@@ -429,6 +429,18 @@ impl eframe::App for RyllApp {
                 });
             });
 
+        // Create a default cursor if the server hasn't sent one yet
+        if self.cursor_image.is_none() && self.connected {
+            self.cursor_image = Some(CursorImage {
+                width: 12,
+                height: 19,
+                hot_spot_x: 0,
+                hot_spot_y: 0,
+                pixels: default_arrow_cursor(),
+            });
+            self.cursor_texture = None;
+        }
+
         // Create cursor texture if we have a new shape
         if self.cursor_image.is_some() && self.cursor_texture.is_none() {
             if let Some(ref img) = self.cursor_image {
@@ -448,15 +460,14 @@ impl eframe::App for RyllApp {
         // Draw cursor overlay
         if self.cursor_visible && self.surface_rect != egui::Rect::NOTHING {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
-                // In server mode, use server-reported position.
-                // In client mode, use local mouse position.
-                let (cx, cy) = if self.mouse_mode == 2 {
-                    self.last_mouse_pos
-                        .map(|(x, y)| (x as f32, y as f32))
-                        .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
-                } else {
-                    (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
-                };
+                // Use the local mouse position if we have one, otherwise
+                // fall back to the server-reported cursor position.
+                // In server mode, the server may or may not send MOVE
+                // updates — the local position is usually more responsive.
+                let (cx, cy) = self
+                    .last_mouse_pos
+                    .map(|(x, y)| (x as f32, y as f32))
+                    .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32));
 
                 let x = self.surface_rect.min.x + cx - img.hot_spot_x as f32;
                 let y = self.surface_rect.min.y + cy - img.hot_spot_y as f32;
@@ -477,6 +488,57 @@ impl eframe::App for RyllApp {
         // repaint via request_repaint() from the connection thread.
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
+}
+
+/// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
+fn default_arrow_cursor() -> Vec<u8> {
+    #[rustfmt::skip]
+    let shape: &[&[u8]] = &[
+        &[1,0,0,0,0,0,0,0,0,0,0,0],
+        &[1,1,0,0,0,0,0,0,0,0,0,0],
+        &[1,2,1,0,0,0,0,0,0,0,0,0],
+        &[1,2,2,1,0,0,0,0,0,0,0,0],
+        &[1,2,2,2,1,0,0,0,0,0,0,0],
+        &[1,2,2,2,2,1,0,0,0,0,0,0],
+        &[1,2,2,2,2,2,1,0,0,0,0,0],
+        &[1,2,2,2,2,2,2,1,0,0,0,0],
+        &[1,2,2,2,2,2,2,2,1,0,0,0],
+        &[1,2,2,2,2,2,2,2,2,1,0,0],
+        &[1,2,2,2,2,2,2,2,2,2,1,0],
+        &[1,2,2,2,2,2,2,2,2,2,2,1],
+        &[1,2,2,2,2,2,2,1,1,1,1,1],
+        &[1,2,2,2,1,2,2,1,0,0,0,0],
+        &[1,2,2,1,0,1,2,2,1,0,0,0],
+        &[1,2,1,0,0,1,2,2,1,0,0,0],
+        &[1,1,0,0,0,0,1,2,2,1,0,0],
+        &[1,0,0,0,0,0,1,2,2,1,0,0],
+        &[0,0,0,0,0,0,0,1,1,0,0,0],
+    ];
+
+    let mut pixels = vec![0u8; 12 * 19 * 4];
+    for (y, row) in shape.iter().enumerate() {
+        for (x, &val) in row.iter().enumerate() {
+            let idx = (y * 12 + x) * 4;
+            match val {
+                1 => {
+                    // Black outline
+                    pixels[idx] = 0;
+                    pixels[idx + 1] = 0;
+                    pixels[idx + 2] = 0;
+                    pixels[idx + 3] = 255;
+                }
+                2 => {
+                    // White fill
+                    pixels[idx] = 255;
+                    pixels[idx + 1] = 255;
+                    pixels[idx + 2] = 255;
+                    pixels[idx + 3] = 255;
+                }
+                _ => {} // transparent (already 0)
+            }
+        }
+    }
+    pixels
 }
 
 /// Run the SPICE connection in async context
