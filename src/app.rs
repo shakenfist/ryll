@@ -18,6 +18,9 @@ use crate::protocol::{ChannelType, SpiceClient};
 const EVENT_CHANNEL_SIZE: usize = 1024;
 const INPUT_CHANNEL_SIZE: usize = 256;
 
+/// Approximate height of the stats bar at the bottom of the window
+const STATS_BAR_HEIGHT: f32 = 28.0;
+
 /// Statistics tracking
 #[derive(Default)]
 struct Statistics {
@@ -237,10 +240,14 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
-        // Resize viewport to match the remote surface
+        // Resize viewport to match the remote surface (plus stats bar)
         if let Some((w, h)) = self.pending_resize.take() {
-            info!("app: resizing viewport to {}x{}", w, h);
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+            let total_h = h + STATS_BAR_HEIGHT;
+            info!(
+                "app: resizing viewport to {}x{} (surface {}x{})",
+                w, total_h, w, h
+            );
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
         }
 
         // Handle input
@@ -249,71 +256,68 @@ impl eframe::App for RyllApp {
         // Handle cadence mode
         self.handle_cadence();
 
-        // Main display area
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(error) = &self.error_message {
-                ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
-                ui.separator();
-            }
+        // Main display area (no margin so the surface fills edge-to-edge)
+        let panel_frame = egui::Frame::none().inner_margin(0.0);
+        egui::CentralPanel::default()
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                if let Some(error) = &self.error_message {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+                    ui.separator();
+                }
 
-            if !self.connected {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Connecting...");
-                });
-                return;
-            }
+                if !self.connected {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Connecting...");
+                    });
+                    return;
+                }
 
-            // Display surfaces
-            for surface in self.surfaces.values_mut() {
-                let width = surface.width;
-                let height = surface.height;
-                let texture = surface.texture(ctx);
-                let size = egui::vec2(width as f32, height as f32);
+                // Display surfaces
+                for surface in self.surfaces.values_mut() {
+                    let width = surface.width;
+                    let height = surface.height;
+                    let texture = surface.texture(ctx);
+                    let size = egui::vec2(width as f32, height as f32);
 
-                // Create a frame for the surface
-                egui::Frame::none()
-                    .fill(egui::Color32::BLACK)
-                    .show(ui, |ui| {
-                        let response = ui.add(
-                            egui::Image::new(texture)
-                                .fit_to_exact_size(size)
-                                .sense(egui::Sense::click_and_drag()),
-                        );
+                    let response = ui.add(
+                        egui::Image::new(texture)
+                            .fit_to_exact_size(size)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
 
-                        // Handle mouse input on the surface
-                        if let Some(tx) = &self.input_tx {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                let x = (pos.x - response.rect.min.x) as u32;
-                                let y = (pos.y - response.rect.min.y) as u32;
+                    // Handle mouse input on the surface
+                    if let Some(tx) = &self.input_tx {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let x = (pos.x - response.rect.min.x) as u32;
+                            let y = (pos.y - response.rect.min.y) as u32;
 
-                                // Mouse movement
-                                let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                            // Mouse movement
+                            let _ = tx.try_send(InputEvent::MouseMove { x, y });
 
-                                // Mouse buttons
-                                if response.clicked_by(egui::PointerButton::Primary) {
-                                    let button =
-                                        mouse_button_to_spice(egui::PointerButton::Primary);
-                                    let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                                    let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                                }
+                            // Mouse buttons
+                            if response.clicked_by(egui::PointerButton::Primary) {
+                                let button = mouse_button_to_spice(egui::PointerButton::Primary);
+                                let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
+                                let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
+                            }
 
-                                if response.clicked_by(egui::PointerButton::Secondary) {
-                                    let button =
-                                        mouse_button_to_spice(egui::PointerButton::Secondary);
-                                    let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                                    let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                                }
+                            if response.clicked_by(egui::PointerButton::Secondary) {
+                                let button = mouse_button_to_spice(egui::PointerButton::Secondary);
+                                let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
+                                let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
                             }
                         }
-                    });
-            }
+                    }
+                }
 
-            if self.surfaces.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Waiting for display...");
-                });
-            }
-        });
+                if self.surfaces.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Waiting for display...");
+                    });
+                }
+            });
 
         // Statistics panel (bottom)
         egui::TopBottomPanel::bottom("stats").show(ctx, |ui| {
