@@ -4,7 +4,7 @@ use eframe::egui;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
@@ -68,7 +68,7 @@ impl RyllApp {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
                 if let Err(e) = run_connection(config_clone, event_tx_clone, input_rx).await {
-                    error!("Connection error: {}", e);
+                    error!("app: connection error: {}", e);
                 }
             });
             // Request repaint when connection changes
@@ -96,7 +96,7 @@ impl RyllApp {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
-                    info!("Session {} initialized", session_id);
+                    info!("app: session {} initialized", session_id);
                     self.connected = true;
                 }
 
@@ -105,13 +105,13 @@ impl RyllApp {
                     width,
                     height,
                 } => {
-                    info!("Surface {} created: {}x{}", surface_id, width, height);
+                    info!("app: surface {} created: {}x{}", surface_id, width, height);
                     self.surfaces
                         .insert(surface_id, DisplaySurface::new(surface_id, width, height));
                 }
 
                 ChannelEvent::SurfaceDestroyed { surface_id } => {
-                    info!("Surface {} destroyed", surface_id);
+                    info!("app: surface {} destroyed", surface_id);
                     self.surfaces.remove(&surface_id);
                 }
 
@@ -124,10 +124,25 @@ impl RyllApp {
                     pixels,
                     ..
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&surface_id) {
-                        surface.blit(left, top, width, height, &pixels);
-                        self.stats.frames_received += 1;
-                    }
+                    // Auto-create surface if the server draws before sending
+                    // SURFACE_CREATE (QEMU does this for the primary surface).
+                    self.surfaces.entry(surface_id).or_insert_with(|| {
+                        let surf_w = left + width;
+                        let surf_h = top + height;
+                        info!(
+                            "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
+                            surface_id, surf_w, surf_h, left, top, width, height
+                        );
+                        DisplaySurface::new(surface_id, surf_w, surf_h)
+                    });
+
+                    let surface = self.surfaces.get_mut(&surface_id).unwrap();
+                    surface.blit(left, top, width, height, &pixels);
+                    self.stats.frames_received += 1;
+                    debug!(
+                        "app: blit surface={}, pos=({},{}), size={}x{}, frame={}",
+                        surface_id, left, top, width, height, self.stats.frames_received
+                    );
                 }
 
                 ChannelEvent::DisplayMark => {
@@ -153,12 +168,12 @@ impl RyllApp {
                 }
 
                 ChannelEvent::Error(msg) => {
-                    error!("Channel error: {}", msg);
+                    error!("app: channel error: {}", msg);
                     self.error_message = Some(msg);
                 }
 
                 ChannelEvent::Disconnected(channel) => {
-                    info!("Channel {} disconnected", channel.name());
+                    info!("app: channel {} disconnected", channel.name());
                     if channel == ChannelType::Main {
                         self.connected = false;
                     }
