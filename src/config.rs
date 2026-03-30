@@ -129,12 +129,29 @@ impl Config {
             .get(section, "host")
             .ok_or_else(|| anyhow!("Missing 'host' in .vv file"))?;
 
-        let port: u16 = ini
+        let port_str = ini
             .get(section, "port")
-            .ok_or_else(|| anyhow!("Missing 'port' in .vv file"))?
-            .parse()?;
+            .ok_or_else(|| anyhow!("Missing 'port' in .vv file"))?;
+        let port: u16 = port_str
+            .trim()
+            .parse()
+            .map_err(|e| anyhow!("Invalid port '{}': {}", port_str, e))?;
 
-        let tls_port = ini.get(section, "tls-port").and_then(|s| s.parse().ok());
+        let tls_port: Option<u16> = match ini.get(section, "tls-port") {
+            Some(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(
+                        trimmed
+                            .parse()
+                            .map_err(|e| anyhow!("Invalid tls-port '{}': {}", s, e))?,
+                    )
+                }
+            }
+            None => None,
+        };
 
         let password = ini.get(section, "password");
         let ca_cert = ini.get(section, "ca");
