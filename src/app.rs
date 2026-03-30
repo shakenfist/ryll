@@ -19,7 +19,7 @@ const EVENT_CHANNEL_SIZE: usize = 1024;
 const INPUT_CHANNEL_SIZE: usize = 256;
 
 /// Approximate height of the stats bar at the bottom of the window
-const STATS_BAR_HEIGHT: f32 = 20.0;
+const STATS_BAR_HEIGHT: f32 = 10.0;
 
 /// Statistics tracking
 #[derive(Default)]
