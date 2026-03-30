@@ -42,7 +42,8 @@ impl SpiceClient {
 
         // Add custom CA if provided
         if let Some(ca_cert) = &config.ca_cert {
-            let cert_pem = std::fs::read(ca_cert)?;
+            let cert_pem = std::fs::read(ca_cert)
+                .map_err(|e| anyhow!("Failed to read CA certificate '{}': {}", ca_cert, e))?;
             let mut reader = std::io::BufReader::new(cert_pem.as_slice());
             let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
 
