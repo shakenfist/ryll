@@ -2,8 +2,13 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig, RootCertStore};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{
+    ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
+};
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
 
@@ -11,6 +16,88 @@ use crate::config::Config;
 
 use super::constants::{ChannelType, SpiceError};
 use super::link::{perform_auth, perform_link, SpiceStream};
+
+/// TLS certificate verifier that trusts a custom CA but skips hostname
+/// verification. SPICE self-signed certificates typically lack SAN
+/// extensions, so standard hostname checking always fails. The CA
+/// trust itself validates the server identity.
+#[derive(Debug)]
+struct SpiceCaVerifier {
+    roots: Arc<RootCertStore>,
+}
+
+impl ServerCertVerifier for SpiceCaVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, Error> {
+        // Verify the certificate chain against our CA roots, but
+        // pass a dummy server name to skip hostname checking.
+        let verifier =
+            tokio_rustls::rustls::client::WebPkiServerVerifier::builder(self.roots.clone())
+                .build()
+                .map_err(|e| Error::General(format!("{}", e)))?;
+
+        // Verify the chain (signature, expiry, CA trust) without hostname
+        match verifier.verify_server_cert(
+            end_entity,
+            intermediates,
+            _server_name,
+            _ocsp_response,
+            now,
+        ) {
+            Ok(v) => Ok(v),
+            Err(Error::InvalidCertificate(
+                tokio_rustls::rustls::CertificateError::NotValidForName,
+            )) => {
+                // Hostname mismatch is expected for SPICE certs — allow it
+                info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, Error> {
+        tokio_rustls::rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+                .signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, Error> {
+        tokio_rustls::rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+                .signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 /// SPICE client for managing connections to channels
 pub struct SpiceClient {
@@ -40,6 +127,8 @@ impl SpiceClient {
         // Add system roots
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
+        let has_custom_ca = config.ca_cert.is_some();
+
         // Add custom CA if provided (inline PEM from .vv file)
         if let Some(ca_cert) = &config.ca_cert {
             // The .vv ca= field contains inline PEM with literal "\n" sequences
@@ -56,9 +145,22 @@ impl SpiceClient {
             }
         }
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        let tls_config = if has_custom_ca {
+            // SPICE self-signed certs typically lack SAN extensions, so
+            // standard hostname verification always fails. Use a custom
+            // verifier that checks the CA chain but allows hostname mismatch.
+            let verifier = SpiceCaVerifier {
+                roots: Arc::new(root_store),
+            };
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(verifier))
+                .with_no_client_auth()
+        } else {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
 
         Ok(TlsConnector::from(Arc::new(tls_config)))
     }
