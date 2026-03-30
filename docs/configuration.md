@@ -74,10 +74,10 @@ port=5900
 | Field | Required | Description |
 |-------|----------|-------------|
 | `host` | Yes | SPICE server hostname or IP address |
-| `port` | Yes | SPICE insecure port (usually 5900+) |
-| `tls-port` | No | SPICE TLS port for secure connections |
+| `port` | No* | SPICE insecure port (usually 5900+) |
+| `tls-port` | No* | SPICE TLS port for secure connections |
 | `password` | No | SPICE password for authentication |
-| `ca` | No | Path to CA certificate file for TLS verification |
+| `ca` | No | Inline PEM CA certificate for TLS verification |
 | `host-subject` | No | Expected server certificate subject |
 
 ### Example .vv Files

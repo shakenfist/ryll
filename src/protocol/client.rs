@@ -40,12 +40,16 @@ impl SpiceClient {
         // Add system roots
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-        // Add custom CA if provided
+        // Add custom CA if provided (inline PEM from .vv file)
         if let Some(ca_cert) = &config.ca_cert {
-            let cert_pem = std::fs::read(ca_cert)
-                .map_err(|e| anyhow!("Failed to read CA certificate '{}': {}", ca_cert, e))?;
-            let mut reader = std::io::BufReader::new(cert_pem.as_slice());
+            // The .vv ca= field contains inline PEM with literal "\n" sequences
+            let pem_str = ca_cert.replace("\\n", "\n");
+            let mut reader = std::io::BufReader::new(pem_str.as_bytes());
             let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+
+            if certs.is_empty() {
+                return Err(anyhow!("No certificates found in ca= field"));
+            }
 
             for cert in certs {
                 root_store.add(cert)?;
