@@ -116,9 +116,12 @@ impl CursorChannel {
         match msg_type {
             cursor_server::INIT => {
                 let init = CursorInit::read(payload)?;
-                debug!(
-                    "cursor: init: pos=({},{}), visible={}",
-                    init.x, init.y, init.visible
+                info!(
+                    "cursor: init: pos=({},{}), visible={}, payload_size={}",
+                    init.x,
+                    init.y,
+                    init.visible,
+                    payload.len()
                 );
 
                 self.event_tx
@@ -133,9 +136,12 @@ impl CursorChannel {
 
             cursor_server::SET => {
                 let set = CursorSet::read(payload)?;
-                debug!(
-                    "cursor: set: pos=({},{}), visible={}",
-                    set.x, set.y, set.visible
+                info!(
+                    "cursor: set: pos=({},{}), visible={}, payload_size={}",
+                    set.x,
+                    set.y,
+                    set.visible,
+                    payload.len()
                 );
 
                 self.event_tx
@@ -152,7 +158,7 @@ impl CursorChannel {
                 if payload.len() >= 4 {
                     let x = u16::from_le_bytes([payload[0], payload[1]]);
                     let y = u16::from_le_bytes([payload[2], payload[3]]);
-                    debug!("cursor: move: ({},{})", x, y);
+                    info!("cursor: move: ({},{})", x, y);
 
                     self.event_tx
                         .send(ChannelEvent::CursorPosition {
@@ -166,7 +172,7 @@ impl CursorChannel {
             }
 
             cursor_server::HIDE => {
-                debug!("cursor: hide");
+                info!("cursor: hide");
                 self.event_tx
                     .send(ChannelEvent::CursorPosition {
                         x: 0,
