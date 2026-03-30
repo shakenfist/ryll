@@ -165,6 +165,7 @@ impl RyllApp {
                 }
 
                 ChannelEvent::CursorPosition { x, y, visible } => {
+                    info!("app: cursor position: ({},{}) visible={}", x, y, visible);
                     self.cursor_pos = (x, y);
                     self.cursor_visible = visible;
                 }
