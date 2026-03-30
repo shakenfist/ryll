@@ -51,6 +51,9 @@ pub struct RyllApp {
     // Session state
     connected: bool,
     error_message: Option<String>,
+
+    // Pending viewport resize from a new surface
+    pending_resize: Option<(f32, f32)>,
 }
 
 impl RyllApp {
@@ -89,6 +92,7 @@ impl RyllApp {
             last_cadence_key: Instant::now(),
             connected: false,
             error_message: None,
+            pending_resize: None,
         }
     }
 
@@ -108,6 +112,7 @@ impl RyllApp {
                     info!("app: surface {} created: {}x{}", surface_id, width, height);
                     self.surfaces
                         .insert(surface_id, DisplaySurface::new(surface_id, width, height));
+                    self.pending_resize = Some((width as f32, height as f32));
                 }
 
                 ChannelEvent::SurfaceDestroyed { surface_id } => {
@@ -126,15 +131,18 @@ impl RyllApp {
                 } => {
                     // Auto-create surface if the server draws before sending
                     // SURFACE_CREATE (QEMU does this for the primary surface).
-                    self.surfaces.entry(surface_id).or_insert_with(|| {
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        self.surfaces.entry(surface_id)
+                    {
                         let surf_w = left + width;
                         let surf_h = top + height;
                         info!(
                             "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
                             surface_id, surf_w, surf_h, left, top, width, height
                         );
-                        DisplaySurface::new(surface_id, surf_w, surf_h)
-                    });
+                        e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
+                        self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                    }
 
                     let surface = self.surfaces.get_mut(&surface_id).unwrap();
                     surface.blit(left, top, width, height, &pixels);
@@ -228,6 +236,12 @@ impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Process incoming events
         self.process_events();
+
+        // Resize viewport to match the remote surface
+        if let Some((w, h)) = self.pending_resize.take() {
+            info!("app: resizing viewport to {}x{}", w, h);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, h)));
+        }
 
         // Handle input
         self.handle_input(ctx);
