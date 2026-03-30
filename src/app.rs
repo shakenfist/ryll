@@ -201,18 +201,36 @@ impl RyllApp {
             None => return,
         };
 
-        // Handle keyboard input
+        // Handle keyboard input — read from the global input state so
+        // key events are captured regardless of which widget has focus.
         ctx.input(|i| {
             for event in &i.events {
-                if let egui::Event::Key { key, pressed, .. } = event {
-                    if let Some((down_code, up_code)) = key_to_scancode(*key) {
-                        let event = if *pressed {
-                            InputEvent::KeyDown(down_code)
-                        } else {
-                            InputEvent::KeyUp(up_code)
-                        };
-                        let _ = input_tx.try_send(event);
+                match event {
+                    egui::Event::Key {
+                        key,
+                        pressed,
+                        repeat: false,
+                        ..
+                    } => {
+                        if let Some((down_code, up_code)) = key_to_scancode(*key) {
+                            let ev = if *pressed {
+                                InputEvent::KeyDown(down_code)
+                            } else {
+                                InputEvent::KeyUp(up_code)
+                            };
+                            debug!(
+                                "app: key {:?} pressed={} scancode={:#x}",
+                                key, pressed, down_code
+                            );
+                            let _ = input_tx.try_send(ev);
+                        }
                     }
+                    egui::Event::Text(text) => {
+                        // Text events give us characters that don't map to Key
+                        // enums (e.g. shifted symbols). Log for diagnostics.
+                        debug!("app: text input: {:?}", text);
+                    }
+                    _ => {}
                 }
             }
         });
@@ -289,25 +307,31 @@ impl eframe::App for RyllApp {
 
                     // Handle mouse input on the surface
                     if let Some(tx) = &self.input_tx {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let x = (pos.x - response.rect.min.x) as u32;
-                            let y = (pos.y - response.rect.min.y) as u32;
-
-                            // Mouse movement
+                        // Send mouse position on hover (not just during click/drag)
+                        if let Some(pos) = response.hover_pos() {
+                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
                             let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                        }
 
-                            // Mouse buttons
-                            if response.clicked_by(egui::PointerButton::Primary) {
-                                let button = mouse_button_to_spice(egui::PointerButton::Primary);
-                                let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                                let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                            }
+                        // Mouse buttons
+                        if response.clicked_by(egui::PointerButton::Primary) {
+                            let pos = response.interact_pointer_pos().unwrap_or(response.rect.min);
+                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
+                            let button = mouse_button_to_spice(egui::PointerButton::Primary);
+                            let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
+                            let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
+                            debug!("app: mouse click at ({},{})", x, y);
+                        }
 
-                            if response.clicked_by(egui::PointerButton::Secondary) {
-                                let button = mouse_button_to_spice(egui::PointerButton::Secondary);
-                                let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                                let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                            }
+                        if response.clicked_by(egui::PointerButton::Secondary) {
+                            let pos = response.interact_pointer_pos().unwrap_or(response.rect.min);
+                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
+                            let button = mouse_button_to_spice(egui::PointerButton::Secondary);
+                            let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
+                            let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
                         }
                     }
                 }
