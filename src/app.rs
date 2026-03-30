@@ -55,6 +55,9 @@ pub struct RyllApp {
     connected: bool,
     error_message: Option<String>,
 
+    // Last mouse position sent (to avoid flooding with duplicates)
+    last_mouse_pos: Option<(u32, u32)>,
+
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
 }
@@ -95,6 +98,7 @@ impl RyllApp {
             last_cadence_key: Instant::now(),
             connected: false,
             error_message: None,
+            last_mouse_pos: None,
             pending_resize: None,
         }
     }
@@ -300,11 +304,14 @@ impl eframe::App for RyllApp {
 
                     // Handle mouse input on the surface
                     if let Some(tx) = &self.input_tx {
-                        // Send mouse position on hover (not just during click/drag)
+                        // Send mouse position only when it changes
                         if let Some(pos) = response.hover_pos() {
                             let x = (pos.x - response.rect.min.x).max(0.0) as u32;
                             let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                            let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                            if self.last_mouse_pos != Some((x, y)) {
+                                self.last_mouse_pos = Some((x, y));
+                                let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                            }
                         }
 
                         // Mouse buttons
