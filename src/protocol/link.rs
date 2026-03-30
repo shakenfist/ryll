@@ -276,11 +276,9 @@ pub async fn perform_link(
     channel_type: ChannelType,
     channel_id: u8,
 ) -> Result<SpiceLinkReply> {
-    // Determine capabilities based on channel type
-    let channel_caps = match channel_type {
-        ChannelType::Main => capabilities::DEFAULT_MAIN,
-        _ => 0,
-    };
+    // Send the same capabilities for all channels — kerbside checks
+    // these and may not forward display updates if caps are missing.
+    let channel_caps = capabilities::DEFAULT_MAIN;
 
     // Send link message
     let link_mess = SpiceLinkMess::new(
