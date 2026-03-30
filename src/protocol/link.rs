@@ -2,6 +2,7 @@
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use rand::rngs::OsRng;
+use rsa::pkcs8::DecodePublicKey;
 use rsa::{Oaep, RsaPublicKey};
 use sha1::Sha1;
 use std::io::{Cursor, Read};
@@ -207,19 +208,28 @@ impl SpiceLinkReply {
     }
 }
 
-/// Perform SPICE authentication
-pub fn encrypt_password(pub_key_der: &[u8], password: &str) -> Result<Vec<u8>> {
-    // Parse the RSA public key from DER format
-    // SPICE uses a specific 162-byte format that's essentially raw RSA parameters
-    // The format is: 4 bytes (modulus size) + modulus + 4 bytes (exp size) + exponent
+/// Parse the RSA public key from the SPICE link reply.
+///
+/// QEMU sends the key as DER-encoded SubjectPublicKeyInfo (ASN.1 SEQUENCE
+/// starting with 0x30). Older descriptions of the protocol mention a raw
+/// format (4-byte BE length-prefixed modulus + exponent), so we try DER
+/// first and fall back to the raw format.
+fn parse_public_key(pub_key_bytes: &[u8]) -> Result<RsaPublicKey> {
+    // DER/SPKI: starts with ASN.1 SEQUENCE tag 0x30
+    if pub_key_bytes.first() == Some(&0x30) {
+        if let Ok(key) = RsaPublicKey::from_public_key_der(pub_key_bytes) {
+            return Ok(key);
+        }
+    }
 
-    if pub_key_der.len() < 8 {
+    // Fallback: raw SPICE format (4-byte BE modulus length + modulus +
+    // 4-byte BE exponent length + exponent)
+    if pub_key_bytes.len() < 8 {
         return Err(anyhow!("Public key too short"));
     }
 
-    let mut cursor = Cursor::new(pub_key_der);
+    let mut cursor = Cursor::new(pub_key_bytes);
 
-    // Read modulus
     let mod_size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor)? as usize;
     if mod_size > 256 || mod_size == 0 {
         return Err(anyhow!("Invalid modulus size: {}", mod_size));
@@ -228,7 +238,6 @@ pub fn encrypt_password(pub_key_der: &[u8], password: &str) -> Result<Vec<u8>> {
     let mut modulus = vec![0u8; mod_size];
     Read::read_exact(&mut cursor, &mut modulus)?;
 
-    // Read exponent
     let exp_size = ReadBytesExt::read_u32::<BigEndian>(&mut cursor)? as usize;
     if exp_size > 8 || exp_size == 0 {
         return Err(anyhow!("Invalid exponent size: {}", exp_size));
@@ -237,18 +246,20 @@ pub fn encrypt_password(pub_key_der: &[u8], password: &str) -> Result<Vec<u8>> {
     let mut exponent = vec![0u8; exp_size];
     Read::read_exact(&mut cursor, &mut exponent)?;
 
-    // Convert to RSA public key
     let n = rsa::BigUint::from_bytes_be(&modulus);
     let e = rsa::BigUint::from_bytes_be(&exponent);
+    Ok(RsaPublicKey::new(n, e)?)
+}
 
-    let pub_key = RsaPublicKey::new(n, e)?;
+/// Perform SPICE authentication
+pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>> {
+    let pub_key = parse_public_key(pub_key_bytes)?;
 
     // Encrypt password using RSA-OAEP with SHA1
     let padding = Oaep::new::<Sha1>();
     let mut rng = OsRng;
 
-    let password_bytes = password.as_bytes();
-    let encrypted = pub_key.encrypt(&mut rng, padding, password_bytes)?;
+    let encrypted = pub_key.encrypt(&mut rng, padding, password.as_bytes())?;
 
     // Pad to 128 bytes (RSA block size)
     let mut result = vec![0u8; 128];
