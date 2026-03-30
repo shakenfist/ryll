@@ -353,25 +353,36 @@ impl eframe::App for RyllApp {
                             }
                         }
 
-                        // Mouse buttons
-                        if response.clicked_by(egui::PointerButton::Primary) {
-                            let pos = response.interact_pointer_pos().unwrap_or(response.rect.min);
-                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
-                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                            let button = mouse_button_to_spice(egui::PointerButton::Primary);
-                            let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                            let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                            debug!("app: mouse click at ({},{})", x, y);
-                        }
-
-                        if response.clicked_by(egui::PointerButton::Secondary) {
-                            let pos = response.interact_pointer_pos().unwrap_or(response.rect.min);
-                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
-                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                            let button = mouse_button_to_spice(egui::PointerButton::Secondary);
-                            let _ = tx.try_send(InputEvent::MouseDown { button, x, y });
-                            let _ = tx.try_send(InputEvent::MouseUp { button, x, y });
-                        }
+                        // Mouse buttons — use the raw pointer state from egui
+                        // so press and release are sent at the correct times,
+                        // not batched together on release like clicked_by().
+                        ctx.input(|i| {
+                            let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                            for button in [
+                                egui::PointerButton::Primary,
+                                egui::PointerButton::Secondary,
+                                egui::PointerButton::Middle,
+                            ] {
+                                if i.pointer.button_pressed(button) {
+                                    let spice_btn = mouse_button_to_spice(button);
+                                    let _ = tx.try_send(InputEvent::MouseDown {
+                                        button: spice_btn,
+                                        x: pos.0,
+                                        y: pos.1,
+                                    });
+                                    debug!("app: mouse down {:?} at ({},{})", button, pos.0, pos.1);
+                                }
+                                if i.pointer.button_released(button) {
+                                    let spice_btn = mouse_button_to_spice(button);
+                                    let _ = tx.try_send(InputEvent::MouseUp {
+                                        button: spice_btn,
+                                        x: pos.0,
+                                        y: pos.1,
+                                    });
+                                    debug!("app: mouse up {:?} at ({},{})", button, pos.0, pos.1);
+                                }
+                            }
+                        });
                     }
                 }
 
