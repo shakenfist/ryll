@@ -177,6 +177,7 @@ Additional documentation is available:
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) - Technical design and data flow
 - [AGENTS.md](AGENTS.md) - Guide for AI coding assistants
+- [STYLEGUIDE.md](STYLEGUIDE.md) - Code conventions and patterns
 
 In the `docs/` directory:
 
