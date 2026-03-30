@@ -414,6 +414,51 @@ impl DisplayChannel {
                     }
                 }
             }
+            Some(ImageType::Lz4) => {
+                // LZ4-compressed BGRX pixel data: 4-byte data_size prefix then LZ4 block
+                if image_data.len() < 4 {
+                    warn!("display: LZ4 image data too short");
+                    None
+                } else {
+                    let width = img_desc.width;
+                    let height = img_desc.height;
+                    let expected = (width as usize)
+                        .checked_mul(height as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .unwrap_or(0);
+                    if expected == 0 {
+                        warn!(
+                            "display: LZ4 image dimensions overflow: {}x{}",
+                            width, height
+                        );
+                        None
+                    } else {
+                        match lz4_flex::decompress(&image_data[4..], expected) {
+                            Ok(bgrx) => {
+                                let mut rgba = vec![0u8; expected];
+                                for i in 0..(width as usize * height as usize) {
+                                    let s = i * 4;
+                                    let d = i * 4;
+                                    rgba[d] = bgrx[s + 2]; // R
+                                    rgba[d + 1] = bgrx[s + 1]; // G
+                                    rgba[d + 2] = bgrx[s]; // B
+                                    rgba[d + 3] = 255; // A
+                                }
+                                Some(DecompressedImage {
+                                    width,
+                                    height,
+                                    pixels: rgba,
+                                    image_id: img_desc.image_id,
+                                })
+                            }
+                            Err(e) => {
+                                warn!("display: LZ4 decompression failed: {}", e);
+                                None
+                            }
+                        }
+                    }
+                }
+            }
             Some(ImageType::FromCache) => {
                 // Look up in cache
                 if let Some(pixels) = self.previous_images.get(&img_desc.image_id) {

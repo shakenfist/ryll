@@ -240,6 +240,10 @@ pub enum ImageType {
     LzRgb = 101,
     GlzRgb = 102,
     FromCache = 103,
+    ZlibGlzRgb = 104,
+    Jpeg = 105,
+    JpegAlpha = 106,
+    Lz4 = 107,
 }
 
 impl ImageType {
@@ -251,6 +255,10 @@ impl ImageType {
             101 => Some(ImageType::LzRgb),
             102 => Some(ImageType::GlzRgb),
             103 => Some(ImageType::FromCache),
+            104 => Some(ImageType::ZlibGlzRgb),
+            105 => Some(ImageType::Jpeg),
+            106 => Some(ImageType::JpegAlpha),
+            107 => Some(ImageType::Lz4),
             _ => None,
         }
     }
