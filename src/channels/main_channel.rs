@@ -137,6 +137,10 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                self.event_tx
+                    .send(ChannelEvent::MouseMode(init.current_mouse_mode))
+                    .await
+                    .ok();
             }
 
             main_server::CHANNELS_LIST => {

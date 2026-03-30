@@ -47,6 +47,9 @@ pub enum ChannelEvent {
     /// Cursor position updated
     CursorPosition { x: u16, y: u16, visible: bool },
 
+    /// Mouse mode from server (1=server, 2=client)
+    MouseMode(u32),
+
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]
     Statistics {

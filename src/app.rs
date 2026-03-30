@@ -54,6 +54,7 @@ pub struct RyllApp {
     // Session state
     connected: bool,
     error_message: Option<String>,
+    mouse_mode: u32, // 1=server, 2=client
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
@@ -98,6 +99,7 @@ impl RyllApp {
             last_cadence_key: Instant::now(),
             connected: false,
             error_message: None,
+            mouse_mode: 0,
             last_mouse_pos: None,
             pending_resize: None,
         }
@@ -168,6 +170,15 @@ impl RyllApp {
                     info!("app: cursor position: ({},{}) visible={}", x, y, visible);
                     self.cursor_pos = (x, y);
                     self.cursor_visible = visible;
+                }
+
+                ChannelEvent::MouseMode(mode) => {
+                    info!(
+                        "app: mouse mode: {} ({})",
+                        mode,
+                        if mode == 1 { "server" } else { "client" }
+                    );
+                    self.mouse_mode = mode;
                 }
 
                 ChannelEvent::Statistics {
@@ -369,16 +380,20 @@ impl eframe::App for RyllApp {
                     }
 
                     ui.separator();
-                    ui.label(format!(
-                        "Cursor: ({}, {}) {}",
-                        self.cursor_pos.0,
-                        self.cursor_pos.1,
-                        if self.cursor_visible {
-                            "visible"
-                        } else {
-                            "hidden"
-                        }
-                    ));
+                    if self.mouse_mode == 1 {
+                        ui.label("Cursor: server mode");
+                    } else {
+                        ui.label(format!(
+                            "Cursor: ({}, {}) {}",
+                            self.cursor_pos.0,
+                            self.cursor_pos.1,
+                            if self.cursor_visible {
+                                "visible"
+                            } else {
+                                "hidden"
+                            }
+                        ));
+                    }
 
                     if self.cadence_enabled {
                         ui.separator();
