@@ -202,11 +202,11 @@ impl InputsChannel {
                     ));
                 }
 
+                // ACK_SYNC is opcode 1 (common across all channels)
                 let mut ack_payload = Vec::new();
                 SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
-                let response = make_message(inputs_client::KEY_MODIFIERS, &ack_payload);
-                self.send_with_log(inputs_client::KEY_MODIFIERS, &response)
-                    .await?;
+                let response = make_message(1, &ack_payload);
+                self.send_with_log(1, &response).await?;
             }
 
             inputs_server::PING => {
