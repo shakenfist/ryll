@@ -10,7 +10,8 @@ use anyhow::Result;
 use clap::Parser;
 use eframe::egui;
 use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::fmt;
+use tracing_subscriber::prelude::*;
 
 use crate::config::{Args, Config};
 
@@ -25,11 +26,32 @@ fn main() -> Result<()> {
         Level::INFO
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(false)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    let level_filter = tracing_subscriber::filter::LevelFilter::from_level(log_level);
+
+    let stderr_layer = fmt::layer().with_target(false).with_filter(level_filter);
+
+    // When verbose, also log to /tmp/ryll.log
+    let _file_guard;
+    if args.verbose {
+        let file_appender = tracing_appender::rolling::never("/tmp", "ryll.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        _file_guard = Some(guard);
+
+        let file_layer = fmt::layer()
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(non_blocking)
+            .with_filter(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+        tracing_subscriber::registry()
+            .with(stderr_layer)
+            .with(file_layer)
+            .init();
+        info!("Logging to /tmp/ryll.log");
+    } else {
+        _file_guard = None;
+        tracing_subscriber::registry().with(stderr_layer).init();
+    };
 
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
