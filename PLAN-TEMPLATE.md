@@ -16,12 +16,14 @@ guessing.
 
 Consult `ARCHITECTURE.md` for the system architecture
 overview, channel types, and data flow. Consult `AGENTS.md`
-for build commands, project conventions, and code
-organisation. The `shakenfist/kerbside` repository contains
-a working SPICE proxy implementation in Python, including
-SPICE protocol documentation in `docs/` and a reference
-SPICE client in `testclient/ryll/` -- refer to these when
-working on protocol questions.
+for build commands, project conventions, code organisation,
+and a table of protocol reference sources. Key references
+include `shakenfist/kerbside` (Python SPICE proxy with
+protocol docs and a reference client),
+`/srv/src-reference/spice/spice-protocol/` (canonical SPICE
+definitions), `/srv/src-reference/spice/spice-gtk/`
+(reference C client), and `/srv/src-reference/qemu/qemu/`
+(server-side SPICE in `ui/spice-*`).
 
 When we get to detailed planning, I prefer a separate plan
 file per detailed phase. These separate files should be named

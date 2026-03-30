@@ -19,6 +19,22 @@ general-purpose SPICE client - it exists to:
 - **shakenfist/kerbside-patches** - OpenStack integration patches for kerbside
 - **shakenfist/kerbside/testclient** - The original Python version of ryll
 
+## Protocol Reference Sources
+
+When working on SPICE protocol implementation details, these
+local source trees are available for reference:
+
+| Source | Path | Use for |
+|--------|------|---------|
+| Kerbside Python proxy | `shakenfist/kerbside/` | Protocol docs in `docs/`, packet parsing in `kerbside/spiceprotocol/packets/`, reference test client in `testclient/ryll/` |
+| SPICE protocol headers | `/srv/src-reference/spice/spice-protocol/` | Canonical enum definitions, message structures, capability flags |
+| SPICE common library | `/srv/src-reference/spice/spice-common/` | Shared marshalling code used by both server and client |
+| SPICE GTK client | `/srv/src-reference/spice/spice-gtk/` | Reference client implementation (C/GTK) |
+| spice-html5 | `/srv/src-reference/spice/spice-html5/` | JavaScript SPICE client (useful for LZ/GLZ decompressor reference) |
+| virt-viewer | `/srv/src-reference/spice/virt-viewer/` | The standard SPICE client, .vv file handling |
+| QEMU | `/srv/src-reference/qemu/qemu/` | Server-side SPICE implementation in `ui/spice-*` |
+| Linux kernel | `/srv/src-reference/torvalds/linux/` | QXL driver in `drivers/gpu/drm/qxl/` |
+
 ## Architecture Overview
 
 ```

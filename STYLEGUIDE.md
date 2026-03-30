@@ -1,9 +1,15 @@
 # Ryll Style Guide
 
 Conventions and patterns for the ryll codebase. New code should follow
-these patterns for consistency. The `shakenfist/kerbside` repository
-contains a working SPICE proxy in Python and protocol documentation in
-`docs/` -- refer to it when working on protocol questions.
+these patterns for consistency. See `AGENTS.md` for a full table of
+protocol reference sources. Key references:
+
+- **shakenfist/kerbside** -- Python SPICE proxy with protocol docs in
+  `docs/` and a reference test client in `testclient/ryll/`
+- `/srv/src-reference/spice/spice-protocol/` -- canonical SPICE enum
+  definitions and message structures
+- `/srv/src-reference/spice/spice-gtk/` -- reference C client
+- `/srv/src-reference/qemu/qemu/ui/spice-*` -- server-side SPICE
 
 ## General
 
