@@ -53,6 +53,30 @@ pub struct Config {
     pub host_subject: Option<String>,
 }
 
+/// Filter out configparser's literal "None" string for absent values
+fn filter_none(s: String) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// Parse an optional u16 from an INI field, treating empty/"None" as absent
+fn parse_optional_u16(ini: &Ini, section: &str, key: &str) -> Result<Option<u16>> {
+    match ini.get(section, key).and_then(filter_none) {
+        Some(s) => {
+            let val: u16 = s
+                .trim()
+                .parse()
+                .map_err(|e| anyhow!("Invalid {} '{}': {}", key, s, e))?;
+            Ok(Some(val))
+        }
+        None => Ok(None),
+    }
+}
+
 impl Config {
     /// Create configuration from command line arguments
     pub fn from_args(args: &Args) -> Result<Self> {
@@ -127,39 +151,23 @@ impl Config {
 
         let host = ini
             .get(section, "host")
+            .and_then(filter_none)
             .ok_or_else(|| anyhow!("Missing 'host' in .vv file"))?;
 
-        let port_str = ini
-            .get(section, "port")
-            .ok_or_else(|| anyhow!("Missing 'port' in .vv file"))?;
-        let port: u16 = port_str
-            .trim()
-            .parse()
-            .map_err(|e| anyhow!("Invalid port '{}': {}", port_str, e))?;
+        let port = parse_optional_u16(&ini, section, "port")?;
+        let tls_port = parse_optional_u16(&ini, section, "tls-port")?;
 
-        let tls_port: Option<u16> = match ini.get(section, "tls-port") {
-            Some(s) => {
-                let trimmed = s.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(
-                        trimmed
-                            .parse()
-                            .map_err(|e| anyhow!("Invalid tls-port '{}': {}", s, e))?,
-                    )
-                }
-            }
-            None => None,
-        };
+        if port.is_none() && tls_port.is_none() {
+            return Err(anyhow!("Must specify 'port' or 'tls-port' in .vv file"));
+        }
 
-        let password = ini.get(section, "password");
-        let ca_cert = ini.get(section, "ca");
-        let host_subject = ini.get(section, "host-subject");
+        let password = ini.get(section, "password").and_then(filter_none);
+        let ca_cert = ini.get(section, "ca").and_then(filter_none);
+        let host_subject = ini.get(section, "host-subject").and_then(filter_none);
 
         Ok(Config {
             host,
-            port,
+            port: port.unwrap_or(0),
             tls_port,
             password,
             ca_cert,
