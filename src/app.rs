@@ -19,7 +19,7 @@ const EVENT_CHANNEL_SIZE: usize = 1024;
 const INPUT_CHANNEL_SIZE: usize = 256;
 
 /// Approximate height of the stats bar at the bottom of the window
-const STATS_BAR_HEIGHT: f32 = 28.0;
+const STATS_BAR_HEIGHT: f32 = 20.0;
 
 /// Statistics tracking
 #[derive(Default)]
@@ -320,42 +320,47 @@ impl eframe::App for RyllApp {
             });
 
         // Statistics panel (bottom)
-        egui::TopBottomPanel::bottom("stats").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("Frames: {}", self.stats.frames_received));
-                ui.separator();
-
-                if let Some(latency) = self.stats.last_latency {
-                    ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+        let stats_frame = egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .fill(ctx.style().visuals.panel_fill);
+        egui::TopBottomPanel::bottom("stats")
+            .frame(stats_frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Frames: {}", self.stats.frames_received));
                     ui.separator();
-                }
 
-                if let Some(start) = self.stats.start_time {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    if elapsed > 0.0 {
-                        let fps = self.stats.frames_received as f64 / elapsed;
-                        ui.label(format!("FPS: {:.1}", fps));
+                    if let Some(latency) = self.stats.last_latency {
+                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+                        ui.separator();
                     }
-                }
 
-                ui.separator();
-                ui.label(format!(
-                    "Cursor: ({}, {}) {}",
-                    self.cursor_pos.0,
-                    self.cursor_pos.1,
-                    if self.cursor_visible {
-                        "visible"
-                    } else {
-                        "hidden"
+                    if let Some(start) = self.stats.start_time {
+                        let elapsed = start.elapsed().as_secs_f64();
+                        if elapsed > 0.0 {
+                            let fps = self.stats.frames_received as f64 / elapsed;
+                            ui.label(format!("FPS: {:.1}", fps));
+                        }
                     }
-                ));
 
-                if self.cadence_enabled {
                     ui.separator();
-                    ui.label("Cadence: ON");
-                }
+                    ui.label(format!(
+                        "Cursor: ({}, {}) {}",
+                        self.cursor_pos.0,
+                        self.cursor_pos.1,
+                        if self.cursor_visible {
+                            "visible"
+                        } else {
+                            "hidden"
+                        }
+                    ));
+
+                    if self.cadence_enabled {
+                        ui.separator();
+                        ui.label("Cadence: ON");
+                    }
+                });
             });
-        });
 
         // Request continuous repainting
         ctx.request_repaint();
