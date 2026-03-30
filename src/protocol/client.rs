@@ -36,13 +36,12 @@ impl ServerCertVerifier for SpiceCaVerifier {
         now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, Error> {
         // Verify the certificate chain against our CA roots, but
-        // pass a dummy server name to skip hostname checking.
+        // skip hostname checking (SPICE certs lack SAN extensions).
         let verifier =
             tokio_rustls::rustls::client::WebPkiServerVerifier::builder(self.roots.clone())
                 .build()
                 .map_err(|e| Error::General(format!("{}", e)))?;
 
-        // Verify the chain (signature, expiry, CA trust) without hostname
         match verifier.verify_server_cert(
             end_entity,
             intermediates,
@@ -51,14 +50,17 @@ impl ServerCertVerifier for SpiceCaVerifier {
             now,
         ) {
             Ok(v) => Ok(v),
-            Err(Error::InvalidCertificate(
-                tokio_rustls::rustls::CertificateError::NotValidForName,
-            )) => {
-                // Hostname mismatch is expected for SPICE certs — allow it
-                info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
-                Ok(ServerCertVerified::assertion())
+            Err(e) => {
+                let msg = format!("{}", e);
+                if msg.contains("not valid for name") || msg.contains("NotValidForName") {
+                    info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
+                    Ok(ServerCertVerified::assertion())
+                } else {
+                    // Other errors (expired, unknown CA, bad signature) are
+                    // still fatal.
+                    Err(e)
+                }
             }
-            Err(e) => Err(e),
         }
     }
 
