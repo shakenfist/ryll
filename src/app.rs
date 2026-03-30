@@ -386,8 +386,10 @@ impl eframe::App for RyllApp {
                 });
             });
 
-        // Request continuous repainting
-        ctx.request_repaint();
+        // Repaint at a modest rate to pick up new frames without
+        // spinning the CPU.  Incoming events will also trigger a
+        // repaint via request_repaint() from the connection thread.
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
 }
 
