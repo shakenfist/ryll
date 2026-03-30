@@ -66,7 +66,9 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         .ok_or_else(|| anyhow!("LZ image dimensions overflow: {}x{}", width, height))?;
     let mut output = vec![0u8; output_size];
 
-    // Current position in compressed data (after header)
+    // Compressed data starts after the 28-byte header.
+    // This implementation follows the kerbside Python reference
+    // decompressor in testclient/ryll/decompressors.py.
     let mut data_offset = 28usize;
     let mut out_idx = 0usize;
 
@@ -75,30 +77,29 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         data_offset += 1;
 
         if ctrl < LZ_MAX_COPY {
-            // Literal pixels: (ctrl + 1) RGB triplets
-            let num_pixels = (ctrl + 1) as usize;
-
-            for _ in 0..num_pixels {
+            // Literal pixels: (ctrl + 1) BGR triplets
+            for _ in 0..(ctrl as usize + 1) {
                 if data_offset + 3 > data.len() || out_idx + 4 > output_size {
                     break;
                 }
-
-                // BGR -> RGBA conversion
                 output[out_idx] = data[data_offset + 2]; // R
                 output[out_idx + 1] = data[data_offset + 1]; // G
                 output[out_idx + 2] = data[data_offset]; // B
                 output[out_idx + 3] = 255; // A
-
                 data_offset += 3;
                 out_idx += 4;
             }
         } else {
             // Back-reference within current image
-            let mut length = ((ctrl >> 5) & 0x07) as usize;
+            let mut length = (ctrl >> 5) as usize;
+            let mut pixel_offset = ((ctrl & 0x1F) as usize) << 8;
 
-            // Variable length encoding
+            // Variable-length run encoding
             if length == 7 {
-                while data_offset < data.len() {
+                loop {
+                    if data_offset >= data.len() {
+                        break;
+                    }
                     let b = data[data_offset];
                     data_offset += 1;
                     length += b as usize;
@@ -107,52 +108,58 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
                     }
                 }
             }
-            length += 2; // Minimum copy length
 
-            // Offset extraction (5 bits from ctrl + 8 bits from next byte)
-            let mut pixel_offset = ((ctrl & 0x1F) as usize) << 8;
-
+            // Read offset low byte
             if data_offset >= data.len() {
                 break;
             }
-
-            let offset_low = data[data_offset] as usize;
+            let code = data[data_offset] as usize;
             data_offset += 1;
+            pixel_offset += code;
 
-            // Check for large offset encoding
-            if offset_low == 255 && pixel_offset == (31 << 8) {
+            // Large offset encoding
+            if code == 255 && (pixel_offset - code) == (31 << 8) {
                 if data_offset + 2 > data.len() {
                     break;
                 }
-                // Read 16-bit big-endian value
-                let hi = data[data_offset] as usize;
-                let lo = data[data_offset + 1] as usize;
+                pixel_offset =
+                    ((data[data_offset] as usize) << 8) | (data[data_offset + 1] as usize);
+                pixel_offset += 8191;
                 data_offset += 2;
-
-                pixel_offset = (hi << 8) | lo;
-                pixel_offset += 8191; // Large offset base
-            } else {
-                pixel_offset |= offset_low;
             }
 
-            pixel_offset += 1; // Adjust from 0-indexed
+            pixel_offset += 1;
 
             // Copy pixels from earlier in output
-            let copy_bytes = length * 4;
-            let src_start = out_idx.saturating_sub(pixel_offset * 4);
+            let src_start = out_idx.wrapping_sub(pixel_offset * 4);
 
-            for i in 0..copy_bytes {
-                if out_idx + i >= output_size {
-                    break;
+            if pixel_offset == 1 {
+                // Repeat the directly previous pixel
+                for _ in 0..length {
+                    if out_idx + 4 > output_size || src_start >= output.len() {
+                        break;
+                    }
+                    output[out_idx] = output[src_start];
+                    output[out_idx + 1] = output[src_start + 1];
+                    output[out_idx + 2] = output[src_start + 2];
+                    output[out_idx + 3] = output[src_start + 3];
+                    out_idx += 4;
                 }
-                // Handle overlapping copies
-                let src_idx = src_start + (i % (pixel_offset * 4));
-                if src_idx < output.len() {
-                    output[out_idx + i] = output[src_idx];
+            } else {
+                // Copy a block of earlier pixels, advancing the source
+                let mut src = src_start;
+                for _ in 0..length {
+                    if out_idx + 4 > output_size || src + 4 > output.len() {
+                        break;
+                    }
+                    output[out_idx] = output[src];
+                    output[out_idx + 1] = output[src + 1];
+                    output[out_idx + 2] = output[src + 2];
+                    output[out_idx + 3] = output[src + 3];
+                    out_idx += 4;
+                    src += 4;
                 }
             }
-
-            out_idx += copy_bytes;
         }
     }
 
