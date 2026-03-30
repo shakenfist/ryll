@@ -107,7 +107,7 @@ user can see where they are pointing. This requires:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Parse SpiceCursor | PLAN-cursor-rendering-phase-01-parse.md | Not started |
+| 1. Parse SpiceCursor | [PLAN-cursor-rendering-phase-01-parse.md](PLAN-cursor-rendering-phase-01-parse.md) | Not started |
 | 2. Render overlay | PLAN-cursor-rendering-phase-02-render.md | Not started |
 
 **Phase 1: Parse SpiceCursor data**
