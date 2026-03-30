@@ -353,10 +353,13 @@ impl DisplayChannel {
                 // Raw 32-bit BGRX pixel data — convert to RGBA
                 let width = img_desc.width;
                 let height = img_desc.height;
-                let expected = (width * height * 4) as usize;
-                if image_data.len() >= expected {
+                let expected = (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|n| n.checked_mul(4))
+                    .unwrap_or(0);
+                if expected > 0 && image_data.len() >= expected {
                     let mut rgba = vec![0u8; expected];
-                    for i in 0..(width * height) as usize {
+                    for i in 0..(width as usize * height as usize) {
                         let src = i * 4;
                         let dst = i * 4;
                         rgba[dst] = image_data[src + 2]; // R

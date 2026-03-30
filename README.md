@@ -34,7 +34,7 @@ make lint
 # Run linting with auto-fix
 make lint-fix
 
-# Start a test QEMU SPICE server (boots to BIOS, no disk needed)
+# Start a test QEMU SPICE server (UEFI latency guest, downloads on first run)
 make test-qemu
 
 # Stop the test QEMU instance

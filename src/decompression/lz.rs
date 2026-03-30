@@ -60,7 +60,10 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
     let _top_down = cursor.read_u32::<BigEndian>()?;
 
     // Output buffer (RGBA)
-    let output_size = (width * height * 4) as usize;
+    let output_size = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| anyhow!("LZ image dimensions overflow: {}x{}", width, height))?;
     let mut output = vec![0u8; output_size];
 
     // Current position in compressed data (after header)
