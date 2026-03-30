@@ -259,13 +259,8 @@ impl InputsChannel {
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
                 // Only log keystrokes with --intimate flag
-                if settings::is_intimate() {
-                    self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
-                    logging::log_detail(&format!("scancode={:#x}", scancode));
-                } else {
-                    debug!("inputs: key down: {:#x}", scancode);
-                    self.send(&msg).await?;
-                }
+                info!("inputs: key down: scancode={:#x}", scancode);
+                self.send(&msg).await?;
             }
 
             InputEvent::KeyUp(scancode) => {
@@ -273,13 +268,8 @@ impl InputsChannel {
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
-                if settings::is_intimate() {
-                    self.send_with_log(inputs_client::KEY_UP, &msg).await?;
-                    logging::log_detail(&format!("scancode={:#x}", scancode));
-                } else {
-                    debug!("inputs: key up: {:#x}", scancode);
-                    self.send(&msg).await?;
-                }
+                info!("inputs: key up: scancode={:#x}", scancode);
+                self.send(&msg).await?;
             }
 
             InputEvent::MouseMove { x, y } => {
@@ -305,17 +295,11 @@ impl InputsChannel {
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
-
-                if settings::is_intimate() {
-                    self.send_with_log(inputs_client::MOUSE_PRESS, &msg).await?;
-                    logging::log_detail(&format!(
-                        "button={}, pos=({},{}), state={:#x}",
-                        button, x, y, self.button_state
-                    ));
-                } else {
-                    debug!("inputs: mouse down: button={}, pos=({},{})", button, x, y);
-                    self.send(&msg).await?;
-                }
+                info!(
+                    "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
+                    button, x, y, self.button_state
+                );
+                self.send(&msg).await?;
             }
 
             InputEvent::MouseUp { button, x, y } => {

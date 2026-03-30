@@ -205,32 +205,25 @@ impl RyllApp {
         // key events are captured regardless of which widget has focus.
         ctx.input(|i| {
             for event in &i.events {
-                match event {
-                    egui::Event::Key {
-                        key,
-                        pressed,
-                        repeat: false,
-                        ..
-                    } => {
-                        if let Some((down_code, up_code)) = key_to_scancode(*key) {
-                            let ev = if *pressed {
-                                InputEvent::KeyDown(down_code)
-                            } else {
-                                InputEvent::KeyUp(up_code)
-                            };
-                            debug!(
-                                "app: key {:?} pressed={} scancode={:#x}",
-                                key, pressed, down_code
-                            );
-                            let _ = input_tx.try_send(ev);
-                        }
+                if let egui::Event::Key {
+                    key,
+                    pressed,
+                    repeat: false,
+                    ..
+                } = event
+                {
+                    if let Some((down_code, up_code)) = key_to_scancode(*key) {
+                        let ev = if *pressed {
+                            InputEvent::KeyDown(down_code)
+                        } else {
+                            InputEvent::KeyUp(up_code)
+                        };
+                        debug!(
+                            "app: key {:?} pressed={} scancode={:#x}",
+                            key, pressed, down_code
+                        );
+                        let _ = input_tx.try_send(ev);
                     }
-                    egui::Event::Text(text) => {
-                        // Text events give us characters that don't map to Key
-                        // enums (e.g. shifted symbols). Log for diagnostics.
-                        debug!("app: text input: {:?}", text);
-                    }
-                    _ => {}
                 }
             }
         });
