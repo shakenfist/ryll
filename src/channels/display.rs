@@ -326,18 +326,6 @@ impl DisplayChannel {
         let img_desc = ImageDescriptor::read(&payload[image_start..])?;
         let image_type = ImageType::from_u8(img_desc.image_type);
 
-        if settings::is_verbose() {
-            logging::log_detail(&format!(
-                "image: type={:?}, size={}x{}, id={}, flags={}",
-                image_type, img_desc.width, img_desc.height, img_desc.image_id, img_desc.flags
-            ));
-        } else {
-            debug!(
-                "display: draw_copy: surface={}, pos=({},{}), image_type={:?}, size={}x{}",
-                base.surface_id, left, top, image_type, img_desc.width, img_desc.height
-            );
-        }
-
         // Image data starts after the descriptor
         let image_data_start = image_start + ImageDescriptor::SIZE;
         if image_data_start >= payload.len() {
@@ -346,6 +334,20 @@ impl DisplayChannel {
         }
 
         let image_data = &payload[image_data_start..];
+
+        info!(
+            "display: draw_copy: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
+             flags={}, data_bytes={}",
+            base.surface_id,
+            left,
+            top,
+            img_desc.width,
+            img_desc.height,
+            image_type,
+            img_desc.image_id,
+            img_desc.flags,
+            image_data.len()
+        );
 
         // Decode/decompress based on type
         let decompressed: Option<DecompressedImage> = match image_type {
@@ -427,10 +429,20 @@ impl DisplayChannel {
                 }
             }
             _ => {
-                debug!("display: unsupported image type: {:?}", image_type);
+                warn!(
+                    "display: unsupported image type: {:?} (raw byte={})",
+                    image_type, img_desc.image_type
+                );
                 None
             }
         };
+
+        if decompressed.is_none() {
+            info!(
+                "display: draw_copy: no pixels produced for type={:?}",
+                image_type
+            );
+        }
 
         if let Some(img) = decompressed {
             // Cache for GLZ dictionary
