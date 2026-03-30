@@ -10,7 +10,7 @@ use std::io::{Cursor, Read};
 
 use super::DecompressedImage;
 
-const GLZ_MAGIC: &[u8; 4] = b"ZL.G"; // Reversed "G.LZ"
+const GLZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
 
 /// Decompress GLZ image data
