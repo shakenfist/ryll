@@ -47,6 +47,9 @@ pub enum ChannelEvent {
     /// Cursor position updated
     CursorPosition { x: u16, y: u16, visible: bool },
 
+    /// Cursor image shape updated
+    CursorShape(CursorImage),
+
     /// Mouse mode from server (1=server, 2=client)
     MouseMode(u32),
 
@@ -85,4 +88,15 @@ pub enum InputEvent {
 
     /// Mouse button released
     MouseUp { button: u32, x: u32, y: u32 },
+}
+
+/// Decoded cursor image in RGBA format
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields used in phase 2 (cursor overlay rendering)
+pub struct CursorImage {
+    pub width: u16,
+    pub height: u16,
+    pub hot_spot_x: u16,
+    pub hot_spot_y: u16,
+    pub pixels: Vec<u8>, // RGBA
 }

@@ -397,6 +397,47 @@ impl CursorSet {
     }
 }
 
+/// SpiceCursor header — precedes cursor pixel data in INIT and SET messages
+#[derive(Debug, Clone)]
+pub struct SpiceCursorHeader {
+    pub flags: u32,
+    pub unique_id: u64,
+    pub cursor_type: u16,
+    pub width: u16,
+    pub height: u16,
+    pub hot_spot_x: u16,
+    pub hot_spot_y: u16,
+}
+
+impl SpiceCursorHeader {
+    pub const SIZE: usize = 22;
+
+    /// Cursor should be cached by unique_id
+    pub const FLAG_CACHE_ME: u32 = 1 << 1;
+    /// No pixel data follows — look up by unique_id
+    pub const FLAG_FROM_CACHE: u32 = 1 << 2;
+
+    pub fn read(data: &[u8]) -> io::Result<Self> {
+        if data.len() < Self::SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Not enough data for SpiceCursorHeader",
+            ));
+        }
+
+        let mut cursor = Cursor::new(data);
+        Ok(SpiceCursorHeader {
+            flags: cursor.read_u32::<LittleEndian>()?,
+            unique_id: cursor.read_u64::<LittleEndian>()?,
+            cursor_type: cursor.read_u16::<LittleEndian>()?,
+            width: cursor.read_u16::<LittleEndian>()?,
+            height: cursor.read_u16::<LittleEndian>()?,
+            hot_spot_x: cursor.read_u16::<LittleEndian>()?,
+            hot_spot_y: cursor.read_u16::<LittleEndian>()?,
+        })
+    }
+}
+
 /// Input key modifiers message (client -> server)
 pub struct InputsKeyModifiers;
 

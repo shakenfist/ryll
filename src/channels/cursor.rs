@@ -1,20 +1,24 @@
-/// Cursor channel handler - cursor position and visibility
+/// Cursor channel handler - cursor position, shape, and caching
 use anyhow::Result;
+use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{make_message, CursorInit, CursorSet, MessageHeader, Ping, SetAck};
+use crate::protocol::messages::{
+    make_message, CursorInit, CursorSet, MessageHeader, Ping, SetAck, SpiceCursorHeader,
+};
 use crate::protocol::{cursor_client, cursor_server, ChannelType};
 use crate::settings;
 
-use super::ChannelEvent;
+use super::{ChannelEvent, CursorImage};
 
 pub struct CursorChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
+    cursor_cache: HashMap<u64, CursorImage>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -28,7 +32,8 @@ impl CursorChannel {
         CursorChannel {
             stream,
             event_tx,
-            buffer: Vec::with_capacity(4096),
+            buffer: Vec::with_capacity(65536),
+            cursor_cache: HashMap::new(),
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -44,7 +49,7 @@ impl CursorChannel {
 
         loop {
             // Read data into buffer
-            let mut chunk = [0u8; 4096];
+            let mut chunk = [0u8; 65536];
             let n = match &mut self.stream {
                 SpiceStream::Plain(s) => {
                     use tokio::io::AsyncReadExt;
@@ -132,6 +137,10 @@ impl CursorChannel {
                     })
                     .await
                     .ok();
+
+                // SpiceCursor data follows the 9-byte INIT header
+                self.parse_and_emit_cursor(&payload[CursorInit::SIZE..])
+                    .await;
             }
 
             cursor_server::SET => {
@@ -152,6 +161,10 @@ impl CursorChannel {
                     })
                     .await
                     .ok();
+
+                // SpiceCursor data follows the 5-byte SET header
+                self.parse_and_emit_cursor(&payload[CursorSet::SIZE..])
+                    .await;
             }
 
             cursor_server::MOVE => {
@@ -184,11 +197,34 @@ impl CursorChannel {
             }
 
             cursor_server::RESET => {
-                debug!("cursor: reset");
+                info!(
+                    "cursor: reset, clearing cache ({} entries)",
+                    self.cursor_cache.len()
+                );
+                self.cursor_cache.clear();
             }
 
             cursor_server::TRAIL => {
                 debug!("cursor: trail settings received");
+            }
+
+            cursor_server::INVALIDATE_ONE => {
+                if payload.len() >= 8 {
+                    let id = u64::from_le_bytes([
+                        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
+                        payload[6], payload[7],
+                    ]);
+                    info!("cursor: invalidate_one: id={}", id);
+                    self.cursor_cache.remove(&id);
+                }
+            }
+
+            cursor_server::INVALIDATE_ALL => {
+                info!(
+                    "cursor: invalidate_all, clearing cache ({} entries)",
+                    self.cursor_cache.len()
+                );
+                self.cursor_cache.clear();
             }
 
             cursor_server::SET_ACK => {
@@ -243,6 +279,71 @@ impl CursorChannel {
         Ok(())
     }
 
+    /// Parse SpiceCursor data and emit a CursorShape event if successful.
+    async fn parse_and_emit_cursor(&mut self, data: &[u8]) {
+        if data.len() < SpiceCursorHeader::SIZE {
+            // No cursor data in this message
+            return;
+        }
+
+        let header = match SpiceCursorHeader::read(data) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("cursor: failed to parse SpiceCursorHeader: {}", e);
+                return;
+            }
+        };
+
+        let from_cache = (header.flags & SpiceCursorHeader::FLAG_FROM_CACHE) != 0;
+        let cache_me = (header.flags & SpiceCursorHeader::FLAG_CACHE_ME) != 0;
+
+        info!(
+            "cursor: shape: type={}, {}x{}, hot=({},{}), id={}, flags={:#x} (cache_me={}, from_cache={})",
+            header.cursor_type,
+            header.width,
+            header.height,
+            header.hot_spot_x,
+            header.hot_spot_y,
+            header.unique_id,
+            header.flags,
+            cache_me,
+            from_cache,
+        );
+
+        if from_cache {
+            // Look up cached cursor by unique_id
+            if let Some(img) = self.cursor_cache.get(&header.unique_id) {
+                info!("cursor: using cached cursor id={}", header.unique_id);
+                self.event_tx
+                    .send(ChannelEvent::CursorShape(img.clone()))
+                    .await
+                    .ok();
+            } else {
+                warn!(
+                    "cursor: cache miss for id={} (cache has {} entries)",
+                    header.unique_id,
+                    self.cursor_cache.len()
+                );
+            }
+            return;
+        }
+
+        // Pixel data follows the header
+        let pixel_data = &data[SpiceCursorHeader::SIZE..];
+        let image = decode_cursor_pixels(&header, pixel_data);
+
+        if let Some(img) = image {
+            if cache_me {
+                info!("cursor: caching cursor id={}", header.unique_id);
+                self.cursor_cache.insert(header.unique_id, img.clone());
+            }
+            self.event_tx
+                .send(ChannelEvent::CursorShape(img))
+                .await
+                .ok();
+        }
+    }
+
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(cursor_client::ACK, &[]);
         self.send_with_log(cursor_client::ACK, &msg).await?;
@@ -264,5 +365,194 @@ impl CursorChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+/// Decode cursor pixel data based on cursor_type, returning RGBA pixels.
+fn decode_cursor_pixels(header: &SpiceCursorHeader, pixel_data: &[u8]) -> Option<CursorImage> {
+    let w = header.width as usize;
+    let h = header.height as usize;
+    let pixel_count = w.checked_mul(h)?;
+    let rgba_size = pixel_count.checked_mul(4)?;
+
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let mut rgba = vec![0u8; rgba_size];
+
+    match header.cursor_type {
+        // Alpha: 32-bit ARGB per pixel
+        0 => {
+            let needed = pixel_count * 4;
+            if pixel_data.len() < needed {
+                warn!(
+                    "cursor: alpha data too short (have {}, need {})",
+                    pixel_data.len(),
+                    needed
+                );
+                return None;
+            }
+            for i in 0..pixel_count {
+                let s = i * 4;
+                let d = i * 4;
+                rgba[d] = pixel_data[s + 2]; // R (from BGRA position)
+                rgba[d + 1] = pixel_data[s + 1]; // G
+                rgba[d + 2] = pixel_data[s]; // B
+                rgba[d + 3] = pixel_data[s + 3]; // A
+            }
+        }
+
+        // Color24: 24-bit BGR per pixel
+        5 => {
+            let needed = pixel_count * 3;
+            if pixel_data.len() < needed {
+                warn!(
+                    "cursor: color24 data too short (have {}, need {})",
+                    pixel_data.len(),
+                    needed
+                );
+                return None;
+            }
+            for i in 0..pixel_count {
+                let s = i * 3;
+                let d = i * 4;
+                rgba[d] = pixel_data[s + 2]; // R
+                rgba[d + 1] = pixel_data[s + 1]; // G
+                rgba[d + 2] = pixel_data[s]; // B
+                rgba[d + 3] = 255; // A
+            }
+        }
+
+        // Color32: 32-bit xRGB per pixel (x is padding, not alpha)
+        6 => {
+            let needed = pixel_count * 4;
+            if pixel_data.len() < needed {
+                warn!(
+                    "cursor: color32 data too short (have {}, need {})",
+                    pixel_data.len(),
+                    needed
+                );
+                return None;
+            }
+            for i in 0..pixel_count {
+                let s = i * 4;
+                let d = i * 4;
+                rgba[d] = pixel_data[s + 2]; // R (from BGRX position)
+                rgba[d + 1] = pixel_data[s + 1]; // G
+                rgba[d + 2] = pixel_data[s]; // B
+                rgba[d + 3] = 255; // A
+            }
+        }
+
+        other => {
+            warn!("cursor: unsupported cursor type {} ({}x{})", other, w, h);
+            return None;
+        }
+    }
+
+    Some(CursorImage {
+        width: header.width,
+        height: header.height,
+        hot_spot_x: header.hot_spot_x,
+        hot_spot_y: header.hot_spot_y,
+        pixels: rgba,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_cursor_payload(
+        cursor_type: u16,
+        width: u16,
+        height: u16,
+        flags: u32,
+        pixel_data: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // SpiceCursorHeader: flags(4) + unique_id(8) + type(2) + w(2) + h(2) + hx(2) + hy(2)
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes()); // unique_id = 1
+        buf.extend_from_slice(&cursor_type.to_le_bytes());
+        buf.extend_from_slice(&width.to_le_bytes());
+        buf.extend_from_slice(&height.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // hot_spot_x
+        buf.extend_from_slice(&0u16.to_le_bytes()); // hot_spot_y
+        buf.extend_from_slice(pixel_data);
+        buf
+    }
+
+    #[test]
+    fn test_alpha_cursor_argb_to_rgba() {
+        // 2x2 alpha cursor: BGRA pixels
+        let pixels: Vec<u8> = vec![
+            0x10, 0x20, 0x30, 0x80, // B=0x10, G=0x20, R=0x30, A=0x80
+            0x40, 0x50, 0x60, 0xFF, // B=0x40, G=0x50, R=0x60, A=0xFF
+            0x00, 0x00, 0x00, 0x00, // transparent black
+            0xFF, 0xFF, 0xFF, 0xFF, // opaque white
+        ];
+        let data = build_cursor_payload(0, 2, 2, 0, &pixels);
+        let header = SpiceCursorHeader::read(&data).unwrap();
+        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        assert!(result.is_some());
+
+        let img = result.unwrap();
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 2);
+        assert_eq!(img.pixels.len(), 16);
+
+        // First pixel: BGRA(0x10,0x20,0x30,0x80) → RGBA(0x30,0x20,0x10,0x80)
+        assert_eq!(img.pixels[0], 0x30); // R
+        assert_eq!(img.pixels[1], 0x20); // G
+        assert_eq!(img.pixels[2], 0x10); // B
+        assert_eq!(img.pixels[3], 0x80); // A
+
+        // Second pixel: BGRA(0x40,0x50,0x60,0xFF) → RGBA(0x60,0x50,0x40,0xFF)
+        assert_eq!(img.pixels[4], 0x60); // R
+        assert_eq!(img.pixels[5], 0x50); // G
+        assert_eq!(img.pixels[6], 0x40); // B
+        assert_eq!(img.pixels[7], 0xFF); // A
+
+        // Third pixel: all zeros (transparent)
+        assert_eq!(img.pixels[8..12], [0, 0, 0, 0]);
+
+        // Fourth pixel: BGRA(FF,FF,FF,FF) → RGBA(FF,FF,FF,FF)
+        assert_eq!(img.pixels[12..16], [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_color32_cursor_xrgb_to_rgba() {
+        // 1x1 color32 cursor: BGRX pixel
+        let pixels: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0x00]; // B=AA, G=BB, R=CC, x=00
+        let data = build_cursor_payload(6, 1, 1, 0, &pixels);
+        let header = SpiceCursorHeader::read(&data).unwrap();
+        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        assert!(result.is_some());
+
+        let img = result.unwrap();
+        assert_eq!(img.pixels, vec![0xCC, 0xBB, 0xAA, 0xFF]); // RGBA with A=255
+    }
+
+    #[test]
+    fn test_from_cache_flag_no_pixel_data() {
+        // Header with FROM_CACHE flag — no pixel data expected
+        let data = build_cursor_payload(0, 24, 24, SpiceCursorHeader::FLAG_FROM_CACHE, &[]);
+        let header = SpiceCursorHeader::read(&data).unwrap();
+        assert_eq!(
+            header.flags & SpiceCursorHeader::FLAG_FROM_CACHE,
+            SpiceCursorHeader::FLAG_FROM_CACHE
+        );
+        assert_eq!(header.width, 24);
+        assert_eq!(header.height, 24);
+    }
+
+    #[test]
+    fn test_zero_dimension_cursor_returns_none() {
+        let data = build_cursor_payload(0, 0, 0, 0, &[]);
+        let header = SpiceCursorHeader::read(&data).unwrap();
+        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        assert!(result.is_none());
     }
 }

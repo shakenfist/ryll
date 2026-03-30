@@ -172,6 +172,14 @@ impl RyllApp {
                     self.cursor_visible = visible;
                 }
 
+                ChannelEvent::CursorShape(ref img) => {
+                    info!(
+                        "app: cursor shape: {}x{}, hot=({},{})",
+                        img.width, img.height, img.hot_spot_x, img.hot_spot_y
+                    );
+                    // TODO(phase-2): store cursor image and render as overlay
+                }
+
                 ChannelEvent::MouseMode(mode) => {
                     info!(
                         "app: mouse mode: {} ({})",
