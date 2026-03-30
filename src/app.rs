@@ -8,7 +8,8 @@ use tracing::{debug, error, info};
 
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
-    ChannelEvent, CursorChannel, DisplayChannel, InputEvent, InputsChannel, MainChannel,
+    ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
+    MainChannel,
 };
 use crate::config::Config;
 use crate::display::DisplaySurface;
@@ -43,6 +44,11 @@ pub struct RyllApp {
     // Cursor state
     cursor_pos: (u16, u16),
     cursor_visible: bool,
+    cursor_image: Option<CursorImage>,
+    cursor_texture: Option<egui::TextureHandle>,
+
+    // Screen-space rect of the rendered SPICE surface
+    surface_rect: egui::Rect,
 
     // Statistics
     stats: Statistics,
@@ -91,6 +97,9 @@ impl RyllApp {
             surfaces: HashMap::new(),
             cursor_pos: (0, 0),
             cursor_visible: true,
+            cursor_image: None,
+            cursor_texture: None,
+            surface_rect: egui::Rect::NOTHING,
             stats: Statistics {
                 start_time: Some(Instant::now()),
                 ..Default::default()
@@ -172,12 +181,13 @@ impl RyllApp {
                     self.cursor_visible = visible;
                 }
 
-                ChannelEvent::CursorShape(ref img) => {
+                ChannelEvent::CursorShape(img) => {
                     info!(
                         "app: cursor shape: {}x{}, hot=({},{})",
                         img.width, img.height, img.hot_spot_x, img.hot_spot_y
                     );
-                    // TODO(phase-2): store cursor image and render as overlay
+                    self.cursor_image = Some(img);
+                    self.cursor_texture = None; // force recreation
                 }
 
                 ChannelEvent::MouseMode(mode) => {
@@ -322,6 +332,15 @@ impl eframe::App for RyllApp {
                             .sense(egui::Sense::click_and_drag()),
                     );
 
+                    // Track the surface rect for cursor overlay positioning
+                    self.surface_rect = response.rect;
+
+                    // Hide the OS cursor when hovering over the surface
+                    if response.hovered() && self.cursor_image.is_some() {
+                        ui.ctx()
+                            .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
+                    }
+
                     // Handle mouse input on the surface
                     if let Some(tx) = &self.input_tx {
                         // Send mouse position only when it changes
@@ -409,6 +428,49 @@ impl eframe::App for RyllApp {
                     }
                 });
             });
+
+        // Create cursor texture if we have a new shape
+        if self.cursor_image.is_some() && self.cursor_texture.is_none() {
+            if let Some(ref img) = self.cursor_image {
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.pixels,
+                );
+                let options = egui::TextureOptions {
+                    magnification: egui::TextureFilter::Nearest,
+                    minification: egui::TextureFilter::Nearest,
+                    ..Default::default()
+                };
+                self.cursor_texture = Some(ctx.load_texture("spice_cursor", color_image, options));
+            }
+        }
+
+        // Draw cursor overlay
+        if self.cursor_visible && self.surface_rect != egui::Rect::NOTHING {
+            if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
+                // In server mode, use server-reported position.
+                // In client mode, use local mouse position.
+                let (cx, cy) = if self.mouse_mode == 2 {
+                    self.last_mouse_pos
+                        .map(|(x, y)| (x as f32, y as f32))
+                        .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
+                } else {
+                    (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                };
+
+                let x = self.surface_rect.min.x + cx - img.hot_spot_x as f32;
+                let y = self.surface_rect.min.y + cy - img.hot_spot_y as f32;
+                let size = egui::vec2(img.width as f32, img.height as f32);
+
+                egui::Area::new(egui::Id::new("spice_cursor"))
+                    .fixed_pos(egui::pos2(x, y))
+                    .interactable(false)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+                    });
+            }
+        }
 
         // Repaint at a modest rate to pick up new frames without
         // spinning the CPU.  Incoming events will also trigger a
