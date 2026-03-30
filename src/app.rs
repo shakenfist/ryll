@@ -457,13 +457,10 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Draw cursor overlay
+        // Draw cursor overlay using the painter so it doesn't
+        // interfere with mouse input on the surface below.
         if self.cursor_visible && self.surface_rect != egui::Rect::NOTHING {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
-                // Use the local mouse position if we have one, otherwise
-                // fall back to the server-reported cursor position.
-                // In server mode, the server may or may not send MOVE
-                // updates — the local position is usually more responsive.
                 let (cx, cy) = self
                     .last_mouse_pos
                     .map(|(x, y)| (x as f32, y as f32))
@@ -472,14 +469,14 @@ impl eframe::App for RyllApp {
                 let x = self.surface_rect.min.x + cx - img.hot_spot_x as f32;
                 let y = self.surface_rect.min.y + cy - img.hot_spot_y as f32;
                 let size = egui::vec2(img.width as f32, img.height as f32);
+                let rect = egui::Rect::from_min_size(egui::pos2(x, y), size);
 
-                egui::Area::new(egui::Id::new("spice_cursor"))
-                    .fixed_pos(egui::pos2(x, y))
-                    .interactable(false)
-                    .order(egui::Order::Foreground)
-                    .show(ctx, |ui| {
-                        ui.add(egui::Image::new(tex).fit_to_exact_size(size));
-                    });
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("spice_cursor"),
+                ));
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
             }
         }
 
