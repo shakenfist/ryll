@@ -51,7 +51,7 @@ impl DisplayChannel {
 
     /// Run the display channel event loop
     pub async fn run(&mut self) -> Result<()> {
-        info!("Display channel started");
+        info!("display: channel started");
 
         // Send display init message
         self.send_init().await?;
@@ -71,7 +71,7 @@ impl DisplayChannel {
             };
 
             if n == 0 {
-                info!("Display channel disconnected");
+                info!("display: channel disconnected");
                 self.event_tx
                     .send(ChannelEvent::Disconnected(ChannelType::Display))
                     .await
@@ -155,7 +155,7 @@ impl DisplayChannel {
             display_server::SURFACE_CREATE => {
                 let surface = SurfaceCreate::read(payload)?;
                 info!(
-                    "Surface created: id={}, {}x{}",
+                    "display: surface created: id={}, {}x{}",
                     surface.surface_id, surface.width, surface.height
                 );
 
@@ -184,7 +184,7 @@ impl DisplayChannel {
                 if payload.len() >= 4 {
                     let surface_id =
                         u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    info!("Surface destroyed: id={}", surface_id);
+                    info!("display: surface destroyed: id={}", surface_id);
 
                     if settings::is_verbose() {
                         logging::log_detail(&format!("surface_id={}", surface_id));
@@ -201,8 +201,12 @@ impl DisplayChannel {
                 self.handle_draw_copy(payload).await?;
             }
 
+            display_server::DRAW_COMPOSITE => {
+                debug!("display: draw_composite (not yet implemented, skipping)");
+            }
+
             display_server::MARK => {
-                debug!("Display mark");
+                debug!("display: mark");
                 self.event_tx.send(ChannelEvent::DisplayMark).await.ok();
             }
 
@@ -243,8 +247,8 @@ impl DisplayChannel {
                 self.send_with_log(display_client::PONG, &response).await?;
             }
 
-            display_server::INVALIDATE_LIST => {
-                debug!("Invalidate list received");
+            display_server::INVALIDATE_LIST | display_server::INVAL_ALL_PIXMAPS => {
+                debug!("display: invalidate pixmaps received (opcode {})", msg_type);
 
                 if settings::is_verbose() {
                     logging::log_detail(&format!(
@@ -259,7 +263,7 @@ impl DisplayChannel {
             }
 
             display_server::RESET => {
-                info!("Display reset");
+                info!("display: reset");
                 self.previous_images.clear();
                 self.previous_images_order.clear();
             }
@@ -281,7 +285,7 @@ impl DisplayChannel {
 
     async fn handle_draw_copy(&mut self, payload: &[u8]) -> Result<()> {
         if payload.len() < DrawCopyBase::SIZE {
-            warn!("draw_copy payload too short");
+            warn!("display: draw_copy payload too short");
             return Ok(());
         }
 
@@ -296,45 +300,30 @@ impl DisplayChannel {
             ));
         }
 
-        // Skip clip data based on clip_type
-        let clip_offset = if base.clip_type == 0 {
-            DrawCopyBase::SIZE
-        } else {
-            // Has clip data - skip it (simplified)
-            DrawCopyBase::SIZE + 4 // Minimal clip skip
-        };
+        // After DrawCopyBase the SpiceCopy structure is (mini-header mode):
+        //   src_bitmap  SPICE_ADDRESS (u32)   4 bytes
+        //   src_area    SpiceRect (4 x i32)  16 bytes
+        //   rop_descriptor  u16               2 bytes
+        //   scale_mode      u8                1 byte
+        //   mask.flags      u8                1 byte
+        //   mask.pos        2 x i32           8 bytes
+        //   mask.bitmap     SPICE_ADDRESS     4 bytes
+        // Total SpiceCopy header = 36 bytes
+        // The SpiceImage (ImageDescriptor + data) follows inline.
+        let copy_header_size: usize = 4 + 16 + 2 + 1 + 1 + 8 + 4;
+        let image_start = DrawCopyBase::SIZE + copy_header_size;
 
-        // Find image descriptor
-        // The layout after clip is: rop_descriptor (2 bytes), scale_mode (1 byte),
-        // mask offset (4 bytes), then image offset (4 bytes)
-        let image_offset_pos = clip_offset + 7;
-
-        if payload.len() < image_offset_pos + 4 {
-            warn!("draw_copy: not enough data for image offset");
+        if payload.len() < image_start + ImageDescriptor::SIZE {
+            warn!(
+                "display: draw_copy: payload too short for image descriptor \
+                 (have {}, need {})",
+                payload.len(),
+                image_start + ImageDescriptor::SIZE
+            );
             return Ok(());
         }
 
-        let image_offset = u32::from_le_bytes([
-            payload[image_offset_pos],
-            payload[image_offset_pos + 1],
-            payload[image_offset_pos + 2],
-            payload[image_offset_pos + 3],
-        ]) as usize;
-
-        // Adjust offset relative to start of payload
-        let actual_offset = if image_offset > 0 {
-            image_offset - MessageHeader::SIZE - DrawCopyBase::SIZE
-        } else {
-            image_offset_pos + 4
-        };
-
-        if payload.len() < actual_offset + ImageDescriptor::SIZE {
-            warn!("draw_copy: not enough data for image descriptor");
-            return Ok(());
-        }
-
-        let img_desc = ImageDescriptor::read(&payload[actual_offset..])?;
-
+        let img_desc = ImageDescriptor::read(&payload[image_start..])?;
         let image_type = ImageType::from_u8(img_desc.image_type);
 
         if settings::is_verbose() {
@@ -344,36 +333,82 @@ impl DisplayChannel {
             ));
         } else {
             debug!(
-                "draw_copy: surface={}, pos=({},{}), image_type={:?}, size={}x{}",
+                "display: draw_copy: surface={}, pos=({},{}), image_type={:?}, size={}x{}",
                 base.surface_id, left, top, image_type, img_desc.width, img_desc.height
             );
         }
 
-        // Image data starts after descriptor
-        let image_data_start = actual_offset + ImageDescriptor::SIZE;
+        // Image data starts after the descriptor
+        let image_data_start = image_start + ImageDescriptor::SIZE;
         if image_data_start >= payload.len() {
-            warn!("draw_copy: no image data");
+            warn!("display: draw_copy: no image data");
             return Ok(());
         }
 
         let image_data = &payload[image_data_start..];
 
-        // Decompress based on type
+        // Decode/decompress based on type
         let decompressed: Option<DecompressedImage> = match image_type {
-            Some(ImageType::GlzRgb) => match decompress_glz(image_data, &self.previous_images) {
-                Ok(img) => Some(img),
-                Err(e) => {
-                    warn!("GLZ decompression failed: {}", e);
+            Some(ImageType::Pixmap) => {
+                // Raw 32-bit BGRX pixel data — convert to RGBA
+                let width = img_desc.width;
+                let height = img_desc.height;
+                let expected = (width * height * 4) as usize;
+                if image_data.len() >= expected {
+                    let mut rgba = vec![0u8; expected];
+                    for i in 0..(width * height) as usize {
+                        let src = i * 4;
+                        let dst = i * 4;
+                        rgba[dst] = image_data[src + 2]; // R
+                        rgba[dst + 1] = image_data[src + 1]; // G
+                        rgba[dst + 2] = image_data[src]; // B
+                        rgba[dst + 3] = 255; // A
+                    }
+                    Some(DecompressedImage {
+                        width,
+                        height,
+                        pixels: rgba,
+                        image_id: img_desc.image_id,
+                    })
+                } else {
+                    warn!(
+                        "display: pixmap data too short (have {}, need {})",
+                        image_data.len(),
+                        expected
+                    );
                     None
                 }
-            },
-            Some(ImageType::LzRgb) => match decompress_lz(image_data) {
-                Ok(img) => Some(img),
-                Err(e) => {
-                    warn!("LZ decompression failed: {}", e);
+            }
+            Some(ImageType::GlzRgb) => {
+                // Skip 4-byte data_size prefix before the GLZ header
+                if image_data.len() < 4 {
+                    warn!("display: GLZ image data too short");
                     None
+                } else {
+                    match decompress_glz(&image_data[4..], &self.previous_images) {
+                        Ok(img) => Some(img),
+                        Err(e) => {
+                            warn!("display: GLZ decompression failed: {}", e);
+                            None
+                        }
+                    }
                 }
-            },
+            }
+            Some(ImageType::LzRgb) => {
+                // Skip 4-byte data_size prefix before the LZ header
+                if image_data.len() < 4 {
+                    warn!("display: LZ image data too short");
+                    None
+                } else {
+                    match decompress_lz(&image_data[4..]) {
+                        Ok(img) => Some(img),
+                        Err(e) => {
+                            warn!("display: LZ decompression failed: {}", e);
+                            None
+                        }
+                    }
+                }
+            }
             Some(ImageType::FromCache) => {
                 // Look up in cache
                 if let Some(pixels) = self.previous_images.get(&img_desc.image_id) {
@@ -384,12 +419,12 @@ impl DisplayChannel {
                         image_id: img_desc.image_id,
                     })
                 } else {
-                    warn!("Image {} not in cache", img_desc.image_id);
+                    warn!("display: image {} not in cache", img_desc.image_id);
                     None
                 }
             }
             _ => {
-                debug!("Unsupported image type: {:?}", image_type);
+                debug!("display: unsupported image type: {:?}", image_type);
                 None
             }
         };

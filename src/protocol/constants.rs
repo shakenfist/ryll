@@ -147,6 +147,7 @@ pub mod display_server {
     pub const RESET: u16 = 103;
     pub const COPY_BITS: u16 = 104;
     pub const INVALIDATE_LIST: u16 = 105;
+    pub const INVAL_ALL_PIXMAPS: u16 = 108;
     pub const STREAM_CREATE: u16 = 122;
     pub const STREAM_DATA: u16 = 123;
     pub const STREAM_CLIP: u16 = 124;

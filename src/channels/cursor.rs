@@ -40,7 +40,7 @@ impl CursorChannel {
 
     /// Run the cursor channel event loop
     pub async fn run(&mut self) -> Result<()> {
-        info!("Cursor channel started");
+        info!("cursor: channel started");
 
         loop {
             // Read data into buffer
@@ -57,7 +57,7 @@ impl CursorChannel {
             };
 
             if n == 0 {
-                info!("Cursor channel disconnected");
+                info!("cursor: channel disconnected");
                 self.event_tx
                     .send(ChannelEvent::Disconnected(ChannelType::Cursor))
                     .await
@@ -117,7 +117,7 @@ impl CursorChannel {
             cursor_server::INIT => {
                 let init = CursorInit::read(payload)?;
                 debug!(
-                    "Cursor init: pos=({},{}), visible={}",
+                    "cursor: init: pos=({},{}), visible={}",
                     init.x, init.y, init.visible
                 );
 
@@ -134,7 +134,7 @@ impl CursorChannel {
             cursor_server::SET => {
                 let set = CursorSet::read(payload)?;
                 debug!(
-                    "Cursor set: pos=({},{}), visible={}",
+                    "cursor: set: pos=({},{}), visible={}",
                     set.x, set.y, set.visible
                 );
 
@@ -152,7 +152,7 @@ impl CursorChannel {
                 if payload.len() >= 4 {
                     let x = u16::from_le_bytes([payload[0], payload[1]]);
                     let y = u16::from_le_bytes([payload[2], payload[3]]);
-                    debug!("Cursor move: ({},{})", x, y);
+                    debug!("cursor: move: ({},{})", x, y);
 
                     self.event_tx
                         .send(ChannelEvent::CursorPosition {
@@ -166,7 +166,7 @@ impl CursorChannel {
             }
 
             cursor_server::HIDE => {
-                debug!("Cursor hide");
+                debug!("cursor: hide");
                 self.event_tx
                     .send(ChannelEvent::CursorPosition {
                         x: 0,
@@ -178,11 +178,11 @@ impl CursorChannel {
             }
 
             cursor_server::RESET => {
-                debug!("Cursor reset");
+                debug!("cursor: reset");
             }
 
             cursor_server::TRAIL => {
-                debug!("Cursor trail settings received");
+                debug!("cursor: trail settings received");
             }
 
             cursor_server::SET_ACK => {

@@ -144,6 +144,7 @@ pub mod message_names {
             display_server::RESET => "reset",
             display_server::COPY_BITS => "copy_bits",
             display_server::INVALIDATE_LIST => "invalidate_list",
+            display_server::INVAL_ALL_PIXMAPS => "inval_all_pixmaps",
             display_server::STREAM_CREATE => "stream_create",
             display_server::STREAM_DATA => "stream_data",
             display_server::STREAM_CLIP => "stream_clip",

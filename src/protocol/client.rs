@@ -96,7 +96,7 @@ impl SpiceClient {
 
         // Perform link handshake
         info!(
-            "Performing link handshake for {} channel (id={})",
+            "{}: performing link handshake (id={})",
             channel_type.name(),
             channel_id
         );
@@ -117,10 +117,10 @@ impl SpiceClient {
         }
 
         // Perform authentication
-        info!("Authenticating...");
+        info!("{}: authenticating...", channel_type.name());
         perform_auth(&mut stream, &reply.pub_key, self.config.password.as_deref()).await?;
 
-        info!("Connected to {} channel successfully", channel_type.name());
+        info!("{}: connected successfully", channel_type.name());
 
         Ok(stream)
     }

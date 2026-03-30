@@ -48,7 +48,7 @@ impl InputsChannel {
 
     /// Run the inputs channel event loop
     pub async fn run(&mut self) -> Result<()> {
-        info!("Inputs channel started");
+        info!("inputs: channel started");
 
         // Send initial key modifiers (NumLock on)
         self.send_key_modifiers(keyboard_modifiers::NUM_LOCK)
@@ -86,7 +86,7 @@ impl InputsChannel {
                 result = read_fut => {
                     match result {
                         Ok(0) => {
-                            info!("Inputs channel disconnected");
+                            info!("inputs: channel disconnected");
                             self.event_tx
                                 .send(ChannelEvent::Disconnected(ChannelType::Inputs))
                                 .await
@@ -98,7 +98,7 @@ impl InputsChannel {
                         }
                         Err(e) => {
                             self.event_tx
-                                .send(ChannelEvent::Error(format!("Inputs read error: {}", e)))
+                                .send(ChannelEvent::Error(format!("inputs: read error: {}", e)))
                                 .await
                                 .ok();
                             break;
@@ -173,7 +173,7 @@ impl InputsChannel {
 
         match msg_type {
             inputs_server::INIT => {
-                debug!("Inputs init received");
+                debug!("inputs: init received");
             }
 
             inputs_server::KEY_MODIFIERS => {
@@ -183,13 +183,13 @@ impl InputsChannel {
                     if settings::is_verbose() {
                         logging::log_detail(&format!("modifiers={:#x}", modifiers));
                     } else {
-                        debug!("Key modifiers from server: {:#x}", modifiers);
+                        debug!("inputs: key modifiers from server: {:#x}", modifiers);
                     }
                 }
             }
 
             inputs_server::MOUSE_MOTION_ACK => {
-                debug!("Mouse motion ack");
+                debug!("inputs: mouse motion ack");
             }
 
             inputs_server::SET_ACK => {
@@ -263,7 +263,7 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
                     logging::log_detail(&format!("scancode={:#x}", scancode));
                 } else {
-                    debug!("Key down: {:#x}", scancode);
+                    debug!("inputs: key down: {:#x}", scancode);
                     self.send(&msg).await?;
                 }
             }
@@ -277,7 +277,7 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::KEY_UP, &msg).await?;
                     logging::log_detail(&format!("scancode={:#x}", scancode));
                 } else {
-                    debug!("Key up: {:#x}", scancode);
+                    debug!("inputs: key up: {:#x}", scancode);
                     self.send(&msg).await?;
                 }
             }
@@ -313,7 +313,7 @@ impl InputsChannel {
                         button, x, y, self.button_state
                     ));
                 } else {
-                    debug!("Mouse down: button={}, pos=({},{})", button, x, y);
+                    debug!("inputs: mouse down: button={}, pos=({},{})", button, x, y);
                     self.send(&msg).await?;
                 }
             }
@@ -333,7 +333,7 @@ impl InputsChannel {
                         button, x, y, self.button_state
                     ));
                 } else {
-                    debug!("Mouse up: button={}, pos=({},{})", button, x, y);
+                    debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
                     self.send(&msg).await?;
                 }
             }

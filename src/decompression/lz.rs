@@ -8,7 +8,7 @@ use std::io::{Cursor, Read};
 
 use super::DecompressedImage;
 
-const LZ_MAGIC: &[u8; 4] = b"ZL.L"; // Reversed "L.LZ"
+const LZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
 
 /// Decompress LZ image data
@@ -169,7 +169,7 @@ mod tests {
     fn test_lz_header_parse() {
         // Minimal LZ header (28 bytes)
         let mut header = Vec::new();
-        header.extend_from_slice(LZ_MAGIC); // Magic
+        header.extend_from_slice(b"  ZL"); // Magic
         header.extend_from_slice(&[0, 1]); // Version major
         header.extend_from_slice(&[0, 0]); // Version minor
         header.extend_from_slice(&[0, 0, 0]); // Padding

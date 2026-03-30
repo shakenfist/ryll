@@ -41,7 +41,7 @@ impl MainChannel {
 
     /// Run the main channel event loop
     pub async fn run(&mut self) -> Result<()> {
-        info!("Main channel started");
+        info!("main: channel started");
 
         loop {
             // Read data into buffer
@@ -58,7 +58,7 @@ impl MainChannel {
             };
 
             if n == 0 {
-                info!("Main channel disconnected");
+                info!("main: channel disconnected");
                 self.event_tx
                     .send(ChannelEvent::Disconnected(ChannelType::Main))
                     .await
@@ -113,7 +113,7 @@ impl MainChannel {
         match msg_type {
             main_server::INIT => {
                 let init = MainInit::read(payload)?;
-                info!("Session initialized: id={}", init.session_id);
+                info!("main: session initialized: id={}", init.session_id);
 
                 if settings::is_verbose() {
                     logging::log_detail(&format!(
@@ -141,7 +141,10 @@ impl MainChannel {
 
             main_server::CHANNELS_LIST => {
                 let list = ChannelsList::read(payload)?;
-                info!("Received channel list: {} channels", list.channels.len());
+                info!(
+                    "main: received channel list: {} channels",
+                    list.channels.len()
+                );
 
                 let channels: Vec<(ChannelType, u8)> = list
                     .channels
@@ -222,19 +225,19 @@ impl MainChannel {
 
                 match severity {
                     NotifySeverity::Error => {
-                        warn!("Server notify (error): {}", notify.message);
+                        warn!("main: server notify (error): {}", notify.message);
                     }
                     NotifySeverity::Warn => {
-                        warn!("Server notify (warn): {}", notify.message);
+                        warn!("main: server notify (warn): {}", notify.message);
                     }
                     NotifySeverity::Info => {
-                        info!("Server notify: {}", notify.message);
+                        info!("main: server notify: {}", notify.message);
                     }
                 }
             }
 
             main_server::DISCONNECTING => {
-                info!("Server sent disconnect notification");
+                info!("main: server sent disconnect notification");
                 self.event_tx
                     .send(ChannelEvent::Disconnected(ChannelType::Main))
                     .await
