@@ -1,0 +1,21 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Cargo cache (used by devcontainer builds)
+/.cargo-cache/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test images
+/testdata/
+
+# Latency measurement output
+latency.csv

@@ -1,0 +1,18 @@
+{
+    "name": "Ryll",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer"
+            ],
+            "settings": {
+                "rust-analyzer.check.command": "clippy"
+            }
+        }
+    },
+    "postCreateCommand": "rustup show && cargo --version",
+    "remoteUser": "vscode"
+}

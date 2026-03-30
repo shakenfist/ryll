@@ -1,0 +1,46 @@
+[package]
+name = "ryll"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust SPICE VDI test client"
+license = "Apache-2.0"
+authors = ["Michael Still <mikal@stillhq.com>"]
+
+[dependencies]
+# GUI framework
+eframe = "0.29"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# CLI parsing
+clap = { version = "4", features = ["derive"] }
+
+# Binary protocol handling
+bytes = "1"
+byteorder = "1"
+
+# Cryptography for SPICE auth
+rsa = "0.9"
+sha1 = "0.10"
+rand = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Config file parsing
+configparser = "3"
+
+# HTTP for URL config fetching
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Async channels
+async-channel = "2"
