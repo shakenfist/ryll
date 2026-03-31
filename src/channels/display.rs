@@ -30,12 +30,21 @@ fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<Deco
     let _top_down = data[0];
     let spice_format = data[1];
 
-    // Bytes per pixel based on spice bitmap format
+    debug!(
+        "display: LZ4 header: top_down={}, format={}, first_16_bytes={:02x?}",
+        _top_down,
+        spice_format,
+        &data[..data.len().min(16)]
+    );
+
+    // Bytes per pixel based on spice bitmap format.
+    // Format 0 (INVALID) is treated as 32BIT — some servers
+    // or proxies send this for standard BGRX data.
     let bpp: usize = match spice_format {
-        4 => 4, // SPICE_BITMAP_FMT_32BIT (BGRX)
-        6 => 4, // SPICE_BITMAP_FMT_RGBA (BGRA)
-        3 => 3, // SPICE_BITMAP_FMT_24BIT (BGR)
-        2 => 2, // SPICE_BITMAP_FMT_16BIT
+        0 | 4 => 4, // SPICE_BITMAP_FMT_32BIT (BGRX) or unspecified
+        6 => 4,     // SPICE_BITMAP_FMT_RGBA (BGRA)
+        3 => 3,     // SPICE_BITMAP_FMT_24BIT (BGR)
+        2 => 2,     // SPICE_BITMAP_FMT_16BIT
         other => {
             warn!("display: LZ4 unsupported spice format: {}", other);
             return None;
