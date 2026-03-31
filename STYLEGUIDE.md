@@ -212,14 +212,27 @@ impl FooMessage {
 
 ### Wire format
 
-After the `ImageDescriptor` (18 bytes), compressed image types (LzRgb,
-GlzRgb) have a 4-byte `data_size: u32` prefix before the actual
-compressed data. Skip it before passing to the decompressor.
+After the `ImageDescriptor` (18 bytes), the image data format
+depends on the image type:
+
+- **LZ_RGB (101) and GLZ_RGB (102)**: 4-byte `data_size` (u32 LE)
+  prefix, then the LZ/GLZ stream. Skip the 4 bytes before passing
+  to the decompressor.
+- **ZLIB_GLZ_RGB (107)**: 8-byte header — `glz_data_size` (u32 LE)
+  + `compressed_size` (u32 LE) — then zlib-compressed GLZ data.
+  Decompress with zlib first, then pass to the GLZ decompressor.
+- **LZ4 (109)**: NO `data_size` prefix. Data starts with 1-byte
+  `top_down`, 1-byte `spice_format`, then per-row LZ4 blocks each
+  with a 4-byte big-endian size prefix.
+- **Pixmap (0)**: raw BGRX pixels, no header.
+- **FromCache (103)**: no pixel data, look up by `image_id`.
 
 ### Decompressor headers
 
 LZ and GLZ headers are **big-endian** (unlike the rest of SPICE). LZ
-magic is `b"  ZL"` (two spaces + ZL). GLZ magic is `b"ZL.G"`.
+magic is `b"  ZL"` (two spaces + ZL). GLZ magic is also `b"  ZL"`
+(the image type in the ImageDescriptor distinguishes them, not the
+magic).
 
 ### Pixel format
 

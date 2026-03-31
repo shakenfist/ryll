@@ -113,62 +113,60 @@ All SPICE messages use a 6-byte mini-header:
 | Inputs (3) | User input | key_down, key_up, mouse_position |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
 
-## Image Compression
+## Image Types and Compression
 
-SPICE uses two compression algorithms for display updates:
+SPICE uses several image types for display updates. The type is
+specified in the `ImageDescriptor` that precedes each image's data.
+Values from `spice-protocol/spice/enums.h`:
 
-### GLZ (Glyph LZ)
+| Type | Name             | Status in ryll |
+|-----:|------------------|----------------|
+|    0 | Pixmap           | Supported (raw BGRX) |
+|    1 | Quic             | Not implemented |
+|  100 | LZ_PLT           | Not implemented |
+|  101 | LZ_RGB           | Supported |
+|  102 | GLZ_RGB          | Supported (with cross-frame dictionary) |
+|  103 | FromCache        | Supported (image cache lookup) |
+|  104 | Surface          | Not implemented |
+|  105 | Jpeg             | Not implemented |
+|  106 | FromCacheLossless| Not implemented |
+|  107 | ZlibGlzRgb      | Supported (zlib-wrapped GLZ) |
+|  108 | JpegAlpha        | Not implemented |
+|  109 | LZ4              | Supported (per-row compressed) |
 
-- Dictionary-based compression
-- Can reference pixels from **previous images** (cross-frame)
-- Requires maintaining a cache of decompressed images
-- More efficient for typical desktop content
+### Wire format differences
 
-### LZ
+- **LZ_RGB and GLZ_RGB**: preceded by a 4-byte `data_size` (u32 LE),
+  then the LZ/GLZ stream with its own big-endian header.
+- **ZLIB_GLZ_RGB**: preceded by `glz_data_size` (u32 LE) +
+  `compressed_size` (u32 LE), then zlib-compressed GLZ data.
+- **LZ4**: NO `data_size` prefix. Data starts immediately with a
+  1-byte `top_down` flag, 1-byte `spice_format`, then per-row
+  LZ4 blocks each with a 4-byte big-endian size prefix.
+- **Pixmap**: raw BGRX pixel data, no header.
+- **FromCache**: no pixel data, uses `image_id` from the descriptor
+  to look up a previously cached decompressed image.
 
-- Simpler LZ variant
-- Only references pixels within the **current image**
-- No cross-frame dependencies
-- Used when GLZ dictionary isn't available
+### Compression algorithms
 
-### Decompression Pipeline
+**GLZ** — Dictionary-based compression that can reference pixels from
+previous images (cross-frame). The GLZ decompressor maintains a cache
+of decompressed images keyed by `image_id`. Cross-frame references
+use `image_dist` to compute the source image ID.
 
-```
-SPICE draw_copy message
-         │
-         ▼
-┌─────────────────┐
-│ Parse header    │
-│ (image type,    │
-│  dimensions)    │
-└────────┬────────┘
-         │
-         ▼
-    ┌────┴────┐
-    │  GLZ?   │
-    └────┬────┘
-    yes/ \no
-       /   \
-      ▼     ▼
-┌─────────┐ ┌─────────┐
-│   GLZ   │ │   LZ    │
-│ decomp  │ │ decomp  │
-└────┬────┘ └────┬────┘
-     │           │
-     └─────┬─────┘
-           │
-           ▼
-    ┌─────────────┐
-    │ RGBA pixels │
-    │  (Vec<u8>)  │
-    └──────┬──────┘
-           │
-           ▼
-    ┌─────────────┐
-    │ Blit to     │
-    │ surface     │
-    └─────────────┘
-```
+**LZ** — Simpler variant that only references pixels within the
+current image. No cross-frame dependencies.
+
+**ZLIB_GLZ_RGB** — GLZ data compressed with zlib for additional
+bandwidth savings. Common for incremental updates from QEMU/KVM
+through kerbside.
+
+**LZ4** — Fast per-row compression. Each row is individually
+LZ4-compressed with a big-endian size prefix. The `spice_format`
+byte indicates the pixel format (4=BGRX, 6=BGRA, 3=BGR).
+
+All decompressors output RGBA pixels (BGRX/BGRA/BGR on the wire
+is converted to RGBA with alpha=255 for opaque formats).
 
 ## Display Rendering
 

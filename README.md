@@ -5,12 +5,14 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 ## Features
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
-- **GLZ and LZ decompression** - Full support for SPICE image compression formats
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, and Pixmap image types
 - **Multi-channel support** - Handles main, display, cursor, and inputs channels
-- **TLS support** - Secure connections with certificate validation
+- **TLS support** - Secure connections with inline CA certificates from .vv files
+- **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
 - **Statistics tracking** - Frame counts, throughput, and latency measurements
+- **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 
 ## Building
 

@@ -141,3 +141,6 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | clap | CLI argument parsing |
 | rsa | RSA-OAEP for SPICE auth |
 | byteorder | Binary protocol parsing |
+| lz4_flex | LZ4 decompression (image type 109) |
+| flate2 | Zlib decompression (ZLIB_GLZ_RGB, type 107) |
+| tracing-appender | File logging to /tmp/ryll.log |
