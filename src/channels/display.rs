@@ -1,6 +1,8 @@
 /// Display channel handler - surfaces, image rendering
 use anyhow::Result;
+use flate2::read::ZlibDecoder;
 use std::collections::HashMap;
+use std::io::Read;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -529,6 +531,44 @@ impl DisplayChannel {
                         Ok(img) => Some(img),
                         Err(e) => {
                             warn!("display: LZ decompression failed: {}", e);
+                            None
+                        }
+                    }
+                }
+            }
+            Some(ImageType::ZlibGlzRgb) => {
+                // Zlib-compressed GLZ data: glz_data_size (u32 LE) +
+                // compressed_size (u32 LE) + zlib-compressed GLZ stream
+                if image_data.len() < 8 {
+                    warn!("display: ZLIB_GLZ_RGB data too short");
+                    None
+                } else {
+                    let _glz_size = u32::from_le_bytes([
+                        image_data[0],
+                        image_data[1],
+                        image_data[2],
+                        image_data[3],
+                    ]) as usize;
+                    let zlib_size = u32::from_le_bytes([
+                        image_data[4],
+                        image_data[5],
+                        image_data[6],
+                        image_data[7],
+                    ]) as usize;
+
+                    let zlib_data = &image_data[8..8 + zlib_size.min(image_data.len() - 8)];
+                    let mut decoder = ZlibDecoder::new(zlib_data);
+                    let mut glz_data = Vec::new();
+                    match decoder.read_to_end(&mut glz_data) {
+                        Ok(_) => match decompress_glz(&glz_data, &self.previous_images) {
+                            Ok(img) => Some(img),
+                            Err(e) => {
+                                warn!("display: ZLIB_GLZ_RGB GLZ decompression failed: {}", e);
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            warn!("display: ZLIB_GLZ_RGB zlib decompression failed: {}", e);
                             None
                         }
                     }

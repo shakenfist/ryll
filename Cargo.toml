@@ -39,8 +39,11 @@ configparser = "3"
 # HTTP for URL config fetching
 reqwest = { version = "0.12", features = ["blocking"] }
 
-# LZ4 decompression for SPICE image type 107
+# LZ4 decompression for SPICE image type 109
 lz4_flex = "0.11"
+
+# Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
+flate2 = "1"
 
 # Error handling
 thiserror = "1"
