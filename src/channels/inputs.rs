@@ -17,6 +17,9 @@ use crate::settings;
 
 use super::{ChannelEvent, InputEvent};
 
+/// spice-gtk throttles motion messages to this many pending before an ACK
+const MOTION_ACK_BUNCH: u32 = 4;
+
 pub struct InputsChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -24,6 +27,7 @@ pub struct InputsChannel {
     buffer: Vec<u8>,
     last_key_time: Option<Instant>,
     button_state: u32,
+    motion_count: u32,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -41,6 +45,7 @@ impl InputsChannel {
             buffer: Vec::with_capacity(4096),
             last_key_time: None,
             button_state: 0,
+            motion_count: 0,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -189,7 +194,8 @@ impl InputsChannel {
             }
 
             inputs_server::MOUSE_MOTION_ACK => {
-                debug!("inputs: mouse motion ack");
+                self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
+                debug!("inputs: mouse motion ack (pending={})", self.motion_count);
             }
 
             inputs_server::SET_ACK => {
@@ -273,23 +279,23 @@ impl InputsChannel {
             }
 
             InputEvent::MouseMove { x, y } => {
-                let mut payload = Vec::new();
-                MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
-                let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
-
-                if settings::is_intimate() {
-                    self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
-                        .await?;
-                    logging::log_detail(&format!(
-                        "x={}, y={}, buttons={:#x}",
-                        x, y, self.button_state
-                    ));
-                } else {
+                // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
+                if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                    let mut payload = Vec::new();
+                    MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
+                    let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send(&msg).await?;
+                    self.motion_count += 1;
                 }
             }
 
             InputEvent::MouseDown { button, x, y } => {
+                // Send position before button press (as spice-gtk does)
+                let mut pos_payload = Vec::new();
+                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
+                self.send(&pos_msg).await?;
+
                 self.button_state |= button;
 
                 let mut payload = Vec::new();
@@ -308,18 +314,8 @@ impl InputsChannel {
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
-
-                if settings::is_intimate() {
-                    self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
-                        .await?;
-                    logging::log_detail(&format!(
-                        "button={}, pos=({},{}), state={:#x}",
-                        button, x, y, self.button_state
-                    ));
-                } else {
-                    debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
-                    self.send(&msg).await?;
-                }
+                debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
+                self.send(&msg).await?;
             }
         }
 
