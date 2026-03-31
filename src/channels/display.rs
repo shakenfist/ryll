@@ -526,13 +526,35 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Lz4) => {
-                // SPICE LZ4 format (after 4-byte data_size prefix):
+                // SPICE LZ4 format: data_size (u32 LE) then:
                 //   1 byte: top_down flag
                 //   1 byte: spice bitmap format
                 //   then per-row blocks: 4-byte BE size + LZ4 compressed row
                 let width = img_desc.width as usize;
                 let height = img_desc.height as usize;
-                decompress_spice_lz4(&image_data[4..], width, height)
+                if image_data.len() < 4 {
+                    warn!("display: LZ4 image data too short");
+                    None
+                } else {
+                    let data_size = u32::from_le_bytes([
+                        image_data[0],
+                        image_data[1],
+                        image_data[2],
+                        image_data[3],
+                    ]) as usize;
+                    // Use data_size to determine the actual LZ4 payload bounds
+                    let lz4_data = if data_size > 0 && 4 + data_size <= image_data.len() {
+                        &image_data[4..4 + data_size]
+                    } else {
+                        &image_data[4..]
+                    };
+                    debug!(
+                        "display: LZ4: data_size={}, first_bytes={:02x?}",
+                        data_size,
+                        &lz4_data[..lz4_data.len().min(8)]
+                    );
+                    decompress_spice_lz4(lz4_data, width, height)
+                }
             }
             Some(ImageType::FromCache) => {
                 // Look up in cache
