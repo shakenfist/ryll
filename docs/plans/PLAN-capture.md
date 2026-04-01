@@ -131,11 +131,11 @@ because encoding is too slow for real-time-ish use.
   payloads only. TLS-level traffic is not useful for
   protocol debugging and we only have access to decrypted
   data in the channel handlers anyway.
-- Should we emit a video frame for every draw_copy or
-  only on MARK boundaries? MARK-only reduces file size
-  significantly but loses intermediate tile states. We
-  should start with MARK-only and add a `--capture-all-
-  draws` flag later if needed.
+- ~~Should we emit a video frame for every draw_copy or
+  only on MARK boundaries?~~ **Resolved**: MARK-only.
+  MARKs are confirmed to arrive from both local QEMU and
+  real servers via kerbside. Add `--capture-all-draws`
+  later if intermediate tile states are needed.
 - Do the `openh264` and `minimp4` crates build inside our
   Docker devcontainer? We need to verify this early since
   they bundle C code.
