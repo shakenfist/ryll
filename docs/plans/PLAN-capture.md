@@ -149,7 +149,7 @@ for bindgen, which isn't available in the devcontainer.
 |-------|------|--------|
 | 1. Capture infrastructure | [PLAN-capture-phase-01-infra.md](PLAN-capture-phase-01-infra.md) | Complete |
 | 2. Pcap packet capture | [PLAN-capture-phase-02-pcap.md](PLAN-capture-phase-02-pcap.md) | Complete |
-| 3. Video frame capture | [PLAN-capture-phase-03-video.md](PLAN-capture-phase-03-video.md) | Not started |
+| 3. Video frame capture | [PLAN-capture-phase-03-video.md](PLAN-capture-phase-03-video.md) | Complete |
 | 4. STYLEGUIDE update | (inline) | Not started |
 
 ### Phase 1: Capture infrastructure

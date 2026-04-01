@@ -71,7 +71,6 @@ pub struct RyllApp {
     pending_resize: Option<(f32, f32)>,
 
     // Capture session (None when --capture is not specified)
-    #[allow(dead_code)] // used in phase 3 for video frame capture
     capture: Option<Arc<CaptureSession>>,
 }
 
@@ -187,7 +186,12 @@ impl RyllApp {
                 }
 
                 ChannelEvent::DisplayMark => {
-                    // Frame boundary - could trigger repaint
+                    // Frame boundary — capture a video frame if enabled
+                    if let Some(ref capture) = self.capture {
+                        if let Some(surface) = self.surfaces.get(&0) {
+                            capture.frame(0, surface.pixels(), surface.width, surface.height);
+                        }
+                    }
                 }
 
                 ChannelEvent::CursorPosition { x, y, visible } => {
