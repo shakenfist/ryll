@@ -45,6 +45,10 @@ lz4_flex = "0.11"
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
 
+# Pcap capture for --capture mode
+pcap-file = "2"
+etherparse = "0.16"
+
 # Error handling
 thiserror = "1"
 anyhow = "1"
