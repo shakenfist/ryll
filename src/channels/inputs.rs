@@ -7,6 +7,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -31,6 +32,7 @@ pub struct InputsChannel {
     button_state: u32,
     motion_count: u32,
     capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -41,6 +43,7 @@ impl InputsChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         input_rx: mpsc::Receiver<InputEvent>,
         capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -51,6 +54,7 @@ impl InputsChannel {
             button_state: 0,
             motion_count: 0,
             capture,
+            byte_counter,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -71,6 +75,7 @@ impl InputsChannel {
             let bytes_in = &mut self.bytes_in;
             let input_rx = &mut self.input_rx;
             let capture = &self.capture;
+            let byte_counter = &self.byte_counter;
 
             // Create read future inline
             let read_fut = async {
@@ -86,6 +91,7 @@ impl InputsChannel {
                     }
                 };
                 if n > 0 {
+                    byte_counter.add(n as u64);
                     if let Some(ref c) = capture {
                         c.packet_received("inputs", &chunk[..n]);
                     }

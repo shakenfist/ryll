@@ -8,6 +8,7 @@ use tracing::{debug, info, warn};
 
 use std::sync::Arc;
 
+use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::decompression::{decompress_glz, decompress_lz, DecompressedImage};
 use crate::protocol::link::SpiceStream;
@@ -149,6 +150,7 @@ pub struct DisplayChannel {
     previous_images_order: Vec<u64>,
     max_cached_images: usize,
     capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -162,6 +164,7 @@ impl DisplayChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
     ) -> Self {
         DisplayChannel {
             stream,
@@ -171,6 +174,7 @@ impl DisplayChannel {
             previous_images_order: Vec::new(),
             max_cached_images: 100,
             capture,
+            byte_counter,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -210,6 +214,7 @@ impl DisplayChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
             if let Some(ref c) = self.capture {
                 c.packet_received("display", &chunk[..n]);
             }

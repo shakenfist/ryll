@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -22,6 +23,7 @@ pub struct CursorChannel {
     buffer: Vec<u8>,
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -35,6 +37,7 @@ impl CursorChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
     ) -> Self {
         CursorChannel {
             stream,
@@ -42,6 +45,7 @@ impl CursorChannel {
             buffer: Vec::with_capacity(65536),
             cursor_cache: HashMap::new(),
             capture,
+            byte_counter,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -78,6 +82,7 @@ impl CursorChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
             if let Some(ref c) = self.capture {
                 c.packet_received("cursor", &chunk[..n]);
             }

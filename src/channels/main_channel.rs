@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -21,6 +22,7 @@ pub struct MainChannel {
     buffer: Vec<u8>,
     session_id: Option<u32>,
     capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -30,6 +32,7 @@ impl MainChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
     ) -> Self {
         MainChannel {
             stream,
@@ -37,6 +40,7 @@ impl MainChannel {
             buffer: Vec::with_capacity(65536),
             session_id: None,
             capture,
+            byte_counter,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -74,6 +78,7 @@ impl MainChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
             if let Some(ref c) = self.capture {
                 c.packet_received("main", &chunk[..n]);
             }
