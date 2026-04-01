@@ -98,26 +98,25 @@ direction, received packets the other.
 headers. Rejected because Wireshark's SPICE dissector
 expects TCP and the fake headers are cheap to construct.
 
-### Video: `openh264` + `minimp4`
+### Video: `openh264` + `mp4`
 
 - `openh264` bundles Cisco's OpenH264 library (BSD
   licensed, auto-built). No system dependency to install.
   Encodes RGBA frames (after conversion to YUV420) to
   H.264 NAL units.
-- `minimp4` (via `minimp4-rs`) bundles a small C library
-  for writing H.264 streams into MP4 containers with
-  per-frame timestamps.
+- `mp4` (v0.14, pure Rust) writes H.264 streams into MP4
+  containers with per-frame timestamps via `Mp4Writer`.
 
 Variable-rate timestamps are supported — a frame is only
 emitted when the display actually changes (after MARK),
 not at a fixed FPS.
 
-**Alternative considered**: `y4m` for raw YUV with
-post-processing via ffmpeg. Rejected because it produces
-huge files and loses variable timing.
+**Alternative rejected**: `minimp4` — requires `libclang`
+for bindgen, which isn't available in the devcontainer.
 
-**Alternative considered**: `rav1e` for AV1. Rejected
-because encoding is too slow for real-time-ish use.
+**Alternative rejected**: `y4m` — huge files and fixed FPS.
+
+**Alternative rejected**: `rav1e` — AV1 encoding too slow.
 
 ## Open questions
 
@@ -136,9 +135,13 @@ because encoding is too slow for real-time-ish use.
   MARKs are confirmed to arrive from both local QEMU and
   real servers via kerbside. Add `--capture-all-draws`
   later if intermediate tile states are needed.
-- Do the `openh264` and `minimp4` crates build inside our
-  Docker devcontainer? We need to verify this early since
-  they bundle C code.
+- ~~Do the video crates build inside our Docker
+  devcontainer?~~ **Resolved**: `openh264` (bundled C,
+  auto-builds) and `mp4` (pure Rust) both build
+  successfully. `minimp4` was rejected because it needs
+  `libclang` for bindgen. Using `mp4` crate (v0.14) for
+  MP4 muxing instead. `pcap-file` and `etherparse` also
+  build fine (both pure Rust).
 
 ## Execution
 
@@ -183,23 +186,18 @@ because encoding is too slow for real-time-ish use.
 
 ### Phase 3: Video frame capture
 
-- Add `openh264` and `minimp4` dependencies (verify they
-  build in the devcontainer first).
+- Add `openh264` and `mp4` dependencies (both verified to
+  build in the devcontainer).
 - Create `capture::VideoWriter` that:
   - Holds the surface pixel buffer reference.
   - On each MARK message, converts the current surface
     RGBA to YUV420, encodes with openh264, muxes into
-    MP4 via minimp4.
+    MP4 via the `mp4` crate's `Mp4Writer`.
   - Uses real timestamps so the video plays back at the
     actual speed of the session.
 - Output file: `display.mp4` in the capture directory.
 - The display channel calls `capture.frame(surface_id,
   &pixels, width, height)` after processing a MARK.
-- If openh264/minimp4 prove difficult to build, fall back
-  to writing PNG frames (one per MARK) using the `png`
-  crate (pure Rust, no deps). PNGs can be assembled into
-  video with `ffmpeg -framerate 10 -i frame-%06d.png
-  output.mp4` post-hoc.
 
 ### Phase 4: STYLEGUIDE update
 
