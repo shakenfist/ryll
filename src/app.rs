@@ -2,10 +2,12 @@
 use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
@@ -67,10 +69,19 @@ pub struct RyllApp {
 
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
+
+    // Capture session (None when --capture is not specified)
+    #[allow(dead_code)] // used in phase 3 for video frame capture
+    capture: Option<Arc<CaptureSession>>,
 }
 
 impl RyllApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: Config, cadence: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: Config,
+        cadence: bool,
+        capture: Option<Arc<CaptureSession>>,
+    ) -> Self {
         // Create event channel
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -79,11 +90,14 @@ impl RyllApp {
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let ctx = cc.egui_ctx.clone();
+        let capture_clone = capture.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                if let Err(e) = run_connection(config_clone, event_tx_clone, input_rx).await {
+                if let Err(e) =
+                    run_connection(config_clone, event_tx_clone, input_rx, capture_clone).await
+                {
                     error!("app: connection error: {}", e);
                 }
             });
@@ -111,6 +125,7 @@ impl RyllApp {
             mouse_mode: 0,
             last_mouse_pos: None,
             pending_resize: None,
+            capture,
         }
     }
 
@@ -554,6 +569,7 @@ async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
+    capture: Option<Arc<CaptureSession>>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -564,7 +580,7 @@ async fn run_connection(
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
-    let mut main_channel = MainChannel::new(main_stream, event_tx_clone);
+    let mut main_channel = MainChannel::new(main_stream, event_tx_clone, capture.clone());
 
     // Spawn main channel task
     let main_handle = tokio::spawn(async move { main_channel.run().await });
@@ -622,7 +638,7 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = DisplayChannel::new(stream, event_tx.clone());
+                let mut channel = DisplayChannel::new(stream, event_tx.clone(), capture.clone());
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
 
@@ -630,7 +646,7 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = CursorChannel::new(stream, event_tx.clone());
+                let mut channel = CursorChannel::new(stream, event_tx.clone(), capture.clone());
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
 
@@ -638,7 +654,8 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = InputsChannel::new(stream, event_tx.clone(), input_rx);
+                let mut channel =
+                    InputsChannel::new(stream, event_tx.clone(), input_rx, capture.clone());
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
                 break;
@@ -665,7 +682,11 @@ async fn run_connection(
 }
 
 /// Run in headless mode (no GUI)
-pub async fn run_headless(config: Config, cadence: bool) -> Result<()> {
+pub async fn run_headless(
+    config: Config,
+    cadence: bool,
+    capture: Option<Arc<CaptureSession>>,
+) -> Result<()> {
     info!("Running in headless mode");
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
@@ -673,7 +694,7 @@ pub async fn run_headless(config: Config, cadence: bool) -> Result<()> {
 
     // Spawn connection task
     let connection_handle =
-        tokio::spawn(async move { run_connection(config, event_tx, input_rx).await });
+        tokio::spawn(async move { run_connection(config, event_tx, input_rx, capture).await });
     // Pin the handle so it can be polled multiple times in the select loop
     tokio::pin!(connection_handle);
 

@@ -2,10 +2,12 @@
 use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{
@@ -28,6 +30,7 @@ pub struct InputsChannel {
     last_key_time: Option<Instant>,
     button_state: u32,
     motion_count: u32,
+    capture: Option<Arc<CaptureSession>>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -37,6 +40,7 @@ impl InputsChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         input_rx: mpsc::Receiver<InputEvent>,
+        capture: Option<Arc<CaptureSession>>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -46,6 +50,7 @@ impl InputsChannel {
             last_key_time: None,
             button_state: 0,
             motion_count: 0,
+            capture,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -65,6 +70,7 @@ impl InputsChannel {
             let buffer = &mut self.buffer;
             let bytes_in = &mut self.bytes_in;
             let input_rx = &mut self.input_rx;
+            let capture = &self.capture;
 
             // Create read future inline
             let read_fut = async {
@@ -80,6 +86,9 @@ impl InputsChannel {
                     }
                 };
                 if n > 0 {
+                    if let Some(ref c) = capture {
+                        c.packet_received("inputs", &chunk[..n]);
+                    }
                     buffer.extend_from_slice(&chunk[..n]);
                     *bytes_in += n as u64;
                 }
@@ -339,6 +348,9 @@ impl InputsChannel {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref c) = self.capture {
+            c.packet_sent("inputs", data);
+        }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;

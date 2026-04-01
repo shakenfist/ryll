@@ -6,6 +6,9 @@ use std::io::Read;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use std::sync::Arc;
+
+use crate::capture::CaptureSession;
 use crate::decompression::{decompress_glz, decompress_lz, DecompressedImage};
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -145,6 +148,7 @@ pub struct DisplayChannel {
     previous_images: HashMap<u64, Vec<u8>>,
     previous_images_order: Vec<u64>,
     max_cached_images: usize,
+    capture: Option<Arc<CaptureSession>>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -154,7 +158,11 @@ pub struct DisplayChannel {
 }
 
 impl DisplayChannel {
-    pub fn new(stream: SpiceStream, event_tx: mpsc::Sender<ChannelEvent>) -> Self {
+    pub fn new(
+        stream: SpiceStream,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        capture: Option<Arc<CaptureSession>>,
+    ) -> Self {
         DisplayChannel {
             stream,
             event_tx,
@@ -162,6 +170,7 @@ impl DisplayChannel {
             previous_images: HashMap::new(),
             previous_images_order: Vec::new(),
             max_cached_images: 100,
+            capture,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -201,6 +210,9 @@ impl DisplayChannel {
                 break;
             }
 
+            if let Some(ref c) = self.capture {
+                c.packet_received("display", &chunk[..n]);
+            }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
 
@@ -672,6 +684,9 @@ impl DisplayChannel {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref c) = self.capture {
+            c.packet_sent("display", data);
+        }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;

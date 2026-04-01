@@ -1,10 +1,14 @@
 mod app;
+mod capture;
 mod channels;
 mod config;
 mod decompression;
 mod display;
 mod protocol;
 mod settings;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
@@ -13,6 +17,7 @@ use tracing::{info, Level};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
+use crate::capture::CaptureSession;
 use crate::config::{Args, Config};
 
 fn main() -> Result<()> {
@@ -65,21 +70,27 @@ fn main() -> Result<()> {
         config.tls_port.is_some()
     );
 
+    // Create capture session if requested
+    let capture = match &args.capture {
+        Some(dir) => Some(Arc::new(CaptureSession::new(PathBuf::from(dir))?)),
+        None => None,
+    };
+
     if args.headless {
-        run_headless(config, &args)
+        run_headless(config, &args, capture)
     } else {
-        run_gui(config, &args)
+        run_gui(config, &args, capture)
     }
 }
 
-fn run_headless(config: Config, args: &Args) -> Result<()> {
+fn run_headless(config: Config, args: &Args, capture: Option<Arc<CaptureSession>>) -> Result<()> {
     info!("Running in headless mode");
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async { app::run_headless(config, args.cadence).await })
+    runtime.block_on(async { app::run_headless(config, args.cadence, capture).await })
 }
 
-fn run_gui(config: Config, args: &Args) -> Result<()> {
+fn run_gui(config: Config, args: &Args, capture: Option<Arc<CaptureSession>>) -> Result<()> {
     info!("Starting GUI");
 
     let native_options = eframe::NativeOptions {
@@ -93,7 +104,7 @@ fn run_gui(config: Config, args: &Args) -> Result<()> {
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::RyllApp::new(cc, config, cadence)))),
+        Box::new(move |cc| Ok(Box::new(app::RyllApp::new(cc, config, cadence, capture)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }
