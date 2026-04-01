@@ -239,6 +239,36 @@ the UEFI latency guest image, which changes screen colour on each keystroke -
 ideal for input-to-display latency testing. The image is downloaded on first
 run to `testdata/`. `make test-qemu-stop` shuts it down via PID file.
 
+## Capture Mode
+
+When `--capture <DIR>` is specified, ryll records:
+
+### Protocol capture (pcap)
+
+Each SPICE channel writes a separate pcap file (`main.pcap`,
+`display.pcap`, `cursor.pcap`, `inputs.pcap`) containing
+decrypted SPICE mini-header messages wrapped in fake TCP/IP
+headers. Wireshark can open these directly.
+
+Implementation: `capture::PcapChannelWriter` per channel, using
+`pcap-file` for pcap output and `etherparse` for header
+construction. Packets are recorded in `send()` and the read
+loop of each channel handler.
+
+### Display capture (video)
+
+`display.mp4` contains an H.264 encoded video of the primary
+surface (surface 0). Frames are emitted on MARK boundaries
+with real timestamps for variable-rate playback.
+
+Implementation: `capture::VideoWriter` lazily initialised on
+the first `DisplayMark` event. Uses `openh264` for RGBA →
+YUV420 → H.264 encoding, and the `mp4` crate for MP4 muxing.
+
+The capture session is `Arc<CaptureSession>` shared across all
+channels and the app. When `--capture` is not specified, the
+field is `None` and all capture code paths are skipped.
+
 ## Statistics and Instrumentation
 
 Ryll tracks:

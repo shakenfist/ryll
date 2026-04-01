@@ -144,3 +144,7 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | lz4_flex | LZ4 decompression (image type 109) |
 | flate2 | Zlib decompression (ZLIB_GLZ_RGB, type 107) |
 | tracing-appender | File logging to /tmp/ryll.log |
+| pcap-file | Pcap file writing for --capture mode |
+| etherparse | Fake TCP/IP header construction for pcap |
+| openh264 | H.264 video encoding for --capture mode |
+| mp4 | MP4 container writing for --capture mode |

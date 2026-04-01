@@ -112,10 +112,26 @@ Options:
   --headless             Run in headless mode (no GUI)
   --cadence              Enable cadence mode (automatic keystroke every 2 seconds)
   -v, --verbose          Enable verbose logging
+  --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
   -h, --help             Print help
   -V, --version          Print version
 ```
+
+### Capture mode
+
+Record protocol traffic and display frames for debugging:
+
+```bash
+ryll --file connection.vv --capture /tmp/capture
+```
+
+This writes:
+- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap` — per-channel
+  pcap files with fake TCP/IP headers, openable in Wireshark
+- `display.mp4` — H.264 video of the display surface at real timing
+
+See [STYLEGUIDE.md](STYLEGUIDE.md) for capture conventions.
 
 ### Headless mode
 

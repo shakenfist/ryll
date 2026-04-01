@@ -278,33 +278,56 @@ Ryll has an opt-in capture mode activated by `--capture <DIR>`.
 When enabled, it writes:
 
 - **Pcap files** (one per channel) with fake TCP/IP headers
-  for Wireshark analysis.
-- **MP4 video** of the display surface, with variable-rate
-  timestamps matching the real session timing.
+  for Wireshark analysis. Decrypted SPICE payloads only
+  (post-TLS).
+- **MP4 video** of the primary display surface (surface 0),
+  with H.264 encoding and variable-rate timestamps matching
+  the real session timing. Frames are emitted on MARK
+  boundaries, not on every draw_copy.
 
 ### Adding capture points
 
 When adding a new channel or modifying message handling:
 
-- Call `capture.sent(channel, &bytes)` in every `send()`
-  method.
-- Call `capture.received(channel, &bytes)` at the top of
-  every message read loop iteration.
-- Call `capture.frame(surface, &pixels, w, h)` after each
-  MARK message in the display channel.
+- Call `capture.packet_sent(channel, &bytes)` in every
+  `send()` method.
+- Call `capture.packet_received(channel, &bytes)` at the
+  top of every message read loop iteration.
+- Video frames are captured in `app.rs` on `DisplayMark`
+  events via `capture.frame(0, pixels, w, h)`.
 
 ### Zero overhead when disabled
 
-All capture methods must be no-ops when `--capture` is not
-specified. The `CaptureSession` is wrapped in
-`Arc<Option<CaptureSession>>` — check with `if let Some(c)
-= capture.as_ref()` before doing any work. Do not
-allocate buffers, format strings, or do I/O when capture
-is disabled.
+All capture is gated behind `Option<Arc<CaptureSession>>`.
+Check with `if let Some(ref c) = self.capture` before
+doing any work. Do not allocate buffers, format strings,
+or do I/O when capture is disabled.
+
+### Pcap details
+
+- One pcap per channel: `main.pcap`, `display.pcap`,
+  `cursor.pcap`, `inputs.pcap`.
+- Fake TCP/IP headers via `etherparse` (client
+  `10.0.0.1`, server `10.0.0.2:5900`).
+- Unique source port per channel (10001-10004).
+- TCP sequence numbers tracked per direction.
+- Timestamps relative to session start.
+
+### Video details
+
+- `display.mp4` — H.264 Baseline profile via `openh264`.
+- Lazy initialisation: encoder created on first frame
+  once surface dimensions are known.
+- SPS/PPS extracted from first encoded bitstream by
+  scanning for Annex B start codes.
+- `force_intra_frame()` before first encode to ensure
+  IDR keyframe.
+- RGBA → YUV420 via `openh264::formats::RgbaSliceU8`.
+- MP4 requires `write_end()` on clean shutdown to write
+  the moov atom. A SIGTERM-killed process will produce
+  an incomplete file.
 
 ### File naming
-
-Files in the capture directory follow this convention:
 
 ```
 <DIR>/
