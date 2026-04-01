@@ -126,10 +126,11 @@ because encoding is too slow for real-time-ish use.
   a single video from the primary surface (surface 0). If
   multiple surfaces are created, log a warning and skip
   video capture for the additional surfaces.
-- Should the pcap include the TLS-encrypted bytes or the
-  decrypted SPICE payloads? Decrypted payloads are far
-  more useful for debugging and are what we have access to
-  in the channel handlers.
+- ~~Should the pcap include the TLS-encrypted bytes or the
+  decrypted SPICE payloads?~~ **Resolved**: decrypted
+  payloads only. TLS-level traffic is not useful for
+  protocol debugging and we only have access to decrypted
+  data in the channel handlers anyway.
 - Should we emit a video frame for every draw_copy or
   only on MARK boundaries? MARK-only reduces file size
   significantly but loses intermediate tile states. We
