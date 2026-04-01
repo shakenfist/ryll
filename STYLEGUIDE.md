@@ -272,6 +272,49 @@ sent through `event_tx`. Add new variants to `channels/mod.rs`. Use
 `.await.ok()` when sending events -- dropping an event is preferable
 to blocking the channel on a full queue.
 
+## Capture mode (`--capture <DIR>`)
+
+Ryll has an opt-in capture mode activated by `--capture <DIR>`.
+When enabled, it writes:
+
+- **Pcap files** (one per channel) with fake TCP/IP headers
+  for Wireshark analysis.
+- **MP4 video** of the display surface, with variable-rate
+  timestamps matching the real session timing.
+
+### Adding capture points
+
+When adding a new channel or modifying message handling:
+
+- Call `capture.sent(channel, &bytes)` in every `send()`
+  method.
+- Call `capture.received(channel, &bytes)` at the top of
+  every message read loop iteration.
+- Call `capture.frame(surface, &pixels, w, h)` after each
+  MARK message in the display channel.
+
+### Zero overhead when disabled
+
+All capture methods must be no-ops when `--capture` is not
+specified. The `CaptureSession` is wrapped in
+`Arc<Option<CaptureSession>>` — check with `if let Some(c)
+= capture.as_ref()` before doing any work. Do not
+allocate buffers, format strings, or do I/O when capture
+is disabled.
+
+### File naming
+
+Files in the capture directory follow this convention:
+
+```
+<DIR>/
+  main.pcap
+  display.pcap
+  cursor.pcap
+  inputs.pcap
+  display.mp4
+```
+
 ## Testing
 
 - Unit tests go in `#[cfg(test)] mod tests` within the source file.
