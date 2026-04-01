@@ -121,10 +121,11 @@ because encoding is too slow for real-time-ish use.
 
 ## Open questions
 
-- Should we record one video per surface, or composite
-  all surfaces into a single video? The VM typically has
-  one primary surface, so a single video is probably fine
-  initially.
+- ~~Should we record one video per surface, or composite
+  all surfaces into a single video?~~ **Resolved**: record
+  a single video from the primary surface (surface 0). If
+  multiple surfaces are created, log a warning and skip
+  video capture for the additional surfaces.
 - Should the pcap include the TLS-encrypted bytes or the
   decrypted SPICE payloads? Decrypted payloads are far
   more useful for debugging and are what we have access to
