@@ -77,3 +77,8 @@ depends = "$auto"
 assets = [
     ["target/release/ryll", "usr/bin/", "755"],
 ]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/ryll", dest = "/usr/bin/ryll", mode = "0755" },
+]
