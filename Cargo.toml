@@ -6,6 +6,10 @@ description = "A Rust SPICE VDI test client"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
 
+[features]
+default = ["capture"]
+capture = ["dep:pcap-file", "dep:etherparse", "dep:openh264", "dep:mp4"]
+
 [dependencies]
 # GUI framework
 eframe = "0.29"
@@ -48,11 +52,11 @@ flate2 = "1"
 # JPEG decoding for SPICE JPEG image type
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
-# Capture mode (--capture)
-pcap-file = "2"
-etherparse = "0.16"
-openh264 = "0.6"
-mp4 = "0.14"
+# Capture mode (--capture) — optional, disabled on Windows
+pcap-file = { version = "2", optional = true }
+etherparse = { version = "0.16", optional = true }
+openh264 = { version = "0.6", optional = true }
+mp4 = { version = "0.14", optional = true }
 
 # Signal handling (Ctrl+C graceful shutdown, cross-platform)
 ctrlc = "3"

@@ -1,5 +1,19 @@
 mod app;
+#[cfg(feature = "capture")]
 mod capture;
+#[cfg(not(feature = "capture"))]
+mod capture {
+    /// Stub CaptureSession when capture feature is disabled.
+    /// Methods are never called (capture is always None), but
+    /// the compiler needs to see them for type-checking.
+    pub struct CaptureSession;
+    impl CaptureSession {
+        pub fn packet_sent(&self, _channel: &str, _data: &[u8]) {}
+        pub fn packet_received(&self, _channel: &str, _data: &[u8]) {}
+        pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) {}
+        pub fn close(&self) {}
+    }
+}
 mod channels;
 mod config;
 mod decompression;
@@ -7,7 +21,6 @@ mod display;
 mod protocol;
 mod settings;
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -81,10 +94,15 @@ fn main() -> Result<()> {
     );
 
     // Create capture session if requested
+    #[cfg(feature = "capture")]
     let capture = match &args.capture {
-        Some(dir) => Some(Arc::new(CaptureSession::new(PathBuf::from(dir))?)),
+        Some(dir) => Some(Arc::new(CaptureSession::new(std::path::PathBuf::from(
+            dir,
+        ))?)),
         None => None,
     };
+    #[cfg(not(feature = "capture"))]
+    let capture: Option<Arc<CaptureSession>> = None;
 
     if args.headless {
         run_headless(config, &args, capture)
