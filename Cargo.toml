@@ -5,6 +5,7 @@ edition = "2021"
 description = "A Rust SPICE VDI test client"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
+repository = "https://github.com/shakenfist/ryll"
 
 [features]
 default = ["capture"]
@@ -67,3 +68,12 @@ anyhow = "1"
 
 # Async channels
 async-channel = "2"
+
+[package.metadata.deb]
+maintainer = "Michael Still <mikal@stillhq.com>"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/ryll", "usr/bin/", "755"],
+]
