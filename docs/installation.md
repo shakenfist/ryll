@@ -19,7 +19,21 @@ The package installs `ryll` to `/usr/bin/ryll`. Runtime dependencies
 
 ## Red Hat / Fedora (RPM)
 
-*Coming soon.* RPM packages will be built with `cargo-generate-rpm`.
+Download the `.rpm` package for your architecture and install:
+
+```bash
+sudo dnf install ./ryll-0.1.0-1.x86_64.rpm
+```
+
+Or with older `yum`-based systems:
+
+```bash
+sudo yum localinstall ryll-0.1.0-1.x86_64.rpm
+```
+
+The package installs `ryll` to `/usr/bin/ryll`. Runtime shared library
+dependencies are detected automatically and resolved by your package
+manager.
 
 ## macOS (Homebrew)
 
