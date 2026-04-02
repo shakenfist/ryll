@@ -526,6 +526,15 @@ impl DisplayChannel {
                         bmp_fmt, bmp_flags, bmp_width, bmp_height, bmp_stride, top_down
                     );
 
+                    // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
+                    if bmp_fmt != 8 && bmp_fmt != 9 {
+                        warn!(
+                            "display: pixmap format {} not supported (only 32-bit)",
+                            bmp_fmt
+                        );
+                        return Ok(());
+                    }
+
                     let width = bmp_width;
                     let height = bmp_height;
                     let stride = bmp_stride as usize;

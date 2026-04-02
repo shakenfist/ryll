@@ -50,31 +50,55 @@ impl PcapChannelWriter {
     }
 
     fn write_sent(&mut self, data: &[u8], elapsed: std::time::Duration) {
-        let frame = build_tcp_frame(
+        self.write_segmented(
             CLIENT_IP,
             self.client_port,
             SERVER_IP,
             SERVER_PORT,
-            self.client_seq,
-            self.server_seq,
             data,
+            elapsed,
         );
         self.client_seq = self.client_seq.wrapping_add(data.len() as u32);
-        self.write_frame(&frame, elapsed);
     }
 
     fn write_received(&mut self, data: &[u8], elapsed: std::time::Duration) {
-        let frame = build_tcp_frame(
+        self.write_segmented(
             SERVER_IP,
             SERVER_PORT,
             CLIENT_IP,
             self.client_port,
-            self.server_seq,
-            self.client_seq,
             data,
+            elapsed,
         );
         self.server_seq = self.server_seq.wrapping_add(data.len() as u32);
-        self.write_frame(&frame, elapsed);
+    }
+
+    /// Write data as one or more TCP segments, splitting payloads
+    /// that exceed the IPv4 maximum (65535 - headers ≈ 65495).
+    fn write_segmented(
+        &mut self,
+        src_ip: [u8; 4],
+        src_port: u16,
+        dst_ip: [u8; 4],
+        dst_port: u16,
+        data: &[u8],
+        elapsed: std::time::Duration,
+    ) {
+        const MAX_PAYLOAD: usize = 65495; // 65535 - 20 (IP) - 20 (TCP)
+        let is_client = src_ip == CLIENT_IP;
+        let mut offset = 0;
+        while offset < data.len() {
+            let end = (offset + MAX_PAYLOAD).min(data.len());
+            let chunk = &data[offset..end];
+            let (seq, ack) = if is_client {
+                (self.client_seq.wrapping_add(offset as u32), self.server_seq)
+            } else {
+                (self.server_seq.wrapping_add(offset as u32), self.client_seq)
+            };
+            let frame = build_tcp_frame(src_ip, src_port, dst_ip, dst_port, seq, ack, chunk);
+            self.write_frame(&frame, elapsed);
+            offset = end;
+        }
     }
 
     fn write_frame(&mut self, frame: &[u8], elapsed: std::time::Duration) {
@@ -481,6 +505,8 @@ pub struct CaptureSession {
     video_writer: Mutex<Option<VideoWriter>>,
     /// Set to true after video init has been attempted (even if it failed).
     video_init_attempted: Mutex<bool>,
+    /// Guard against duplicate close() calls (explicit + Drop).
+    closed: std::sync::atomic::AtomicBool,
 }
 
 impl CaptureSession {
@@ -503,6 +529,7 @@ impl CaptureSession {
             pcap_writers,
             video_writer: Mutex::new(None),
             video_init_attempted: Mutex::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -558,6 +585,9 @@ impl CaptureSession {
     /// no explicit flush; only the MP4 video writer requires
     /// finalisation to write the moov atom.
     pub fn close(&self) {
+        if self.closed.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            return; // already closed
+        }
         if let Ok(mut writer) = self.video_writer.lock() {
             if let Some(ref mut vw) = *writer {
                 vw.close();
