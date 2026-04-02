@@ -18,6 +18,12 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 
+## Installation
+
+Pre-built `.deb` packages for Debian/Ubuntu are available from
+[GitHub Releases](https://github.com/shakenfist/ryll/releases). See
+[docs/installation.md](docs/installation.md) for all platforms.
+
 ## CI
 
 GitHub Actions CI builds and tests ryll on Linux, macOS (Apple Silicon),
@@ -213,6 +219,7 @@ Additional documentation is available:
 In the `docs/` directory:
 
 - [Documentation Index](docs/index.md) - What ryll is and why it exists
+- [Installation](docs/installation.md) - Pre-built packages and install instructions
 - [Configuration](docs/configuration.md) - CLI options and .vv file format
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
 - [Binary Portability](docs/portability.md) - How to share binaries between machines
