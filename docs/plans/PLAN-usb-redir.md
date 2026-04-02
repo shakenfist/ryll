@@ -329,8 +329,8 @@ protocol handling.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. SpiceVMC channel transport | [PLAN-usb-redir-phase-01-vmc-channel.md](PLAN-usb-redir-phase-01-vmc-channel.md) | Complete |
-| 2. usbredir protocol parser | [PLAN-usb-redir-phase-02-usbredir-parser.md](PLAN-usb-redir-phase-02-usbredir-parser.md) | Not started |
-| 3. Device backend trait | [PLAN-usb-redir-phase-03-device-backend.md](PLAN-usb-redir-phase-03-device-backend.md) | Not started |
+| 2. usbredir protocol parser | [PLAN-usb-redir-phase-02-usbredir-parser.md](PLAN-usb-redir-phase-02-usbredir-parser.md) | Complete |
+| 3. Device backend trait | [PLAN-usb-redir-phase-03-device-backend.md](PLAN-usb-redir-phase-03-device-backend.md) | Complete |
 | 4. Real device enumeration and passthrough | [PLAN-usb-redir-phase-04-real-devices.md](PLAN-usb-redir-phase-04-real-devices.md) | Not started |
 | 5. Device connection lifecycle | [PLAN-usb-redir-phase-05-device-connect.md](PLAN-usb-redir-phase-05-device-connect.md) | Not started |
 | 6. Control and bulk transfers | [PLAN-usb-redir-phase-06-transfers.md](PLAN-usb-redir-phase-06-transfers.md) | Not started |

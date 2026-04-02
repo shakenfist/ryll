@@ -119,6 +119,9 @@ src/
 │   ├── constants.rs     # Message types, capabilities, status codes
 │   ├── messages.rs      # Wire format structs, read/write
 │   └── parser.rs        # Byte-stream parser, unit tests
+├── usb/                 # USB device backend abstraction
+│   └── mod.rs           # UsbDeviceBackend trait, TransferResult,
+│                        #   DeviceSource, UsbDeviceInfo, enumeration
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)

@@ -11,6 +11,7 @@ pub use main_channel::MainChannel;
 pub use usbredir::UsbredirChannel;
 
 use crate::protocol::ChannelType;
+use crate::usb::UsbDeviceInfo;
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
@@ -71,6 +72,10 @@ pub enum ChannelEvent {
 
     /// A USB redirection channel connected successfully
     UsbChannelReady,
+
+    /// Available USB devices changed (enumeration result)
+    #[allow(dead_code)]
+    UsbDevicesChanged(Vec<UsbDeviceInfo>),
 
     /// Channel disconnected
     Disconnected(ChannelType),

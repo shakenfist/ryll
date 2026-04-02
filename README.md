@@ -186,6 +186,8 @@ src/
 │   ├── constants.rs     # usbredir message types, capabilities
 │   ├── messages.rs      # Wire format structs, read/write
 │   └── parser.rs        # Byte-stream parser
+├── usb/
+│   └── mod.rs           # UsbDeviceBackend trait, device enumeration
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression

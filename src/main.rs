@@ -20,6 +20,7 @@ mod decompression;
 mod display;
 mod protocol;
 mod settings;
+mod usb;
 mod usbredir;
 
 use std::sync::atomic::{AtomicBool, Ordering};
