@@ -113,7 +113,8 @@ src/
 │   ├── display.rs       # Surface management, image decoding,
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
-│   └── inputs.rs        # Keyboard scancodes, mouse events
+│   ├── inputs.rs        # Keyboard scancodes, mouse events
+│   └── usbredir.rs      # USB redirection (SpiceVMC transport)
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)

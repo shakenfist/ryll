@@ -2,11 +2,13 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
+pub mod usbredir;
 
 pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
+pub use usbredir::UsbredirChannel;
 
 use crate::protocol::ChannelType;
 
@@ -66,6 +68,9 @@ pub enum ChannelEvent {
 
     /// Connection error
     Error(String),
+
+    /// A USB redirection channel connected successfully
+    UsbChannelReady,
 
     /// Channel disconnected
     Disconnected(ChannelType),

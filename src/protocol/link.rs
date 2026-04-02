@@ -281,6 +281,7 @@ pub async fn perform_link(
     // software fallback that produces far fewer display updates.
     let channel_caps = match channel_type {
         ChannelType::Display => capabilities::DEFAULT_DISPLAY,
+        ChannelType::Usbredir => capabilities::DEFAULT_SPICEVMC,
         _ => capabilities::DEFAULT_MAIN,
     };
 

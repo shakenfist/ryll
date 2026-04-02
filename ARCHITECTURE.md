@@ -44,6 +44,7 @@ communication between tasks.
 | Display channel | Receive images, decompress, queue for rendering |
 | Cursor channel | Track cursor position and visibility |
 | Inputs channel | Send keyboard/mouse events to server |
+| Usbredir channel | USB redirection via SpiceVMC data transport |
 | UI thread | egui rendering, input capture (GUI mode only) |
 
 ### Channel Communication
@@ -112,6 +113,7 @@ All SPICE messages use a 6-byte mini-header:
 | Display (2) | Graphics | surface_create, draw_copy, mark |
 | Inputs (3) | User input | key_down, key_up, mouse_position |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
+| Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 
 ## Image Types and Compression
 
@@ -282,7 +284,7 @@ When `--capture <DIR>` is specified, ryll records:
 ### Protocol capture (pcap)
 
 Each SPICE channel writes a separate pcap file (`main.pcap`,
-`display.pcap`, `cursor.pcap`, `inputs.pcap`) containing
+`display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`) containing
 decrypted SPICE mini-header messages wrapped in fake TCP/IP
 headers. Wireshark can open these directly.
 

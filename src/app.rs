@@ -12,7 +12,7 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel,
+    MainChannel, UsbredirChannel,
 };
 use crate::config::Config;
 use crate::display::DisplaySurface;
@@ -318,6 +318,10 @@ impl RyllApp {
                 ChannelEvent::Error(msg) => {
                     error!("app: channel error: {}", msg);
                     self.error_message = Some(msg);
+                }
+
+                ChannelEvent::UsbChannelReady => {
+                    info!("app: USB redirection channel connected");
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -813,6 +817,19 @@ async fn run_connection(
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
                 break;
+            }
+
+            ChannelType::Usbredir => {
+                let stream = client
+                    .connect_channel(session_id, channel_type, channel_id)
+                    .await?;
+                let mut channel = UsbredirChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    capture.clone(),
+                    byte_counter.clone(),
+                );
+                handles.push(tokio::spawn(async move { channel.run().await }));
             }
 
             _ => {
