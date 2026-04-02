@@ -495,36 +495,84 @@ impl DisplayChannel {
         // Decode/decompress based on type
         let decompressed: Option<DecompressedImage> = match image_type {
             Some(ImageType::Pixmap) => {
-                // Raw 32-bit BGRX pixel data — convert to RGBA
-                let width = img_desc.width;
-                let height = img_desc.height;
-                let expected = (width as usize)
-                    .checked_mul(height as usize)
-                    .and_then(|n| n.checked_mul(4))
-                    .unwrap_or(0);
-                if expected > 0 && image_data.len() >= expected {
-                    let mut rgba = vec![0u8; expected];
-                    for i in 0..(width as usize * height as usize) {
-                        let src = i * 4;
-                        let dst = i * 4;
-                        rgba[dst] = image_data[src + 2]; // R
-                        rgba[dst + 1] = image_data[src + 1]; // G
-                        rgba[dst + 2] = image_data[src]; // B
-                        rgba[dst + 3] = 255; // A
-                    }
-                    Some(DecompressedImage {
-                        width,
-                        height,
-                        pixels: rgba,
-                        image_id: img_desc.image_id,
-                    })
-                } else {
-                    warn!(
-                        "display: pixmap data too short (have {}, need {})",
-                        image_data.len(),
-                        expected
-                    );
+                // BitmapData: format(u8) + flags(u8) + x(u32) +
+                // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
+                // then raw pixel rows.
+                if image_data.len() < 18 {
+                    warn!("display: pixmap BitmapData header too short");
                     None
+                } else {
+                    let bmp_fmt = image_data[0];
+                    let bmp_flags = image_data[1];
+                    let bmp_width = u32::from_le_bytes([
+                        image_data[2],
+                        image_data[3],
+                        image_data[4],
+                        image_data[5],
+                    ]);
+                    let bmp_height = u32::from_le_bytes([
+                        image_data[6],
+                        image_data[7],
+                        image_data[8],
+                        image_data[9],
+                    ]);
+                    let bmp_stride = u32::from_le_bytes([
+                        image_data[10],
+                        image_data[11],
+                        image_data[12],
+                        image_data[13],
+                    ]);
+                    let top_down = (bmp_flags & 0x04) != 0;
+                    // palette_addr at offset 14..18 (ignored for 32-bit)
+                    let pixel_data = &image_data[18..];
+
+                    debug!(
+                        "display: pixmap fmt={}, flags={:#x}, {}x{}, stride={}, top_down={}",
+                        bmp_fmt, bmp_flags, bmp_width, bmp_height, bmp_stride, top_down
+                    );
+
+                    let width = bmp_width;
+                    let height = bmp_height;
+                    let stride = bmp_stride as usize;
+                    let pixel_count = (width as usize) * (height as usize);
+                    let expected_pixels = pixel_count * 4;
+
+                    if stride * (height as usize) > pixel_data.len() {
+                        warn!(
+                            "display: pixmap data too short (have {}, need {})",
+                            pixel_data.len(),
+                            stride * (height as usize)
+                        );
+                        None
+                    } else {
+                        let mut rgba = vec![0u8; expected_pixels];
+                        let row_bytes = (width as usize) * 4;
+                        for y in 0..height as usize {
+                            // Rows may be bottom-up unless TOP_DOWN flag is set
+                            let src_y = if top_down {
+                                y
+                            } else {
+                                (height as usize) - 1 - y
+                            };
+                            let src_row = &pixel_data[src_y * stride..src_y * stride + row_bytes];
+                            let dst_start = y * row_bytes;
+                            for x in 0..width as usize {
+                                let si = x * 4;
+                                let di = dst_start + x * 4;
+                                // BGRX -> RGBA
+                                rgba[di] = src_row[si + 2]; // R
+                                rgba[di + 1] = src_row[si + 1]; // G
+                                rgba[di + 2] = src_row[si]; // B
+                                rgba[di + 3] = 255; // A
+                            }
+                        }
+                        Some(DecompressedImage {
+                            width,
+                            height,
+                            pixels: rgba,
+                            image_id: img_desc.image_id,
+                        })
+                    }
                 }
             }
             Some(ImageType::GlzRgb) => {
@@ -669,10 +717,10 @@ impl DisplayChannel {
         }
 
         if let Some(img) = decompressed {
-            // Cache for GLZ dictionary
-            if img.image_id != 0 {
-                self.cache_image(img.image_id, img.pixels.clone());
-            }
+            // Cache for GLZ dictionary — all images must be cached
+            // since GLZ uses sequential IDs starting from 0 and
+            // later images reference earlier ones via win_head_dist.
+            self.cache_image(img.image_id, img.pixels.clone());
 
             // Send to UI
             self.event_tx

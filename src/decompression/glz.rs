@@ -63,7 +63,16 @@ pub fn decompress_glz(
     let height = cursor.read_u32::<BigEndian>()?;
     let _stride = cursor.read_u32::<BigEndian>()?;
     let image_id = cursor.read_u64::<BigEndian>()?;
-    let _win_head_dist = cursor.read_u32::<BigEndian>()?;
+    let win_head_dist = cursor.read_u32::<BigEndian>()?;
+
+    tracing::debug!(
+        "glz: header id={}, {}x{}, type={}, win_head_dist={}",
+        image_id,
+        width,
+        height,
+        _img_type,
+        win_head_dist
+    );
 
     // Output buffer (RGBA)
     let output_size = (width as usize)
