@@ -109,8 +109,20 @@ pub mod capabilities {
     pub const MAIN_AGENT_CONNECTED_TOKENS: u32 = 1 << 2;
     pub const MAIN_SEAMLESS_MIGRATE: u32 = 1 << 3;
 
-    // Default main channel caps
     pub const DEFAULT_MAIN: u32 = MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_SEAMLESS_MIGRATE;
+
+    // Display channel capabilities (SPICE_DISPLAY_CAP_*)
+    pub const DISPLAY_SIZED_STREAM: u32 = 1 << 0;
+    pub const DISPLAY_MONITORS_CONFIG: u32 = 1 << 1;
+    pub const DISPLAY_COMPOSITE: u32 = 1 << 2;
+    pub const DISPLAY_A8_SURFACE: u32 = 1 << 3;
+    pub const DISPLAY_LZ4_COMPRESSION: u32 = 1 << 5;
+
+    // Advertise the caps that affect how the guest QXL driver
+    // renders.  Without COMPOSITE the guest falls back to a
+    // software path that produces far fewer display updates.
+    pub const DEFAULT_DISPLAY: u32 =
+        DISPLAY_SIZED_STREAM | DISPLAY_MONITORS_CONFIG | DISPLAY_COMPOSITE | DISPLAY_A8_SURFACE;
 }
 
 /// Authentication mechanism
@@ -141,6 +153,8 @@ pub mod main_client {
 }
 
 /// Display channel message types (server -> client)
+///
+/// Values from spice-protocol/spice/enums.h SPICE_MSG_DISPLAY_*
 pub mod display_server {
     pub const MODE: u16 = 101;
     pub const MARK: u16 = 102;
@@ -152,9 +166,8 @@ pub mod display_server {
     pub const STREAM_DATA: u16 = 123;
     pub const STREAM_CLIP: u16 = 124;
     pub const STREAM_DESTROY: u16 = 125;
-    pub const STREAM_DATA_SIZED: u16 = 126;
 
-    // Draw operations
+    // Draw operations (302+)
     pub const DRAW_FILL: u16 = 302;
     pub const DRAW_OPAQUE: u16 = 303;
     pub const DRAW_COPY: u16 = 304;
@@ -167,13 +180,16 @@ pub mod display_server {
     pub const DRAW_TEXT: u16 = 311;
     pub const DRAW_TRANSPARENT: u16 = 312;
     pub const DRAW_ALPHA_BLEND: u16 = 313;
-    pub const DRAW_COMPOSITE: u16 = 314;
 
-    pub const SURFACE_CREATE: u16 = 315;
-    pub const SURFACE_DESTROY: u16 = 316;
-
-    pub const MONITORS_CONFIG: u16 = 320;
-    pub const DRAW_COPY_EX: u16 = 321;
+    // Surface and extended display ops (314+)
+    pub const SURFACE_CREATE: u16 = 314;
+    pub const SURFACE_DESTROY: u16 = 315;
+    pub const STREAM_DATA_SIZED: u16 = 316;
+    pub const MONITORS_CONFIG: u16 = 317;
+    pub const DRAW_COMPOSITE: u16 = 318;
+    pub const STREAM_ACTIVATE_REPORT: u16 = 319;
+    pub const GL_SCANOUT_UNIX: u16 = 320;
+    pub const GL_DRAW: u16 = 321;
 
     // Common
     pub const SET_ACK: u16 = 3;

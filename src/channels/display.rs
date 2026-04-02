@@ -6,6 +6,10 @@ use std::io::Read;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use std::sync::Arc;
+
+use crate::app::ByteCounter;
+use crate::capture::CaptureSession;
 use crate::decompression::{decompress_glz, decompress_lz, DecompressedImage};
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -135,6 +139,7 @@ fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<Deco
         height: height as u32,
         pixels: rgba,
         image_id: 0,
+        win_head_dist: None,
     })
 }
 
@@ -143,8 +148,8 @@ pub struct DisplayChannel {
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
     previous_images: HashMap<u64, Vec<u8>>,
-    previous_images_order: Vec<u64>,
-    max_cached_images: usize,
+    capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -154,14 +159,19 @@ pub struct DisplayChannel {
 }
 
 impl DisplayChannel {
-    pub fn new(stream: SpiceStream, event_tx: mpsc::Sender<ChannelEvent>) -> Self {
+    pub fn new(
+        stream: SpiceStream,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
+    ) -> Self {
         DisplayChannel {
             stream,
             event_tx,
             buffer: Vec::with_capacity(1024 * 1024), // 1MB buffer for images
             previous_images: HashMap::new(),
-            previous_images_order: Vec::new(),
-            max_cached_images: 100,
+            capture,
+            byte_counter,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -201,6 +211,10 @@ impl DisplayChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
+            if let Some(ref c) = self.capture {
+                c.packet_received("display", &chunk[..n]);
+            }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
 
@@ -327,6 +341,10 @@ impl DisplayChannel {
                 debug!("display: draw_composite (not yet implemented, skipping)");
             }
 
+            display_server::MONITORS_CONFIG => {
+                debug!("display: monitors_config received (acknowledged, not acted on)");
+            }
+
             display_server::MARK => {
                 debug!("display: mark");
                 self.event_tx.send(ChannelEvent::DisplayMark).await.ok();
@@ -381,13 +399,11 @@ impl DisplayChannel {
 
                 // Clear cached images
                 self.previous_images.clear();
-                self.previous_images_order.clear();
             }
 
             display_server::RESET => {
                 info!("display: reset");
                 self.previous_images.clear();
-                self.previous_images_order.clear();
             }
 
             _ => {
@@ -474,36 +490,94 @@ impl DisplayChannel {
         // Decode/decompress based on type
         let decompressed: Option<DecompressedImage> = match image_type {
             Some(ImageType::Pixmap) => {
-                // Raw 32-bit BGRX pixel data — convert to RGBA
-                let width = img_desc.width;
-                let height = img_desc.height;
-                let expected = (width as usize)
-                    .checked_mul(height as usize)
-                    .and_then(|n| n.checked_mul(4))
-                    .unwrap_or(0);
-                if expected > 0 && image_data.len() >= expected {
-                    let mut rgba = vec![0u8; expected];
-                    for i in 0..(width as usize * height as usize) {
-                        let src = i * 4;
-                        let dst = i * 4;
-                        rgba[dst] = image_data[src + 2]; // R
-                        rgba[dst + 1] = image_data[src + 1]; // G
-                        rgba[dst + 2] = image_data[src]; // B
-                        rgba[dst + 3] = 255; // A
-                    }
-                    Some(DecompressedImage {
-                        width,
-                        height,
-                        pixels: rgba,
-                        image_id: img_desc.image_id,
-                    })
-                } else {
-                    warn!(
-                        "display: pixmap data too short (have {}, need {})",
-                        image_data.len(),
-                        expected
-                    );
+                // BitmapData: format(u8) + flags(u8) + x(u32) +
+                // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
+                // then raw pixel rows.
+                if image_data.len() < 18 {
+                    warn!("display: pixmap BitmapData header too short");
                     None
+                } else {
+                    let bmp_fmt = image_data[0];
+                    let bmp_flags = image_data[1];
+                    let bmp_width = u32::from_le_bytes([
+                        image_data[2],
+                        image_data[3],
+                        image_data[4],
+                        image_data[5],
+                    ]);
+                    let bmp_height = u32::from_le_bytes([
+                        image_data[6],
+                        image_data[7],
+                        image_data[8],
+                        image_data[9],
+                    ]);
+                    let bmp_stride = u32::from_le_bytes([
+                        image_data[10],
+                        image_data[11],
+                        image_data[12],
+                        image_data[13],
+                    ]);
+                    let top_down = (bmp_flags & 0x04) != 0;
+                    // palette_addr at offset 14..18 (ignored for 32-bit)
+                    let pixel_data = &image_data[18..];
+
+                    debug!(
+                        "display: pixmap fmt={}, flags={:#x}, {}x{}, stride={}, top_down={}",
+                        bmp_fmt, bmp_flags, bmp_width, bmp_height, bmp_stride, top_down
+                    );
+
+                    // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
+                    if bmp_fmt != 8 && bmp_fmt != 9 {
+                        warn!(
+                            "display: pixmap format {} not supported (only 32-bit)",
+                            bmp_fmt
+                        );
+                        return Ok(());
+                    }
+
+                    let width = bmp_width;
+                    let height = bmp_height;
+                    let stride = bmp_stride as usize;
+                    let pixel_count = (width as usize) * (height as usize);
+                    let expected_pixels = pixel_count * 4;
+
+                    if stride * (height as usize) > pixel_data.len() {
+                        warn!(
+                            "display: pixmap data too short (have {}, need {})",
+                            pixel_data.len(),
+                            stride * (height as usize)
+                        );
+                        None
+                    } else {
+                        let mut rgba = vec![0u8; expected_pixels];
+                        let row_bytes = (width as usize) * 4;
+                        for y in 0..height as usize {
+                            // Rows may be bottom-up unless TOP_DOWN flag is set
+                            let src_y = if top_down {
+                                y
+                            } else {
+                                (height as usize) - 1 - y
+                            };
+                            let src_row = &pixel_data[src_y * stride..src_y * stride + row_bytes];
+                            let dst_start = y * row_bytes;
+                            for x in 0..width as usize {
+                                let si = x * 4;
+                                let di = dst_start + x * 4;
+                                // BGRX -> RGBA
+                                rgba[di] = src_row[si + 2]; // R
+                                rgba[di + 1] = src_row[si + 1]; // G
+                                rgba[di + 2] = src_row[si]; // B
+                                rgba[di + 3] = 255; // A
+                            }
+                        }
+                        Some(DecompressedImage {
+                            width,
+                            height,
+                            pixels: rgba,
+                            image_id: img_desc.image_id,
+                            win_head_dist: None,
+                        })
+                    }
                 }
             }
             Some(ImageType::GlzRgb) => {
@@ -595,10 +669,42 @@ impl DisplayChannel {
                         height: img_desc.height,
                         pixels: pixels.clone(),
                         image_id: img_desc.image_id,
+                        win_head_dist: None,
                     })
                 } else {
                     warn!("display: image {} not in cache", img_desc.image_id);
                     None
+                }
+            }
+            Some(ImageType::Jpeg) => {
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
+                if image_data.len() < 4 {
+                    warn!("display: JPEG data too short");
+                    None
+                } else {
+                    let data_size = u32::from_le_bytes([
+                        image_data[0],
+                        image_data[1],
+                        image_data[2],
+                        image_data[3],
+                    ]) as usize;
+                    let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
+                    match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            Some(DecompressedImage {
+                                width: rgba.width(),
+                                height: rgba.height(),
+                                pixels: rgba.into_raw(),
+                                image_id: img_desc.image_id,
+                                win_head_dist: None,
+                            })
+                        }
+                        Err(e) => {
+                            warn!("display: JPEG decode failed: {}", e);
+                            None
+                        }
+                    }
                 }
             }
             _ => {
@@ -618,9 +724,13 @@ impl DisplayChannel {
         }
 
         if let Some(img) = decompressed {
-            // Cache for GLZ dictionary
-            if img.image_id != 0 {
-                self.cache_image(img.image_id, img.pixels.clone());
+            // Cache for GLZ dictionary and evict images that have
+            // fallen outside the reference window.
+            self.previous_images
+                .insert(img.image_id, img.pixels.clone());
+            if let Some(dist) = img.win_head_dist {
+                let oldest = img.image_id.saturating_sub(dist);
+                self.previous_images.retain(|&id, _| id >= oldest);
             }
 
             // Send to UI
@@ -641,20 +751,6 @@ impl DisplayChannel {
         Ok(())
     }
 
-    fn cache_image(&mut self, image_id: u64, pixels: Vec<u8>) {
-        // Add to cache
-        self.previous_images.insert(image_id, pixels);
-        self.previous_images_order.push(image_id);
-
-        // Evict old entries if over limit
-        while self.previous_images_order.len() > self.max_cached_images {
-            if let Some(old_id) = self.previous_images_order.first().copied() {
-                self.previous_images_order.remove(0);
-                self.previous_images.remove(&old_id);
-            }
-        }
-    }
-
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(display_client::ACK, &[]);
         self.send_with_log(display_client::ACK, &msg).await?;
@@ -672,6 +768,9 @@ impl DisplayChannel {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref c) = self.capture {
+            c.packet_sent("display", data);
+        }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;

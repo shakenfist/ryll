@@ -2,10 +2,13 @@
 use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
@@ -22,6 +25,9 @@ const INPUT_CHANNEL_SIZE: usize = 256;
 /// Approximate height of the stats bar at the bottom of the window
 const STATS_BAR_HEIGHT: f32 = 10.0;
 
+/// Number of bandwidth samples to keep for the sparkline.
+const BANDWIDTH_HISTORY_LEN: usize = 60;
+
 /// Statistics tracking
 #[derive(Default)]
 struct Statistics {
@@ -30,6 +36,72 @@ struct Statistics {
     bytes_out: u64,
     last_latency: Option<f64>,
     start_time: Option<Instant>,
+}
+
+/// Shared byte counter that channels increment from their
+/// read loops. The app polls it to compute bandwidth.
+pub struct ByteCounter(AtomicU64);
+
+impl ByteCounter {
+    pub fn new() -> Self {
+        ByteCounter(AtomicU64::new(0))
+    }
+
+    /// Add bytes (called from channel read loops).
+    pub fn add(&self, bytes: u64) {
+        self.0.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// Read and reset the counter (called from the app tick).
+    fn take(&self) -> u64 {
+        self.0.swap(0, Ordering::Relaxed)
+    }
+}
+
+/// Rolling bandwidth tracker — samples bytes/sec once per second.
+struct BandwidthTracker {
+    /// Shared counter incremented by all channels.
+    counter: Arc<ByteCounter>,
+    /// History of bytes-per-second samples (most recent last).
+    history: Vec<f32>,
+    /// When the current second started.
+    last_tick: Instant,
+}
+
+impl BandwidthTracker {
+    fn new(counter: Arc<ByteCounter>) -> Self {
+        BandwidthTracker {
+            counter,
+            history: Vec::with_capacity(BANDWIDTH_HISTORY_LEN),
+            last_tick: Instant::now(),
+        }
+    }
+
+    /// Tick the tracker — if a second has elapsed, read the
+    /// counter and push a new sample.
+    fn tick(&mut self) {
+        let elapsed = self.last_tick.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            let bytes = self.counter.take();
+            let secs = elapsed.as_secs_f64();
+            let bps = bytes as f64 / secs;
+            self.history.push(bps as f32);
+            if self.history.len() > BANDWIDTH_HISTORY_LEN {
+                self.history.remove(0);
+            }
+            self.last_tick = Instant::now();
+        }
+    }
+
+    /// Format the most recent bandwidth value for display.
+    fn label(&self) -> String {
+        match self.history.last() {
+            Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
+            Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
+            Some(&bps) => format!("{:.0} B/s", bps),
+            None => String::from("-- B/s"),
+        }
+    }
 }
 
 /// The egui application
@@ -67,23 +139,47 @@ pub struct RyllApp {
 
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
+
+    // Bandwidth tracking for the status bar sparkline
+    bandwidth: BandwidthTracker,
+
+    // Capture session (None when --capture is not specified)
+    capture: Option<Arc<CaptureSession>>,
 }
 
 impl RyllApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, config: Config, cadence: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        config: Config,
+        cadence: bool,
+        capture: Option<Arc<CaptureSession>>,
+    ) -> Self {
         // Create event channel
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+
+        // Shared byte counter for bandwidth tracking
+        let byte_counter = Arc::new(ByteCounter::new());
 
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let ctx = cc.egui_ctx.clone();
+        let capture_clone = capture.clone();
+        let counter_clone = byte_counter.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
-                if let Err(e) = run_connection(config_clone, event_tx_clone, input_rx).await {
+                if let Err(e) = run_connection(
+                    config_clone,
+                    event_tx_clone,
+                    input_rx,
+                    capture_clone,
+                    counter_clone,
+                )
+                .await
+                {
                     error!("app: connection error: {}", e);
                 }
             });
@@ -111,6 +207,8 @@ impl RyllApp {
             mouse_mode: 0,
             last_mouse_pos: None,
             pending_resize: None,
+            bandwidth: BandwidthTracker::new(byte_counter),
+            capture,
         }
     }
 
@@ -172,7 +270,12 @@ impl RyllApp {
                 }
 
                 ChannelEvent::DisplayMark => {
-                    // Frame boundary - could trigger repaint
+                    // Frame boundary — capture a video frame if enabled
+                    if let Some(ref capture) = self.capture {
+                        if let Some(surface) = self.surfaces.get(&0) {
+                            capture.frame(0, surface.pixels(), surface.width, surface.height);
+                        }
+                    }
                 }
 
                 ChannelEvent::CursorPosition { x, y, visible } => {
@@ -282,6 +385,17 @@ impl RyllApp {
 
 impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Graceful shutdown on Ctrl+C: close capture session (flushes
+        // the MP4 moov atom) then ask eframe to exit.
+        if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            info!("app: shutdown requested (SIGINT)");
+            if let Some(ref capture) = self.capture {
+                capture.close();
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         // Process incoming events
         self.process_events();
 
@@ -294,6 +408,9 @@ impl eframe::App for RyllApp {
             );
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
         }
+
+        // Tick the bandwidth tracker
+        self.bandwidth.tick();
 
         // Handle input
         self.handle_input(ctx);
@@ -437,6 +554,37 @@ impl eframe::App for RyllApp {
                         ui.separator();
                         ui.label("Cadence: ON");
                     }
+
+                    // Bandwidth sparkline (right-aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(self.bandwidth.label());
+                        if self.bandwidth.history.len() >= 2 {
+                            let max_val = self
+                                .bandwidth
+                                .history
+                                .iter()
+                                .cloned()
+                                .fold(1.0f32, f32::max);
+                            let sparkline_w = 80.0;
+                            let sparkline_h = 12.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(sparkline_w, sparkline_h),
+                                egui::Sense::hover(),
+                            );
+                            let painter = ui.painter_at(rect);
+                            let n = self.bandwidth.history.len();
+                            let bar_w = sparkline_w / n as f32;
+                            for (i, &val) in self.bandwidth.history.iter().enumerate() {
+                                let h = (val / max_val) * sparkline_h;
+                                let x = rect.min.x + i as f32 * bar_w;
+                                let bar = egui::Rect::from_min_max(
+                                    egui::pos2(x, rect.max.y - h),
+                                    egui::pos2(x + bar_w - 0.5, rect.max.y),
+                                );
+                                painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
+                            }
+                        }
+                    });
                 });
             });
 
@@ -554,6 +702,8 @@ async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
+    capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -564,7 +714,12 @@ async fn run_connection(
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
-    let mut main_channel = MainChannel::new(main_stream, event_tx_clone);
+    let mut main_channel = MainChannel::new(
+        main_stream,
+        event_tx_clone,
+        capture.clone(),
+        byte_counter.clone(),
+    );
 
     // Spawn main channel task
     let main_handle = tokio::spawn(async move { main_channel.run().await });
@@ -622,7 +777,12 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = DisplayChannel::new(stream, event_tx.clone());
+                let mut channel = DisplayChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    capture.clone(),
+                    byte_counter.clone(),
+                );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
 
@@ -630,7 +790,12 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = CursorChannel::new(stream, event_tx.clone());
+                let mut channel = CursorChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    capture.clone(),
+                    byte_counter.clone(),
+                );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
 
@@ -638,7 +803,13 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = InputsChannel::new(stream, event_tx.clone(), input_rx);
+                let mut channel = InputsChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    input_rx,
+                    capture.clone(),
+                    byte_counter.clone(),
+                );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
                 break;
@@ -665,15 +836,26 @@ async fn run_connection(
 }
 
 /// Run in headless mode (no GUI)
-pub async fn run_headless(config: Config, cadence: bool) -> Result<()> {
+pub async fn run_headless(
+    config: Config,
+    cadence: bool,
+    capture: Option<Arc<CaptureSession>>,
+) -> Result<()> {
     info!("Running in headless mode");
+
+    // Keep a reference for clean shutdown
+    let capture_for_shutdown = capture.clone();
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
 
+    // Headless mode doesn't display bandwidth, but channels still need the counter
+    let byte_counter = Arc::new(ByteCounter::new());
+
     // Spawn connection task
-    let connection_handle =
-        tokio::spawn(async move { run_connection(config, event_tx, input_rx).await });
+    let connection_handle = tokio::spawn(async move {
+        run_connection(config, event_tx, input_rx, capture, byte_counter).await
+    });
     // Pin the handle so it can be polled multiple times in the select loop
     tokio::pin!(connection_handle);
 
@@ -731,11 +913,23 @@ pub async fn run_headless(config: Config, cadence: bool) -> Result<()> {
                 info!("Connection task completed");
                 break;
             }
+            // Poll for Ctrl+C (SIGINT) at a reasonable interval
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("app: shutdown requested (SIGINT)");
+                    break;
+                }
+            }
         }
     }
 
     if let Some(handle) = cadence_handle {
         handle.abort();
+    }
+
+    // Close capture session (flushes MP4 moov atom)
+    if let Some(ref capture) = capture_for_shutdown {
+        capture.close();
     }
 
     info!("Headless mode finished");

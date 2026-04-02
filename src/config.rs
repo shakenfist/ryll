@@ -39,6 +39,10 @@ pub struct Args {
     /// Path to write latency measurements
     #[arg(long)]
     pub latency_file: Option<String>,
+
+    /// Directory for protocol/display capture output (pcap + video)
+    #[arg(long)]
+    pub capture: Option<String>,
 }
 
 /// SPICE connection configuration

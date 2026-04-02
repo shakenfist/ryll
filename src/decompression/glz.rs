@@ -63,7 +63,16 @@ pub fn decompress_glz(
     let height = cursor.read_u32::<BigEndian>()?;
     let _stride = cursor.read_u32::<BigEndian>()?;
     let image_id = cursor.read_u64::<BigEndian>()?;
-    let _win_head_dist = cursor.read_u32::<BigEndian>()?;
+    let win_head_dist = cursor.read_u32::<BigEndian>()?;
+
+    tracing::debug!(
+        "glz: header id={}, {}x{}, type={}, win_head_dist={}",
+        image_id,
+        width,
+        height,
+        _img_type,
+        win_head_dist
+    );
 
     // Output buffer (RGBA)
     let output_size = (width as usize)
@@ -151,13 +160,13 @@ pub fn decompress_glz(
                 let pf2 = (code2 >> 5) & 0x01;
                 pixel_offset += ((code2 & 0x1F) as usize) << 12;
                 image_dist = 0;
-                for _ in 0..image_flag {
+                for i in 0..image_flag {
                     if data_offset >= data.len() {
                         break;
                     }
                     let b = data[data_offset];
                     data_offset += 1;
-                    image_dist += b as u64;
+                    image_dist += (b as u64) << (8 * i);
                 }
                 if pf2 != 0 {
                     if data_offset >= data.len() {
@@ -219,6 +228,13 @@ pub fn decompress_glz(
                     }
                 } else {
                     // Image not in dictionary -- leave pixels black
+                    tracing::warn!(
+                        "glz: cross-image ref to id {} not in dictionary \
+                         (current={}, dist={})",
+                        source_id,
+                        image_id,
+                        image_dist
+                    );
                     out_idx += length * 4;
                 }
             }
@@ -230,6 +246,7 @@ pub fn decompress_glz(
         height,
         pixels: output,
         image_id,
+        win_head_dist: Some(win_head_dist as u64),
     })
 }
 

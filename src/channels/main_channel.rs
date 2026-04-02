@@ -1,8 +1,11 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::Result;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::app::ByteCounter;
+use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{
@@ -18,17 +21,26 @@ pub struct MainChannel {
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
     session_id: Option<u32>,
+    capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     bytes_in: u64,
     bytes_out: u64,
 }
 
 impl MainChannel {
-    pub fn new(stream: SpiceStream, event_tx: mpsc::Sender<ChannelEvent>) -> Self {
+    pub fn new(
+        stream: SpiceStream,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
+    ) -> Self {
         MainChannel {
             stream,
             event_tx,
             buffer: Vec::with_capacity(65536),
             session_id: None,
+            capture,
+            byte_counter,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -66,6 +78,10 @@ impl MainChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
+            if let Some(ref c) = self.capture {
+                c.packet_received("main", &chunk[..n]);
+            }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
 
@@ -272,6 +288,9 @@ impl MainChannel {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref c) = self.capture {
+            c.packet_sent("main", data);
+        }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;

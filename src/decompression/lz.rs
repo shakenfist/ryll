@@ -168,6 +168,7 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         height,
         pixels: output,
         image_id: 0, // LZ doesn't use image IDs
+        win_head_dist: None,
     })
 }
 

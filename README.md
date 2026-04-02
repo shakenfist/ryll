@@ -5,14 +5,18 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 ## Features
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
-- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, and Pixmap image types
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
 - **Multi-channel support** - Handles main, display, cursor, and inputs channels
 - **TLS support** - Secure connections with inline CA certificates from .vv files
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
+- **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
 - **Statistics tracking** - Frame counts, throughput, and latency measurements
+- **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
+- **Graceful Ctrl+C shutdown** - SIGINT sets an AtomicBool flag; the GUI and headless event loops check it and shut down cleanly, ensuring capture files are finalized
+- **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 
 ## Building
 
@@ -112,10 +116,26 @@ Options:
   --headless             Run in headless mode (no GUI)
   --cadence              Enable cadence mode (automatic keystroke every 2 seconds)
   -v, --verbose          Enable verbose logging
+  --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
   -h, --help             Print help
   -V, --version          Print version
 ```
+
+### Capture mode
+
+Record protocol traffic and display frames for debugging:
+
+```bash
+ryll --file connection.vv --capture /tmp/capture
+```
+
+This writes:
+- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap` — per-channel
+  pcap files with fake TCP/IP headers, openable in Wireshark
+- `display.mp4` — H.264 video of the display surface at real timing
+
+See [STYLEGUIDE.md](STYLEGUIDE.md) for capture conventions.
 
 ### Headless mode
 
@@ -135,17 +155,18 @@ This will:
 
 ```
 src/
-├── main.rs              # CLI entry point
-├── app.rs               # egui App implementation
+├── main.rs              # CLI entry point, SIGINT handler
+├── app.rs               # egui App, bandwidth sparkline
+├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
 ├── protocol/
-│   ├── constants.rs     # SPICE protocol constants
+│   ├── constants.rs     # SPICE protocol constants, capabilities
 │   ├── messages.rs      # Binary message structures
-│   ├── link.rs          # Handshake and authentication
+│   ├── link.rs          # Handshake, auth, capability negotiation
 │   └── client.rs        # Connection management
 ├── channels/
 │   ├── main_channel.rs  # Session management
-│   ├── display.rs       # Display rendering
+│   ├── display.rs       # Display rendering, GLZ dictionary
 │   ├── cursor.rs        # Cursor tracking
 │   └── inputs.rs        # Keyboard/mouse input
 ├── decompression/
@@ -162,6 +183,8 @@ src/
 - **tokio-rustls** - TLS support
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
+- **image** - JPEG decoding (via the `image` crate with jpeg feature)
+- **libc** - SIGINT signal handler for graceful shutdown
 
 ## Comparison with Python version
 

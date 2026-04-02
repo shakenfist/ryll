@@ -45,6 +45,18 @@ lz4_flex = "0.11"
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
 
+# JPEG decoding for SPICE JPEG image type
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Capture mode (--capture)
+pcap-file = "2"
+etherparse = "0.16"
+openh264 = "0.6"
+mp4 = "0.14"
+
+# Signal handling (Ctrl+C graceful shutdown)
+libc = "0.2"
+
 # Error handling
 thiserror = "1"
 anyhow = "1"

@@ -1,9 +1,12 @@
 /// Cursor channel handler - cursor position, shape, and caching
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::app::ByteCounter;
+use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{
@@ -19,6 +22,8 @@ pub struct CursorChannel {
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
     cursor_cache: HashMap<u64, CursorImage>,
+    capture: Option<Arc<CaptureSession>>,
+    byte_counter: Arc<ByteCounter>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -28,12 +33,19 @@ pub struct CursorChannel {
 }
 
 impl CursorChannel {
-    pub fn new(stream: SpiceStream, event_tx: mpsc::Sender<ChannelEvent>) -> Self {
+    pub fn new(
+        stream: SpiceStream,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        capture: Option<Arc<CaptureSession>>,
+        byte_counter: Arc<ByteCounter>,
+    ) -> Self {
         CursorChannel {
             stream,
             event_tx,
             buffer: Vec::with_capacity(65536),
             cursor_cache: HashMap::new(),
+            capture,
+            byte_counter,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -70,6 +82,10 @@ impl CursorChannel {
                 break;
             }
 
+            self.byte_counter.add(n as u64);
+            if let Some(ref c) = self.capture {
+                c.packet_received("cursor", &chunk[..n]);
+            }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
 
@@ -361,6 +377,9 @@ impl CursorChannel {
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
+        if let Some(ref c) = self.capture {
+            c.packet_sent("cursor", data);
+        }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;

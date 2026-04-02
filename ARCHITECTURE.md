@@ -121,14 +121,14 @@ Values from `spice-protocol/spice/enums.h`:
 
 | Type | Name             | Status in ryll |
 |-----:|------------------|----------------|
-|    0 | Pixmap           | Supported (raw BGRX) |
+|    0 | Pixmap           | Supported (BitmapData header + raw BGRX/RGBA) |
 |    1 | Quic             | Not implemented |
 |  100 | LZ_PLT           | Not implemented |
 |  101 | LZ_RGB           | Supported |
 |  102 | GLZ_RGB          | Supported (with cross-frame dictionary) |
 |  103 | FromCache        | Supported (image cache lookup) |
 |  104 | Surface          | Not implemented |
-|  105 | Jpeg             | Not implemented |
+|  105 | Jpeg             | Supported (via the `image` crate) |
 |  106 | FromCacheLossless| Not implemented |
 |  107 | ZlibGlzRgb      | Supported (zlib-wrapped GLZ) |
 |  108 | JpegAlpha        | Not implemented |
@@ -143,16 +143,26 @@ Values from `spice-protocol/spice/enums.h`:
 - **LZ4**: NO `data_size` prefix. Data starts immediately with a
   1-byte `top_down` flag, 1-byte `spice_format`, then per-row
   LZ4 blocks each with a 4-byte big-endian size prefix.
-- **Pixmap**: raw BGRX pixel data, no header.
+- **Pixmap**: preceded by an 18-byte `BitmapData` header (format u8,
+  flags u8, x u32, y u32, stride u32, palette_addr u32), then raw pixel
+  rows. Only 32-bit formats (BGRX=8, RGBA=9) are supported. The
+  `top_down` flag (bit 2 of flags) controls row ordering.
+- **JPEG**: preceded by a 4-byte `data_size` (u32 LE), then a standard
+  JPEG stream. Decoded via the `image` crate and converted to RGBA.
 - **FromCache**: no pixel data, uses `image_id` from the descriptor
   to look up a previously cached decompressed image.
 
 ### Compression algorithms
 
-**GLZ** — Dictionary-based compression that can reference pixels from
+**GLZ** -- Dictionary-based compression that can reference pixels from
 previous images (cross-frame). The GLZ decompressor maintains a cache
 of decompressed images keyed by `image_id`. Cross-frame references
-use `image_dist` to compute the source image ID.
+use `image_dist` to compute the source image ID. Each GLZ header
+includes a `win_head_dist` field that defines the reference window
+size; after decompressing an image, the display channel evicts all
+cached images whose id falls below `image_id - win_head_dist`. This
+replaced an earlier fixed-size cache that could evict images still
+needed by subsequent frames.
 
 **LZ** — Simpler variant that only references pixels within the
 current image. No cross-frame dependencies.
@@ -167,6 +177,32 @@ byte indicates the pixel format (4=BGRX, 6=BGRA, 3=BGR).
 
 All decompressors output RGBA pixels (BGRX/BGRA/BGR on the wire
 is converted to RGBA with alpha=255 for opaque formats).
+
+## Display Channel Capabilities
+
+During the link handshake, ryll advertises per-channel capability flags
+to the server. The display channel capabilities are particularly
+important:
+
+| Flag | Bit | Effect |
+|------|----:|--------|
+| SIZED_STREAM | 0 | Streaming video support |
+| MONITORS_CONFIG | 1 | Multi-monitor configuration |
+| COMPOSITE | 2 | Compositing operations (DRAW_COMPOSITE opcode 318) |
+| A8_SURFACE | 3 | Alpha-only surface support |
+
+Without **COMPOSITE**, the guest QXL driver falls back to a slow
+software rendering path that produces only `draw_copy` messages with
+Pixmap images. With it, the driver uses hardware-accelerated
+compositing and sends compressed image types (GLZ, LZ, JPEG). This
+was the root cause of an earlier issue where keyboard input appeared
+to have no effect -- the server was rendering via the slow path and
+flooding the client with uncompressed data.
+
+The correct display server opcodes are:
+- `SURFACE_CREATE` = 314 (not 1, as some references suggest)
+- `MONITORS_CONFIG` = 317
+- `DRAW_COMPOSITE` = 318
 
 ## Display Rendering
 
@@ -239,6 +275,67 @@ the UEFI latency guest image, which changes screen colour on each keystroke -
 ideal for input-to-display latency testing. The image is downloaded on first
 run to `testdata/`. `make test-qemu-stop` shuts it down via PID file.
 
+## Capture Mode
+
+When `--capture <DIR>` is specified, ryll records:
+
+### Protocol capture (pcap)
+
+Each SPICE channel writes a separate pcap file (`main.pcap`,
+`display.pcap`, `cursor.pcap`, `inputs.pcap`) containing
+decrypted SPICE mini-header messages wrapped in fake TCP/IP
+headers. Wireshark can open these directly.
+
+Implementation: `capture::PcapChannelWriter` per channel, using
+`pcap-file` for pcap output and `etherparse` for header
+construction. Packets are recorded in `send()` and the read
+loop of each channel handler. Writers use unbuffered I/O (no
+`BufWriter`) so every packet hits disk immediately.
+
+Large SPICE messages (e.g. uncompressed display updates) can
+exceed the IPv4 maximum packet size (65535 bytes). The pcap
+writer splits these into multiple TCP segments with sequential
+sequence numbers, so Wireshark can reassemble them and the
+pcap file never triggers a length-overflow panic.
+
+### Display capture (video)
+
+`display.mp4` contains an H.264 encoded video of the primary
+surface (surface 0). Frames are emitted on MARK boundaries
+with real timestamps for variable-rate playback.
+
+Implementation: `capture::VideoWriter` lazily initialised on
+the first `DisplayMark` event. Uses `openh264` for RGBA →
+YUV420 → H.264 encoding, and the `mp4` crate for MP4 muxing.
+
+The capture session is `Arc<CaptureSession>` shared across all
+channels and the app. When `--capture` is not specified, the
+field is `None` and all capture code paths are skipped. The
+`CaptureSession` uses an `AtomicBool` guard to ensure `close()`
+is idempotent -- it may be called both explicitly during
+shutdown and again from the `Drop` implementation.
+
+## Graceful Shutdown
+
+Ryll installs a SIGINT handler (via `libc::signal`) in `main.rs` that sets a
+global `AtomicBool` flag (`SHUTDOWN_REQUESTED`). This allows Ctrl+C to trigger
+a clean shutdown instead of killing the process immediately.
+
+- **GUI mode**: The `eframe::App::update()` loop in `app.rs` checks the flag
+  each frame and calls `ctx.send_viewport_cmd(ViewportCommand::Close)` when
+  set, which lets eframe run its normal teardown path and finalize the capture
+  session.
+- **Headless mode**: The tokio `select!` loop polls the flag alongside channel
+  events and breaks out cleanly when shutdown is requested.
+
+### Unbuffered capture I/O
+
+The pcap channel writers (`PcapChannelWriter` in `capture.rs`) write directly
+to `File` without `BufWriter`. This means every packet is persisted to disk
+immediately, so pcap data is never lost if the process is interrupted by
+SIGINT or any other signal. The MP4 video writer also uses unbuffered `File`
+I/O for the same reason.
+
 ## Statistics and Instrumentation
 
 Ryll tracks:
@@ -246,6 +343,10 @@ Ryll tracks:
 - **Frames received**: Count of draw operations
 - **Bytes in/out**: Network throughput per channel
 - **Latency**: Time from key press to display update (cadence mode)
+- **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
+  displayed in the status bar as a small bar chart. Channel read loops
+  increment a shared `AtomicU64` byte counter; the `BandwidthTracker`
+  in `app.rs` samples it once per second and renders the sparkline.
 
-This instrumentation is the primary purpose of ryll - measuring kerbside proxy
+This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
