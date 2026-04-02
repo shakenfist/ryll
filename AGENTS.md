@@ -75,21 +75,43 @@ Ryll uses:
    directly to `File` (no `BufWriter`), so packet data is always on disk and
    survives SIGINT without explicit flush.
 
+7. **Display channel capabilities** - Ryll advertises COMPOSITE, MONITORS_CONFIG,
+   SIZED_STREAM, and A8_SURFACE capabilities during the display channel
+   handshake. Without COMPOSITE, the guest QXL driver falls back to a slow
+   software rendering path that sends only raw Pixmap data via `draw_copy`,
+   making keyboard input appear to have no effect because the client is
+   overwhelmed with uncompressed frames.
+
+8. **GLZ win_head_dist eviction** - The GLZ dictionary evicts cached images
+   based on the `win_head_dist` field from each GLZ header, rather than using
+   a fixed cache size. This matches the server's reference window and prevents
+   both premature eviction (corrupting cross-frame references) and unbounded
+   memory growth.
+
+9. **Pcap TCP segmentation** - Large SPICE messages are split into multiple
+   TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
+   length (65535 bytes), which would panic in the header construction code.
+
 ## Code Organisation
 
 ```
 src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
-├── app.rs               # egui App, event loop, headless runner
+├── app.rs               # egui App, event loop, headless runner,
+│                        #   bandwidth sparkline
+├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
+│                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
 ├── protocol/            # SPICE protocol implementation
-│   ├── constants.rs     # Enums, message IDs
+│   ├── constants.rs     # Enums, message IDs, capability flags
 │   ├── messages.rs      # Binary serialization
-│   ├── link.rs          # Handshake, RSA auth
+│   ├── link.rs          # Handshake, RSA auth, capability
+│   │                    #   advertisement
 │   └── client.rs        # Connection management
 ├── channels/            # Per-channel handlers
 │   ├── main_channel.rs  # Session init, ping/pong
-│   ├── display.rs       # Surface management, image decoding
+│   ├── display.rs       # Surface management, image decoding,
+│   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
 │   └── inputs.rs        # Keyboard scancodes, mouse events
 ├── decompression/       # Image decompression
@@ -157,4 +179,5 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | etherparse | Fake TCP/IP header construction for pcap |
 | openh264 | H.264 video encoding for --capture mode |
 | mp4 | MP4 container writing for --capture mode |
+| image | JPEG decoding (with `jpeg` feature only) |
 | libc | SIGINT signal handler for graceful shutdown |
