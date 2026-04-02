@@ -139,6 +139,7 @@ fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<Deco
         height: height as u32,
         pixels: rgba,
         image_id: 0,
+        win_head_dist: None,
     })
 }
 
@@ -147,8 +148,6 @@ pub struct DisplayChannel {
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
     previous_images: HashMap<u64, Vec<u8>>,
-    previous_images_order: Vec<u64>,
-    max_cached_images: usize,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     ack_generation: u32,
@@ -171,8 +170,6 @@ impl DisplayChannel {
             event_tx,
             buffer: Vec::with_capacity(1024 * 1024), // 1MB buffer for images
             previous_images: HashMap::new(),
-            previous_images_order: Vec::new(),
-            max_cached_images: 1024,
             capture,
             byte_counter,
             ack_generation: 0,
@@ -402,13 +399,11 @@ impl DisplayChannel {
 
                 // Clear cached images
                 self.previous_images.clear();
-                self.previous_images_order.clear();
             }
 
             display_server::RESET => {
                 info!("display: reset");
                 self.previous_images.clear();
-                self.previous_images_order.clear();
             }
 
             _ => {
@@ -571,6 +566,7 @@ impl DisplayChannel {
                             height,
                             pixels: rgba,
                             image_id: img_desc.image_id,
+                            win_head_dist: None,
                         })
                     }
                 }
@@ -664,6 +660,7 @@ impl DisplayChannel {
                         height: img_desc.height,
                         pixels: pixels.clone(),
                         image_id: img_desc.image_id,
+                        win_head_dist: None,
                     })
                 } else {
                     warn!("display: image {} not in cache", img_desc.image_id);
@@ -691,6 +688,7 @@ impl DisplayChannel {
                                 height: rgba.height(),
                                 pixels: rgba.into_raw(),
                                 image_id: img_desc.image_id,
+                                win_head_dist: None,
                             })
                         }
                         Err(e) => {
@@ -717,10 +715,14 @@ impl DisplayChannel {
         }
 
         if let Some(img) = decompressed {
-            // Cache for GLZ dictionary — all images must be cached
-            // since GLZ uses sequential IDs starting from 0 and
-            // later images reference earlier ones via win_head_dist.
-            self.cache_image(img.image_id, img.pixels.clone());
+            // Cache for GLZ dictionary and evict images that have
+            // fallen outside the reference window.
+            self.previous_images
+                .insert(img.image_id, img.pixels.clone());
+            if let Some(dist) = img.win_head_dist {
+                let oldest = img.image_id.saturating_sub(dist);
+                self.previous_images.retain(|&id, _| id >= oldest);
+            }
 
             // Send to UI
             self.event_tx
@@ -738,20 +740,6 @@ impl DisplayChannel {
         }
 
         Ok(())
-    }
-
-    fn cache_image(&mut self, image_id: u64, pixels: Vec<u8>) {
-        // Add to cache
-        self.previous_images.insert(image_id, pixels);
-        self.previous_images_order.push(image_id);
-
-        // Evict old entries if over limit
-        while self.previous_images_order.len() > self.max_cached_images {
-            if let Some(old_id) = self.previous_images_order.first().copied() {
-                self.previous_images_order.remove(0);
-                self.previous_images.remove(&old_id);
-            }
-        }
     }
 
     async fn send_ack(&mut self) -> Result<()> {

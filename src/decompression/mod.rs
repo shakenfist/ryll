@@ -9,6 +9,7 @@ pub use lz::decompress_lz;
 pub struct DecompressedImage {
     pub width: u32,
     pub height: u32,
-    pub pixels: Vec<u8>, // RGBA format
-    pub image_id: u64,   // For GLZ dictionary
+    pub pixels: Vec<u8>,            // RGBA format
+    pub image_id: u64,              // For GLZ dictionary
+    pub win_head_dist: Option<u64>, // GLZ window distance (for eviction)
 }

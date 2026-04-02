@@ -246,6 +246,7 @@ pub fn decompress_glz(
         height,
         pixels: output,
         image_id,
+        win_head_dist: Some(win_head_dist as u64),
     })
 }
 
