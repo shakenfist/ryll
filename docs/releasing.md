@@ -6,6 +6,19 @@ creates a GitHub Release, and updates the Homebrew tap.
 
 ## Prerequisites
 
+### Tag protection
+
+A tag protection rule should be configured so only authorised
+maintainers can push `v*` tags. Set this up in GitHub under
+Settings → Rules → Rulesets (or the older Settings → Tags):
+
+- **Pattern:** `v*`
+- **Restrict who can create matching tags:** maintainers only
+
+This prevents accidental or unauthorised releases.
+
+### HOMEBREW_TAP_TOKEN
+
 A repository secret `HOMEBREW_TAP_TOKEN` must be configured in the
 ryll repo settings. This is a GitHub personal access token (classic
 with `repo` scope, or fine-grained with write access to
