@@ -64,8 +64,19 @@ cp ryll /usr/local/bin/
 
 ## Windows
 
-*Coming soon.* A `.zip` archive containing `ryll.exe` will be available.
-Note that `--capture` mode is not available on Windows.
+Download the `.zip` archive from
+[GitHub Releases](https://github.com/shakenfist/ryll/releases),
+extract it, and run `ryll.exe`:
+
+```powershell
+Expand-Archive ryll-x86_64-pc-windows-msvc.zip -DestinationPath .
+.\ryll.exe --help
+```
+
+To make it available system-wide, move `ryll.exe` to a directory
+on your `PATH`.
+
+Note that `--capture` mode is not available on Windows builds.
 
 ## Building from source
 
