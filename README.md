@@ -15,7 +15,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Statistics tracking** - Frame counts, throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
-- **Graceful Ctrl+C shutdown** - SIGINT sets an AtomicBool flag; the GUI and headless event loops check it and shut down cleanly, ensuring capture files are finalized
+- **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 
 ## Building
@@ -155,7 +155,7 @@ This will:
 
 ```
 src/
-├── main.rs              # CLI entry point, SIGINT handler
+├── main.rs              # CLI entry point, Ctrl+C handler
 ├── app.rs               # egui App, bandwidth sparkline
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
@@ -184,7 +184,7 @@ src/
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
-- **libc** - SIGINT signal handler for graceful shutdown
+- **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version
 
