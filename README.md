@@ -13,6 +13,8 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
 - **Statistics tracking** - Frame counts, throughput, and latency measurements
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
+- **Graceful Ctrl+C shutdown** - SIGINT sets an AtomicBool flag; the GUI and headless event loops check it and shut down cleanly, ensuring capture files are finalized
+- **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 
 ## Building
 
@@ -151,7 +153,7 @@ This will:
 
 ```
 src/
-├── main.rs              # CLI entry point
+├── main.rs              # CLI entry point, SIGINT handler
 ├── app.rs               # egui App implementation
 ├── config.rs            # Configuration parsing
 ├── protocol/
@@ -178,6 +180,7 @@ src/
 - **tokio-rustls** - TLS support
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
+- **libc** - SIGINT signal handler for graceful shutdown
 
 ## Comparison with Python version
 

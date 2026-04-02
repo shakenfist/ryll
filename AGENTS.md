@@ -66,11 +66,20 @@ Ryll uses:
 4. **Cadence mode** - Sends automatic keystrokes every 2 seconds to generate
    predictable input→display latency measurements.
 
+5. **Graceful Ctrl+C shutdown** - A SIGINT handler in `main.rs` sets a global
+   `SHUTDOWN_REQUESTED` AtomicBool. The eframe update loop (`app.rs`) and the
+   headless tokio select loop both poll this flag and shut down cleanly,
+   ensuring capture sessions are finalized.
+
+6. **Unbuffered capture I/O** - Pcap and MP4 writers in `capture.rs` write
+   directly to `File` (no `BufWriter`), so packet data is always on disk and
+   survives SIGINT without explicit flush.
+
 ## Code Organisation
 
 ```
 src/
-├── main.rs              # CLI entry, mode selection (GUI vs headless)
+├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner
 ├── config.rs            # .vv file parsing, CLI args
 ├── protocol/            # SPICE protocol implementation
@@ -148,3 +157,4 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | etherparse | Fake TCP/IP header construction for pcap |
 | openh264 | H.264 video encoding for --capture mode |
 | mp4 | MP4 container writing for --capture mode |
+| libc | SIGINT signal handler for graceful shutdown |

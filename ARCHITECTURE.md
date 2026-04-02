@@ -253,7 +253,8 @@ headers. Wireshark can open these directly.
 Implementation: `capture::PcapChannelWriter` per channel, using
 `pcap-file` for pcap output and `etherparse` for header
 construction. Packets are recorded in `send()` and the read
-loop of each channel handler.
+loop of each channel handler. Writers use unbuffered I/O (no
+`BufWriter`) so every packet hits disk immediately.
 
 ### Display capture (video)
 
@@ -268,6 +269,27 @@ YUV420 → H.264 encoding, and the `mp4` crate for MP4 muxing.
 The capture session is `Arc<CaptureSession>` shared across all
 channels and the app. When `--capture` is not specified, the
 field is `None` and all capture code paths are skipped.
+
+## Graceful Shutdown
+
+Ryll installs a SIGINT handler (via `libc::signal`) in `main.rs` that sets a
+global `AtomicBool` flag (`SHUTDOWN_REQUESTED`). This allows Ctrl+C to trigger
+a clean shutdown instead of killing the process immediately.
+
+- **GUI mode**: The `eframe::App::update()` loop in `app.rs` checks the flag
+  each frame and calls `ctx.send_viewport_cmd(ViewportCommand::Close)` when
+  set, which lets eframe run its normal teardown path and finalize the capture
+  session.
+- **Headless mode**: The tokio `select!` loop polls the flag alongside channel
+  events and breaks out cleanly when shutdown is requested.
+
+### Unbuffered capture I/O
+
+The pcap channel writers (`PcapChannelWriter` in `capture.rs`) write directly
+to `File` without `BufWriter`. This means every packet is persisted to disk
+immediately, so pcap data is never lost if the process is interrupted by
+SIGINT or any other signal. The MP4 video writer also uses unbuffered `File`
+I/O for the same reason.
 
 ## Statistics and Instrumentation
 

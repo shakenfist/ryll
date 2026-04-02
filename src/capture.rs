@@ -5,7 +5,6 @@
 /// given directory. When not enabled, all methods are no-ops.
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -22,8 +21,12 @@ const SERVER_IP: [u8; 4] = [10, 0, 0, 2];
 const SERVER_PORT: u16 = 5900;
 
 /// Per-channel pcap writer with TCP state tracking.
+///
+/// Uses unbuffered I/O so that every packet is flushed to disk
+/// immediately.  This means the pcap files survive Ctrl+C / SIGINT
+/// without needing an explicit flush on shutdown.
 struct PcapChannelWriter {
-    writer: PcapWriter<BufWriter<File>>,
+    writer: PcapWriter<File>,
     client_seq: u32,
     server_seq: u32,
     client_port: u16,
@@ -31,7 +34,7 @@ struct PcapChannelWriter {
 
 impl PcapChannelWriter {
     fn new(path: PathBuf, client_port: u16) -> anyhow::Result<Self> {
-        let file = BufWriter::new(File::create(&path)?);
+        let file = File::create(&path)?;
         let header = PcapHeader {
             datalink: DataLink::ETHERNET,
             ..Default::default()
@@ -142,7 +145,7 @@ const CHANNELS: &[&str] = &["main", "display", "cursor", "inputs"];
 /// and muxes into an MP4 container.
 struct VideoWriter {
     encoder: openh264::encoder::Encoder,
-    mp4_writer: mp4::Mp4Writer<BufWriter<File>>,
+    mp4_writer: mp4::Mp4Writer<File>,
     track_id: u32,
     width: u32,
     height: u32,
@@ -293,7 +296,7 @@ impl VideoWriter {
         // Create MP4 writer
         let path = dir.join("display.mp4");
         let file = match File::create(&path) {
-            Ok(f) => BufWriter::new(f),
+            Ok(f) => f,
             Err(e) => {
                 warn!("capture: failed to create {}: {}", path.display(), e);
                 return None;
@@ -549,18 +552,17 @@ impl CaptureSession {
     }
 
     /// Finalise and close the capture session.
-    pub fn close(&mut self) {
-        // Close video writer first (writes moov atom)
+    ///
+    /// Takes `&self` so it can be called through an `Arc` (e.g. from
+    /// the Ctrl+C handler).  Pcap writers use unbuffered I/O and need
+    /// no explicit flush; only the MP4 video writer requires
+    /// finalisation to write the moov atom.
+    pub fn close(&self) {
         if let Ok(mut writer) = self.video_writer.lock() {
             if let Some(ref mut vw) = *writer {
                 vw.close();
             }
             *writer = None;
-        }
-
-        // Drop pcap writers to flush BufWriter buffers
-        for (name, _) in self.pcap_writers.drain() {
-            debug!("capture: closing {}.pcap", name);
         }
         info!("capture: session closed ({})", self.dir.display());
     }

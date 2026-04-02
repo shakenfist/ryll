@@ -385,6 +385,17 @@ impl RyllApp {
 
 impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Graceful shutdown on Ctrl+C: close capture session (flushes
+        // the MP4 moov atom) then ask eframe to exit.
+        if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            info!("app: shutdown requested (SIGINT)");
+            if let Some(ref capture) = self.capture {
+                capture.close();
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
         // Process incoming events
         self.process_events();
 
@@ -832,6 +843,9 @@ pub async fn run_headless(
 ) -> Result<()> {
     info!("Running in headless mode");
 
+    // Keep a reference for clean shutdown
+    let capture_for_shutdown = capture.clone();
+
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
 
@@ -899,11 +913,23 @@ pub async fn run_headless(
                 info!("Connection task completed");
                 break;
             }
+            // Poll for Ctrl+C (SIGINT) at a reasonable interval
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+                    info!("app: shutdown requested (SIGINT)");
+                    break;
+                }
+            }
         }
     }
 
     if let Some(handle) = cadence_handle {
         handle.abort();
+    }
+
+    // Close capture session (flushes MP4 moov atom)
+    if let Some(ref capture) = capture_for_shutdown {
+        capture.close();
     }
 
     info!("Headless mode finished");

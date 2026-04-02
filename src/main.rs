@@ -8,6 +8,7 @@ mod protocol;
 mod settings;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -20,7 +21,23 @@ use tracing_subscriber::prelude::*;
 use crate::capture::CaptureSession;
 use crate::config::{Args, Config};
 
+/// Flag set by the SIGINT handler to request graceful shutdown.
+pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigint(_: libc::c_int) {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
 fn main() -> Result<()> {
+    // Install SIGINT handler so Ctrl+C triggers a graceful shutdown
+    // instead of an immediate process exit (which skips destructors).
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            handle_sigint as *const () as libc::sighandler_t,
+        );
+    }
+
     // Parse command line arguments
     let args = Args::parse();
 
