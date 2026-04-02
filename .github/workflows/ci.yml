@@ -132,3 +132,19 @@ jobs:
           name: macos-tarball
           path: target/release/ryll-*.tar.gz
           retention-days: 30
+
+      - name: Create Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path target\release\ryll.exe `
+            -DestinationPath target\release\ryll-${{ matrix.target }}.zip
+
+      - name: Upload Windows zip
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: target/release/ryll-*.zip
+          retention-days: 30
