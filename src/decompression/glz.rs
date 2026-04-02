@@ -151,13 +151,13 @@ pub fn decompress_glz(
                 let pf2 = (code2 >> 5) & 0x01;
                 pixel_offset += ((code2 & 0x1F) as usize) << 12;
                 image_dist = 0;
-                for _ in 0..image_flag {
+                for i in 0..image_flag {
                     if data_offset >= data.len() {
                         break;
                     }
                     let b = data[data_offset];
                     data_offset += 1;
-                    image_dist += b as u64;
+                    image_dist += (b as u64) << (8 * i);
                 }
                 if pf2 != 0 {
                     if data_offset >= data.len() {

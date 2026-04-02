@@ -344,6 +344,10 @@ impl DisplayChannel {
                 debug!("display: draw_composite (not yet implemented, skipping)");
             }
 
+            display_server::MONITORS_CONFIG => {
+                debug!("display: monitors_config received (acknowledged, not acted on)");
+            }
+
             display_server::MARK => {
                 debug!("display: mark");
                 self.event_tx.send(ChannelEvent::DisplayMark).await.ok();

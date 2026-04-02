@@ -153,6 +153,8 @@ pub mod main_client {
 }
 
 /// Display channel message types (server -> client)
+///
+/// Values from spice-protocol/spice/enums.h SPICE_MSG_DISPLAY_*
 pub mod display_server {
     pub const MODE: u16 = 101;
     pub const MARK: u16 = 102;
@@ -164,9 +166,8 @@ pub mod display_server {
     pub const STREAM_DATA: u16 = 123;
     pub const STREAM_CLIP: u16 = 124;
     pub const STREAM_DESTROY: u16 = 125;
-    pub const STREAM_DATA_SIZED: u16 = 126;
 
-    // Draw operations
+    // Draw operations (302+)
     pub const DRAW_FILL: u16 = 302;
     pub const DRAW_OPAQUE: u16 = 303;
     pub const DRAW_COPY: u16 = 304;
@@ -179,13 +180,16 @@ pub mod display_server {
     pub const DRAW_TEXT: u16 = 311;
     pub const DRAW_TRANSPARENT: u16 = 312;
     pub const DRAW_ALPHA_BLEND: u16 = 313;
-    pub const DRAW_COMPOSITE: u16 = 314;
 
-    pub const SURFACE_CREATE: u16 = 315;
-    pub const SURFACE_DESTROY: u16 = 316;
-
-    pub const MONITORS_CONFIG: u16 = 320;
-    pub const DRAW_COPY_EX: u16 = 321;
+    // Surface and extended display ops (314+)
+    pub const SURFACE_CREATE: u16 = 314;
+    pub const SURFACE_DESTROY: u16 = 315;
+    pub const STREAM_DATA_SIZED: u16 = 316;
+    pub const MONITORS_CONFIG: u16 = 317;
+    pub const DRAW_COMPOSITE: u16 = 318;
+    pub const STREAM_ACTIVATE_REPORT: u16 = 319;
+    pub const GL_SCANOUT_UNIX: u16 = 320;
+    pub const GL_DRAW: u16 = 321;
 
     // Common
     pub const SET_ACK: u16 = 3;
