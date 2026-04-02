@@ -86,3 +86,19 @@ jobs:
 
       - name: Run tests
         run: cargo test ${{ matrix.features }}
+
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        if: runner.os == 'Linux'
+        run: cargo deb --no-build
+
+      - name: Upload .deb artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: target/debian/*.deb
+          retention-days: 30
