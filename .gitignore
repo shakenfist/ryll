@@ -1,6 +1,5 @@
 # Rust build artifacts
 /target/
-Cargo.lock
 
 # Cargo cache (used by devcontainer builds)
 /.cargo-cache/
