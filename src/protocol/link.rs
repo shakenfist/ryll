@@ -276,9 +276,13 @@ pub async fn perform_link(
     channel_type: ChannelType,
     channel_id: u8,
 ) -> Result<SpiceLinkReply> {
-    // Send the same capabilities for all channels — kerbside checks
-    // these and may not forward display updates if caps are missing.
-    let channel_caps = capabilities::DEFAULT_MAIN;
+    // Per-channel capabilities.  The display caps are critical:
+    // without COMPOSITE the guest QXL driver renders via a
+    // software fallback that produces far fewer display updates.
+    let channel_caps = match channel_type {
+        ChannelType::Display => capabilities::DEFAULT_DISPLAY,
+        _ => capabilities::DEFAULT_MAIN,
+    };
 
     // Send link message
     let link_mess = SpiceLinkMess::new(

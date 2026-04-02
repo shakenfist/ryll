@@ -109,8 +109,20 @@ pub mod capabilities {
     pub const MAIN_AGENT_CONNECTED_TOKENS: u32 = 1 << 2;
     pub const MAIN_SEAMLESS_MIGRATE: u32 = 1 << 3;
 
-    // Default main channel caps
     pub const DEFAULT_MAIN: u32 = MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_SEAMLESS_MIGRATE;
+
+    // Display channel capabilities (SPICE_DISPLAY_CAP_*)
+    pub const DISPLAY_SIZED_STREAM: u32 = 1 << 0;
+    pub const DISPLAY_MONITORS_CONFIG: u32 = 1 << 1;
+    pub const DISPLAY_COMPOSITE: u32 = 1 << 2;
+    pub const DISPLAY_A8_SURFACE: u32 = 1 << 3;
+    pub const DISPLAY_LZ4_COMPRESSION: u32 = 1 << 5;
+
+    // Advertise the caps that affect how the guest QXL driver
+    // renders.  Without COMPOSITE the guest falls back to a
+    // software path that produces far fewer display updates.
+    pub const DEFAULT_DISPLAY: u32 =
+        DISPLAY_SIZED_STREAM | DISPLAY_MONITORS_CONFIG | DISPLAY_COMPOSITE | DISPLAY_A8_SURFACE;
 }
 
 /// Authentication mechanism
