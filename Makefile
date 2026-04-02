@@ -18,8 +18,8 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
-.PHONY: all build release clean devcontainer lint lint-fix test help \
-	test-qemu test-qemu-stop
+.PHONY: all build release clean devcontainer ensure-cache lint lint-fix \
+	test help test-qemu test-qemu-stop
 
 all: build
 
@@ -45,8 +45,19 @@ devcontainer:
 $(CARGO_CACHE)/registry $(CARGO_CACHE)/git:
 	mkdir -p $@
 
+# Ensure cargo cache directories are writable by the build user.
+# A previous root-owned docker run can leave these owned by root.
+ensure-cache: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+	@if [ ! -w "$(CARGO_CACHE)/registry" ] || [ ! -w "$(CARGO_CACHE)/git" ]; then \
+		echo "Fixing cargo cache permissions..."; \
+		docker run --rm \
+			-v "$(CURDIR)/$(CARGO_CACHE)":/cache \
+			$(RYLL_IMAGE) \
+			chown -R $(UID):$(GID) /cache; \
+	fi
+
 # Build debug version
-build: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+build: ensure-cache
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
@@ -58,7 +69,7 @@ build: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 		cargo build
 
 # Build release version
-release: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+release: ensure-cache
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
@@ -70,7 +81,7 @@ release: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 		cargo build --release
 
 # Run tests
-test: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+test: ensure-cache
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
@@ -82,7 +93,7 @@ test: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 		cargo test
 
 # Run linting checks (rustfmt + clippy)
-lint: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+lint: ensure-cache
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
@@ -94,7 +105,7 @@ lint: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 		sh -c "cargo fmt --check && cargo clippy -- -D warnings"
 
 # Run linting with auto-fix
-lint-fix: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
+lint-fix: ensure-cache
 	docker run --rm \
 		-v "$(CURDIR)":/workspace \
 		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
