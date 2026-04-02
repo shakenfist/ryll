@@ -115,6 +115,10 @@ src/
 │   ├── cursor.rs        # Cursor position tracking
 │   ├── inputs.rs        # Keyboard scancodes, mouse events
 │   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+├── usbredir/            # usbredir protocol parser
+│   ├── constants.rs     # Message types, capabilities, status codes
+│   ├── messages.rs      # Wire format structs, read/write
+│   └── parser.rs        # Byte-stream parser, unit tests
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)

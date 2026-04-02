@@ -182,6 +182,10 @@ src/
 │   ├── cursor.rs        # Cursor tracking
 │   ├── inputs.rs        # Keyboard/mouse input
 │   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+├── usbredir/
+│   ├── constants.rs     # usbredir message types, capabilities
+│   ├── messages.rs      # Wire format structs, read/write
+│   └── parser.rs        # Byte-stream parser
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression

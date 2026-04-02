@@ -1,8 +1,8 @@
 /// USB redirection channel handler — SpiceVMC transport layer
 ///
 /// Receives SPICEVMC_DATA and SPICEVMC_COMPRESSED_DATA messages from
-/// the server, decompresses LZ4 payloads, and buffers the raw usbredir
-/// protocol bytes for parsing in a later phase.
+/// the server, decompresses LZ4 payloads, and parses the usbredir
+/// protocol messages within.
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -15,6 +15,9 @@ use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
+use crate::usbredir::constants::msg_type_name;
+use crate::usbredir::messages::UsbredirPayload;
+use crate::usbredir::parser::UsbredirParser;
 
 use super::ChannelEvent;
 
@@ -35,9 +38,8 @@ pub struct UsbredirChannel {
     bytes_in: u64,
     bytes_out: u64,
 
-    // Usbredir payload buffer: accumulates deframed VMC data
-    // payloads for the usbredir parser (stubbed in this phase).
-    usbredir_buf: Vec<u8>,
+    // usbredir protocol parser
+    parser: UsbredirParser,
 }
 
 impl UsbredirChannel {
@@ -59,7 +61,7 @@ impl UsbredirChannel {
             last_ack: 0,
             bytes_in: 0,
             bytes_out: 0,
-            usbredir_buf: Vec::with_capacity(65536),
+            parser: UsbredirParser::new(),
         }
     }
 
@@ -200,13 +202,97 @@ impl UsbredirChannel {
     }
 
     async fn handle_vmc_data(&mut self, payload: &[u8]) -> Result<()> {
-        self.usbredir_buf.extend_from_slice(payload);
+        self.parser.feed(payload);
 
-        debug!(
-            "usbredir: received {} bytes VMC data ({} bytes buffered)",
-            payload.len(),
-            self.usbredir_buf.len(),
-        );
+        while let Some(msg) = self.parser.next_message()? {
+            self.handle_usbredir_message(msg).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_usbredir_message(
+        &mut self,
+        msg: crate::usbredir::messages::UsbredirMessage,
+    ) -> Result<()> {
+        let type_name = msg_type_name(match &msg.payload {
+            UsbredirPayload::Hello(_) => 0,
+            UsbredirPayload::DeviceConnect(_) => 1,
+            UsbredirPayload::DeviceDisconnect => 2,
+            UsbredirPayload::Reset => 3,
+            UsbredirPayload::InterfaceInfo(_) => 4,
+            UsbredirPayload::EpInfo(_) => 5,
+            UsbredirPayload::SetConfiguration(_) => 6,
+            UsbredirPayload::GetConfiguration => 7,
+            UsbredirPayload::ConfigurationStatus(_) => 8,
+            UsbredirPayload::SetAltSetting(_) => 9,
+            UsbredirPayload::GetAltSetting(_) => 10,
+            UsbredirPayload::AltSettingStatus(_) => 11,
+            UsbredirPayload::StartInterruptReceiving(_) => 15,
+            UsbredirPayload::StopInterruptReceiving(_) => 16,
+            UsbredirPayload::InterruptReceivingStatus(_) => 17,
+            UsbredirPayload::CancelDataPacket => 21,
+            UsbredirPayload::FilterReject => 22,
+            UsbredirPayload::DeviceDisconnectAck => 24,
+            UsbredirPayload::ControlPacket { .. } => 100,
+            UsbredirPayload::BulkPacket { .. } => 101,
+            UsbredirPayload::InterruptPacket { .. } => 103,
+            UsbredirPayload::Unknown { msg_type, .. } => *msg_type,
+        });
+
+        match &msg.payload {
+            UsbredirPayload::Hello(hello) => {
+                info!(
+                    "usbredir: server hello: version='{}' caps=0x{:08x}",
+                    hello.version, hello.capabilities,
+                );
+            }
+            UsbredirPayload::Reset => {
+                info!("usbredir: reset requested (id={})", msg.id);
+            }
+            UsbredirPayload::SetConfiguration(sc) => {
+                info!(
+                    "usbredir: set_configuration={} (id={})",
+                    sc.configuration, msg.id
+                );
+            }
+            UsbredirPayload::GetConfiguration => {
+                info!("usbredir: get_configuration (id={})", msg.id);
+            }
+            UsbredirPayload::SetAltSetting(sa) => {
+                info!(
+                    "usbredir: set_alt_setting iface={} alt={} (id={})",
+                    sa.interface, sa.alt_setting, msg.id,
+                );
+            }
+            UsbredirPayload::GetAltSetting(ga) => {
+                info!(
+                    "usbredir: get_alt_setting iface={} (id={})",
+                    ga.interface, msg.id
+                );
+            }
+            UsbredirPayload::CancelDataPacket => {
+                info!("usbredir: cancel_data_packet (id={})", msg.id);
+            }
+            UsbredirPayload::FilterReject => {
+                info!("usbredir: filter_reject");
+            }
+            UsbredirPayload::DeviceDisconnectAck => {
+                info!("usbredir: device_disconnect_ack");
+            }
+            UsbredirPayload::Unknown { msg_type, data } => {
+                debug!(
+                    "usbredir: unknown message type={} ({}) len={} (id={})",
+                    msg_type,
+                    type_name,
+                    data.len(),
+                    msg.id,
+                );
+            }
+            _ => {
+                debug!("usbredir: {} (id={})", type_name, msg.id);
+            }
+        }
 
         Ok(())
     }
