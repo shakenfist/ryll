@@ -21,22 +21,15 @@ use tracing_subscriber::prelude::*;
 use crate::capture::CaptureSession;
 use crate::config::{Args, Config};
 
-/// Flag set by the SIGINT handler to request graceful shutdown.
+/// Flag set by the Ctrl+C handler to request graceful shutdown.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-extern "C" fn handle_sigint(_: libc::c_int) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
-}
-
 fn main() -> Result<()> {
-    // Install SIGINT handler so Ctrl+C triggers a graceful shutdown
-    // instead of an immediate process exit (which skips destructors).
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            handle_sigint as *const () as libc::sighandler_t,
-        );
-    }
+    // Install Ctrl+C handler so graceful shutdown works on all platforms.
+    ctrlc::set_handler(|| {
+        SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    })
+    .expect("failed to set Ctrl+C handler");
 
     // Parse command line arguments
     let args = Args::parse();

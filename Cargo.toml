@@ -54,8 +54,8 @@ etherparse = "0.16"
 openh264 = "0.6"
 mp4 = "0.14"
 
-# Signal handling (Ctrl+C graceful shutdown)
-libc = "0.2"
+# Signal handling (Ctrl+C graceful shutdown, cross-platform)
+ctrlc = "3"
 
 # Error handling
 thiserror = "1"
