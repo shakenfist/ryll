@@ -41,6 +41,7 @@ pub struct Args {
     pub latency_file: Option<String>,
 
     /// Directory for protocol/display capture output (pcap + video)
+    #[cfg(feature = "capture")]
     #[arg(long)]
     pub capture: Option<String>,
 }

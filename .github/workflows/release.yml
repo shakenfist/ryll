@@ -1,0 +1,241 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions: {}
+
+jobs:
+  check-version:
+    name: Verify version matches tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version consistency
+        id: check
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          EXPECTED="${TAG_NAME#v}"
+          ACTUAL=$(grep '^version = ' Cargo.toml \
+            | head -1 | sed 's/version = "//;s/"//')
+          echo "Tag: ${TAG_NAME}"
+          echo "Expected version: ${EXPECTED}"
+          echo "Cargo.toml version: ${ACTUAL}"
+
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "mismatch=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+            echo "expected=${EXPECTED}" >> "$GITHUB_OUTPUT"
+            echo "actual=${ACTUAL}" >> "$GITHUB_OUTPUT"
+            echo "::error::Version mismatch: tag ${TAG_NAME} expects ${EXPECTED} but Cargo.toml has ${ACTUAL}"
+            exit 1
+          fi
+
+      - name: File issue on version mismatch
+        if: failure() && steps.check.outputs.mismatch == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Release ${{ steps.check.outputs.tag }}: Cargo.toml version mismatch" \
+            --label "bug" \
+            --body "The release workflow for tag \`${{ steps.check.outputs.tag }}\` failed because the Cargo.toml version does not match the tag.
+
+          - **Tag expects:** ${{ steps.check.outputs.expected }}
+          - **Cargo.toml has:** ${{ steps.check.outputs.actual }}
+
+          To fix: update \`version\` in \`Cargo.toml\`, commit, and re-tag.
+
+          See the [failed workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: check-version
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: ""
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+            features: ""
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: "--no-default-features"
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Get version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config cmake \
+            libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb1-dev \
+            libx11-dev libxkbcommon-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libssl-dev
+
+      - name: Build
+        run: cargo build --release ${{ matrix.features }}
+
+      - name: Run tests
+        run: cargo test ${{ matrix.features }}
+
+      # --- Linux: .deb and .rpm ---
+
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        if: runner.os == 'Linux'
+        run: cargo deb --no-build
+
+      - name: Upload .deb artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-deb
+          path: target/debian/*.deb
+
+      - name: Install cargo-generate-rpm
+        if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm package
+        if: runner.os == 'Linux'
+        run: cargo generate-rpm
+
+      - name: Upload .rpm artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rpm
+          path: target/generate-rpm/*.rpm
+
+      # --- macOS: tarball ---
+
+      - name: Create macOS tarball
+        if: runner.os == 'macOS'
+        run: |
+          cd target/release
+          tar czf "ryll-${VERSION}-${{ matrix.target }}.tar.gz" ryll
+
+      - name: Upload macOS tarball
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: target/release/ryll-*.tar.gz
+
+      # --- Windows: zip ---
+
+      - name: Create Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path target\release\ryll.exe `
+            -DestinationPath "target\release\ryll-${{ env.VERSION }}-${{ matrix.target }}.zip"
+
+      - name: Upload Windows zip
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: target/release/ryll-*.zip
+
+  github-release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            *.deb
+            *.rpm
+            *.tar.gz
+            *.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: github-release
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - name: Get version from tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+
+      - name: Download macOS tarball from release
+        run: |
+          curl -sL -o ryll-macos.tar.gz \
+            "https://github.com/shakenfist/ryll/releases/download/v${VERSION}/ryll-${VERSION}-aarch64-apple-darwin.tar.gz"
+
+      - name: Compute SHA256
+        run: |
+          SHA=$(sha256sum ryll-macos.tar.gz | awk '{print $1}')
+          echo "SHA256=${SHA}" >> "$GITHUB_ENV"
+          echo "SHA256: ${SHA}"
+
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/shakenfist/homebrew-tap.git"
+          cd homebrew-tap
+          sed -i "s/version \".*\"/version \"${VERSION}\"/" Formula/ryll.rb
+          sed -i "s/sha256 \".*\"/sha256 \"${SHA256}\"/" Formula/ryll.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ryll.rb
+          git diff --cached --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Update ryll to ${VERSION}"
+          git push

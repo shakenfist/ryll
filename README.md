@@ -15,8 +15,20 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Statistics tracking** - Frame counts, throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
-- **Graceful Ctrl+C shutdown** - SIGINT sets an AtomicBool flag; the GUI and headless event loops check it and shut down cleanly, ensuring capture files are finalized
+- **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
+
+## Installation
+
+Pre-built `.deb` packages for Debian/Ubuntu are available from
+[GitHub Releases](https://github.com/shakenfist/ryll/releases). See
+[docs/installation.md](docs/installation.md) for all platforms.
+
+## CI
+
+GitHub Actions CI builds and tests ryll on Linux, macOS (Apple Silicon),
+and Windows on every push to `develop` and on pull requests. The workflow
+is at `.github/workflows/ci.yml`.
 
 ## Building
 
@@ -155,7 +167,7 @@ This will:
 
 ```
 src/
-├── main.rs              # CLI entry point, SIGINT handler
+├── main.rs              # CLI entry point, Ctrl+C handler
 ├── app.rs               # egui App, bandwidth sparkline
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
@@ -184,7 +196,7 @@ src/
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
-- **libc** - SIGINT signal handler for graceful shutdown
+- **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version
 
@@ -207,9 +219,11 @@ Additional documentation is available:
 In the `docs/` directory:
 
 - [Documentation Index](docs/index.md) - What ryll is and why it exists
+- [Installation](docs/installation.md) - Pre-built packages and install instructions
 - [Configuration](docs/configuration.md) - CLI options and .vv file format
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
 - [Binary Portability](docs/portability.md) - How to share binaries between machines
+- [Releasing](docs/releasing.md) - How to publish a new release
 
 ## License
 

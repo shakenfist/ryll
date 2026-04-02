@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config cmake \
+            libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb1-dev \
+            libx11-dev libxkbcommon-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libssl-dev
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: ""
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+            features: ""
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: "--no-default-features"
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config cmake \
+            libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb1-dev \
+            libx11-dev libxkbcommon-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libssl-dev
+
+      - name: Build
+        run: cargo build --release ${{ matrix.features }}
+
+      - name: Run tests
+        run: cargo test ${{ matrix.features }}
+
+      - name: Install cargo-deb
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        if: runner.os == 'Linux'
+        run: cargo deb --no-build
+
+      - name: Upload .deb artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: target/debian/*.deb
+          retention-days: 30
+
+      - name: Install cargo-generate-rpm
+        if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm package
+        if: runner.os == 'Linux'
+        run: cargo generate-rpm
+
+      - name: Upload .rpm artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: target/generate-rpm/*.rpm
+          retention-days: 30
+
+      - name: Create macOS tarball
+        if: runner.os == 'macOS'
+        run: |
+          cd target/release
+          tar czf ryll-${{ matrix.target }}.tar.gz ryll
+
+      - name: Upload macOS tarball
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-tarball
+          path: target/release/ryll-*.tar.gz
+          retention-days: 30
+
+      - name: Create Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path target\release\ryll.exe `
+            -DestinationPath target\release\ryll-${{ matrix.target }}.zip
+
+      - name: Upload Windows zip
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: target/release/ryll-*.zip
+          retention-days: 30
