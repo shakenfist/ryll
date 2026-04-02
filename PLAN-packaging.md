@@ -187,13 +187,13 @@ This requires:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Platform portability | PLAN-packaging-phase-01-portability.md | Not started |
-| 2. GitHub Actions CI | PLAN-packaging-phase-02-ci.md | Not started |
-| 3. Debian packaging | PLAN-packaging-phase-03-debian.md | Not started |
-| 4. RPM packaging | PLAN-packaging-phase-04-rpm.md | Not started |
-| 5. macOS packaging | PLAN-packaging-phase-05-macos.md | Not started |
-| 6. Windows packaging | PLAN-packaging-phase-06-windows.md | Not started |
-| 7. Release automation | PLAN-packaging-phase-07-release.md | Not started |
+| 1. Platform portability | PLAN-packaging-phase-01-portability.md | Complete |
+| 2. GitHub Actions CI | PLAN-packaging-phase-02-ci.md | Complete |
+| 3. Debian packaging | PLAN-packaging-phase-03-debian.md | Complete |
+| 4. RPM packaging | PLAN-packaging-phase-04-rpm.md | Complete |
+| 5. macOS packaging | PLAN-packaging-phase-05-macos.md | Complete |
+| 6. Windows packaging | PLAN-packaging-phase-06-windows.md | Complete |
+| 7. Release automation | PLAN-packaging-phase-07-release.md | Complete |
 
 ### Phase 1: Platform portability
 
