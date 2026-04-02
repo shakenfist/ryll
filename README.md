@@ -223,6 +223,7 @@ In the `docs/` directory:
 - [Configuration](docs/configuration.md) - CLI options and .vv file format
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
 - [Binary Portability](docs/portability.md) - How to share binaries between machines
+- [Releasing](docs/releasing.md) - How to publish a new release
 
 ## License
 
