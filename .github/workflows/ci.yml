@@ -102,3 +102,19 @@ jobs:
           name: deb-package
           path: target/debian/*.deb
           retention-days: 30
+
+      - name: Install cargo-generate-rpm
+        if: runner.os == 'Linux'
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm package
+        if: runner.os == 'Linux'
+        run: cargo generate-rpm
+
+      - name: Upload .rpm artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpm-package
+          path: target/generate-rpm/*.rpm
+          retention-days: 30
