@@ -37,7 +37,30 @@ manager.
 
 ## macOS (Homebrew)
 
-*Coming soon.* A Homebrew tap will be available for Apple Silicon Macs.
+Ryll is available for Apple Silicon Macs via a Homebrew tap:
+
+```bash
+brew install shakenfist/tap/ryll
+```
+
+Or add the tap first, then install:
+
+```bash
+brew tap shakenfist/tap
+brew install ryll
+```
+
+Only Apple Silicon (aarch64) is supported. Intel Macs are not
+supported as Apple has dropped security updates for all x86 Macs.
+
+Alternatively, download the tarball from
+[GitHub Releases](https://github.com/shakenfist/ryll/releases)
+and copy the binary to a directory on your `PATH`:
+
+```bash
+tar xzf ryll-0.1.0-aarch64-apple-darwin.tar.gz
+cp ryll /usr/local/bin/
+```
 
 ## Windows
 
