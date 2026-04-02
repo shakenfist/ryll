@@ -172,7 +172,7 @@ impl DisplayChannel {
             buffer: Vec::with_capacity(1024 * 1024), // 1MB buffer for images
             previous_images: HashMap::new(),
             previous_images_order: Vec::new(),
-            max_cached_images: 100,
+            max_cached_images: 1024,
             capture,
             byte_counter,
             ack_generation: 0,
@@ -620,6 +620,36 @@ impl DisplayChannel {
                 } else {
                     warn!("display: image {} not in cache", img_desc.image_id);
                     None
+                }
+            }
+            Some(ImageType::Jpeg) => {
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
+                if image_data.len() < 4 {
+                    warn!("display: JPEG data too short");
+                    None
+                } else {
+                    let data_size = u32::from_le_bytes([
+                        image_data[0],
+                        image_data[1],
+                        image_data[2],
+                        image_data[3],
+                    ]) as usize;
+                    let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
+                    match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            Some(DecompressedImage {
+                                width: rgba.width(),
+                                height: rgba.height(),
+                                pixels: rgba.into_raw(),
+                                image_id: img_desc.image_id,
+                            })
+                        }
+                        Err(e) => {
+                            warn!("display: JPEG decode failed: {}", e);
+                            None
+                        }
+                    }
                 }
             }
             _ => {

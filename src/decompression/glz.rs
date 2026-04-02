@@ -219,6 +219,13 @@ pub fn decompress_glz(
                     }
                 } else {
                     // Image not in dictionary -- leave pixels black
+                    tracing::warn!(
+                        "glz: cross-image ref to id {} not in dictionary \
+                         (current={}, dist={})",
+                        source_id,
+                        image_id,
+                        image_dist
+                    );
                     out_idx += length * 4;
                 }
             }
