@@ -148,10 +148,13 @@ src/
 
 ## Build System
 
-- **Devcontainer** for consistent builds (`.devcontainer/`)
-- **Makefile** for common operations
+- **Devcontainer** for consistent local builds (`.devcontainer/`)
+- **Makefile** for common local operations
 - Cargo cache persisted in `.cargo-cache/` for faster rebuilds
 - **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
+- **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
+  on Linux, macOS (ARM), and Windows on every push to `develop` and
+  on pull requests. CI runs native `cargo` (not Docker).
 
 ### Pre-commit
 
