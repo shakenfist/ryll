@@ -36,6 +36,10 @@ const CSW_SIZE: usize = 13;
 const CSW_STATUS_PASSED: u8 = 0;
 const CSW_STATUS_FAILED: u8 = 1;
 
+// Maximum SCSI transfer size: 2048 blocks = 1 MB. Prevents OOM from
+// a malicious server sending large READ/WRITE commands.
+const MAX_TRANSFER_BLOCKS: u64 = 2048;
+
 // SCSI opcodes
 const SCSI_TEST_UNIT_READY: u8 = 0x00;
 const SCSI_REQUEST_SENSE: u8 = 0x03;
@@ -591,6 +595,11 @@ impl VirtualMsc {
     async fn scsi_read_10(&mut self, cbw: &Cbw) -> ScsiResult {
         let lba = u32::from_be_bytes([cbw.cb[2], cbw.cb[3], cbw.cb[4], cbw.cb[5]]) as u64;
         let transfer_blocks = u16::from_be_bytes([cbw.cb[7], cbw.cb[8]]) as u64;
+
+        if transfer_blocks > MAX_TRANSFER_BLOCKS {
+            return ScsiResult::check_condition(SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
+        }
+
         let byte_count = (transfer_blocks * BLOCK_SIZE as u64) as usize;
 
         if lba + transfer_blocks > self.block_count {
@@ -614,6 +623,10 @@ impl VirtualMsc {
 
         let lba = u32::from_be_bytes([cbw.cb[2], cbw.cb[3], cbw.cb[4], cbw.cb[5]]) as u64;
         let transfer_blocks = u16::from_be_bytes([cbw.cb[7], cbw.cb[8]]) as u64;
+
+        if transfer_blocks > MAX_TRANSFER_BLOCKS {
+            return ScsiResult::check_condition(SENSE_ILLEGAL_REQUEST, 0x20, 0x00);
+        }
 
         if lba + transfer_blocks > self.block_count {
             return ScsiResult::check_condition(SENSE_MEDIUM_ERROR, 0x21, 0x00);

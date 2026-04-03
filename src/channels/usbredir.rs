@@ -269,6 +269,15 @@ impl UsbredirChannel {
         let uncompressed_size = u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
         let compressed = &payload[5..];
 
+        // Cap decompression size to prevent OOM from malicious server
+        if uncompressed_size > 64 * 1024 * 1024 {
+            warn!(
+                "usbredir: decompressed size {} exceeds limit, dropping",
+                uncompressed_size
+            );
+            return Ok(());
+        }
+
         if settings::is_verbose() {
             logging::log_detail(&format!(
                 "type={} uncompressed={} compressed={}",
@@ -487,10 +496,29 @@ impl UsbredirChannel {
             UsbredirPayload::BulkPacket { header, data } => {
                 if let Some(ref mut backend) = self.backend {
                     let ep_in = is_ep_in(header.endpoint);
+                    let actual_len = header.actual_length();
+
+                    // Cap bulk transfer size to prevent OOM from malicious server
+                    if actual_len > 16 * 1024 * 1024 {
+                        warn!("usbredir: bulk transfer too large: {} bytes", actual_len);
+                        let resp_header = BulkPacketHeader {
+                            endpoint: header.endpoint,
+                            status: Status::Inval as u8,
+                            length: 0,
+                            stream_id: header.stream_id,
+                            length_high: 0,
+                        };
+                        let mut buf = Vec::new();
+                        resp_header.write(&mut buf)?;
+                        self.send_usbredir(msg_type::BULK_PACKET, msg.id, &buf)
+                            .await?;
+                        return Ok(());
+                    }
 
                     let result = if ep_in {
-                        let max_len = header.actual_length() as usize;
-                        backend.bulk_in(header.endpoint, max_len).await?
+                        backend
+                            .bulk_in(header.endpoint, actual_len as usize)
+                            .await?
                     } else {
                         backend.bulk_out(header.endpoint, &data).await?
                     };
@@ -660,6 +688,12 @@ impl UsbredirChannel {
     // ── Interrupt polling ──────────────────────────────
 
     async fn start_interrupt_poll(&mut self, endpoint: u8) -> Status {
+        // Limit active interrupt polls to prevent resource exhaustion
+        if self.interrupt_handles.len() >= 32 {
+            warn!("usbredir: too many active interrupt polls");
+            return Status::Ioerror;
+        }
+
         if self.interrupt_handles.contains_key(&endpoint) {
             debug!(
                 "usbredir: interrupt poll already active for ep={}",
@@ -787,27 +821,27 @@ impl UsbredirChannel {
 /// Get a human-readable name for a UsbredirPayload variant.
 fn payload_type_name(payload: &UsbredirPayload) -> &'static str {
     msg_type_name(match payload {
-        UsbredirPayload::Hello(_) => 0,
-        UsbredirPayload::DeviceConnect(_) => 1,
-        UsbredirPayload::DeviceDisconnect => 2,
-        UsbredirPayload::Reset => 3,
-        UsbredirPayload::InterfaceInfo(_) => 4,
-        UsbredirPayload::EpInfo(_) => 5,
-        UsbredirPayload::SetConfiguration(_) => 6,
-        UsbredirPayload::GetConfiguration => 7,
-        UsbredirPayload::ConfigurationStatus(_) => 8,
-        UsbredirPayload::SetAltSetting(_) => 9,
-        UsbredirPayload::GetAltSetting(_) => 10,
-        UsbredirPayload::AltSettingStatus(_) => 11,
-        UsbredirPayload::StartInterruptReceiving(_) => 15,
-        UsbredirPayload::StopInterruptReceiving(_) => 16,
-        UsbredirPayload::InterruptReceivingStatus(_) => 17,
-        UsbredirPayload::CancelDataPacket => 21,
-        UsbredirPayload::FilterReject => 22,
-        UsbredirPayload::DeviceDisconnectAck => 24,
-        UsbredirPayload::ControlPacket { .. } => 100,
-        UsbredirPayload::BulkPacket { .. } => 101,
-        UsbredirPayload::InterruptPacket { .. } => 103,
-        UsbredirPayload::Unknown { msg_type, .. } => *msg_type,
+        UsbredirPayload::Hello(_) => msg_type::HELLO,
+        UsbredirPayload::DeviceConnect(_) => msg_type::DEVICE_CONNECT,
+        UsbredirPayload::DeviceDisconnect => msg_type::DEVICE_DISCONNECT,
+        UsbredirPayload::Reset => msg_type::RESET,
+        UsbredirPayload::InterfaceInfo(_) => msg_type::INTERFACE_INFO,
+        UsbredirPayload::EpInfo(_) => msg_type::EP_INFO,
+        UsbredirPayload::SetConfiguration(_) => msg_type::SET_CONFIGURATION,
+        UsbredirPayload::GetConfiguration => msg_type::GET_CONFIGURATION,
+        UsbredirPayload::ConfigurationStatus(_) => msg_type::CONFIGURATION_STATUS,
+        UsbredirPayload::SetAltSetting(_) => msg_type::SET_ALT_SETTING,
+        UsbredirPayload::GetAltSetting(_) => msg_type::GET_ALT_SETTING,
+        UsbredirPayload::AltSettingStatus(_) => msg_type::ALT_SETTING_STATUS,
+        UsbredirPayload::StartInterruptReceiving(_) => msg_type::START_INTERRUPT_RECEIVING,
+        UsbredirPayload::StopInterruptReceiving(_) => msg_type::STOP_INTERRUPT_RECEIVING,
+        UsbredirPayload::InterruptReceivingStatus(_) => msg_type::INTERRUPT_RECEIVING_STATUS,
+        UsbredirPayload::CancelDataPacket => msg_type::CANCEL_DATA_PACKET,
+        UsbredirPayload::FilterReject => msg_type::FILTER_REJECT,
+        UsbredirPayload::DeviceDisconnectAck => msg_type::DEVICE_DISCONNECT_ACK,
+        UsbredirPayload::ControlPacket { .. } => msg_type::CONTROL_PACKET,
+        UsbredirPayload::BulkPacket { .. } => msg_type::BULK_PACKET,
+        UsbredirPayload::InterruptPacket { .. } => msg_type::INTERRUPT_PACKET,
+        UsbredirPayload::Unknown { msg_type: mt, .. } => *mt,
     })
 }

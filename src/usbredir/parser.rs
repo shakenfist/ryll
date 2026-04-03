@@ -8,6 +8,10 @@ use anyhow::Result;
 use super::constants::msg_type;
 use super::messages::*;
 
+/// Maximum usbredir payload size (16 MB). Rejects messages with larger
+/// payloads to prevent OOM from a malicious server.
+const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
+
 /// Stateful parser that buffers incoming bytes and yields complete
 /// usbredir messages.
 pub struct UsbredirParser {
@@ -34,6 +38,17 @@ impl UsbredirParser {
         }
 
         let header = UsbredirHeader::read(&self.buf)?;
+
+        if header.length > MAX_PAYLOAD_SIZE {
+            // Drain the header and reject — don't accumulate a huge buffer
+            self.buf.drain(..UsbredirHeader::SIZE);
+            anyhow::bail!(
+                "usbredir payload too large: {} bytes (max {})",
+                header.length,
+                MAX_PAYLOAD_SIZE
+            );
+        }
+
         let total = UsbredirHeader::SIZE + header.length as usize;
 
         if self.buf.len() < total {
