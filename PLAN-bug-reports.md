@@ -170,7 +170,7 @@ attach to a bug report or email.
 | 1. Ring buffer infrastructure | [PLAN-bug-reports-phase-01-ring-buffer.md](PLAN-bug-reports-phase-01-ring-buffer.md) | Complete |
 | 2. Channel state snapshots | [PLAN-bug-reports-phase-02-channel-state.md](PLAN-bug-reports-phase-02-channel-state.md) | Complete |
 | 3. Bug report assembly and zip output | [PLAN-bug-reports-phase-03-zip-output.md](PLAN-bug-reports-phase-03-zip-output.md) | Complete |
-| 4. GUI: report button and description dialog | PLAN-bug-reports-phase-04-gui-button.md | Not started |
+| 4. GUI: report button and description dialog | [PLAN-bug-reports-phase-04-gui-button.md](PLAN-bug-reports-phase-04-gui-button.md) | Complete |
 | 5. GUI: display region selection | PLAN-bug-reports-phase-05-region-select.md | Not started |
 | 6. GUI: live traffic viewer | PLAN-bug-reports-phase-06-traffic-viewer.md | Not started |
 | 7. Documentation and testing | PLAN-bug-reports-phase-07-docs.md | Not started |

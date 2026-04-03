@@ -167,6 +167,12 @@ pub struct RyllApp {
     // Connection target for bug report metadata
     target_host: String,
     target_port: u16,
+
+    // Bug report dialog state
+    show_bug_dialog: bool,
+    bug_report_type: BugReportType,
+    bug_description: String,
+    bug_status_message: Option<(String, Instant)>,
 }
 
 impl RyllApp {
@@ -256,6 +262,10 @@ impl RyllApp {
             app_snapshot,
             target_host,
             target_port,
+            show_bug_dialog: false,
+            bug_report_type: BugReportType::Display,
+            bug_description: String::new(),
+            bug_status_message: None,
         }
     }
 
@@ -476,6 +486,12 @@ impl RyllApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        // Don't forward input to the SPICE server when
+        // the bug report dialog is open.
+        if self.show_bug_dialog {
+            return;
+        }
+
         let input_tx = match &self.input_tx {
             Some(tx) => tx.clone(),
             None => return,
@@ -492,6 +508,10 @@ impl RyllApp {
                     ..
                 } = event
                 {
+                    // F12 is consumed by the bug report shortcut
+                    if *key == egui::Key::F12 {
+                        continue;
+                    }
                     if let Some((down_code, up_code)) = key_to_scancode(*key) {
                         let ev = if *pressed {
                             InputEvent::KeyDown(down_code)
@@ -555,6 +575,31 @@ impl eframe::App for RyllApp {
         // Tick the bandwidth tracker
         self.bandwidth.tick();
 
+        // Expire old status messages
+        if let Some((_, created)) = &self.bug_status_message {
+            if created.elapsed() >= Duration::from_secs(5) {
+                self.bug_status_message = None;
+            }
+        }
+
+        // F12 toggles bug report dialog
+        let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
+        if f12_pressed {
+            self.show_bug_dialog = !self.show_bug_dialog;
+            if self.show_bug_dialog {
+                self.bug_report_type = BugReportType::Display;
+                self.bug_description.clear();
+            }
+        }
+
+        // Escape closes the dialog
+        if self.show_bug_dialog {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                self.show_bug_dialog = false;
+            }
+        }
+
         // Handle input
         self.handle_input(ctx);
 
@@ -601,48 +646,56 @@ impl eframe::App for RyllApp {
                             .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
                     }
 
-                    // Handle mouse input on the surface
-                    if let Some(tx) = &self.input_tx {
-                        // Send mouse position only when it changes
-                        if let Some(pos) = response.hover_pos() {
-                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
-                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                            if self.last_mouse_pos != Some((x, y)) {
-                                self.last_mouse_pos = Some((x, y));
-                                let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                    // Handle mouse input on the surface (suppressed when dialog is open)
+                    if !self.show_bug_dialog {
+                        if let Some(tx) = &self.input_tx {
+                            // Send mouse position only when it changes
+                            if let Some(pos) = response.hover_pos() {
+                                let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                                let y = (pos.y - response.rect.min.y).max(0.0) as u32;
+                                if self.last_mouse_pos != Some((x, y)) {
+                                    self.last_mouse_pos = Some((x, y));
+                                    let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                                }
                             }
-                        }
 
-                        // Mouse buttons — use the raw pointer state from egui
-                        // so press and release are sent at the correct times,
-                        // not batched together on release like clicked_by().
-                        ctx.input(|i| {
-                            let pos = self.last_mouse_pos.unwrap_or((0, 0));
-                            for button in [
-                                egui::PointerButton::Primary,
-                                egui::PointerButton::Secondary,
-                                egui::PointerButton::Middle,
-                            ] {
-                                if i.pointer.button_pressed(button) {
-                                    let spice_btn = mouse_button_to_spice(button);
-                                    let _ = tx.try_send(InputEvent::MouseDown {
-                                        button: spice_btn,
-                                        x: pos.0,
-                                        y: pos.1,
-                                    });
-                                    debug!("app: mouse down {:?} at ({},{})", button, pos.0, pos.1);
+                            // Mouse buttons — use the raw pointer state from egui
+                            // so press and release are sent at the correct times,
+                            // not batched together on release like clicked_by().
+                            ctx.input(|i| {
+                                let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                                for button in [
+                                    egui::PointerButton::Primary,
+                                    egui::PointerButton::Secondary,
+                                    egui::PointerButton::Middle,
+                                ] {
+                                    if i.pointer.button_pressed(button) {
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        let _ = tx.try_send(InputEvent::MouseDown {
+                                            button: spice_btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        debug!(
+                                            "app: mouse down {:?} at ({},{})",
+                                            button, pos.0, pos.1
+                                        );
+                                    }
+                                    if i.pointer.button_released(button) {
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        let _ = tx.try_send(InputEvent::MouseUp {
+                                            button: spice_btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        debug!(
+                                            "app: mouse up {:?} at ({},{})",
+                                            button, pos.0, pos.1
+                                        );
+                                    }
                                 }
-                                if i.pointer.button_released(button) {
-                                    let spice_btn = mouse_button_to_spice(button);
-                                    let _ = tx.try_send(InputEvent::MouseUp {
-                                        button: spice_btn,
-                                        x: pos.0,
-                                        y: pos.1,
-                                    });
-                                    debug!("app: mouse up {:?} at ({},{})", button, pos.0, pos.1);
-                                }
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -703,7 +756,7 @@ impl eframe::App for RyllApp {
                         ui.label(format!("USB: {}", desc));
                     }
 
-                    // Bandwidth sparkline (right-aligned)
+                    // Bandwidth sparkline and bug report button (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(self.bandwidth.label());
                         if self.bandwidth.history.len() >= 2 {
@@ -732,9 +785,111 @@ impl eframe::App for RyllApp {
                                 painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
                             }
                         }
+
+                        ui.separator();
+                        if ui.small_button("Report").clicked() {
+                            self.show_bug_dialog = true;
+                            self.bug_report_type = BugReportType::Display;
+                            self.bug_description.clear();
+                        }
+
+                        // Transient status message from bug report
+                        if let Some((ref msg, created)) = self.bug_status_message {
+                            if created.elapsed() < Duration::from_secs(5) {
+                                ui.separator();
+                                ui.label(msg);
+                            }
+                        }
                     });
                 });
             });
+
+        // Bug report dialog (two-pass: render then act)
+        let mut dialog_action = None;
+        if self.show_bug_dialog {
+            egui::Window::new("Bug Report")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(350.0);
+
+                    ui.label(
+                        "Bug reports may contain sensitive data including \
+                         screen contents, typed keystrokes, and protocol \
+                         traffic. Review the report before sharing and \
+                         ensure no confidential information is visible on \
+                         screen or was recently typed.",
+                    );
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ui.label("Report type:");
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Display,
+                        "Display (screenshot + image state)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Input,
+                        "Input (keyboard + mouse state)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Cursor,
+                        "Cursor (cursor cache + position)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Connection,
+                        "Connection (session + main channel)",
+                    );
+
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ui.label("Description (optional):");
+                    ui.text_edit_singleline(&mut self.bug_description);
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Capture").clicked() {
+                            dialog_action = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            dialog_action = Some(false);
+                        }
+                    });
+                });
+        }
+
+        // Execute dialog action outside the closure
+        match dialog_action {
+            Some(true) => {
+                let report_type = self.bug_report_type;
+                let description = self.bug_description.clone();
+                match self.generate_bug_report(report_type, description, None) {
+                    Ok(path) => {
+                        let msg = format!("Bug report saved to {}", path.display());
+                        info!("app: {}", msg);
+                        self.bug_status_message = Some((msg, Instant::now()));
+                    }
+                    Err(e) => {
+                        let msg = format!("Bug report failed: {}", e);
+                        error!("app: {}", msg);
+                        self.bug_status_message = Some((msg, Instant::now()));
+                    }
+                }
+                self.show_bug_dialog = false;
+            }
+            Some(false) => {
+                self.show_bug_dialog = false;
+            }
+            None => {}
+        }
 
         // Create a default cursor if the server hasn't sent one yet
         if self.cursor_image.is_none() && self.connected {

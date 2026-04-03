@@ -477,6 +477,30 @@ directory.
 that collects surface pixels, constructs the `BugReport`, and
 writes the zip.
 
+## Bug Report Dialog
+
+Pressing **F12** or clicking the **Report** button in the status
+bar opens a centred modal dialog for generating bug reports.  The
+dialog contains:
+
+1. A privacy warning about sensitive data in reports.
+2. Radio buttons to select the report type (Display, Input,
+   Cursor, Connection).
+3. An optional description text field.
+4. Capture and Cancel buttons.
+
+While the dialog is open, keyboard and mouse input is not forwarded
+to the SPICE server.  F12 is always consumed by ryll (never sent to
+the guest).  Escape closes the dialog.
+
+The dialog uses a **two-pass pattern** to avoid egui borrow checker
+conflicts: the UI is rendered in a closure that collects the user's
+action into a local variable, then the action is executed on `self`
+after the closure returns.
+
+After a successful report, a transient status message ("Bug report
+saved to ...") is displayed in the status bar for 5 seconds.
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.

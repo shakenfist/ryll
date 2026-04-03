@@ -98,7 +98,7 @@ Ryll uses:
 src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
-│                        #   bandwidth sparkline
+│                        #   bandwidth sparkline, bug report dialog
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
 │                        #   TrafficRingBuffer, TrafficBuffers),
 │                        #   channel state snapshots (DisplaySnapshot,
