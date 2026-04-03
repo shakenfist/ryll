@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::bugreport::TrafficBuffers;
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
@@ -152,6 +153,10 @@ pub struct RyllApp {
 
     // USB device status
     usb_device_description: Option<String>,
+
+    // Traffic ring buffers (always active, for bug reports and traffic viewer)
+    #[allow(dead_code)]
+    traffic: Arc<TrafficBuffers>,
 }
 
 impl RyllApp {
@@ -169,12 +174,16 @@ impl RyllApp {
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
 
+        // Traffic ring buffers (always active)
+        let traffic = Arc::new(TrafficBuffers::new());
+
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let ctx = cc.egui_ctx.clone();
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
+        let traffic_clone = traffic.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -186,6 +195,7 @@ impl RyllApp {
                     virtual_disks,
                     capture_clone,
                     counter_clone,
+                    traffic_clone,
                 )
                 .await
                 {
@@ -216,6 +226,7 @@ impl RyllApp {
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
             usb_device_description: None,
+            traffic,
         }
     }
 
@@ -733,6 +744,7 @@ async fn run_connection(
     virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -748,6 +760,7 @@ async fn run_connection(
         event_tx_clone,
         capture.clone(),
         byte_counter.clone(),
+        traffic.clone(),
     );
 
     // Spawn main channel task
@@ -811,6 +824,7 @@ async fn run_connection(
                     event_tx.clone(),
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -824,6 +838,7 @@ async fn run_connection(
                     event_tx.clone(),
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -838,6 +853,7 @@ async fn run_connection(
                     input_rx,
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -898,6 +914,9 @@ pub async fn run_headless(
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
 
+    // Traffic ring buffers (always active)
+    let traffic = Arc::new(TrafficBuffers::new());
+
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
         run_connection(
@@ -907,6 +926,7 @@ pub async fn run_headless(
             virtual_disks,
             capture,
             byte_counter,
+            traffic,
         )
         .await
     });

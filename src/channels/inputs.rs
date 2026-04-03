@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::app::ByteCounter;
+use crate::bugreport::TrafficBuffers;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -33,6 +34,7 @@ pub struct InputsChannel {
     motion_count: u32,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -44,6 +46,7 @@ impl InputsChannel {
         input_rx: mpsc::Receiver<InputEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -55,6 +58,7 @@ impl InputsChannel {
             motion_count: 0,
             capture,
             byte_counter,
+            traffic,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -166,6 +170,15 @@ impl InputsChannel {
             if self.buffer.len() < total_size {
                 break;
             }
+
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "inputs",
+                header.message_type,
+                message_names::inputs_server(header.message_type),
+                &raw,
+            );
 
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
             self.buffer.drain(..total_size);
@@ -279,9 +292,8 @@ impl InputsChannel {
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
-                // Only log keystrokes with --intimate flag
                 info!("inputs: key down: scancode={:#x}", scancode);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
             }
 
             InputEvent::KeyUp(scancode) => {
@@ -290,7 +302,7 @@ impl InputsChannel {
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
                 info!("inputs: key up: scancode={:#x}", scancode);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::KEY_UP, &msg).await?;
             }
 
             InputEvent::MouseMove { x, y } => {
@@ -299,7 +311,8 @@ impl InputsChannel {
                     let mut payload = Vec::new();
                     MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
-                    self.send(&msg).await?;
+                    self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
+                        .await?;
                     self.motion_count += 1;
                 }
             }
@@ -309,7 +322,8 @@ impl InputsChannel {
                 let mut pos_payload = Vec::new();
                 MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
-                self.send(&pos_msg).await?;
+                self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
+                    .await?;
 
                 self.button_state |= button;
 
@@ -320,7 +334,7 @@ impl InputsChannel {
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
                     button, x, y, self.button_state
                 );
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::MOUSE_PRESS, &msg).await?;
             }
 
             InputEvent::MouseUp { button, x, y } => {
@@ -330,7 +344,8 @@ impl InputsChannel {
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
                 debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
+                    .await?;
             }
         }
 
@@ -341,15 +356,16 @@ impl InputsChannel {
         let mut payload = Vec::new();
         InputsKeyModifiers::write(modifiers, &mut payload)?;
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
-        self.send(&msg).await
+        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg).await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::inputs_client(msg_type);
         if settings::is_verbose() || settings::is_intimate() {
-            let msg_type_str = message_names::inputs_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "inputs", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "inputs", msg_type, msg_name, payload_size);
         }
+        self.traffic.record_sent("inputs", msg_type, msg_name, data);
         self.send(data).await
     }
 

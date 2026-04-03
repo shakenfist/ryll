@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
+use crate::bugreport::TrafficBuffers;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -24,6 +25,7 @@ pub struct CursorChannel {
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -38,6 +40,7 @@ impl CursorChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
     ) -> Self {
         CursorChannel {
             stream,
@@ -46,6 +49,7 @@ impl CursorChannel {
             cursor_cache: HashMap::new(),
             capture,
             byte_counter,
+            traffic,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -104,6 +108,15 @@ impl CursorChannel {
             if self.buffer.len() < total_size {
                 break;
             }
+
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "cursor",
+                header.message_type,
+                message_names::cursor_server(header.message_type),
+                &raw,
+            );
 
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
             self.buffer.drain(..total_size);
@@ -368,11 +381,12 @@ impl CursorChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::cursor_client(msg_type);
         if settings::is_verbose() {
-            let msg_type_str = message_names::cursor_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "cursor", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "cursor", msg_type, msg_name, payload_size);
         }
+        self.traffic.record_sent("cursor", msg_type, msg_name, data);
         self.send(data).await
     }
 

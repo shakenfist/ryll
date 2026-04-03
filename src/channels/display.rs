@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 use std::sync::Arc;
 
 use crate::app::ByteCounter;
+use crate::bugreport::TrafficBuffers;
 use crate::capture::CaptureSession;
 use crate::decompression::{decompress_glz, decompress_lz, DecompressedImage};
 use crate::protocol::link::SpiceStream;
@@ -150,6 +151,7 @@ pub struct DisplayChannel {
     previous_images: HashMap<u64, Vec<u8>>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -164,6 +166,7 @@ impl DisplayChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
     ) -> Self {
         DisplayChannel {
             stream,
@@ -172,6 +175,7 @@ impl DisplayChannel {
             previous_images: HashMap::new(),
             capture,
             byte_counter,
+            traffic,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -256,6 +260,15 @@ impl DisplayChannel {
                 // Wait for more data
                 break;
             }
+
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "display",
+                header.message_type,
+                message_names::display_server(header.message_type),
+                &raw,
+            );
 
             // Extract message payload
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
@@ -759,11 +772,13 @@ impl DisplayChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::display_client(msg_type);
         if settings::is_verbose() {
-            let msg_type_str = message_names::display_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "display", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "display", msg_type, msg_name, payload_size);
         }
+        self.traffic
+            .record_sent("display", msg_type, msg_name, data);
         self.send(data).await
     }
 

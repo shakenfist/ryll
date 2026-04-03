@@ -99,6 +99,8 @@ src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
 │                        #   bandwidth sparkline
+├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
+│                        #   TrafficRingBuffer, TrafficBuffers)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args

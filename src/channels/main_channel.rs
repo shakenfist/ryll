@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
+use crate::bugreport::TrafficBuffers;
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -23,6 +24,7 @@ pub struct MainChannel {
     session_id: Option<u32>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -33,6 +35,7 @@ impl MainChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
     ) -> Self {
         MainChannel {
             stream,
@@ -41,6 +44,7 @@ impl MainChannel {
             session_id: None,
             capture,
             byte_counter,
+            traffic,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -101,6 +105,15 @@ impl MainChannel {
                 // Wait for more data
                 break;
             }
+
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "main",
+                header.message_type,
+                message_names::main_server(header.message_type),
+                &raw,
+            );
 
             // Extract message payload
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
@@ -279,11 +292,12 @@ impl MainChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::main_client(msg_type);
         if settings::is_verbose() {
-            let msg_type_str = message_names::main_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "main", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "main", msg_type, msg_name, payload_size);
         }
+        self.traffic.record_sent("main", msg_type, msg_name, data);
         self.send(data).await
     }
 

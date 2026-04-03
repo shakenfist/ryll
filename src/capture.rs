@@ -108,7 +108,7 @@ impl PcapChannelWriter {
 }
 
 /// Build a fake Ethernet + IPv4 + TCP frame wrapping `payload`.
-fn build_tcp_frame(
+pub(crate) fn build_tcp_frame(
     src_ip: [u8; 4],
     src_port: u16,
     dst_ip: [u8; 4],
@@ -147,7 +147,7 @@ fn build_tcp_frame(
 }
 
 /// Map channel name to a unique client port number.
-fn channel_port(channel: &str) -> u16 {
+pub(crate) fn channel_port(channel: &str) -> u16 {
     match channel {
         "main" => 10001,
         "display" => 10002,

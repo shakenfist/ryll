@@ -410,6 +410,21 @@ Ryll tracks:
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
 
+## Traffic Ring Buffer
+
+Every SPICE message (sent and received) is recorded in a per-channel
+ring buffer regardless of whether `--capture` is active. The ring
+buffer retains the most recent traffic up to a 50 MB total cap
+(12.5 MB per channel). Each entry stores structured metadata (channel
+name, direction, message type ID and human-readable name, wire and
+payload sizes, timestamp) alongside a full pcap frame for export.
+
+The `TrafficBuffers` struct in `src/bugreport.rs` holds all four
+per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
+shared via `Arc<TrafficBuffers>` between all channel handler tasks
+and the UI thread. This supports both bug report export (Phase 3)
+and a live traffic viewer (Phase 6).
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.
