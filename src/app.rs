@@ -9,8 +9,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
-    AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion, SurfaceInfo,
-    TrafficBuffers,
+    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion,
+    SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
 };
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
@@ -34,6 +34,12 @@ const BANDWIDTH_HISTORY_LEN: usize = 60;
 
 /// Number of recent frame timestamps kept for the FPS sliding window.
 const FPS_WINDOW_SIZE: usize = 120;
+
+/// Maximum entries shown in the traffic viewer.
+const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
+
+/// How often the traffic viewer refreshes from the ring buffers.
+const TRAFFIC_VIEWER_REFRESH_MS: u64 = 250;
 
 /// Statistics tracking
 #[derive(Default)]
@@ -178,6 +184,17 @@ pub struct RyllApp {
     region_select_active: bool,
     region_drag_start: Option<(u32, u32)>,
     region_drag_end: Option<(u32, u32)>,
+
+    // Traffic viewer state
+    show_traffic_viewer: bool,
+    traffic_viewer_entries: Vec<TrafficViewEntry>,
+    traffic_viewer_last_refresh: Instant,
+    traffic_viewer_paused: bool,
+    traffic_filter_main: bool,
+    traffic_filter_display: bool,
+    traffic_filter_inputs: bool,
+    traffic_filter_cursor: bool,
+    traffic_filter_usbredir: bool,
 }
 
 impl RyllApp {
@@ -274,6 +291,15 @@ impl RyllApp {
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
+            show_traffic_viewer: false,
+            traffic_viewer_entries: Vec::new(),
+            traffic_viewer_last_refresh: Instant::now(),
+            traffic_viewer_paused: false,
+            traffic_filter_main: true,
+            traffic_filter_display: true,
+            traffic_filter_inputs: true,
+            traffic_filter_cursor: true,
+            traffic_filter_usbredir: true,
         }
     }
 
@@ -515,8 +541,8 @@ impl RyllApp {
                     ..
                 } = event
                 {
-                    // F12 is consumed by the bug report shortcut
-                    if *key == egui::Key::F12 {
+                    // F11/F12 are consumed by the traffic viewer / bug report shortcuts
+                    if *key == egui::Key::F11 || *key == egui::Key::F12 {
                         continue;
                     }
                     if let Some((down_code, up_code)) = key_to_scancode(*key) {
@@ -625,6 +651,14 @@ impl eframe::App for RyllApp {
             }
         }
 
+        // F11 toggles traffic viewer (not during region selection)
+        if !self.region_select_active {
+            let f11_pressed = ctx.input(|i| i.key_pressed(egui::Key::F11));
+            if f11_pressed {
+                self.show_traffic_viewer = !self.show_traffic_viewer;
+            }
+        }
+
         // Escape closes the dialog
         if self.show_bug_dialog {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -638,6 +672,206 @@ impl eframe::App for RyllApp {
 
         // Handle cadence mode
         self.handle_cadence();
+
+        // Refresh traffic viewer entries periodically
+        if self.show_traffic_viewer
+            && !self.traffic_viewer_paused
+            && self.traffic_viewer_last_refresh.elapsed()
+                >= Duration::from_millis(TRAFFIC_VIEWER_REFRESH_MS)
+        {
+            self.traffic_viewer_entries =
+                self.traffic.recent_view_entries(TRAFFIC_VIEWER_MAX_ENTRIES);
+            self.traffic_viewer_last_refresh = Instant::now();
+        }
+
+        // Statistics panel (bottom) — rendered before CentralPanel
+        // so egui reserves its space correctly.
+        let stats_frame = egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .fill(ctx.style().visuals.panel_fill);
+        egui::TopBottomPanel::bottom("stats")
+            .frame(stats_frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(latency) = self.stats.last_latency {
+                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+                        ui.separator();
+                    }
+
+                    // Sliding-window FPS from DisplayMark timestamps
+                    if self.stats.frame_times.len() >= 2 {
+                        let oldest = self.stats.frame_times.first().unwrap();
+                        let newest = self.stats.frame_times.last().unwrap();
+                        let elapsed = newest.duration_since(*oldest).as_secs_f64();
+                        if elapsed > 0.0 {
+                            let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
+                            ui.label(format!("FPS: {:.1}", fps));
+                        }
+                    }
+
+                    ui.separator();
+                    if self.mouse_mode == 1 {
+                        ui.label("Cursor: server mode");
+                    } else {
+                        ui.label(format!(
+                            "Cursor: ({}, {}) {}",
+                            self.cursor_pos.0,
+                            self.cursor_pos.1,
+                            if self.cursor_visible {
+                                "visible"
+                            } else {
+                                "hidden"
+                            }
+                        ));
+                    }
+
+                    if self.cadence_enabled {
+                        ui.separator();
+                        ui.label("Cadence: ON");
+                    }
+
+                    if let Some(ref desc) = self.usb_device_description {
+                        ui.separator();
+                        ui.label(format!("USB: {}", desc));
+                    }
+
+                    // Bandwidth sparkline and buttons (right-aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(self.bandwidth.label());
+                        if self.bandwidth.history.len() >= 2 {
+                            let max_val = self
+                                .bandwidth
+                                .history
+                                .iter()
+                                .cloned()
+                                .fold(1.0f32, f32::max);
+                            let sparkline_w = 80.0;
+                            let sparkline_h = 12.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(sparkline_w, sparkline_h),
+                                egui::Sense::hover(),
+                            );
+                            let painter = ui.painter_at(rect);
+                            let n = self.bandwidth.history.len();
+                            let bar_w = sparkline_w / n as f32;
+                            for (i, &val) in self.bandwidth.history.iter().enumerate() {
+                                let h = (val / max_val) * sparkline_h;
+                                let x = rect.min.x + i as f32 * bar_w;
+                                let bar = egui::Rect::from_min_max(
+                                    egui::pos2(x, rect.max.y - h),
+                                    egui::pos2(x + bar_w - 0.5, rect.max.y),
+                                );
+                                painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
+                            }
+                        }
+
+                        ui.separator();
+                        if ui.small_button("Traffic").clicked() {
+                            self.show_traffic_viewer = !self.show_traffic_viewer;
+                        }
+                        if ui.small_button("Report").clicked() {
+                            self.show_bug_dialog = true;
+                            self.bug_report_type = BugReportType::Display;
+                            self.bug_description.clear();
+                        }
+
+                        // Transient status message from bug report
+                        if let Some((ref msg, created)) = self.bug_status_message {
+                            if created.elapsed() < Duration::from_secs(5) {
+                                ui.separator();
+                                ui.label(msg);
+                            }
+                        }
+                    });
+                });
+            });
+
+        // Traffic viewer side panel (conditional)
+        if self.show_traffic_viewer {
+            egui::SidePanel::right("traffic_viewer")
+                .default_width(350.0)
+                .show(ctx, |ui| {
+                    // Header
+                    ui.horizontal(|ui| {
+                        ui.heading("Traffic");
+                        if ui
+                            .small_button(if self.traffic_viewer_paused {
+                                "Resume"
+                            } else {
+                                "Pause"
+                            })
+                            .clicked()
+                        {
+                            self.traffic_viewer_paused = !self.traffic_viewer_paused;
+                        }
+                        ui.label(format!("{} msgs", self.traffic_viewer_entries.len()));
+                    });
+
+                    // Channel filters
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.traffic_filter_main, "Main");
+                        ui.checkbox(&mut self.traffic_filter_display, "Display");
+                        ui.checkbox(&mut self.traffic_filter_inputs, "Inputs");
+                        ui.checkbox(&mut self.traffic_filter_cursor, "Cursor");
+                        ui.checkbox(&mut self.traffic_filter_usbredir, "USB");
+                    });
+                    ui.separator();
+
+                    // Scrollable message list
+                    let stick = !self.traffic_viewer_paused;
+                    let now_elapsed = self.traffic.elapsed();
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(stick)
+                        .show(ui, |ui| {
+                            for entry in &self.traffic_viewer_entries {
+                                // Apply channel filter
+                                let visible = match entry.channel {
+                                    "main" => self.traffic_filter_main,
+                                    "display" => self.traffic_filter_display,
+                                    "inputs" => self.traffic_filter_inputs,
+                                    "cursor" => self.traffic_filter_cursor,
+                                    "usbredir" => self.traffic_filter_usbredir,
+                                    _ => true,
+                                };
+                                if !visible {
+                                    continue;
+                                }
+
+                                let relative =
+                                    entry.timestamp.as_secs_f64() - now_elapsed.as_secs_f64();
+                                let dir = match entry.direction {
+                                    TrafficDirection::Sent => "\u{2192}",
+                                    TrafficDirection::Received => "\u{2190}",
+                                };
+                                let channel_color = match entry.channel {
+                                    "main" => egui::Color32::from_rgb(120, 160, 255),
+                                    "display" => egui::Color32::from_rgb(100, 200, 100),
+                                    "inputs" => egui::Color32::from_rgb(255, 180, 80),
+                                    "cursor" => egui::Color32::from_rgb(200, 130, 255),
+                                    "usbredir" => egui::Color32::from_rgb(255, 100, 100),
+                                    _ => egui::Color32::GRAY,
+                                };
+                                let size_str = format_size(entry.wire_size);
+
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!("{:>7.1}s", relative));
+                                    ui.colored_label(
+                                        channel_color,
+                                        format!("{:<8}", entry.channel),
+                                    );
+                                    ui.monospace(dir);
+                                    ui.label(entry.message_name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.monospace(size_str);
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                });
+        }
 
         // Main display area (no margin so the surface fills edge-to-edge)
         let panel_frame = egui::Frame::none().inner_margin(0.0);
@@ -741,104 +975,6 @@ impl eframe::App for RyllApp {
                         ui.label("Waiting for display...");
                     });
                 }
-            });
-
-        // Statistics panel (bottom)
-        let stats_frame = egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-            .fill(ctx.style().visuals.panel_fill);
-        egui::TopBottomPanel::bottom("stats")
-            .frame(stats_frame)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if let Some(latency) = self.stats.last_latency {
-                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
-                        ui.separator();
-                    }
-
-                    // Sliding-window FPS from DisplayMark timestamps
-                    if self.stats.frame_times.len() >= 2 {
-                        let oldest = self.stats.frame_times.first().unwrap();
-                        let newest = self.stats.frame_times.last().unwrap();
-                        let elapsed = newest.duration_since(*oldest).as_secs_f64();
-                        if elapsed > 0.0 {
-                            let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
-                            ui.label(format!("FPS: {:.1}", fps));
-                        }
-                    }
-
-                    ui.separator();
-                    if self.mouse_mode == 1 {
-                        ui.label("Cursor: server mode");
-                    } else {
-                        ui.label(format!(
-                            "Cursor: ({}, {}) {}",
-                            self.cursor_pos.0,
-                            self.cursor_pos.1,
-                            if self.cursor_visible {
-                                "visible"
-                            } else {
-                                "hidden"
-                            }
-                        ));
-                    }
-
-                    if self.cadence_enabled {
-                        ui.separator();
-                        ui.label("Cadence: ON");
-                    }
-
-                    if let Some(ref desc) = self.usb_device_description {
-                        ui.separator();
-                        ui.label(format!("USB: {}", desc));
-                    }
-
-                    // Bandwidth sparkline and bug report button (right-aligned)
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(self.bandwidth.label());
-                        if self.bandwidth.history.len() >= 2 {
-                            let max_val = self
-                                .bandwidth
-                                .history
-                                .iter()
-                                .cloned()
-                                .fold(1.0f32, f32::max);
-                            let sparkline_w = 80.0;
-                            let sparkline_h = 12.0;
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(sparkline_w, sparkline_h),
-                                egui::Sense::hover(),
-                            );
-                            let painter = ui.painter_at(rect);
-                            let n = self.bandwidth.history.len();
-                            let bar_w = sparkline_w / n as f32;
-                            for (i, &val) in self.bandwidth.history.iter().enumerate() {
-                                let h = (val / max_val) * sparkline_h;
-                                let x = rect.min.x + i as f32 * bar_w;
-                                let bar = egui::Rect::from_min_max(
-                                    egui::pos2(x, rect.max.y - h),
-                                    egui::pos2(x + bar_w - 0.5, rect.max.y),
-                                );
-                                painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
-                            }
-                        }
-
-                        ui.separator();
-                        if ui.small_button("Report").clicked() {
-                            self.show_bug_dialog = true;
-                            self.bug_report_type = BugReportType::Display;
-                            self.bug_description.clear();
-                        }
-
-                        // Transient status message from bug report
-                        if let Some((ref msg, created)) = self.bug_status_message {
-                            if created.elapsed() < Duration::from_secs(5) {
-                                ui.separator();
-                                ui.label(msg);
-                            }
-                        }
-                    });
-                });
             });
 
         // Bug report dialog (two-pass: render then act)

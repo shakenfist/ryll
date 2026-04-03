@@ -422,8 +422,8 @@ payload sizes, timestamp) alongside a full pcap frame for export.
 The `TrafficBuffers` struct in `src/bugreport.rs` holds all four
 per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
 shared via `Arc<TrafficBuffers>` between all channel handler tasks
-and the UI thread. This supports both bug report export (Phase 3)
-and a live traffic viewer (Phase 6).
+and the UI thread. This supports both bug report export
+and the live traffic viewer.
 
 ## Channel State Snapshots
 
@@ -431,7 +431,7 @@ Each channel handler maintains an `Arc<Mutex<T>>` snapshot struct
 that captures the channel's mutable state. The snapshots are updated
 in-place after every batch of processed messages and after every sent
 message. All snapshot structs derive `serde::Serialize` so they can be
-written to JSON for bug reports (Phase 3).
+written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
@@ -519,6 +519,29 @@ closes and the app enters **region selection mode**:
 
 Keyboard and mouse input is not forwarded to the SPICE server
 during selection.  Coordinates are clamped to the surface bounds.
+
+## Live Traffic Viewer
+
+Pressing **F11** or clicking the **Traffic** button in the status
+bar toggles a right-side panel showing a live feed of recent SPICE
+protocol messages from the ring buffer.
+
+The viewer collects entries from all four channels via
+`TrafficBuffers::recent_view_entries()`, which returns lightweight
+`TrafficViewEntry` structs (no pcap frame data).  Entries are cached
+in `RyllApp` and refreshed every 250ms to minimise mutex contention.
+
+Features:
+- **Channel filters**: checkboxes to hide/show individual channels
+- **Pause/Resume**: freezes the display for inspection
+- **Auto-scroll**: sticks to the bottom when not paused
+- **Colour-coded channels**: main=blue, display=green, inputs=orange,
+  cursor=purple
+
+Each row shows: relative timestamp, channel name, direction arrow
+(sent/received), message name, and wire size.
+
+F11 is consumed by ryll and not forwarded to the SPICE server.
 
 ## Keyboard Scancodes
 

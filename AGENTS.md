@@ -98,14 +98,16 @@ Ryll uses:
 src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
-│                        #   bandwidth sparkline, bug report dialog
+│                        #   bandwidth sparkline, bug report dialog,
+│                        #   live traffic viewer panel
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
 │                        #   TrafficRingBuffer, TrafficBuffers),
 │                        #   channel state snapshots (DisplaySnapshot,
 │                        #   InputsSnapshot, CursorSnapshot,
 │                        #   MainSnapshot, AppSnapshot,
 │                        #   ChannelSnapshots), bug report assembly
-│                        #   (BugReport, BugReportType, ReportMetadata)
+│                        #   (BugReport, BugReportType, ReportMetadata),
+│                        #   traffic viewer (TrafficViewEntry)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args

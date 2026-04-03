@@ -24,7 +24,6 @@ pub enum TrafficDirection {
 
 /// A single protocol message recorded in the ring buffer.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields read in later phases (traffic viewer, bug report zip)
 pub struct TrafficEntry {
     /// Time elapsed since session start.
     pub timestamp: Duration,
@@ -44,6 +43,26 @@ pub struct TrafficEntry {
     /// payload).  Used by `drain_to_pcap()` for bug report
     /// export.
     pub pcap_frame: Vec<u8>,
+}
+
+/// Lightweight traffic entry for the viewer (no pcap frame).
+#[derive(Clone)]
+#[allow(dead_code)] // some fields reserved for future use (hex dump, expanded row)
+pub struct TrafficViewEntry {
+    /// Time elapsed since session start.
+    pub timestamp: Duration,
+    /// Which channel this message belongs to.
+    pub channel: &'static str,
+    /// Sent by the client or received from the server.
+    pub direction: TrafficDirection,
+    /// SPICE message type ID.
+    pub message_type: u16,
+    /// Human-readable message name.
+    pub message_name: &'static str,
+    /// Total wire size including the 6-byte header.
+    pub wire_size: u32,
+    /// Payload size (wire_size minus 6-byte header).
+    pub payload_size: u32,
 }
 
 /// Per-channel ring buffer of recent protocol traffic.
@@ -87,7 +106,6 @@ impl TrafficRingBuffer {
     }
 
     /// Return a reference to all buffered entries (oldest first).
-    #[allow(dead_code)] // used in later phases (traffic viewer, bug report zip)
     pub fn entries(&self) -> &VecDeque<TrafficEntry> {
         &self.entries
     }
@@ -141,12 +159,11 @@ impl TrafficRingBuffer {
     }
 }
 
-/// Default per-channel ring buffer cap: 12.5 MB (50 MB / 4 channels).
-const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 4;
+/// Default per-channel ring buffer cap: 10 MB (50 MB / 5 channels).
+const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 5;
 
 /// Known channel names.
-#[allow(dead_code)] // used in later phases (bug report zip, traffic viewer)
-const CHANNELS: [&str; 4] = ["main", "display", "inputs", "cursor"];
+const CHANNELS: [&str; 5] = ["main", "display", "inputs", "cursor", "usbredir"];
 
 /// Holds all four per-channel ring buffers plus a shared session
 /// start timestamp.
@@ -155,6 +172,7 @@ pub struct TrafficBuffers {
     display: Mutex<TrafficRingBuffer>,
     inputs: Mutex<TrafficRingBuffer>,
     cursor: Mutex<TrafficRingBuffer>,
+    usbredir: Mutex<TrafficRingBuffer>,
     /// Session start time for relative timestamps.
     start: Instant,
 }
@@ -167,6 +185,7 @@ impl TrafficBuffers {
             display: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             inputs: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             cursor: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
+            usbredir: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             start: Instant::now(),
         }
     }
@@ -183,6 +202,7 @@ impl TrafficBuffers {
             "display" => Some(&self.display),
             "inputs" => Some(&self.inputs),
             "cursor" => Some(&self.cursor),
+            "usbredir" => Some(&self.usbredir),
             _ => None,
         }
     }
@@ -290,7 +310,7 @@ impl TrafficBuffers {
     }
 
     /// Log a summary of ring buffer state (for verbose mode).
-    #[allow(dead_code)] // used in later phases
+    #[allow(dead_code)]
     pub fn log_summary(&self) {
         for name in &CHANNELS {
             if let Some(buf) = self.buffer_for(name) {
@@ -323,13 +343,40 @@ impl TrafficBuffers {
             None
         }
     }
+
+    /// Collect recent entries from all channels for the traffic
+    /// viewer.  Returns at most `max` entries sorted by timestamp
+    /// (oldest first).  Does not copy pcap frame data.
+    pub fn recent_view_entries(&self, max: usize) -> Vec<TrafficViewEntry> {
+        let mut all = Vec::new();
+        for name in &CHANNELS {
+            if let Some(buf) = self.buffer_for(name) {
+                let guard = buf.lock().unwrap();
+                for entry in guard.entries().iter().rev().take(max) {
+                    all.push(TrafficViewEntry {
+                        timestamp: entry.timestamp,
+                        channel: entry.channel,
+                        direction: entry.direction,
+                        message_type: entry.message_type,
+                        message_name: entry.message_name,
+                        wire_size: entry.wire_size,
+                        payload_size: entry.payload_size,
+                    });
+                }
+            }
+        }
+        all.sort_by_key(|e| e.timestamp);
+        if all.len() > max {
+            all.drain(..all.len() - max);
+        }
+        all
+    }
 }
 
 // ── Channel state snapshots ─────────────────────────────────
 
 /// Result of a single image decode in the display channel.
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct DecodeResult {
     /// SPICE image type (e.g. "GlzRgb", "Lz4", "Pixmap").
     pub image_type: String,
@@ -349,7 +396,6 @@ pub struct DecodeResult {
 
 /// Snapshot of the display channel's mutable state.
 #[derive(Debug, Clone, Default, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct DisplaySnapshot {
     pub image_cache_entries: usize,
     pub image_cache_ids: Vec<u64>,
@@ -365,7 +411,6 @@ pub struct DisplaySnapshot {
 
 /// A recorded input event for the inputs channel snapshot.
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct InputEventRecord {
     /// "KeyDown", "KeyUp", "MouseDown", "MouseUp", "MouseMove".
     pub event_type: String,
@@ -382,7 +427,6 @@ pub struct InputEventRecord {
 
 /// Snapshot of the inputs channel's mutable state.
 #[derive(Debug, Clone, Default, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct InputsSnapshot {
     pub button_state: u32,
     pub motion_count: u32,
@@ -394,7 +438,6 @@ pub struct InputsSnapshot {
 
 /// Summary of a cached cursor shape.
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct CursorCacheEntry {
     pub cursor_id: u64,
     pub width: u16,
@@ -405,7 +448,6 @@ pub struct CursorCacheEntry {
 
 /// Snapshot of the cursor channel's mutable state.
 #[derive(Debug, Clone, Default, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct CursorSnapshot {
     pub cache_entries: usize,
     pub cache_contents: Vec<CursorCacheEntry>,
@@ -419,7 +461,6 @@ pub struct CursorSnapshot {
 
 /// Snapshot of the main channel's mutable state.
 #[derive(Debug, Clone, Default, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct MainSnapshot {
     pub session_id: Option<u32>,
     pub bytes_in: u64,
@@ -428,7 +469,6 @@ pub struct MainSnapshot {
 
 /// Summary of an active display surface.
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct SurfaceInfo {
     pub surface_id: u32,
     pub width: u32,
@@ -437,7 +477,6 @@ pub struct SurfaceInfo {
 
 /// Snapshot of application-level state.
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // read in Phase 3 (bug report zip)
 pub struct AppSnapshot {
     pub fps: f64,
     pub bandwidth_history: Vec<f32>,
@@ -547,11 +586,21 @@ pub(crate) fn encode_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Resu
     Ok(buf)
 }
 
+/// Format a byte size for human-readable display.
+pub(crate) fn format_size(bytes: u32) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1}M", bytes as f64 / 1_000_000.0)
+    } else if bytes >= 10_000 {
+        format!("{:.1}K", bytes as f64 / 1_000.0)
+    } else {
+        format!("{}", bytes)
+    }
+}
+
 // ── Bug report assembly ────────────────────────────────────
 
 /// Which channel the bug report is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // variants used in Phase 4 (GUI trigger)
 pub enum BugReportType {
     Display,
     Input,
@@ -1066,5 +1115,135 @@ mod tests {
         assert_eq!(BugReportType::Input.channel_name(), "inputs");
         assert_eq!(BugReportType::Cursor.channel_name(), "cursor");
         assert_eq!(BugReportType::Connection.channel_name(), "main");
+    }
+
+    #[test]
+    fn test_recent_view_entries() {
+        let buffers = TrafficBuffers::new();
+
+        // Push entries to multiple channels
+        buffers.record_sent("main", 101, "attach_channels", &[0u8; 10]);
+        buffers.record_received("display", 302, "draw_copy", &[0u8; 100]);
+        buffers.record_sent("inputs", 101, "key_down", &[0u8; 10]);
+        buffers.record_received("cursor", 401, "cursor_set", &[0u8; 50]);
+
+        let entries = buffers.recent_view_entries(100);
+        assert_eq!(entries.len(), 4);
+        // Entries should be sorted by timestamp
+        for w in entries.windows(2) {
+            assert!(w[0].timestamp <= w[1].timestamp);
+        }
+
+        // Verify max limit
+        let limited = buffers.recent_view_entries(2);
+        assert_eq!(limited.len(), 2);
+    }
+
+    #[test]
+    fn test_bug_report_assemble_cursor() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::new(
+            BugReportType::Cursor,
+            "cursor disappeared".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-cursor");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+        assert!(path.exists());
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        assert!(!names.contains(&"screenshot.png".to_string()));
+
+        {
+            let mut meta_file = archive.by_name("metadata.json").unwrap();
+            let mut meta_str = String::new();
+            std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
+            assert!(meta_str.contains("\"report_type\": \"Cursor\""));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bug_report_assemble_connection() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::new(
+            BugReportType::Connection,
+            "session dropped".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-connection");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+        assert!(path.exists());
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        assert!(!names.contains(&"screenshot.png".to_string()));
+
+        {
+            let mut meta_file = archive.by_name("metadata.json").unwrap();
+            let mut meta_str = String::new();
+            std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
+            assert!(meta_str.contains("\"report_type\": \"Connection\""));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_drain_unknown_channel() {
+        let buffers = TrafficBuffers::new();
+        assert!(buffers.drain_channel_pcap_bytes("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0");
+        assert_eq!(format_size(500), "500");
+        assert_eq!(format_size(9999), "9999");
+        assert_eq!(format_size(15000), "15.0K");
+        assert_eq!(format_size(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn test_encode_png_1x1() {
+        let pixels = vec![128u8, 64, 32, 255];
+        let png_bytes = encode_png(&pixels, 1, 1).unwrap();
+        assert_eq!(&png_bytes[..4], b"\x89PNG");
     }
 }
