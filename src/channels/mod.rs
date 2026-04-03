@@ -73,6 +73,9 @@ pub enum ChannelEvent {
     /// A USB redirection channel connected successfully
     UsbChannelReady,
 
+    /// A USB device was successfully connected
+    UsbDeviceConnected(String),
+
     /// Available USB devices changed (enumeration result)
     #[allow(dead_code)]
     UsbDevicesChanged(Vec<UsbDeviceInfo>),

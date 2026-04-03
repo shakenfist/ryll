@@ -10,11 +10,13 @@ use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
+use crate::config::VirtualDiskConfig;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
+use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, UsbDeviceBackend};
 use crate::usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use crate::usbredir::messages::{
@@ -47,6 +49,9 @@ pub struct UsbredirChannel {
     parser: UsbredirParser,
     server_caps: u32,
     backend: Option<DeviceBackend>,
+
+    // Virtual disks to auto-connect after hello exchange
+    auto_connect_disks: Vec<VirtualDiskConfig>,
 }
 
 impl UsbredirChannel {
@@ -54,6 +59,7 @@ impl UsbredirChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         usb_rx: mpsc::Receiver<UsbCommand>,
+        auto_connect_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
     ) -> Self {
@@ -73,6 +79,7 @@ impl UsbredirChannel {
             parser: UsbredirParser::new(),
             server_caps: 0,
             backend: None,
+            auto_connect_disks,
         }
     }
 
@@ -289,6 +296,20 @@ impl UsbredirChannel {
                     "usbredir: server hello: version='{}' caps=0x{:08x}",
                     hello.version, hello.capabilities,
                 );
+
+                // Auto-connect virtual disks if configured via CLI
+                let disks = std::mem::take(&mut self.auto_connect_disks);
+                if let Some(disk) = disks.into_iter().next() {
+                    match VirtualMsc::open(disk.path.clone(), disk.read_only).await {
+                        Ok(msc) => {
+                            let backend = DeviceBackend::Virtual(msc);
+                            self.connect_device(backend).await?;
+                        }
+                        Err(e) => {
+                            warn!("usbredir: failed to open {}: {}", disk.path.display(), e);
+                        }
+                    }
+                }
             }
 
             UsbredirPayload::SetConfiguration(sc) => {
@@ -554,8 +575,13 @@ impl UsbredirChannel {
         self.send_usbredir(msg_type::DEVICE_CONNECT, 0, &buf)
             .await?;
 
+        let desc = backend.description();
         self.backend = Some(backend);
-        info!("usbredir: device connected");
+        info!("usbredir: device connected: {}", desc);
+        self.event_tx
+            .send(ChannelEvent::UsbDeviceConnected(desc))
+            .await
+            .ok();
         Ok(())
     }
 

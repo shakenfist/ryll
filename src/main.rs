@@ -34,7 +34,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use crate::capture::CaptureSession;
-use crate::config::{Args, Config};
+use crate::config::{parse_virtual_disks, Args, Config, VirtualDiskConfig};
 
 /// Flag set by the Ctrl+C handler to request graceful shutdown.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -95,6 +95,9 @@ fn main() -> Result<()> {
         config.tls_port.is_some()
     );
 
+    // Parse virtual disk configs (validates paths early)
+    let virtual_disks = parse_virtual_disks(&args)?;
+
     // Create capture session if requested
     #[cfg(feature = "capture")]
     let capture = match &args.capture {
@@ -107,20 +110,31 @@ fn main() -> Result<()> {
     let capture: Option<Arc<CaptureSession>> = None;
 
     if args.headless {
-        run_headless(config, &args, capture)
+        run_headless(config, &args, virtual_disks, capture)
     } else {
-        run_gui(config, &args, capture)
+        run_gui(config, &args, virtual_disks, capture)
     }
 }
 
-fn run_headless(config: Config, args: &Args, capture: Option<Arc<CaptureSession>>) -> Result<()> {
+fn run_headless(
+    config: Config,
+    args: &Args,
+    virtual_disks: Vec<VirtualDiskConfig>,
+    capture: Option<Arc<CaptureSession>>,
+) -> Result<()> {
     info!("Running in headless mode");
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async { app::run_headless(config, args.cadence, capture).await })
+    runtime
+        .block_on(async { app::run_headless(config, args.cadence, virtual_disks, capture).await })
 }
 
-fn run_gui(config: Config, args: &Args, capture: Option<Arc<CaptureSession>>) -> Result<()> {
+fn run_gui(
+    config: Config,
+    args: &Args,
+    virtual_disks: Vec<VirtualDiskConfig>,
+    capture: Option<Arc<CaptureSession>>,
+) -> Result<()> {
     info!("Starting GUI");
 
     let native_options = eframe::NativeOptions {
@@ -134,7 +148,15 @@ fn run_gui(config: Config, args: &Args, capture: Option<Arc<CaptureSession>>) ->
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
-        Box::new(move |cc| Ok(Box::new(app::RyllApp::new(cc, config, cadence, capture)))),
+        Box::new(move |cc| {
+            Ok(Box::new(app::RyllApp::new(
+                cc,
+                config,
+                cadence,
+                virtual_disks,
+                capture,
+            )))
+        }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }
