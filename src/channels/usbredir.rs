@@ -3,8 +3,10 @@
 /// Handles the SPICE SpiceVMC transport, usbredir hello handshake,
 /// device attachment/detachment lifecycle, and delegates configuration
 /// and transfer messages to the active device backend.
-use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -17,7 +19,7 @@ use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
 use crate::usb::virtual_msc::VirtualMsc;
-use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, UsbDeviceBackend};
+use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
 use crate::usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use crate::usbredir::messages::{
     make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
@@ -52,6 +54,11 @@ pub struct UsbredirChannel {
 
     // Virtual disks to auto-connect after hello exchange
     auto_connect_disks: Vec<VirtualDiskConfig>,
+
+    // Interrupt polling
+    interrupt_tx: mpsc::Sender<InterruptData>,
+    interrupt_rx: mpsc::Receiver<InterruptData>,
+    interrupt_handles: HashMap<u8, tokio::task::JoinHandle<()>>,
 }
 
 impl UsbredirChannel {
@@ -63,6 +70,7 @@ impl UsbredirChannel {
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
     ) -> Self {
+        let (interrupt_tx, interrupt_rx) = mpsc::channel(64);
         UsbredirChannel {
             stream,
             event_tx,
@@ -80,6 +88,9 @@ impl UsbredirChannel {
             server_caps: 0,
             backend: None,
             auto_connect_disks,
+            interrupt_tx,
+            interrupt_rx,
+            interrupt_handles: HashMap::new(),
         }
     }
 
@@ -93,6 +104,7 @@ impl UsbredirChannel {
 
         loop {
             let usb_rx = &mut self.usb_rx;
+            let interrupt_rx = &mut self.interrupt_rx;
 
             tokio::select! {
                 // Network read
@@ -113,6 +125,7 @@ impl UsbredirChannel {
                     let (n, chunk) = result?;
                     if n == 0 {
                         info!("usbredir: channel disconnected");
+                        self.stop_all_interrupt_polls();
                         self.event_tx
                             .send(ChannelEvent::Disconnected(ChannelType::Usbredir))
                             .await
@@ -133,6 +146,11 @@ impl UsbredirChannel {
                 // USB commands from the app
                 Some(cmd) = usb_rx.recv() => {
                     self.handle_usb_command(cmd).await?;
+                }
+
+                // Interrupt data from polling tasks
+                Some(idata) = interrupt_rx.recv() => {
+                    self.forward_interrupt_data(idata).await?;
                 }
             }
         }
@@ -505,19 +523,62 @@ impl UsbredirChannel {
                 }
             }
 
-            UsbredirPayload::InterruptPacket { header, .. } => {
-                // Phase 9 will implement interrupt transfers; respond with STALL
-                if self.backend.is_some() {
-                    let resp = InterruptPacketHeader {
-                        endpoint: header.endpoint,
-                        status: Status::Stall as u8,
-                        length: 0,
-                    };
-                    let mut buf = Vec::new();
-                    resp.write(&mut buf)?;
-                    self.send_usbredir(msg_type::INTERRUPT_PACKET, msg.id, &buf)
-                        .await?;
+            UsbredirPayload::InterruptPacket { header, data } => {
+                if let Some(ref mut backend) = self.backend {
+                    if is_ep_in(header.endpoint) {
+                        // Server shouldn't send IN interrupt packets — we send those
+                        debug!(
+                            "usbredir: ignoring interrupt IN from server (ep={})",
+                            header.endpoint
+                        );
+                    } else {
+                        // Interrupt OUT: write data to the device
+                        let result = backend.interrupt_out(header.endpoint, &data).await?;
+                        let resp = InterruptPacketHeader {
+                            endpoint: header.endpoint,
+                            status: result.status as u8,
+                            length: 0,
+                        };
+                        let mut buf = Vec::new();
+                        resp.write(&mut buf)?;
+                        self.send_usbredir(msg_type::INTERRUPT_PACKET, msg.id, &buf)
+                            .await?;
+                    }
+                } else {
+                    warn!("usbredir: interrupt_packet but no device connected");
                 }
+            }
+
+            UsbredirPayload::StartInterruptReceiving(sir) => {
+                info!(
+                    "usbredir: start_interrupt_receiving ep={} (id={})",
+                    sir.endpoint, msg.id
+                );
+                let status = self.start_interrupt_poll(sir.endpoint).await;
+                let resp = crate::usbredir::messages::InterruptReceivingStatus {
+                    status: status as u8,
+                    endpoint: sir.endpoint,
+                };
+                let mut buf = Vec::new();
+                resp.write(&mut buf)?;
+                self.send_usbredir(msg_type::INTERRUPT_RECEIVING_STATUS, msg.id, &buf)
+                    .await?;
+            }
+
+            UsbredirPayload::StopInterruptReceiving(sir) => {
+                info!(
+                    "usbredir: stop_interrupt_receiving ep={} (id={})",
+                    sir.endpoint, msg.id
+                );
+                self.stop_interrupt_poll(sir.endpoint);
+                let resp = crate::usbredir::messages::InterruptReceivingStatus {
+                    status: Status::Success as u8,
+                    endpoint: sir.endpoint,
+                };
+                let mut buf = Vec::new();
+                resp.write(&mut buf)?;
+                self.send_usbredir(msg_type::INTERRUPT_RECEIVING_STATUS, msg.id, &buf)
+                    .await?;
             }
 
             UsbredirPayload::Unknown { msg_type: mt, data } => {
@@ -588,11 +649,73 @@ impl UsbredirChannel {
     async fn disconnect_device(&mut self) -> Result<()> {
         if self.backend.is_some() {
             info!("usbredir: disconnecting device");
+            self.stop_all_interrupt_polls();
             self.send_usbredir(msg_type::DEVICE_DISCONNECT, 0, &[])
                 .await?;
             self.backend = None;
         }
         Ok(())
+    }
+
+    // ── Interrupt polling ──────────────────────────────
+
+    async fn start_interrupt_poll(&mut self, endpoint: u8) -> Status {
+        if self.interrupt_handles.contains_key(&endpoint) {
+            debug!(
+                "usbredir: interrupt poll already active for ep={}",
+                endpoint
+            );
+            return Status::Success;
+        }
+
+        let Some(ref mut backend) = self.backend else {
+            warn!("usbredir: start_interrupt_receiving but no device connected");
+            return Status::Ioerror;
+        };
+
+        match backend
+            .start_interrupt_in(endpoint, self.interrupt_tx.clone())
+            .await
+        {
+            Ok(handle) => {
+                self.interrupt_handles.insert(endpoint, handle);
+                Status::Success
+            }
+            Err(e) => {
+                warn!(
+                    "usbredir: failed to start interrupt poll ep={}: {}",
+                    endpoint, e
+                );
+                Status::Ioerror
+            }
+        }
+    }
+
+    fn stop_interrupt_poll(&mut self, endpoint: u8) {
+        if let Some(handle) = self.interrupt_handles.remove(&endpoint) {
+            handle.abort();
+            debug!("usbredir: stopped interrupt poll ep={}", endpoint);
+        }
+    }
+
+    fn stop_all_interrupt_polls(&mut self) {
+        for (ep, handle) in self.interrupt_handles.drain() {
+            handle.abort();
+            debug!("usbredir: stopped interrupt poll ep={}", ep);
+        }
+    }
+
+    async fn forward_interrupt_data(&mut self, idata: InterruptData) -> Result<()> {
+        let header = InterruptPacketHeader {
+            endpoint: idata.endpoint,
+            status: idata.status as u8,
+            length: idata.data.len() as u16,
+        };
+        let mut buf = Vec::new();
+        header.write(&mut buf)?;
+        buf.extend_from_slice(&idata.data);
+        self.send_usbredir(msg_type::INTERRUPT_PACKET, 0, &buf)
+            .await
     }
 
     // ── Hello exchange ─────────────────────────────────

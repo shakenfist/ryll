@@ -12,6 +12,7 @@ pub mod virtual_msc;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 
 use crate::usbredir::constants::Status;
 use crate::usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
@@ -57,6 +58,16 @@ impl TransferResult {
             data: Vec::new(),
         }
     }
+}
+
+// ── Interrupt data ─────────────────────────────────────
+
+/// Data from an interrupt polling task, sent back to the channel handler.
+#[derive(Debug)]
+pub struct InterruptData {
+    pub endpoint: u8,
+    pub data: Vec<u8>,
+    pub status: Status,
 }
 
 // ── Control transfer setup ─────────────────────────────
@@ -146,6 +157,30 @@ pub trait UsbDeviceBackend: Send {
         endpoint: u8,
         data: &[u8],
     ) -> impl std::future::Future<Output = Result<TransferResult>> + Send;
+
+    // ── Interrupt transfers ─────────────────────
+
+    /// Start polling an interrupt IN endpoint. Spawns a background
+    /// task that reads from the endpoint and sends data via `tx`.
+    /// Returns the JoinHandle for the polling task.
+    /// Default: returns error (virtual devices don't support interrupts).
+    fn start_interrupt_in(
+        &mut self,
+        _endpoint: u8,
+        _tx: mpsc::Sender<InterruptData>,
+    ) -> impl std::future::Future<Output = Result<tokio::task::JoinHandle<()>>> + Send {
+        async { anyhow::bail!("interrupt transfers not supported by this backend") }
+    }
+
+    /// Write data to an interrupt OUT endpoint.
+    /// Default: returns STALL.
+    fn interrupt_out(
+        &mut self,
+        _endpoint: u8,
+        _data: &[u8],
+    ) -> impl std::future::Future<Output = Result<TransferResult>> + Send {
+        async { Ok(TransferResult::stall()) }
+    }
 
     // ── Metadata ────────────────────────────────
 
@@ -246,6 +281,24 @@ impl UsbDeviceBackend for DeviceBackend {
         match self {
             DeviceBackend::Real(d) => d.bulk_out(endpoint, data).await,
             DeviceBackend::Virtual(d) => d.bulk_out(endpoint, data).await,
+        }
+    }
+
+    async fn start_interrupt_in(
+        &mut self,
+        endpoint: u8,
+        tx: mpsc::Sender<InterruptData>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        match self {
+            DeviceBackend::Real(d) => d.start_interrupt_in(endpoint, tx).await,
+            DeviceBackend::Virtual(d) => d.start_interrupt_in(endpoint, tx).await,
+        }
+    }
+
+    async fn interrupt_out(&mut self, endpoint: u8, data: &[u8]) -> Result<TransferResult> {
+        match self {
+            DeviceBackend::Real(d) => d.interrupt_out(endpoint, data).await,
+            DeviceBackend::Virtual(d) => d.interrupt_out(endpoint, data).await,
         }
     }
 

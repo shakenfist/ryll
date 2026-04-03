@@ -7,12 +7,16 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use nusb::transfer::{Bulk, ControlIn, ControlOut, ControlType, In, Out, Recipient, TransferError};
+use nusb::transfer::{
+    Bulk, ControlIn, ControlOut, ControlType, In, Interrupt, Out, Recipient, TransferError,
+};
 use nusb::MaybeFuture;
-use tracing::warn;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
 use super::{
-    usb_ep_to_usbredir, ControlSetup, DeviceSource, TransferResult, UsbDeviceBackend, UsbDeviceInfo,
+    usb_ep_to_usbredir, usbredir_ep_to_usb, ControlSetup, DeviceSource, InterruptData,
+    TransferResult, UsbDeviceBackend, UsbDeviceInfo,
 };
 use crate::usbredir::constants::Status;
 use crate::usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
@@ -360,6 +364,128 @@ impl UsbDeviceBackend for RealDevice {
             Err(e) => {
                 warn!(
                     "usb: failed to open bulk OUT endpoint 0x{:02x}: {}",
+                    usb_addr, e
+                );
+                return Ok(TransferResult::error(Status::Inval));
+            }
+        };
+
+        let buf: nusb::transfer::Buffer = data.into();
+        ep.submit(buf);
+        let completion = ep.next_complete().await;
+
+        match completion.status {
+            Ok(()) => Ok(TransferResult::success_empty()),
+            Err(e) => Ok(transfer_error_to_result(e)),
+        }
+    }
+
+    async fn start_interrupt_in(
+        &mut self,
+        endpoint: u8,
+        tx: mpsc::Sender<InterruptData>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        let usb_addr = usbredir_ep_to_usb(endpoint);
+        let Some(iface) = self.find_interface_for_endpoint(endpoint) else {
+            anyhow::bail!("no interface for endpoint {}", endpoint);
+        };
+
+        let max_packet_size = self.ep_info.ep_max_packet_size[endpoint as usize] as usize;
+        let max_packet_size = if max_packet_size == 0 {
+            8
+        } else {
+            max_packet_size
+        };
+
+        // Clone the interface (Arc-based) so the polling task owns it
+        let iface_clone = iface.clone();
+        let handle = tokio::task::spawn(async move {
+            let mut ep = match iface_clone.endpoint::<Interrupt, In>(usb_addr) {
+                Ok(ep) => ep,
+                Err(e) => {
+                    warn!(
+                        "usb: failed to open interrupt IN endpoint 0x{:02x}: {}",
+                        usb_addr, e
+                    );
+                    return;
+                }
+            };
+
+            debug!(
+                "usb: interrupt poll started for endpoint {} (0x{:02x})",
+                endpoint, usb_addr
+            );
+
+            loop {
+                let buf = nusb::transfer::Buffer::new(max_packet_size);
+                ep.submit(buf);
+                let completion = ep.next_complete().await;
+
+                match completion.status {
+                    Ok(()) => {
+                        let data = completion.buffer[..completion.actual_len].to_vec();
+                        if tx
+                            .send(InterruptData {
+                                endpoint,
+                                data,
+                                status: Status::Success,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            // Channel closed — handler is gone
+                            break;
+                        }
+                    }
+                    Err(TransferError::Cancelled) => {
+                        debug!("usb: interrupt poll cancelled for endpoint {}", endpoint);
+                        break;
+                    }
+                    Err(TransferError::Disconnected) => {
+                        debug!(
+                            "usb: device disconnected during interrupt poll ep={}",
+                            endpoint
+                        );
+                        let _ = tx
+                            .send(InterruptData {
+                                endpoint,
+                                data: Vec::new(),
+                                status: Status::Ioerror,
+                            })
+                            .await;
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("usb: interrupt transfer error ep={}: {:?}", endpoint, e);
+                        let _ = tx
+                            .send(InterruptData {
+                                endpoint,
+                                data: Vec::new(),
+                                status: Status::Ioerror,
+                            })
+                            .await;
+                        // Continue polling — transient errors are normal
+                    }
+                }
+            }
+
+            debug!("usb: interrupt poll ended for endpoint {}", endpoint);
+        });
+
+        Ok(handle)
+    }
+
+    async fn interrupt_out(&mut self, endpoint: u8, data: &[u8]) -> Result<TransferResult> {
+        let usb_addr = usbredir_ep_to_usb(endpoint);
+        let Some(iface) = self.find_interface_for_endpoint(endpoint) else {
+            return Ok(TransferResult::error(Status::Inval));
+        };
+
+        let mut ep = match iface.endpoint::<Interrupt, Out>(usb_addr) {
+            Ok(ep) => ep,
+            Err(e) => {
+                warn!(
+                    "usb: failed to open interrupt OUT endpoint 0x{:02x}: {}",
                     usb_addr, e
                 );
                 return Ok(TransferResult::error(Status::Inval));
