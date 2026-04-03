@@ -69,6 +69,9 @@ anyhow = "1"
 # Async channels
 async-channel = "2"
 
+# USB device access (pure Rust, no libusb)
+nusb = "0.2"
+
 [package.metadata.deb]
 maintainer = "Michael Still <mikal@stillhq.com>"
 section = "utils"

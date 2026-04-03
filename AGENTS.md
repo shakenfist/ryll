@@ -120,8 +120,9 @@ src/
 │   ├── messages.rs      # Wire format structs, read/write
 │   └── parser.rs        # Byte-stream parser, unit tests
 ├── usb/                 # USB device backend abstraction
-│   └── mod.rs           # UsbDeviceBackend trait, TransferResult,
-│                        #   DeviceSource, UsbDeviceInfo, enumeration
+│   ├── mod.rs           # UsbDeviceBackend trait, TransferResult,
+│   │                    #   DeviceSource, UsbDeviceInfo, enumeration
+│   └── real.rs          # Physical device backend (nusb crate)
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)

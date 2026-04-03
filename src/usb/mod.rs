@@ -6,6 +6,8 @@
 //! knowing whether the device is real hardware or software-emulated.
 #![allow(dead_code)]
 
+pub mod real;
+
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -196,16 +198,41 @@ impl UsbDeviceInfo {
     }
 }
 
+// ── Endpoint address helpers ───────────────────────────
+
+/// Convert a usbredir endpoint number (0-31) to a USB endpoint address.
+///
+/// usbredir: 0-15 = OUT, 16-31 = IN.
+/// USB: 0x00-0x0F = OUT, 0x80-0x8F = IN.
+pub fn usbredir_ep_to_usb(ep: u8) -> u8 {
+    if ep >= 16 {
+        0x80 | (ep - 16)
+    } else {
+        ep
+    }
+}
+
+/// Convert a USB endpoint address to usbredir endpoint numbering (0-31).
+pub fn usb_ep_to_usbredir(addr: u8) -> u8 {
+    if addr & 0x80 != 0 {
+        16 + (addr & 0x0F)
+    } else {
+        addr & 0x0F
+    }
+}
+
+/// Check if a usbredir endpoint number is an IN (device-to-host) endpoint.
+pub fn is_ep_in(ep: u8) -> bool {
+    ep >= 16
+}
+
 // ── Enumeration ────────────────────────────────────────
 
 /// Enumerate all available USB devices (physical + configured virtual).
 ///
 /// `virtual_disks` comes from CLI flags (`--usb-disk`).
-/// Physical device enumeration is stubbed until phase 4.
 pub fn enumerate_devices(virtual_disks: &[(PathBuf, bool)]) -> Vec<UsbDeviceInfo> {
-    let mut devices = Vec::new();
-
-    // Physical devices will be added in phase 4.
+    let mut devices = real::enumerate_physical();
 
     // Virtual disk devices
     for (path, read_only) in virtual_disks {
@@ -326,25 +353,73 @@ mod tests {
     }
 
     #[test]
-    fn enumerate_empty() {
-        let devices = enumerate_devices(&[]);
-        assert!(devices.is_empty());
+    fn endpoint_out_mapping() {
+        assert_eq!(usbredir_ep_to_usb(0), 0x00);
+        assert_eq!(usbredir_ep_to_usb(1), 0x01);
+        assert_eq!(usbredir_ep_to_usb(2), 0x02);
+        assert_eq!(usbredir_ep_to_usb(15), 0x0F);
     }
 
     #[test]
-    fn enumerate_virtual_disks() {
+    fn endpoint_in_mapping() {
+        assert_eq!(usbredir_ep_to_usb(16), 0x80);
+        assert_eq!(usbredir_ep_to_usb(17), 0x81);
+        assert_eq!(usbredir_ep_to_usb(18), 0x82);
+        assert_eq!(usbredir_ep_to_usb(31), 0x8F);
+    }
+
+    #[test]
+    fn endpoint_reverse_mapping() {
+        assert_eq!(usb_ep_to_usbredir(0x00), 0);
+        assert_eq!(usb_ep_to_usbredir(0x02), 2);
+        assert_eq!(usb_ep_to_usbredir(0x81), 17);
+        assert_eq!(usb_ep_to_usbredir(0x82), 18);
+    }
+
+    #[test]
+    fn endpoint_round_trip() {
+        for ep in 0..32u8 {
+            assert_eq!(usb_ep_to_usbredir(usbredir_ep_to_usb(ep)), ep);
+        }
+    }
+
+    #[test]
+    fn endpoint_direction() {
+        assert!(!is_ep_in(0));
+        assert!(!is_ep_in(2));
+        assert!(!is_ep_in(15));
+        assert!(is_ep_in(16));
+        assert!(is_ep_in(17));
+        assert!(is_ep_in(31));
+    }
+
+    #[test]
+    fn enumerate_empty() {
+        let devices = enumerate_devices(&[]);
+        // May return physical devices if USB is accessible; at minimum no panic
+        let _count = devices.len();
+    }
+
+    #[test]
+    fn enumerate_includes_virtual_disks() {
         let disks = vec![
             (PathBuf::from("/tmp/test.raw"), false),
             (PathBuf::from("/data/readonly.raw"), true),
         ];
         let devices = enumerate_devices(&disks);
-        assert_eq!(devices.len(), 2);
 
-        assert_eq!(devices[0].vendor_id, 0x1d6b);
-        assert_eq!(devices[0].product_id, 0x0104);
-        assert!(devices[0].name.contains("test.raw"));
+        // Filter to just the virtual devices (physical count varies by environment)
+        let virtual_devs: Vec<_> = devices
+            .iter()
+            .filter(|d| matches!(d.source, DeviceSource::VirtualDisk { .. }))
+            .collect();
+        assert_eq!(virtual_devs.len(), 2);
+
+        assert_eq!(virtual_devs[0].vendor_id, 0x1d6b);
+        assert_eq!(virtual_devs[0].product_id, 0x0104);
+        assert!(virtual_devs[0].name.contains("test.raw"));
         assert!(matches!(
-            &devices[0].source,
+            &virtual_devs[0].source,
             DeviceSource::VirtualDisk {
                 read_only: false,
                 ..
@@ -352,7 +427,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            &devices[1].source,
+            &virtual_devs[1].source,
             DeviceSource::VirtualDisk {
                 read_only: true,
                 ..

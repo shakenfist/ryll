@@ -187,7 +187,8 @@ src/
 │   ├── messages.rs      # Wire format structs, read/write
 │   └── parser.rs        # Byte-stream parser
 ├── usb/
-│   └── mod.rs           # UsbDeviceBackend trait, device enumeration
+│   ├── mod.rs           # UsbDeviceBackend trait, device enumeration
+│   └── real.rs          # Physical USB device backend (nusb)
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression
@@ -203,6 +204,7 @@ src/
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
+- **nusb** - USB device access (pure Rust, no libusb)
 - **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version
