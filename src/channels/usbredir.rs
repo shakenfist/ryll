@@ -15,11 +15,11 @@ use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
-use crate::usb::{DeviceBackend, UsbDeviceBackend};
-use crate::usbredir::constants::{self, msg_type, msg_type_name, RYLL_CAPS};
+use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, UsbDeviceBackend};
+use crate::usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use crate::usbredir::messages::{
-    make_usbredir_message, AltSettingStatus, ConfigurationStatus, Hello, UsbredirMessage,
-    UsbredirPayload,
+    make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
+    ControlPacketHeader, Hello, InterruptPacketHeader, UsbredirMessage, UsbredirPayload,
 };
 use crate::usbredir::parser::UsbredirParser;
 
@@ -382,8 +382,10 @@ impl UsbredirChannel {
             }
 
             UsbredirPayload::CancelDataPacket => {
-                info!("usbredir: cancel_data_packet (id={})", msg.id);
-                // Phase 6 will implement transfer cancellation
+                debug!(
+                    "usbredir: cancel_data_packet (id={}) — cancellation not yet supported",
+                    msg.id
+                );
             }
 
             UsbredirPayload::FilterReject => {
@@ -395,14 +397,106 @@ impl UsbredirChannel {
                 self.backend = None;
             }
 
-            UsbredirPayload::ControlPacket { .. }
-            | UsbredirPayload::BulkPacket { .. }
-            | UsbredirPayload::InterruptPacket { .. } => {
-                // Phase 6 will handle data transfers
-                debug!(
-                    "usbredir: {} (id={}) — not yet implemented",
-                    type_name, msg.id
-                );
+            UsbredirPayload::ControlPacket { header, data } => {
+                if let Some(ref mut backend) = self.backend {
+                    let is_in = header.request_type & 0x80 != 0;
+                    let setup = ControlSetup {
+                        endpoint: header.endpoint,
+                        request_type: header.request_type,
+                        request: header.request,
+                        value: header.value,
+                        index: header.index,
+                        length: header.length,
+                    };
+
+                    let result = backend.control_transfer(&setup, &data).await?;
+
+                    if settings::is_verbose() {
+                        debug!(
+                            "usbredir: control {} ep={} req=0x{:02x} rtype=0x{:02x} \
+                             val=0x{:04x} idx=0x{:04x} -> status={:?} {}B",
+                            if is_in { "IN" } else { "OUT" },
+                            header.endpoint,
+                            header.request,
+                            header.request_type,
+                            header.value,
+                            header.index,
+                            result.status,
+                            result.data.len(),
+                        );
+                    }
+
+                    let resp_header = ControlPacketHeader {
+                        endpoint: header.endpoint,
+                        request: header.request,
+                        request_type: header.request_type,
+                        status: result.status as u8,
+                        value: header.value,
+                        index: header.index,
+                        length: result.data.len() as u16,
+                    };
+                    let mut buf = Vec::new();
+                    resp_header.write(&mut buf)?;
+                    buf.extend_from_slice(&result.data);
+                    self.send_usbredir(msg_type::CONTROL_PACKET, msg.id, &buf)
+                        .await?;
+                } else {
+                    warn!("usbredir: control_packet but no device connected");
+                }
+            }
+
+            UsbredirPayload::BulkPacket { header, data } => {
+                if let Some(ref mut backend) = self.backend {
+                    let ep_in = is_ep_in(header.endpoint);
+
+                    let result = if ep_in {
+                        let max_len = header.actual_length() as usize;
+                        backend.bulk_in(header.endpoint, max_len).await?
+                    } else {
+                        backend.bulk_out(header.endpoint, &data).await?
+                    };
+
+                    if settings::is_verbose() {
+                        debug!(
+                            "usbredir: bulk {} ep={} -> status={:?} {}B",
+                            if ep_in { "IN" } else { "OUT" },
+                            header.endpoint,
+                            result.status,
+                            result.data.len(),
+                        );
+                    }
+
+                    let data_len = result.data.len() as u32;
+                    let resp_header = BulkPacketHeader {
+                        endpoint: header.endpoint,
+                        status: result.status as u8,
+                        length: (data_len & 0xFFFF) as u16,
+                        stream_id: header.stream_id,
+                        length_high: ((data_len >> 16) & 0xFFFF) as u16,
+                    };
+                    let mut buf = Vec::new();
+                    resp_header.write(&mut buf)?;
+                    buf.extend_from_slice(&result.data);
+                    self.send_usbredir(msg_type::BULK_PACKET, msg.id, &buf)
+                        .await?;
+                } else {
+                    warn!("usbredir: bulk_packet but no device connected");
+                }
+            }
+
+            UsbredirPayload::InterruptPacket { header, .. } => {
+                // Phase 9 will implement interrupt transfers; respond with STALL
+                if self.backend.is_some() {
+                    let resp = InterruptPacketHeader {
+                        endpoint: header.endpoint,
+                        status: Status::Stall as u8,
+                        length: 0,
+                    };
+                    let mut buf = Vec::new();
+                    resp.write(&mut buf)?;
+                    self.send_usbredir(msg_type::INTERRUPT_PACKET, msg.id, &buf)
+                        .await?;
+                }
             }
 
             UsbredirPayload::Unknown { msg_type: mt, data } => {
