@@ -328,6 +328,13 @@ a QEMU instance with USB redirection enabled.
 
 When `--capture <DIR>` is specified, ryll records:
 
+### Session metadata
+
+`metadata.json` is written at session start with platform details
+(OS, architecture), ryll version, and connection target (host, port).
+This makes capture directories self-describing when shared for bug
+reports or debugging.
+
 ### Protocol capture (pcap)
 
 Each SPICE channel writes a separate pcap file (`main.pcap`,
@@ -389,7 +396,10 @@ I/O for the same reason.
 
 Ryll tracks:
 
-- **Frames received**: Count of draw operations
+- **FPS**: Sliding-window frames-per-second derived from `DisplayMark`
+  boundaries (true frame completions), not individual draw operations.
+  The window keeps the most recent 120 timestamps for an accurate
+  short-term reading.
 - **Bytes in/out**: Network throughput per channel
 - **Latency**: Time from key press to display update (cadence mode)
 - **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
@@ -399,3 +409,145 @@ Ryll tracks:
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
+
+## Traffic Ring Buffer
+
+Every SPICE message (sent and received) is recorded in a per-channel
+ring buffer regardless of whether `--capture` is active. The ring
+buffer retains the most recent traffic up to a 50 MB total cap
+(12.5 MB per channel). Each entry stores structured metadata (channel
+name, direction, message type ID and human-readable name, wire and
+payload sizes, timestamp) alongside a full pcap frame for export.
+
+The `TrafficBuffers` struct in `src/bugreport.rs` holds all four
+per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
+shared via `Arc<TrafficBuffers>` between all channel handler tasks
+and the UI thread. This supports both bug report export
+and the live traffic viewer.
+
+## Channel State Snapshots
+
+Each channel handler maintains an `Arc<Mutex<T>>` snapshot struct
+that captures the channel's mutable state. The snapshots are updated
+in-place after every batch of processed messages and after every sent
+message. All snapshot structs derive `serde::Serialize` so they can be
+written to JSON for bug reports.
+
+| Snapshot struct | Channel | Key fields |
+|----------------|---------|------------|
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20), ACK state, bytes in/out |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, bytes in/out |
+| `MainSnapshot` | Main | Session ID, bytes in/out |
+| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
+
+The `ChannelSnapshots` struct in `src/bugreport.rs` holds the four
+channel snapshot `Arc<Mutex<T>>` values and is created alongside
+`TrafficBuffers` in `run_connection()`. The `AppSnapshot` is
+maintained separately by the `RyllApp` event loop.
+
+Updates hold the mutex only briefly (copying a handful of scalars
+and small collections), so contention with the UI thread is
+negligible.
+
+## Bug Report Assembly
+
+`BugReport` in `src/bugreport.rs` assembles a self-contained zip
+file from the ring buffer, channel snapshots, and app state.  The
+zip contains:
+
+```
+ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
+├── metadata.json       # report type, description, ryll version,
+│                       #   platform, target host/port, timestamp
+├── session.json        # AppSnapshot (FPS, bandwidth, surfaces)
+├── channel-state.json  # snapshot of the affected channel
+├── traffic.pcap        # ring buffer pcap (capture feature only)
+└── screenshot.png      # display reports only (RGBA → PNG)
+```
+
+Report types are `Display`, `Input`, `Cursor`, and `Connection`,
+each mapping to one SPICE channel.  `BugReport::new()` gathers
+and serialises all data synchronously.  `BugReport::write_zip()`
+writes the zip to the capture directory's `bug-reports/`
+subdirectory (if `--capture` is active) or the current working
+directory.
+
+`RyllApp::generate_bug_report()` is the high-level entry point
+that collects surface pixels, constructs the `BugReport`, and
+writes the zip.
+
+## Bug Report Dialog
+
+Pressing **F12** or clicking the **Report** button in the status
+bar opens a centred modal dialog for generating bug reports.  The
+dialog contains:
+
+1. A privacy warning about sensitive data in reports.
+2. Radio buttons to select the report type (Display, Input,
+   Cursor, Connection).
+3. An optional description text field.
+4. Capture and Cancel buttons.
+
+While the dialog is open, keyboard and mouse input is not forwarded
+to the SPICE server.  F12 is always consumed by ryll (never sent to
+the guest).  Escape closes the dialog.
+
+The dialog uses a **two-pass pattern** to avoid egui borrow checker
+conflicts: the UI is rendered in a closure that collects the user's
+action into a local variable, then the action is executed on `self`
+after the closure returns.
+
+After a successful report, a transient status message ("Bug report
+saved to ...") is displayed in the status bar for 5 seconds.
+
+### Display region selection
+
+When the user selects "Display" and clicks "Capture", the dialog
+closes and the app enters **region selection mode**:
+
+1. A translucent instruction banner appears at the top of the
+   surface: "Click and drag to select the affected region.
+   Press Escape to skip."
+2. The OS cursor changes to a crosshair (the SPICE cursor overlay
+   is hidden).
+3. The user drags a rectangle; a translucent red overlay shows
+   the selection.
+4. On mouse release, the report is generated with the region
+   coordinates in the metadata.
+5. Pressing Escape skips selection and generates without a region.
+
+Keyboard and mouse input is not forwarded to the SPICE server
+during selection.  Coordinates are clamped to the surface bounds.
+
+## Live Traffic Viewer
+
+Pressing **F11** or clicking the **Traffic** button in the status
+bar toggles a right-side panel showing a live feed of recent SPICE
+protocol messages from the ring buffer.
+
+The viewer collects entries from all four channels via
+`TrafficBuffers::recent_view_entries()`, which returns lightweight
+`TrafficViewEntry` structs (no pcap frame data).  Entries are cached
+in `RyllApp` and refreshed every 250ms to minimise mutex contention.
+
+Features:
+- **Channel filters**: checkboxes to hide/show individual channels
+- **Pause/Resume**: freezes the display for inspection
+- **Auto-scroll**: sticks to the bottom when not paused
+- **Colour-coded channels**: main=blue, display=green, inputs=orange,
+  cursor=purple
+
+Each row shows: relative timestamp, channel name, direction arrow
+(sent/received), message name, and wire size.
+
+F11 is consumed by ryll and not forwarded to the SPICE server.
+
+## Keyboard Scancodes
+
+Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.
+Keys in the navigation cluster (arrow keys, Home, End, Insert, Delete,
+PageUp, PageDown) require the E0 extended prefix to distinguish them from
+their numpad equivalents. These are encoded in the u32 scancode field as
+`(scancode << 8) | 0xE0`, matching spice-gtk's `spice_make_scancode()`.
+The mapping table uses the 0x1xx convention internally (bit 8 set = extended).

@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+use crate::bugreport::{
+    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion,
+    SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+};
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
@@ -28,6 +32,15 @@ const STATS_BAR_HEIGHT: f32 = 10.0;
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
+/// Number of recent frame timestamps kept for the FPS sliding window.
+const FPS_WINDOW_SIZE: usize = 120;
+
+/// Maximum entries shown in the traffic viewer.
+const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
+
+/// How often the traffic viewer refreshes from the ring buffers.
+const TRAFFIC_VIEWER_REFRESH_MS: u64 = 250;
+
 /// Statistics tracking
 #[derive(Default)]
 struct Statistics {
@@ -35,7 +48,8 @@ struct Statistics {
     bytes_in: u64,
     bytes_out: u64,
     last_latency: Option<f64>,
-    start_time: Option<Instant>,
+    /// Timestamps of recent DisplayMark events for sliding-window FPS.
+    frame_times: Vec<Instant>,
 }
 
 /// Shared byte counter that channels increment from their
@@ -148,6 +162,39 @@ pub struct RyllApp {
 
     // USB device status
     usb_device_description: Option<String>,
+
+    // Traffic ring buffers (always active, for bug reports and traffic viewer)
+    traffic: Arc<TrafficBuffers>,
+
+    // Channel state snapshots (always active, for bug reports)
+    channel_snapshots: ChannelSnapshots,
+    app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
+
+    // Connection target for bug report metadata
+    target_host: String,
+    target_port: u16,
+
+    // Bug report dialog state
+    show_bug_dialog: bool,
+    bug_report_type: BugReportType,
+    bug_description: String,
+    bug_status_message: Option<(String, Instant)>,
+
+    // Region selection state (Display bug reports)
+    region_select_active: bool,
+    region_drag_start: Option<(u32, u32)>,
+    region_drag_end: Option<(u32, u32)>,
+
+    // Traffic viewer state
+    show_traffic_viewer: bool,
+    traffic_viewer_entries: Vec<TrafficViewEntry>,
+    traffic_viewer_last_refresh: Instant,
+    traffic_viewer_paused: bool,
+    traffic_filter_main: bool,
+    traffic_filter_display: bool,
+    traffic_filter_inputs: bool,
+    traffic_filter_cursor: bool,
+    traffic_filter_usbredir: bool,
 }
 
 impl RyllApp {
@@ -165,12 +212,30 @@ impl RyllApp {
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
 
+        // Traffic ring buffers (always active)
+        let traffic = Arc::new(TrafficBuffers::new());
+
+        // Channel state snapshots (always active)
+        let channel_snapshots = ChannelSnapshots::new();
+        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+
+        // Save connection target for bug report metadata
+        let target_host = config.host.clone();
+        let target_port = config.port;
+
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let ctx = cc.egui_ctx.clone();
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
+        let traffic_clone = traffic.clone();
+        let snaps_for_conn = ChannelSnapshots {
+            display: channel_snapshots.display.clone(),
+            inputs: channel_snapshots.inputs.clone(),
+            cursor: channel_snapshots.cursor.clone(),
+            main: channel_snapshots.main.clone(),
+        };
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -182,6 +247,8 @@ impl RyllApp {
                     virtual_disks,
                     capture_clone,
                     counter_clone,
+                    traffic_clone,
+                    snaps_for_conn,
                 )
                 .await
                 {
@@ -201,10 +268,7 @@ impl RyllApp {
             cursor_image: None,
             cursor_texture: None,
             surface_rect: egui::Rect::NOTHING,
-            stats: Statistics {
-                start_time: Some(Instant::now()),
-                ..Default::default()
-            },
+            stats: Statistics::default(),
             cadence_enabled: cadence,
             last_cadence_key: Instant::now(),
             connected: false,
@@ -215,6 +279,27 @@ impl RyllApp {
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
             usb_device_description: None,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            target_host,
+            target_port,
+            show_bug_dialog: false,
+            bug_report_type: BugReportType::Display,
+            bug_description: String::new(),
+            bug_status_message: None,
+            region_select_active: false,
+            region_drag_start: None,
+            region_drag_end: None,
+            show_traffic_viewer: false,
+            traffic_viewer_entries: Vec::new(),
+            traffic_viewer_last_refresh: Instant::now(),
+            traffic_viewer_paused: false,
+            traffic_filter_main: true,
+            traffic_filter_display: true,
+            traffic_filter_inputs: true,
+            traffic_filter_cursor: true,
+            traffic_filter_usbredir: true,
         }
     }
 
@@ -270,13 +355,20 @@ impl RyllApp {
                     surface.blit(left, top, width, height, &pixels);
                     self.stats.frames_received += 1;
                     debug!(
-                        "app: blit surface={}, pos=({},{}), size={}x{}, frame={}",
-                        surface_id, left, top, width, height, self.stats.frames_received
+                        "app: blit surface={}, pos=({},{}), size={}x{}",
+                        surface_id, left, top, width, height
                     );
                 }
 
                 ChannelEvent::DisplayMark => {
-                    // Frame boundary — capture a video frame if enabled
+                    // Frame boundary — record timestamp for FPS calculation
+                    let now = Instant::now();
+                    self.stats.frame_times.push(now);
+                    if self.stats.frame_times.len() > FPS_WINDOW_SIZE {
+                        self.stats.frame_times.remove(0);
+                    }
+
+                    // Capture a video frame if enabled
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self.surfaces.get(&0) {
                             capture.frame(0, surface.pixels(), surface.width, surface.height);
@@ -345,9 +437,115 @@ impl RyllApp {
                 _ => {}
             }
         }
+
+        self.update_app_snapshot();
+    }
+
+    /// Sync app-level state to the shared snapshot.
+    fn update_app_snapshot(&self) {
+        let mut snap = self.app_snapshot.lock().unwrap();
+
+        // FPS from sliding-window frame_times
+        snap.fps = if self.stats.frame_times.len() >= 2 {
+            let oldest = self.stats.frame_times.first().unwrap();
+            let newest = self.stats.frame_times.last().unwrap();
+            let elapsed = newest.duration_since(*oldest).as_secs_f64();
+            if elapsed > 0.0 {
+                (self.stats.frame_times.len() - 1) as f64 / elapsed
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        snap.bandwidth_history = self.bandwidth.history.clone();
+        snap.bandwidth_current = self.bandwidth.history.last().copied().unwrap_or(0.0);
+        snap.last_latency = self.stats.last_latency;
+        snap.frames_received = self.stats.frames_received;
+        snap.surfaces = self
+            .surfaces
+            .values()
+            .map(|s| SurfaceInfo {
+                surface_id: s.id,
+                width: s.width,
+                height: s.height,
+            })
+            .collect();
+        snap.cursor_pos = self.cursor_pos;
+        snap.cursor_visible = self.cursor_visible;
+        snap.mouse_mode = self.mouse_mode;
+        snap.connected = self.connected;
+        snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
+    }
+
+    /// Generate a bug report and write it to disk.
+    /// Returns the path of the written zip file.
+    pub fn generate_bug_report(
+        &self,
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        // Get surface pixels for display reports
+        let surface_data = if report_type == BugReportType::Display {
+            self.surfaces
+                .get(&0)
+                .map(|s| (s.pixels(), s.width, s.height))
+        } else {
+            None
+        };
+
+        // Assemble the report
+        let report = BugReport::new(
+            report_type,
+            description,
+            region,
+            &self.target_host,
+            self.target_port,
+            &self.traffic,
+            &self.channel_snapshots,
+            &self.app_snapshot,
+            surface_data,
+        )?;
+
+        // Determine output directory
+        let output_dir = match &self.capture {
+            Some(cap) => cap.dir.join("bug-reports"),
+            None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+
+        report.write_zip(&output_dir)
+    }
+
+    /// Run a bug report and set the status bar message from the result.
+    fn finish_bug_report(
+        &mut self,
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+    ) {
+        match self.generate_bug_report(report_type, description, region) {
+            Ok(path) => {
+                let msg = format!("Bug report saved to {}", path.display());
+                info!("app: {}", msg);
+                self.bug_status_message = Some((msg, Instant::now()));
+            }
+            Err(e) => {
+                let msg = format!("Bug report failed: {}", e);
+                error!("app: {}", msg);
+                self.bug_status_message = Some((msg, Instant::now()));
+            }
+        }
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
+        // Don't forward input to the SPICE server when
+        // the bug report dialog or region selection is active.
+        if self.show_bug_dialog || self.region_select_active {
+            return;
+        }
+
         let input_tx = match &self.input_tx {
             Some(tx) => tx.clone(),
             None => return,
@@ -364,6 +562,10 @@ impl RyllApp {
                     ..
                 } = event
                 {
+                    // F11/F12 are consumed by the traffic viewer / bug report shortcuts
+                    if *key == egui::Key::F11 || *key == egui::Key::F12 {
+                        continue;
+                    }
                     if let Some((down_code, up_code)) = key_to_scancode(*key) {
                         let ev = if *pressed {
                             InputEvent::KeyDown(down_code)
@@ -427,11 +629,259 @@ impl eframe::App for RyllApp {
         // Tick the bandwidth tracker
         self.bandwidth.tick();
 
+        // Expire old status messages
+        if let Some((_, created)) = &self.bug_status_message {
+            if created.elapsed() >= Duration::from_secs(5) {
+                self.bug_status_message = None;
+            }
+        }
+
+        // Escape during region selection: skip and generate without region
+        if self.region_select_active {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                let report_type = self.bug_report_type;
+                let description = self.bug_description.clone();
+                self.finish_bug_report(report_type, description, None);
+                self.region_select_active = false;
+                self.region_drag_start = None;
+                self.region_drag_end = None;
+            }
+        }
+
+        // F12 toggles bug report dialog (not during region selection)
+        if !self.region_select_active {
+            let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
+            if f12_pressed {
+                self.show_bug_dialog = !self.show_bug_dialog;
+                if self.show_bug_dialog {
+                    self.bug_report_type = BugReportType::Display;
+                    self.bug_description.clear();
+                }
+            }
+        }
+
+        // F11 toggles traffic viewer (not during region selection)
+        if !self.region_select_active {
+            let f11_pressed = ctx.input(|i| i.key_pressed(egui::Key::F11));
+            if f11_pressed {
+                self.show_traffic_viewer = !self.show_traffic_viewer;
+            }
+        }
+
+        // Escape closes the dialog
+        if self.show_bug_dialog {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                self.show_bug_dialog = false;
+            }
+        }
+
         // Handle input
         self.handle_input(ctx);
 
         // Handle cadence mode
         self.handle_cadence();
+
+        // Refresh traffic viewer entries periodically
+        if self.show_traffic_viewer
+            && !self.traffic_viewer_paused
+            && self.traffic_viewer_last_refresh.elapsed()
+                >= Duration::from_millis(TRAFFIC_VIEWER_REFRESH_MS)
+        {
+            self.traffic_viewer_entries =
+                self.traffic.recent_view_entries(TRAFFIC_VIEWER_MAX_ENTRIES);
+            self.traffic_viewer_last_refresh = Instant::now();
+        }
+
+        // Statistics panel (bottom) — rendered before CentralPanel
+        // so egui reserves its space correctly.
+        let stats_frame = egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .fill(ctx.style().visuals.panel_fill);
+        egui::TopBottomPanel::bottom("stats")
+            .frame(stats_frame)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if let Some(latency) = self.stats.last_latency {
+                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+                        ui.separator();
+                    }
+
+                    // Sliding-window FPS from DisplayMark timestamps
+                    if self.stats.frame_times.len() >= 2 {
+                        let oldest = self.stats.frame_times.first().unwrap();
+                        let newest = self.stats.frame_times.last().unwrap();
+                        let elapsed = newest.duration_since(*oldest).as_secs_f64();
+                        if elapsed > 0.0 {
+                            let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
+                            ui.label(format!("FPS: {:.1}", fps));
+                        }
+                    }
+
+                    ui.separator();
+                    if self.mouse_mode == 1 {
+                        ui.label("Cursor: server mode");
+                    } else {
+                        ui.label(format!(
+                            "Cursor: ({}, {}) {}",
+                            self.cursor_pos.0,
+                            self.cursor_pos.1,
+                            if self.cursor_visible {
+                                "visible"
+                            } else {
+                                "hidden"
+                            }
+                        ));
+                    }
+
+                    if self.cadence_enabled {
+                        ui.separator();
+                        ui.label("Cadence: ON");
+                    }
+
+                    if let Some(ref desc) = self.usb_device_description {
+                        ui.separator();
+                        ui.label(format!("USB: {}", desc));
+                    }
+
+                    // Bandwidth sparkline and buttons (right-aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(self.bandwidth.label());
+                        if self.bandwidth.history.len() >= 2 {
+                            let max_val = self
+                                .bandwidth
+                                .history
+                                .iter()
+                                .cloned()
+                                .fold(1.0f32, f32::max);
+                            let sparkline_w = 80.0;
+                            let sparkline_h = 12.0;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(sparkline_w, sparkline_h),
+                                egui::Sense::hover(),
+                            );
+                            let painter = ui.painter_at(rect);
+                            let n = self.bandwidth.history.len();
+                            let bar_w = sparkline_w / n as f32;
+                            for (i, &val) in self.bandwidth.history.iter().enumerate() {
+                                let h = (val / max_val) * sparkline_h;
+                                let x = rect.min.x + i as f32 * bar_w;
+                                let bar = egui::Rect::from_min_max(
+                                    egui::pos2(x, rect.max.y - h),
+                                    egui::pos2(x + bar_w - 0.5, rect.max.y),
+                                );
+                                painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
+                            }
+                        }
+
+                        ui.separator();
+                        if ui.small_button("Traffic").clicked() {
+                            self.show_traffic_viewer = !self.show_traffic_viewer;
+                        }
+                        if ui.small_button("Report").clicked() {
+                            self.show_bug_dialog = true;
+                            self.bug_report_type = BugReportType::Display;
+                            self.bug_description.clear();
+                        }
+
+                        // Transient status message from bug report
+                        if let Some((ref msg, created)) = self.bug_status_message {
+                            if created.elapsed() < Duration::from_secs(5) {
+                                ui.separator();
+                                ui.label(msg);
+                            }
+                        }
+                    });
+                });
+            });
+
+        // Traffic viewer side panel (conditional)
+        if self.show_traffic_viewer {
+            egui::SidePanel::right("traffic_viewer")
+                .default_width(350.0)
+                .show(ctx, |ui| {
+                    // Header
+                    ui.horizontal(|ui| {
+                        ui.heading("Traffic");
+                        if ui
+                            .small_button(if self.traffic_viewer_paused {
+                                "Resume"
+                            } else {
+                                "Pause"
+                            })
+                            .clicked()
+                        {
+                            self.traffic_viewer_paused = !self.traffic_viewer_paused;
+                        }
+                        ui.label(format!("{} msgs", self.traffic_viewer_entries.len()));
+                    });
+
+                    // Channel filters
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.traffic_filter_main, "Main");
+                        ui.checkbox(&mut self.traffic_filter_display, "Display");
+                        ui.checkbox(&mut self.traffic_filter_inputs, "Inputs");
+                        ui.checkbox(&mut self.traffic_filter_cursor, "Cursor");
+                        ui.checkbox(&mut self.traffic_filter_usbredir, "USB");
+                    });
+                    ui.separator();
+
+                    // Scrollable message list
+                    let stick = !self.traffic_viewer_paused;
+                    let now_elapsed = self.traffic.elapsed();
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(stick)
+                        .show(ui, |ui| {
+                            for entry in &self.traffic_viewer_entries {
+                                // Apply channel filter
+                                let visible = match entry.channel {
+                                    "main" => self.traffic_filter_main,
+                                    "display" => self.traffic_filter_display,
+                                    "inputs" => self.traffic_filter_inputs,
+                                    "cursor" => self.traffic_filter_cursor,
+                                    "usbredir" => self.traffic_filter_usbredir,
+                                    _ => true,
+                                };
+                                if !visible {
+                                    continue;
+                                }
+
+                                let relative =
+                                    entry.timestamp.as_secs_f64() - now_elapsed.as_secs_f64();
+                                let dir = match entry.direction {
+                                    TrafficDirection::Sent => "\u{2192}",
+                                    TrafficDirection::Received => "\u{2190}",
+                                };
+                                let channel_color = match entry.channel {
+                                    "main" => egui::Color32::from_rgb(120, 160, 255),
+                                    "display" => egui::Color32::from_rgb(100, 200, 100),
+                                    "inputs" => egui::Color32::from_rgb(255, 180, 80),
+                                    "cursor" => egui::Color32::from_rgb(200, 130, 255),
+                                    "usbredir" => egui::Color32::from_rgb(255, 100, 100),
+                                    _ => egui::Color32::GRAY,
+                                };
+                                let size_str = format_size(entry.wire_size);
+
+                                ui.horizontal(|ui| {
+                                    ui.monospace(format!("{:>7.1}s", relative));
+                                    ui.colored_label(
+                                        channel_color,
+                                        format!("{:<8}", entry.channel),
+                                    );
+                                    ui.monospace(dir);
+                                    ui.label(entry.message_name);
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            ui.monospace(size_str);
+                                        },
+                                    );
+                                });
+                            }
+                        });
+                });
+        }
 
         // Main display area (no margin so the surface fills edge-to-edge)
         let panel_frame = egui::Frame::none().inner_margin(0.0);
@@ -468,53 +918,65 @@ impl eframe::App for RyllApp {
                     self.surface_rect = response.rect;
 
                     // Hide the OS cursor when hovering over the surface
-                    if response.hovered() && self.cursor_image.is_some() {
+                    // (show crosshair during region selection instead)
+                    if response.hovered()
+                        && !self.region_select_active
+                        && self.cursor_image.is_some()
+                    {
                         ui.ctx()
                             .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
                     }
 
-                    // Handle mouse input on the surface
-                    if let Some(tx) = &self.input_tx {
-                        // Send mouse position only when it changes
-                        if let Some(pos) = response.hover_pos() {
-                            let x = (pos.x - response.rect.min.x).max(0.0) as u32;
-                            let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                            if self.last_mouse_pos != Some((x, y)) {
-                                self.last_mouse_pos = Some((x, y));
-                                let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                    // Handle mouse input on the surface (suppressed during dialog/selection)
+                    if !self.show_bug_dialog && !self.region_select_active {
+                        if let Some(tx) = &self.input_tx {
+                            // Send mouse position only when it changes
+                            if let Some(pos) = response.hover_pos() {
+                                let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                                let y = (pos.y - response.rect.min.y).max(0.0) as u32;
+                                if self.last_mouse_pos != Some((x, y)) {
+                                    self.last_mouse_pos = Some((x, y));
+                                    let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                                }
                             }
-                        }
 
-                        // Mouse buttons — use the raw pointer state from egui
-                        // so press and release are sent at the correct times,
-                        // not batched together on release like clicked_by().
-                        ctx.input(|i| {
-                            let pos = self.last_mouse_pos.unwrap_or((0, 0));
-                            for button in [
-                                egui::PointerButton::Primary,
-                                egui::PointerButton::Secondary,
-                                egui::PointerButton::Middle,
-                            ] {
-                                if i.pointer.button_pressed(button) {
-                                    let spice_btn = mouse_button_to_spice(button);
-                                    let _ = tx.try_send(InputEvent::MouseDown {
-                                        button: spice_btn,
-                                        x: pos.0,
-                                        y: pos.1,
-                                    });
-                                    debug!("app: mouse down {:?} at ({},{})", button, pos.0, pos.1);
+                            // Mouse buttons — use the raw pointer state from egui
+                            // so press and release are sent at the correct times,
+                            // not batched together on release like clicked_by().
+                            ctx.input(|i| {
+                                let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                                for button in [
+                                    egui::PointerButton::Primary,
+                                    egui::PointerButton::Secondary,
+                                    egui::PointerButton::Middle,
+                                ] {
+                                    if i.pointer.button_pressed(button) {
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        let _ = tx.try_send(InputEvent::MouseDown {
+                                            button: spice_btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        debug!(
+                                            "app: mouse down {:?} at ({},{})",
+                                            button, pos.0, pos.1
+                                        );
+                                    }
+                                    if i.pointer.button_released(button) {
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        let _ = tx.try_send(InputEvent::MouseUp {
+                                            button: spice_btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        debug!(
+                                            "app: mouse up {:?} at ({},{})",
+                                            button, pos.0, pos.1
+                                        );
+                                    }
                                 }
-                                if i.pointer.button_released(button) {
-                                    let spice_btn = mouse_button_to_spice(button);
-                                    let _ = tx.try_send(InputEvent::MouseUp {
-                                        button: spice_btn,
-                                        x: pos.0,
-                                        y: pos.1,
-                                    });
-                                    debug!("app: mouse up {:?} at ({},{})", button, pos.0, pos.1);
-                                }
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -525,88 +987,187 @@ impl eframe::App for RyllApp {
                 }
             });
 
-        // Statistics panel (bottom)
-        let stats_frame = egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
-            .fill(ctx.style().visuals.panel_fill);
-        egui::TopBottomPanel::bottom("stats")
-            .frame(stats_frame)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(format!("Frames: {}", self.stats.frames_received));
+        // Bug report dialog (two-pass: render then act)
+        let mut dialog_action = None;
+        if self.show_bug_dialog {
+            egui::Window::new("Bug Report")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(350.0);
+
+                    ui.label(
+                        "Bug reports may contain sensitive data including \
+                         screen contents, typed keystrokes, and protocol \
+                         traffic. Review the report before sharing and \
+                         ensure no confidential information is visible on \
+                         screen or was recently typed.",
+                    );
+                    ui.add_space(4.0);
                     ui.separator();
+                    ui.add_space(4.0);
 
-                    if let Some(latency) = self.stats.last_latency {
-                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
-                        ui.separator();
-                    }
+                    ui.label("Report type:");
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Display,
+                        "Display (screenshot + image state)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Input,
+                        "Input (keyboard + mouse state)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Cursor,
+                        "Cursor (cursor cache + position)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Connection,
+                        "Connection (session + main channel)",
+                    );
 
-                    if let Some(start) = self.stats.start_time {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        if elapsed > 0.0 {
-                            let fps = self.stats.frames_received as f64 / elapsed;
-                            ui.label(format!("FPS: {:.1}", fps));
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    ui.label("Description (optional):");
+                    ui.text_edit_singleline(&mut self.bug_description);
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Capture").clicked() {
+                            dialog_action = Some(true);
                         }
-                    }
-
-                    ui.separator();
-                    if self.mouse_mode == 1 {
-                        ui.label("Cursor: server mode");
-                    } else {
-                        ui.label(format!(
-                            "Cursor: ({}, {}) {}",
-                            self.cursor_pos.0,
-                            self.cursor_pos.1,
-                            if self.cursor_visible {
-                                "visible"
-                            } else {
-                                "hidden"
-                            }
-                        ));
-                    }
-
-                    if self.cadence_enabled {
-                        ui.separator();
-                        ui.label("Cadence: ON");
-                    }
-
-                    if let Some(ref desc) = self.usb_device_description {
-                        ui.separator();
-                        ui.label(format!("USB: {}", desc));
-                    }
-
-                    // Bandwidth sparkline (right-aligned)
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(self.bandwidth.label());
-                        if self.bandwidth.history.len() >= 2 {
-                            let max_val = self
-                                .bandwidth
-                                .history
-                                .iter()
-                                .cloned()
-                                .fold(1.0f32, f32::max);
-                            let sparkline_w = 80.0;
-                            let sparkline_h = 12.0;
-                            let (rect, _) = ui.allocate_exact_size(
-                                egui::vec2(sparkline_w, sparkline_h),
-                                egui::Sense::hover(),
-                            );
-                            let painter = ui.painter_at(rect);
-                            let n = self.bandwidth.history.len();
-                            let bar_w = sparkline_w / n as f32;
-                            for (i, &val) in self.bandwidth.history.iter().enumerate() {
-                                let h = (val / max_val) * sparkline_h;
-                                let x = rect.min.x + i as f32 * bar_w;
-                                let bar = egui::Rect::from_min_max(
-                                    egui::pos2(x, rect.max.y - h),
-                                    egui::pos2(x + bar_w - 0.5, rect.max.y),
-                                );
-                                painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(80, 180, 80));
-                            }
+                        if ui.button("Cancel").clicked() {
+                            dialog_action = Some(false);
                         }
                     });
                 });
+        }
+
+        // Execute dialog action outside the closure
+        match dialog_action {
+            Some(true) => {
+                if self.bug_report_type == BugReportType::Display {
+                    // Enter region selection mode for display reports
+                    self.region_select_active = true;
+                    self.region_drag_start = None;
+                    self.region_drag_end = None;
+                } else {
+                    // Non-display: generate immediately
+                    let report_type = self.bug_report_type;
+                    let description = self.bug_description.clone();
+                    self.finish_bug_report(report_type, description, None);
+                }
+                self.show_bug_dialog = false;
+            }
+            Some(false) => {
+                self.show_bug_dialog = false;
+            }
+            None => {}
+        }
+
+        // Region selection mode: crosshair, drag tracking, overlays
+        if self.region_select_active && self.surface_rect != egui::Rect::NOTHING {
+            // Show crosshair cursor over the surface
+            ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+
+            // Get surface dimensions for clamping
+            let surf_w = self.surface_rect.width() as u32;
+            let surf_h = self.surface_rect.height() as u32;
+
+            // Track drag (two-pass: collect action, execute outside)
+            let mut region_completed = false;
+            ctx.input(|i| {
+                if i.pointer.primary_pressed() {
+                    if let Some(pos) = i.pointer.interact_pos() {
+                        let x = ((pos.x - self.surface_rect.min.x).max(0.0) as u32).min(surf_w);
+                        let y = ((pos.y - self.surface_rect.min.y).max(0.0) as u32).min(surf_h);
+                        self.region_drag_start = Some((x, y));
+                        self.region_drag_end = Some((x, y));
+                    }
+                }
+                if i.pointer.primary_down() {
+                    if let Some(pos) = i.pointer.interact_pos() {
+                        let x = ((pos.x - self.surface_rect.min.x).max(0.0) as u32).min(surf_w);
+                        let y = ((pos.y - self.surface_rect.min.y).max(0.0) as u32).min(surf_h);
+                        self.region_drag_end = Some((x, y));
+                    }
+                }
+                if i.pointer.primary_released() && self.region_drag_start.is_some() {
+                    region_completed = true;
+                }
             });
+
+            // Draw instruction banner
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("region_select_banner"),
+            ));
+            let banner_rect = egui::Rect::from_min_size(
+                self.surface_rect.min,
+                egui::vec2(self.surface_rect.width(), 28.0),
+            );
+            painter.rect_filled(
+                banner_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Click and drag to select the affected region. Press Escape to skip.",
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
+
+            // Draw selection rectangle while dragging
+            if let (Some((sx, sy)), Some((ex, ey))) = (self.region_drag_start, self.region_drag_end)
+            {
+                let left = sx.min(ex) as f32 + self.surface_rect.min.x;
+                let top = sy.min(ey) as f32 + self.surface_rect.min.y;
+                let right = sx.max(ex) as f32 + self.surface_rect.min.x;
+                let bottom = sy.max(ey) as f32 + self.surface_rect.min.y;
+                let sel_rect =
+                    egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
+                let sel_painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("region_select_rect"),
+                ));
+                sel_painter.rect_filled(
+                    sel_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 0, 0, 60),
+                );
+                sel_painter.rect_stroke(
+                    sel_rect,
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)),
+                );
+            }
+
+            // Generate report on drag release
+            if region_completed {
+                let (sx, sy) = self.region_drag_start.unwrap();
+                let (ex, ey) = self.region_drag_end.unwrap();
+                let region = ReportRegion {
+                    left: sx.min(ex),
+                    top: sy.min(ey),
+                    right: sx.max(ex),
+                    bottom: sy.max(ey),
+                };
+                let report_type = self.bug_report_type;
+                let description = self.bug_description.clone();
+                self.finish_bug_report(report_type, description, Some(region));
+                self.region_select_active = false;
+                self.region_drag_start = None;
+                self.region_drag_end = None;
+            }
+        }
 
         // Create a default cursor if the server hasn't sent one yet
         if self.cursor_image.is_none() && self.connected {
@@ -638,7 +1199,11 @@ impl eframe::App for RyllApp {
 
         // Draw cursor overlay using the painter so it doesn't
         // interfere with mouse input on the surface below.
-        if self.cursor_visible && self.surface_rect != egui::Rect::NOTHING {
+        // (hidden during region selection — crosshair cursor is shown instead)
+        if self.cursor_visible
+            && !self.region_select_active
+            && self.surface_rect != egui::Rect::NOTHING
+        {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
                 let (cx, cy) = self
                     .last_mouse_pos
@@ -659,10 +1224,10 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Repaint at a modest rate to pick up new frames without
-        // spinning the CPU.  Incoming events will also trigger a
-        // repaint via request_repaint() from the connection thread.
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        // Repaint at ~60 fps to keep input responsive (clicks, key
+        // presses).  Incoming events also trigger repaints via
+        // request_repaint() from the connection thread.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
 
@@ -718,6 +1283,7 @@ fn default_arrow_cursor() -> Vec<u8> {
 }
 
 /// Run the SPICE connection in async context
+#[allow(clippy::too_many_arguments)]
 async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -725,6 +1291,8 @@ async fn run_connection(
     virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
+    snapshots: ChannelSnapshots,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -740,6 +1308,8 @@ async fn run_connection(
         event_tx_clone,
         capture.clone(),
         byte_counter.clone(),
+        traffic.clone(),
+        snapshots.main,
     );
 
     // Spawn main channel task
@@ -803,6 +1373,8 @@ async fn run_connection(
                     event_tx.clone(),
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
+                    snapshots.display.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -816,6 +1388,8 @@ async fn run_connection(
                     event_tx.clone(),
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
+                    snapshots.cursor.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -830,6 +1404,8 @@ async fn run_connection(
                     input_rx,
                     capture.clone(),
                     byte_counter.clone(),
+                    traffic.clone(),
+                    snapshots.inputs.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -890,6 +1466,12 @@ pub async fn run_headless(
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
 
+    // Traffic ring buffers (always active)
+    let traffic = Arc::new(TrafficBuffers::new());
+
+    // Channel state snapshots (always active)
+    let snapshots = ChannelSnapshots::new();
+
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
         run_connection(
@@ -899,6 +1481,8 @@ pub async fn run_headless(
             virtual_disks,
             capture,
             byte_counter,
+            traffic,
+            snapshots,
         )
         .await
     });

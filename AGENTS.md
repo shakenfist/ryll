@@ -98,7 +98,16 @@ Ryll uses:
 src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
-│                        #   bandwidth sparkline
+│                        #   bandwidth sparkline, bug report dialog,
+│                        #   live traffic viewer panel
+├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
+│                        #   TrafficRingBuffer, TrafficBuffers),
+│                        #   channel state snapshots (DisplaySnapshot,
+│                        #   InputsSnapshot, CursorSnapshot,
+│                        #   MainSnapshot, AppSnapshot,
+│                        #   ChannelSnapshots), bug report assembly
+│                        #   (BugReport, BugReportType, ReportMetadata),
+│                        #   traffic viewer (TrafficViewEntry)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
@@ -113,7 +122,8 @@ src/
 │   ├── display.rs       # Surface management, image decoding,
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
-│   ├── inputs.rs        # Keyboard scancodes, mouse events
+│   ├── inputs.rs        # Keyboard scancodes (with E0 extended
+│                        #   prefix for nav cluster), mouse events
 │   └── usbredir.rs      # USB redirection (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser
 │   ├── constants.rs     # Message types, capabilities, status codes
@@ -194,4 +204,7 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | openh264 | H.264 video encoding for --capture mode (optional, `capture` feature) |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
 | image | JPEG decoding (with `jpeg` feature only) |
+| serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
+| zip | Zip file output for bug reports |
+| png | PNG encoding for bug report screenshots |
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |

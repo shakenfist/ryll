@@ -1,4 +1,5 @@
 mod app;
+mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 #[cfg(not(feature = "capture"))]
@@ -6,7 +7,9 @@ mod capture {
     /// Stub CaptureSession when capture feature is disabled.
     /// Methods are never called (capture is always None), but
     /// the compiler needs to see them for type-checking.
-    pub struct CaptureSession;
+    pub struct CaptureSession {
+        pub dir: std::path::PathBuf,
+    }
     impl CaptureSession {
         pub fn packet_sent(&self, _channel: &str, _data: &[u8]) {}
         pub fn packet_received(&self, _channel: &str, _data: &[u8]) {}
@@ -101,9 +104,12 @@ fn main() -> Result<()> {
     // Create capture session if requested
     #[cfg(feature = "capture")]
     let capture = match &args.capture {
-        Some(dir) => Some(Arc::new(CaptureSession::new(std::path::PathBuf::from(
-            dir,
-        ))?)),
+        Some(dir) => Some(Arc::new(CaptureSession::new(
+            std::path::PathBuf::from(dir),
+            &config.host,
+            config.port,
+            config.tls_port,
+        )?)),
         None => None,
     };
     #[cfg(not(feature = "capture"))]

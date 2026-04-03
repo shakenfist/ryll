@@ -1,11 +1,12 @@
 /// Cursor channel handler - cursor position, shape, and caching
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
+use crate::bugreport::{CursorCacheEntry, CursorSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -24,6 +25,8 @@ pub struct CursorChannel {
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
+    snapshot: Arc<Mutex<CursorSnapshot>>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -38,6 +41,8 @@ impl CursorChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
+        snapshot: Arc<Mutex<CursorSnapshot>>,
     ) -> Self {
         CursorChannel {
             stream,
@@ -46,6 +51,8 @@ impl CursorChannel {
             cursor_cache: HashMap::new(),
             capture,
             byte_counter,
+            traffic,
+            snapshot,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -105,6 +112,15 @@ impl CursorChannel {
                 break;
             }
 
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "cursor",
+                header.message_type,
+                message_names::cursor_server(header.message_type),
+                &raw,
+            );
+
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
             self.buffer.drain(..total_size);
 
@@ -117,6 +133,7 @@ impl CursorChannel {
             }
         }
 
+        self.update_snapshot();
         Ok(())
     }
 
@@ -360,6 +377,29 @@ impl CursorChannel {
         }
     }
 
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.cache_entries = self.cursor_cache.len();
+        snap.cache_contents = self
+            .cursor_cache
+            .iter()
+            .map(|(&id, img)| CursorCacheEntry {
+                cursor_id: id,
+                width: img.width,
+                height: img.height,
+                hot_spot_x: img.hot_spot_x,
+                hot_spot_y: img.hot_spot_y,
+            })
+            .collect();
+        snap.ack_generation = self.ack_generation;
+        snap.ack_window = self.ack_window;
+        snap.message_count = self.message_count;
+        snap.last_ack = self.last_ack;
+        snap.bytes_in = self.bytes_in;
+        snap.bytes_out = self.bytes_out;
+    }
+
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(cursor_client::ACK, &[]);
         self.send_with_log(cursor_client::ACK, &msg).await?;
@@ -368,12 +408,15 @@ impl CursorChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::cursor_client(msg_type);
         if settings::is_verbose() {
-            let msg_type_str = message_names::cursor_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "cursor", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "cursor", msg_type, msg_name, payload_size);
         }
-        self.send(data).await
+        self.traffic.record_sent("cursor", msg_type, msg_name, data);
+        let result = self.send(data).await;
+        self.update_snapshot();
+        result
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {

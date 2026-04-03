@@ -108,7 +108,7 @@ impl PcapChannelWriter {
 }
 
 /// Build a fake Ethernet + IPv4 + TCP frame wrapping `payload`.
-fn build_tcp_frame(
+pub(crate) fn build_tcp_frame(
     src_ip: [u8; 4],
     src_port: u16,
     dst_ip: [u8; 4],
@@ -147,7 +147,7 @@ fn build_tcp_frame(
 }
 
 /// Map channel name to a unique client port number.
-fn channel_port(channel: &str) -> u16 {
+pub(crate) fn channel_port(channel: &str) -> u16 {
     match channel {
         "main" => 10001,
         "display" => 10002,
@@ -492,6 +492,11 @@ fn length_prefix_nal(nal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Re-export from bugreport module to avoid duplication.
+fn chrono_now() -> String {
+    crate::bugreport::chrono_now()
+}
+
 // ── Capture session ─────────────────────────────────────
 
 /// Holds state for an active capture session.
@@ -512,9 +517,16 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     /// Create a new capture session writing to `dir`.
-    pub fn new(dir: PathBuf) -> anyhow::Result<Self> {
+    ///
+    /// Writes a `metadata.json` file with session context (platform,
+    /// version, connection target) so that capture directories are
+    /// self-describing when shared for bug reports.
+    pub fn new(dir: PathBuf, host: &str, port: u16, tls_port: Option<u16>) -> anyhow::Result<Self> {
         fs::create_dir_all(&dir)?;
         info!("capture: writing to {}", dir.display());
+
+        // Write session metadata
+        Self::write_metadata(&dir, host, port, tls_port)?;
 
         let mut pcap_writers = HashMap::new();
         for &channel in CHANNELS {
@@ -532,6 +544,51 @@ impl CaptureSession {
             video_init_attempted: Mutex::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Write a metadata.json file describing this capture session.
+    fn write_metadata(
+        dir: &std::path::Path,
+        host: &str,
+        port: u16,
+        tls_port: Option<u16>,
+    ) -> anyhow::Result<()> {
+        use std::io::Write;
+
+        let path = dir.join("metadata.json");
+        let mut f = File::create(&path)?;
+
+        let version = env!("CARGO_PKG_VERSION");
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        let tls_str = match tls_port {
+            Some(p) => format!("{}", p),
+            None => String::from("null"),
+        };
+
+        // Simple hand-written JSON to avoid a serde dependency
+        write!(
+            f,
+            "{{\n\
+             \x20 \"ryll_version\": \"{}\",\n\
+             \x20 \"platform_os\": \"{}\",\n\
+             \x20 \"platform_arch\": \"{}\",\n\
+             \x20 \"target_host\": \"{}\",\n\
+             \x20 \"target_port\": {},\n\
+             \x20 \"target_tls_port\": {},\n\
+             \x20 \"capture_started\": \"{}\"\n\
+             }}\n",
+            version,
+            os,
+            arch,
+            host.replace('\\', "\\\\").replace('"', "\\\""),
+            port,
+            tls_str,
+            chrono_now(),
+        )?;
+
+        info!("capture: wrote {}", path.display());
+        Ok(())
     }
 
     /// Record a packet sent by the client on the given channel.

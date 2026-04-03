@@ -1,13 +1,14 @@
 /// Inputs channel handler - keyboard and mouse input
 use anyhow::Result;
 use eframe::egui;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::app::ByteCounter;
+use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -23,6 +24,9 @@ use super::{ChannelEvent, InputEvent};
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
 
+/// Maximum number of recent input events to keep in the snapshot.
+const MAX_RECENT_EVENTS: usize = 50;
+
 pub struct InputsChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -33,6 +37,9 @@ pub struct InputsChannel {
     motion_count: u32,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
+    snapshot: Arc<Mutex<InputsSnapshot>>,
+    recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -44,6 +51,8 @@ impl InputsChannel {
         input_rx: mpsc::Receiver<InputEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
+        snapshot: Arc<Mutex<InputsSnapshot>>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -55,6 +64,9 @@ impl InputsChannel {
             motion_count: 0,
             capture,
             byte_counter,
+            traffic,
+            snapshot,
+            recent_events: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -167,6 +179,15 @@ impl InputsChannel {
                 break;
             }
 
+            // Record to ring buffer before draining
+            let raw = self.buffer[..total_size].to_vec();
+            self.traffic.record_received(
+                "inputs",
+                header.message_type,
+                message_names::inputs_server(header.message_type),
+                &raw,
+            );
+
             let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
             self.buffer.drain(..total_size);
 
@@ -174,6 +195,7 @@ impl InputsChannel {
                 .await?;
         }
 
+        self.update_snapshot();
         Ok(())
     }
 
@@ -263,6 +285,8 @@ impl InputsChannel {
     }
 
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<()> {
+        let ts = self.traffic.elapsed().as_secs_f64();
+
         match event {
             InputEvent::KeyDown(scancode) => {
                 self.last_key_time = Some(Instant::now());
@@ -275,31 +299,58 @@ impl InputsChannel {
                     .await
                     .ok();
 
+                self.record_event(InputEventRecord {
+                    event_type: "KeyDown".to_string(),
+                    scancode,
+                    x: 0,
+                    y: 0,
+                    button_mask: 0,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
-                // Only log keystrokes with --intimate flag
                 info!("inputs: key down: scancode={:#x}", scancode);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
             }
 
             InputEvent::KeyUp(scancode) => {
+                self.record_event(InputEventRecord {
+                    event_type: "KeyUp".to_string(),
+                    scancode,
+                    x: 0,
+                    y: 0,
+                    button_mask: 0,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
                 info!("inputs: key up: scancode={:#x}", scancode);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::KEY_UP, &msg).await?;
             }
 
             InputEvent::MouseMove { x, y } => {
                 // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                    self.record_event(InputEventRecord {
+                        event_type: "MouseMove".to_string(),
+                        scancode: 0,
+                        x,
+                        y,
+                        button_mask: self.button_state,
+                        timestamp_secs: ts,
+                    });
+
                     let mut payload = Vec::new();
                     MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
-                    self.send(&msg).await?;
+                    self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
+                        .await?;
                     self.motion_count += 1;
                 }
             }
@@ -309,9 +360,19 @@ impl InputsChannel {
                 let mut pos_payload = Vec::new();
                 MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
-                self.send(&pos_msg).await?;
+                self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
+                    .await?;
 
                 self.button_state |= button;
+
+                self.record_event(InputEventRecord {
+                    event_type: "MouseDown".to_string(),
+                    scancode: 0,
+                    x,
+                    y,
+                    button_mask: button,
+                    timestamp_secs: ts,
+                });
 
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
@@ -320,37 +381,69 @@ impl InputsChannel {
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
                     button, x, y, self.button_state
                 );
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::MOUSE_PRESS, &msg).await?;
             }
 
             InputEvent::MouseUp { button, x, y } => {
                 self.button_state &= !button;
 
+                self.record_event(InputEventRecord {
+                    event_type: "MouseUp".to_string(),
+                    scancode: 0,
+                    x,
+                    y,
+                    button_mask: button,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
                 debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
-                self.send(&msg).await?;
+                self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
+                    .await?;
             }
         }
 
         Ok(())
     }
 
+    /// Record an input event in the local deque.
+    fn record_event(&mut self, event: InputEventRecord) {
+        self.recent_events.push_back(event);
+        if self.recent_events.len() > MAX_RECENT_EVENTS {
+            self.recent_events.pop_front();
+        }
+    }
+
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.button_state = self.button_state;
+        snap.motion_count = self.motion_count;
+        snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
+        snap.recent_events = self.recent_events.clone();
+        snap.bytes_in = self.bytes_in;
+        snap.bytes_out = self.bytes_out;
+    }
+
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
         let mut payload = Vec::new();
         InputsKeyModifiers::write(modifiers, &mut payload)?;
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
-        self.send(&msg).await
+        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg).await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let msg_name = message_names::inputs_client(msg_type);
         if settings::is_verbose() || settings::is_intimate() {
-            let msg_type_str = message_names::inputs_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
-            logging::log_message("sent", "inputs", msg_type, msg_type_str, payload_size);
+            logging::log_message("sent", "inputs", msg_type, msg_name, payload_size);
         }
-        self.send(data).await
+        self.traffic.record_sent("inputs", msg_type, msg_name, data);
+        let result = self.send(data).await;
+        self.update_snapshot();
+        result
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
@@ -364,11 +457,31 @@ impl InputsChannel {
     }
 }
 
-/// AT-84 keyboard scancode mapping
-/// Maps egui key codes to SPICE/PCAT scancodes
+/// Encode a SPICE scancode for the wire.
+///
+/// Normal keys use a single-byte scancode in the low byte of the u32.
+/// Extended keys (E0-prefixed on the AT keyboard) are encoded as two
+/// bytes: the E0 prefix in the low byte, the scancode in the next byte.
+/// This matches spice-gtk's `spice_make_scancode()`.
+fn make_scancode(base: u32, release: bool) -> u32 {
+    let code = if release { base | 0x80 } else { base };
+    if base >= 0x100 {
+        // Extended key: wire bytes are [0xE0, scancode] in LE u32
+        let sc = code & 0xFF;
+        (sc << 8) | 0xE0
+    } else {
+        code
+    }
+}
+
+/// AT keyboard scancode mapping.
+///
+/// Maps egui key codes to SPICE/PCAT scancodes.  Keys that require
+/// the E0 extended prefix (arrow keys, navigation cluster) use the
+/// 0x1xx convention: the low byte is the base scancode and bit 8
+/// signals "extended".  `make_scancode()` encodes this for the wire.
 pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
-    // Returns (press_code, release_code)
-    // Release code = press_code | 0x80
+    // Returns (press_code, release_code) ready for the wire
     static SCANCODE_MAP: std::sync::LazyLock<HashMap<egui::Key, u32>> =
         std::sync::LazyLock::new(|| {
             let mut m = HashMap::new();
@@ -433,18 +546,20 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
             m.insert(egui::Key::Escape, 0x01);
             m.insert(egui::Key::Backspace, 0x0E);
             m.insert(egui::Key::Tab, 0x0F);
-            m.insert(egui::Key::Delete, 0x53);
-            m.insert(egui::Key::Insert, 0x52);
-            m.insert(egui::Key::Home, 0x47);
-            m.insert(egui::Key::End, 0x4F);
-            m.insert(egui::Key::PageUp, 0x49);
-            m.insert(egui::Key::PageDown, 0x51);
 
-            // Arrow keys
-            m.insert(egui::Key::ArrowUp, 0x48);
-            m.insert(egui::Key::ArrowDown, 0x50);
-            m.insert(egui::Key::ArrowLeft, 0x4B);
-            m.insert(egui::Key::ArrowRight, 0x4D);
+            // Navigation cluster — extended keys (E0 prefix, 0x1xx)
+            m.insert(egui::Key::Delete, 0x153);
+            m.insert(egui::Key::Insert, 0x152);
+            m.insert(egui::Key::Home, 0x147);
+            m.insert(egui::Key::End, 0x14F);
+            m.insert(egui::Key::PageUp, 0x149);
+            m.insert(egui::Key::PageDown, 0x151);
+
+            // Arrow keys — extended keys (E0 prefix, 0x1xx)
+            m.insert(egui::Key::ArrowUp, 0x148);
+            m.insert(egui::Key::ArrowDown, 0x150);
+            m.insert(egui::Key::ArrowLeft, 0x14B);
+            m.insert(egui::Key::ArrowRight, 0x14D);
 
             // Punctuation
             m.insert(egui::Key::Minus, 0x0C);
@@ -462,7 +577,9 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
             m
         });
 
-    SCANCODE_MAP.get(&key).map(|&code| (code, code | 0x80))
+    SCANCODE_MAP
+        .get(&key)
+        .map(|&code| (make_scancode(code, false), make_scancode(code, true)))
 }
 
 /// Map mouse button to SPICE button flag
