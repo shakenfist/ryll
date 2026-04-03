@@ -123,7 +123,8 @@ src/
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
 │   ├── inputs.rs        # Keyboard scancodes (with E0 extended
-│                        #   prefix for nav cluster), mouse events
+│                        #   prefix for nav cluster), mouse events,
+│                        #   motion coalescing to prevent channel backpressure
 │   └── usbredir.rs      # USB redirection (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser
 │   ├── constants.rs     # Message types, capabilities, status codes

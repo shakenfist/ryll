@@ -75,7 +75,10 @@ communication between tasks.
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)
   to the UI thread
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
-  inputs channel handler
+  inputs channel handler. The channel is bounded (256 slots). The consumer
+  coalesces consecutive MouseMove events into a single position update to
+  prevent the channel from filling during network stalls, which would cause
+  the producer's `try_send` to silently drop critical button events
 
 ## SPICE Protocol
 
