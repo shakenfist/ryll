@@ -282,9 +282,15 @@ impl UsbDeviceBackend for RealDevice {
         let (control_type, recipient) = decode_request_type(setup.request_type);
         let is_in = setup.request_type & 0x80 != 0;
 
+        // Use the first claimed interface for control transfers.
+        // Device::control_in/out is only available on Linux/macOS;
+        // Interface::control_in/out works on all platforms including Windows.
+        let Some(iface) = self.interfaces.first() else {
+            return Ok(TransferResult::error(Status::Inval));
+        };
+
         if is_in {
-            match self
-                .device
+            match iface
                 .control_in(
                     ControlIn {
                         control_type,
@@ -302,8 +308,7 @@ impl UsbDeviceBackend for RealDevice {
                 Err(e) => Ok(transfer_error_to_result(e)),
             }
         } else {
-            match self
-                .device
+            match iface
                 .control_out(
                     ControlOut {
                         control_type,
