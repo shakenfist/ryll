@@ -492,6 +492,41 @@ fn length_prefix_nal(nal: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Return the current UTC time as an ISO-8601 string without
+/// pulling in a datetime crate.  Uses UNIX_EPOCH + SystemTime.
+fn chrono_now() -> String {
+    use std::time::SystemTime;
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            // Rough UTC decomposition (no leap-second handling)
+            let days = secs / 86400;
+            let time_secs = secs % 86400;
+            let h = time_secs / 3600;
+            let m = (time_secs % 3600) / 60;
+            let s = time_secs % 60;
+
+            // Days since 1970-01-01 → (year, month, day)
+            // Algorithm from Howard Hinnant's date library (public domain)
+            let z = days as i64 + 719468;
+            let era = if z >= 0 { z } else { z - 146096 } / 146097;
+            let doe = (z - era * 146097) as u64;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let y = yoe as i64 + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = if mon <= 2 { y + 1 } else { y };
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                year, mon, d, h, m, s
+            )
+        }
+        Err(_) => String::from("unknown"),
+    }
+}
+
 // ── Capture session ─────────────────────────────────────
 
 /// Holds state for an active capture session.
@@ -512,9 +547,16 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     /// Create a new capture session writing to `dir`.
-    pub fn new(dir: PathBuf) -> anyhow::Result<Self> {
+    ///
+    /// Writes a `metadata.json` file with session context (platform,
+    /// version, connection target) so that capture directories are
+    /// self-describing when shared for bug reports.
+    pub fn new(dir: PathBuf, host: &str, port: u16, tls_port: Option<u16>) -> anyhow::Result<Self> {
         fs::create_dir_all(&dir)?;
         info!("capture: writing to {}", dir.display());
+
+        // Write session metadata
+        Self::write_metadata(&dir, host, port, tls_port)?;
 
         let mut pcap_writers = HashMap::new();
         for &channel in CHANNELS {
@@ -532,6 +574,51 @@ impl CaptureSession {
             video_init_attempted: Mutex::new(false),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Write a metadata.json file describing this capture session.
+    fn write_metadata(
+        dir: &std::path::Path,
+        host: &str,
+        port: u16,
+        tls_port: Option<u16>,
+    ) -> anyhow::Result<()> {
+        use std::io::Write;
+
+        let path = dir.join("metadata.json");
+        let mut f = File::create(&path)?;
+
+        let version = env!("CARGO_PKG_VERSION");
+        let os = std::env::consts::OS;
+        let arch = std::env::consts::ARCH;
+        let tls_str = match tls_port {
+            Some(p) => format!("{}", p),
+            None => String::from("null"),
+        };
+
+        // Simple hand-written JSON to avoid a serde dependency
+        write!(
+            f,
+            "{{\n\
+             \x20 \"ryll_version\": \"{}\",\n\
+             \x20 \"platform_os\": \"{}\",\n\
+             \x20 \"platform_arch\": \"{}\",\n\
+             \x20 \"target_host\": \"{}\",\n\
+             \x20 \"target_port\": {},\n\
+             \x20 \"target_tls_port\": {},\n\
+             \x20 \"capture_started\": \"{}\"\n\
+             }}\n",
+            version,
+            os,
+            arch,
+            host.replace('\\', "\\\\").replace('"', "\\\""),
+            port,
+            tls_str,
+            chrono_now(),
+        )?;
+
+        info!("capture: wrote {}", path.display());
+        Ok(())
     }
 
     /// Record a packet sent by the client on the given channel.

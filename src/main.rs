@@ -101,9 +101,12 @@ fn main() -> Result<()> {
     // Create capture session if requested
     #[cfg(feature = "capture")]
     let capture = match &args.capture {
-        Some(dir) => Some(Arc::new(CaptureSession::new(std::path::PathBuf::from(
-            dir,
-        ))?)),
+        Some(dir) => Some(Arc::new(CaptureSession::new(
+            std::path::PathBuf::from(dir),
+            &config.host,
+            config.port,
+            config.tls_port,
+        )?)),
         None => None,
     };
     #[cfg(not(feature = "capture"))]

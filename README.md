@@ -13,7 +13,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Headless mode** - Run without GUI for automated testing and benchmarking
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
 - **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
-- **Statistics tracking** - Frame counts, throughput, and latency measurements
+- **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
@@ -144,6 +144,8 @@ ryll --file connection.vv --capture /tmp/capture
 ```
 
 This writes:
+- `metadata.json` — session context (ryll version, platform, target host)
+  for self-describing capture directories in bug reports
 - `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap` —
   per-channel pcap files with fake TCP/IP headers, openable in Wireshark
 - `display.mp4` — H.264 video of the display surface at real timing

@@ -364,11 +364,31 @@ impl InputsChannel {
     }
 }
 
-/// AT-84 keyboard scancode mapping
-/// Maps egui key codes to SPICE/PCAT scancodes
+/// Encode a SPICE scancode for the wire.
+///
+/// Normal keys use a single-byte scancode in the low byte of the u32.
+/// Extended keys (E0-prefixed on the AT keyboard) are encoded as two
+/// bytes: the E0 prefix in the low byte, the scancode in the next byte.
+/// This matches spice-gtk's `spice_make_scancode()`.
+fn make_scancode(base: u32, release: bool) -> u32 {
+    let code = if release { base | 0x80 } else { base };
+    if base >= 0x100 {
+        // Extended key: wire bytes are [0xE0, scancode] in LE u32
+        let sc = code & 0xFF;
+        (sc << 8) | 0xE0
+    } else {
+        code
+    }
+}
+
+/// AT keyboard scancode mapping.
+///
+/// Maps egui key codes to SPICE/PCAT scancodes.  Keys that require
+/// the E0 extended prefix (arrow keys, navigation cluster) use the
+/// 0x1xx convention: the low byte is the base scancode and bit 8
+/// signals "extended".  `make_scancode()` encodes this for the wire.
 pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
-    // Returns (press_code, release_code)
-    // Release code = press_code | 0x80
+    // Returns (press_code, release_code) ready for the wire
     static SCANCODE_MAP: std::sync::LazyLock<HashMap<egui::Key, u32>> =
         std::sync::LazyLock::new(|| {
             let mut m = HashMap::new();
@@ -433,18 +453,20 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
             m.insert(egui::Key::Escape, 0x01);
             m.insert(egui::Key::Backspace, 0x0E);
             m.insert(egui::Key::Tab, 0x0F);
-            m.insert(egui::Key::Delete, 0x53);
-            m.insert(egui::Key::Insert, 0x52);
-            m.insert(egui::Key::Home, 0x47);
-            m.insert(egui::Key::End, 0x4F);
-            m.insert(egui::Key::PageUp, 0x49);
-            m.insert(egui::Key::PageDown, 0x51);
 
-            // Arrow keys
-            m.insert(egui::Key::ArrowUp, 0x48);
-            m.insert(egui::Key::ArrowDown, 0x50);
-            m.insert(egui::Key::ArrowLeft, 0x4B);
-            m.insert(egui::Key::ArrowRight, 0x4D);
+            // Navigation cluster — extended keys (E0 prefix, 0x1xx)
+            m.insert(egui::Key::Delete, 0x153);
+            m.insert(egui::Key::Insert, 0x152);
+            m.insert(egui::Key::Home, 0x147);
+            m.insert(egui::Key::End, 0x14F);
+            m.insert(egui::Key::PageUp, 0x149);
+            m.insert(egui::Key::PageDown, 0x151);
+
+            // Arrow keys — extended keys (E0 prefix, 0x1xx)
+            m.insert(egui::Key::ArrowUp, 0x148);
+            m.insert(egui::Key::ArrowDown, 0x150);
+            m.insert(egui::Key::ArrowLeft, 0x14B);
+            m.insert(egui::Key::ArrowRight, 0x14D);
 
             // Punctuation
             m.insert(egui::Key::Minus, 0x0C);
@@ -462,7 +484,9 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
             m
         });
 
-    SCANCODE_MAP.get(&key).map(|&code| (code, code | 0x80))
+    SCANCODE_MAP
+        .get(&key)
+        .map(|&code| (make_scancode(code, false), make_scancode(code, true)))
 }
 
 /// Map mouse button to SPICE button flag

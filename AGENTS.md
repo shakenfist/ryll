@@ -113,7 +113,8 @@ src/
 │   ├── display.rs       # Surface management, image decoding,
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
-│   ├── inputs.rs        # Keyboard scancodes, mouse events
+│   ├── inputs.rs        # Keyboard scancodes (with E0 extended
+│                        #   prefix for nav cluster), mouse events
 │   └── usbredir.rs      # USB redirection (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser
 │   ├── constants.rs     # Message types, capabilities, status codes

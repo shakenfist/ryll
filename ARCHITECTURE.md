@@ -328,6 +328,13 @@ a QEMU instance with USB redirection enabled.
 
 When `--capture <DIR>` is specified, ryll records:
 
+### Session metadata
+
+`metadata.json` is written at session start with platform details
+(OS, architecture), ryll version, and connection target (host, port).
+This makes capture directories self-describing when shared for bug
+reports or debugging.
+
 ### Protocol capture (pcap)
 
 Each SPICE channel writes a separate pcap file (`main.pcap`,
@@ -389,7 +396,10 @@ I/O for the same reason.
 
 Ryll tracks:
 
-- **Frames received**: Count of draw operations
+- **FPS**: Sliding-window frames-per-second derived from `DisplayMark`
+  boundaries (true frame completions), not individual draw operations.
+  The window keeps the most recent 120 timestamps for an accurate
+  short-term reading.
 - **Bytes in/out**: Network throughput per channel
 - **Latency**: Time from key press to display update (cadence mode)
 - **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
@@ -399,3 +409,12 @@ Ryll tracks:
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
+
+## Keyboard Scancodes
+
+Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.
+Keys in the navigation cluster (arrow keys, Home, End, Insert, Delete,
+PageUp, PageDown) require the E0 extended prefix to distinguish them from
+their numpad equivalents. These are encoded in the u32 scancode field as
+`(scancode << 8) | 0xE0`, matching spice-gtk's `spice_make_scancode()`.
+The mapping table uses the 0x1xx convention internally (bit 8 set = extended).

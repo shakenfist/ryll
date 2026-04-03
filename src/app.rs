@@ -28,6 +28,9 @@ const STATS_BAR_HEIGHT: f32 = 10.0;
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
+/// Number of recent frame timestamps kept for the FPS sliding window.
+const FPS_WINDOW_SIZE: usize = 120;
+
 /// Statistics tracking
 #[derive(Default)]
 struct Statistics {
@@ -35,7 +38,8 @@ struct Statistics {
     bytes_in: u64,
     bytes_out: u64,
     last_latency: Option<f64>,
-    start_time: Option<Instant>,
+    /// Timestamps of recent DisplayMark events for sliding-window FPS.
+    frame_times: Vec<Instant>,
 }
 
 /// Shared byte counter that channels increment from their
@@ -201,10 +205,7 @@ impl RyllApp {
             cursor_image: None,
             cursor_texture: None,
             surface_rect: egui::Rect::NOTHING,
-            stats: Statistics {
-                start_time: Some(Instant::now()),
-                ..Default::default()
-            },
+            stats: Statistics::default(),
             cadence_enabled: cadence,
             last_cadence_key: Instant::now(),
             connected: false,
@@ -270,13 +271,20 @@ impl RyllApp {
                     surface.blit(left, top, width, height, &pixels);
                     self.stats.frames_received += 1;
                     debug!(
-                        "app: blit surface={}, pos=({},{}), size={}x{}, frame={}",
-                        surface_id, left, top, width, height, self.stats.frames_received
+                        "app: blit surface={}, pos=({},{}), size={}x{}",
+                        surface_id, left, top, width, height
                     );
                 }
 
                 ChannelEvent::DisplayMark => {
-                    // Frame boundary — capture a video frame if enabled
+                    // Frame boundary — record timestamp for FPS calculation
+                    let now = Instant::now();
+                    self.stats.frame_times.push(now);
+                    if self.stats.frame_times.len() > FPS_WINDOW_SIZE {
+                        self.stats.frame_times.remove(0);
+                    }
+
+                    // Capture a video frame if enabled
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self.surfaces.get(&0) {
                             capture.frame(0, surface.pixels(), surface.width, surface.height);
@@ -533,18 +541,18 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Frames: {}", self.stats.frames_received));
-                    ui.separator();
-
                     if let Some(latency) = self.stats.last_latency {
                         ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
                         ui.separator();
                     }
 
-                    if let Some(start) = self.stats.start_time {
-                        let elapsed = start.elapsed().as_secs_f64();
+                    // Sliding-window FPS from DisplayMark timestamps
+                    if self.stats.frame_times.len() >= 2 {
+                        let oldest = self.stats.frame_times.first().unwrap();
+                        let newest = self.stats.frame_times.last().unwrap();
+                        let elapsed = newest.duration_since(*oldest).as_secs_f64();
                         if elapsed > 0.0 {
-                            let fps = self.stats.frames_received as f64 / elapsed;
+                            let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
                             ui.label(format!("FPS: {:.1}", fps));
                         }
                     }
@@ -659,10 +667,10 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Repaint at a modest rate to pick up new frames without
-        // spinning the CPU.  Incoming events will also trigger a
-        // repaint via request_repaint() from the connection thread.
-        ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        // Repaint at ~60 fps to keep input responsive (clicks, key
+        // presses).  Incoming events also trigger repaints via
+        // request_repaint() from the connection thread.
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
 
