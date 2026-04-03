@@ -1295,6 +1295,7 @@ fn default_arrow_cursor() -> Vec<u8> {
 }
 
 /// Run the SPICE connection in async context
+#[allow(clippy::too_many_arguments)]
 async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
