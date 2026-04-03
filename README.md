@@ -7,6 +7,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
 - **Multi-channel support** - Handles main, display, cursor, inputs, and usbredir channels
+- **USB device redirection** - Forward physical USB devices or present RAW disk images as virtual USB mass storage devices via `--usb-disk`
 - **TLS support** - Secure connections with inline CA certificates from .vv files
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking

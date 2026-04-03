@@ -18,8 +18,8 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
-.PHONY: all build release clean devcontainer ensure-cache lint lint-fix \
-	test help test-qemu test-qemu-stop
+.PHONY: all build release clean clean-testdata devcontainer ensure-cache \
+	lint lint-fix test help test-qemu test-qemu-usb test-qemu-stop
 
 all: build
 
@@ -35,6 +35,7 @@ help:
 	@echo ""
 	@echo "Test SPICE server:"
 	@echo "  make test-qemu      - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
+	@echo "  make test-qemu-usb  - Same, with USB redirection enabled"
 	@echo "  make test-qemu-stop - Stop the test QEMU instance"
 
 # Build the devcontainer image
@@ -121,6 +122,10 @@ clean:
 	rm -rf target/
 	rm -rf $(CARGO_CACHE)/
 
+# Clean test data files
+clean-testdata:
+	rm -f testdata/usb-test.raw
+
 # Clean devcontainer image
 clean-devcontainer:
 	docker rmi -f $(RYLL_IMAGE) 2>/dev/null || true
@@ -157,3 +162,30 @@ test-qemu-stop:
 		echo "Stopped test QEMU instance"; \
 	fi
 	@rm -f $(QEMU_VARS_COPY)
+
+# Create a test RAW image for USB disk passthrough
+testdata/usb-test.raw:
+	mkdir -p testdata
+	dd if=/dev/zero of=$@ bs=1M count=64 2>/dev/null
+	@echo "Created 64MB test image: $@"
+
+# Start a test QEMU instance with SPICE and USB redirection enabled.
+# Connect with: ryll --direct localhost:$(QEMU_SPICE_PORT) --usb-disk testdata/usb-test.raw
+test-qemu-usb: test-qemu-stop $(QEMU_TEST_IMAGE) testdata/usb-test.raw
+	cp $(OVMF_VARS) $(QEMU_VARS_COPY)
+	qemu-system-x86_64 \
+		-display none \
+		-machine q35 \
+		-m 256 \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(QEMU_VARS_COPY) \
+		-drive file=$(QEMU_TEST_IMAGE),format=qcow2,if=virtio \
+		-vga qxl \
+		-spice port=$(QEMU_SPICE_PORT),disable-ticketing=on \
+		-device qemu-xhci,id=xhci \
+		-chardev spicevmc,id=usbredir1,name=usbredir \
+		-device usb-redir,chardev=usbredir1,id=redir1 \
+		-daemonize \
+		-pidfile $(QEMU_PID_FILE)
+	@echo "QEMU SPICE+USB server on port $(QEMU_SPICE_PORT) (PID $$(cat $(QEMU_PID_FILE)))"
+	@echo "Connect: ryll --direct localhost:$(QEMU_SPICE_PORT) --usb-disk testdata/usb-test.raw"

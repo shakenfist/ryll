@@ -337,7 +337,7 @@ protocol handling.
 | 7. Virtual mass storage device (RAW images) | [PLAN-usb-redir-phase-07-virtual-msc.md](PLAN-usb-redir-phase-07-virtual-msc.md) | Complete |
 | 8. UI integration | [PLAN-usb-redir-phase-08-ui.md](PLAN-usb-redir-phase-08-ui.md) | Complete |
 | 9. Interrupt transfers | [PLAN-usb-redir-phase-09-interrupt.md](PLAN-usb-redir-phase-09-interrupt.md) | Complete |
-| 10. Testing and QEMU setup | [PLAN-usb-redir-phase-10-testing.md](PLAN-usb-redir-phase-10-testing.md) | Not started |
+| 10. Testing and QEMU setup | [PLAN-usb-redir-phase-10-testing.md](PLAN-usb-redir-phase-10-testing.md) | Complete |
 
 ### Phase 1: SpiceVMC channel transport
 
