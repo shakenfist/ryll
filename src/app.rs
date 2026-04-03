@@ -173,6 +173,11 @@ pub struct RyllApp {
     bug_report_type: BugReportType,
     bug_description: String,
     bug_status_message: Option<(String, Instant)>,
+
+    // Region selection state (Display bug reports)
+    region_select_active: bool,
+    region_drag_start: Option<(u32, u32)>,
+    region_drag_end: Option<(u32, u32)>,
 }
 
 impl RyllApp {
@@ -266,6 +271,9 @@ impl RyllApp {
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
             bug_status_message: None,
+            region_select_active: false,
+            region_drag_start: None,
+            region_drag_end: None,
         }
     }
 
@@ -447,7 +455,6 @@ impl RyllApp {
 
     /// Generate a bug report and write it to disk.
     /// Returns the path of the written zip file.
-    #[allow(dead_code)] // called from Phase 4 GUI
     pub fn generate_bug_report(
         &self,
         report_type: BugReportType,
@@ -487,8 +494,8 @@ impl RyllApp {
 
     fn handle_input(&mut self, ctx: &egui::Context) {
         // Don't forward input to the SPICE server when
-        // the bug report dialog is open.
-        if self.show_bug_dialog {
+        // the bug report dialog or region selection is active.
+        if self.show_bug_dialog || self.region_select_active {
             return;
         }
 
@@ -582,13 +589,39 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // F12 toggles bug report dialog
-        let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
-        if f12_pressed {
-            self.show_bug_dialog = !self.show_bug_dialog;
-            if self.show_bug_dialog {
-                self.bug_report_type = BugReportType::Display;
-                self.bug_description.clear();
+        // Escape during region selection: skip and generate without region
+        if self.region_select_active {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                let report_type = self.bug_report_type;
+                let description = self.bug_description.clone();
+                match self.generate_bug_report(report_type, description, None) {
+                    Ok(path) => {
+                        let msg = format!("Bug report saved to {}", path.display());
+                        info!("app: {}", msg);
+                        self.bug_status_message = Some((msg, Instant::now()));
+                    }
+                    Err(e) => {
+                        let msg = format!("Bug report failed: {}", e);
+                        error!("app: {}", msg);
+                        self.bug_status_message = Some((msg, Instant::now()));
+                    }
+                }
+                self.region_select_active = false;
+                self.region_drag_start = None;
+                self.region_drag_end = None;
+            }
+        }
+
+        // F12 toggles bug report dialog (not during region selection)
+        if !self.region_select_active {
+            let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
+            if f12_pressed {
+                self.show_bug_dialog = !self.show_bug_dialog;
+                if self.show_bug_dialog {
+                    self.bug_report_type = BugReportType::Display;
+                    self.bug_description.clear();
+                }
             }
         }
 
@@ -641,13 +674,17 @@ impl eframe::App for RyllApp {
                     self.surface_rect = response.rect;
 
                     // Hide the OS cursor when hovering over the surface
-                    if response.hovered() && self.cursor_image.is_some() {
+                    // (show crosshair during region selection instead)
+                    if response.hovered()
+                        && !self.region_select_active
+                        && self.cursor_image.is_some()
+                    {
                         ui.ctx()
                             .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
                     }
 
-                    // Handle mouse input on the surface (suppressed when dialog is open)
-                    if !self.show_bug_dialog {
+                    // Handle mouse input on the surface (suppressed during dialog/selection)
+                    if !self.show_bug_dialog && !self.region_select_active {
                         if let Some(tx) = &self.input_tx {
                             // Send mouse position only when it changes
                             if let Some(pos) = response.hover_pos() {
@@ -869,9 +906,128 @@ impl eframe::App for RyllApp {
         // Execute dialog action outside the closure
         match dialog_action {
             Some(true) => {
+                if self.bug_report_type == BugReportType::Display {
+                    // Enter region selection mode for display reports
+                    self.region_select_active = true;
+                    self.region_drag_start = None;
+                    self.region_drag_end = None;
+                } else {
+                    // Non-display: generate immediately
+                    let report_type = self.bug_report_type;
+                    let description = self.bug_description.clone();
+                    match self.generate_bug_report(report_type, description, None) {
+                        Ok(path) => {
+                            let msg = format!("Bug report saved to {}", path.display());
+                            info!("app: {}", msg);
+                            self.bug_status_message = Some((msg, Instant::now()));
+                        }
+                        Err(e) => {
+                            let msg = format!("Bug report failed: {}", e);
+                            error!("app: {}", msg);
+                            self.bug_status_message = Some((msg, Instant::now()));
+                        }
+                    }
+                }
+                self.show_bug_dialog = false;
+            }
+            Some(false) => {
+                self.show_bug_dialog = false;
+            }
+            None => {}
+        }
+
+        // Region selection mode: crosshair, drag tracking, overlays
+        if self.region_select_active && self.surface_rect != egui::Rect::NOTHING {
+            // Show crosshair cursor over the surface
+            ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+
+            // Get surface dimensions for clamping
+            let surf_w = self.surface_rect.width() as u32;
+            let surf_h = self.surface_rect.height() as u32;
+
+            // Track drag (two-pass: collect action, execute outside)
+            let mut region_completed = false;
+            ctx.input(|i| {
+                if i.pointer.primary_pressed() {
+                    if let Some(pos) = i.pointer.interact_pos() {
+                        let x = ((pos.x - self.surface_rect.min.x).max(0.0) as u32).min(surf_w);
+                        let y = ((pos.y - self.surface_rect.min.y).max(0.0) as u32).min(surf_h);
+                        self.region_drag_start = Some((x, y));
+                        self.region_drag_end = Some((x, y));
+                    }
+                }
+                if i.pointer.primary_down() {
+                    if let Some(pos) = i.pointer.interact_pos() {
+                        let x = ((pos.x - self.surface_rect.min.x).max(0.0) as u32).min(surf_w);
+                        let y = ((pos.y - self.surface_rect.min.y).max(0.0) as u32).min(surf_h);
+                        self.region_drag_end = Some((x, y));
+                    }
+                }
+                if i.pointer.primary_released() && self.region_drag_start.is_some() {
+                    region_completed = true;
+                }
+            });
+
+            // Draw instruction banner
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("region_select_banner"),
+            ));
+            let banner_rect = egui::Rect::from_min_size(
+                self.surface_rect.min,
+                egui::vec2(self.surface_rect.width(), 28.0),
+            );
+            painter.rect_filled(
+                banner_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
+            );
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Click and drag to select the affected region. Press Escape to skip.",
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
+
+            // Draw selection rectangle while dragging
+            if let (Some((sx, sy)), Some((ex, ey))) = (self.region_drag_start, self.region_drag_end)
+            {
+                let left = sx.min(ex) as f32 + self.surface_rect.min.x;
+                let top = sy.min(ey) as f32 + self.surface_rect.min.y;
+                let right = sx.max(ex) as f32 + self.surface_rect.min.x;
+                let bottom = sy.max(ey) as f32 + self.surface_rect.min.y;
+                let sel_rect =
+                    egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
+                let sel_painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("region_select_rect"),
+                ));
+                sel_painter.rect_filled(
+                    sel_rect,
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 0, 0, 60),
+                );
+                sel_painter.rect_stroke(
+                    sel_rect,
+                    0.0,
+                    egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)),
+                );
+            }
+
+            // Generate report on drag release
+            if region_completed {
+                let (sx, sy) = self.region_drag_start.unwrap();
+                let (ex, ey) = self.region_drag_end.unwrap();
+                let region = ReportRegion {
+                    left: sx.min(ex),
+                    top: sy.min(ey),
+                    right: sx.max(ex),
+                    bottom: sy.max(ey),
+                };
                 let report_type = self.bug_report_type;
                 let description = self.bug_description.clone();
-                match self.generate_bug_report(report_type, description, None) {
+                match self.generate_bug_report(report_type, description, Some(region)) {
                     Ok(path) => {
                         let msg = format!("Bug report saved to {}", path.display());
                         info!("app: {}", msg);
@@ -883,12 +1039,10 @@ impl eframe::App for RyllApp {
                         self.bug_status_message = Some((msg, Instant::now()));
                     }
                 }
-                self.show_bug_dialog = false;
+                self.region_select_active = false;
+                self.region_drag_start = None;
+                self.region_drag_end = None;
             }
-            Some(false) => {
-                self.show_bug_dialog = false;
-            }
-            None => {}
         }
 
         // Create a default cursor if the server hasn't sent one yet
@@ -921,7 +1075,11 @@ impl eframe::App for RyllApp {
 
         // Draw cursor overlay using the painter so it doesn't
         // interfere with mouse input on the surface below.
-        if self.cursor_visible && self.surface_rect != egui::Rect::NOTHING {
+        // (hidden during region selection — crosshair cursor is shown instead)
+        if self.cursor_visible
+            && !self.region_select_active
+            && self.surface_rect != egui::Rect::NOTHING
+        {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
                 let (cx, cy) = self
                     .last_mouse_pos

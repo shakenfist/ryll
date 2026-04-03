@@ -501,6 +501,25 @@ after the closure returns.
 After a successful report, a transient status message ("Bug report
 saved to ...") is displayed in the status bar for 5 seconds.
 
+### Display region selection
+
+When the user selects "Display" and clicks "Capture", the dialog
+closes and the app enters **region selection mode**:
+
+1. A translucent instruction banner appears at the top of the
+   surface: "Click and drag to select the affected region.
+   Press Escape to skip."
+2. The OS cursor changes to a crosshair (the SPICE cursor overlay
+   is hidden).
+3. The user drags a rectangle; a translucent red overlay shows
+   the selection.
+4. On mouse release, the report is generated with the region
+   coordinates in the metadata.
+5. Pressing Escape skips selection and generates without a region.
+
+Keyboard and mouse input is not forwarded to the SPICE server
+during selection.  Coordinates are clamped to the surface bounds.
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.
