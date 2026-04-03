@@ -7,7 +7,9 @@ mod capture {
     /// Stub CaptureSession when capture feature is disabled.
     /// Methods are never called (capture is always None), but
     /// the compiler needs to see them for type-checking.
-    pub struct CaptureSession;
+    pub struct CaptureSession {
+        pub dir: std::path::PathBuf,
+    }
     impl CaptureSession {
         pub fn packet_sent(&self, _channel: &str, _data: &[u8]) {}
         pub fn packet_received(&self, _channel: &str, _data: &[u8]) {}
