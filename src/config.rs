@@ -1,8 +1,9 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use configparser::ini::Ini;
-use std::fs;
-use std::path::Path;
 
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
@@ -44,6 +45,14 @@ pub struct Args {
     #[cfg(feature = "capture")]
     #[arg(long)]
     pub capture: Option<String>,
+
+    /// Present a RAW disk image as a USB mass storage device (repeatable)
+    #[arg(long = "usb-disk")]
+    pub usb_disk: Vec<String>,
+
+    /// Present a RAW disk image as a read-only USB mass storage device (repeatable)
+    #[arg(long = "usb-disk-ro")]
+    pub usb_disk_ro: Vec<String>,
 }
 
 /// SPICE connection configuration
@@ -179,4 +188,66 @@ impl Config {
             host_subject,
         })
     }
+}
+
+/// Parsed virtual disk configuration from CLI flags.
+#[derive(Debug, Clone)]
+pub struct VirtualDiskConfig {
+    pub path: PathBuf,
+    pub read_only: bool,
+}
+
+/// Collect virtual disk configs from CLI args and validate paths.
+pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
+    let mut disks = Vec::new();
+
+    for path_str in &args.usb_disk {
+        let path = PathBuf::from(path_str);
+        validate_disk_path(&path)?;
+        disks.push(VirtualDiskConfig {
+            path,
+            read_only: false,
+        });
+    }
+
+    for path_str in &args.usb_disk_ro {
+        let path = PathBuf::from(path_str);
+        validate_disk_path(&path)?;
+        disks.push(VirtualDiskConfig {
+            path,
+            read_only: true,
+        });
+    }
+
+    if disks.len() > 1 {
+        tracing::warn!(
+            "Multiple USB disks specified; only the first will be connected \
+             (one device per usbredir channel)"
+        );
+    }
+
+    Ok(disks)
+}
+
+fn validate_disk_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("USB disk image not found: {}", path.display()));
+    }
+    let metadata = fs::metadata(path)?;
+    if metadata.len() < 512 {
+        return Err(anyhow!(
+            "USB disk image too small ({} bytes, minimum 512): {}",
+            metadata.len(),
+            path.display()
+        ));
+    }
+    if metadata.len() % 512 != 0 {
+        tracing::warn!(
+            "USB disk image {} is {} bytes (not a multiple of 512), {} bytes will be inaccessible",
+            path.display(),
+            metadata.len(),
+            metadata.len() % 512,
+        );
+    }
+    Ok(())
 }

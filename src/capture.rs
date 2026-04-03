@@ -153,12 +153,13 @@ fn channel_port(channel: &str) -> u16 {
         "display" => 10002,
         "inputs" => 10003,
         "cursor" => 10004,
+        "usbredir" => 10009,
         _ => 10099,
     }
 }
 
 /// Known channel names that get pcap writers.
-const CHANNELS: &[&str] = &["main", "display", "cursor", "inputs"];
+const CHANNELS: &[&str] = &["main", "display", "cursor", "inputs", "usbredir"];
 
 // ── Video capture ───────────────────────────────────────
 

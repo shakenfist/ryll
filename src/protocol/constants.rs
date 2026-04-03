@@ -123,6 +123,11 @@ pub mod capabilities {
     // software path that produces far fewer display updates.
     pub const DEFAULT_DISPLAY: u32 =
         DISPLAY_SIZED_STREAM | DISPLAY_MONITORS_CONFIG | DISPLAY_COMPOSITE | DISPLAY_A8_SURFACE;
+
+    // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
+    pub const SPICEVMC_LZ4: u32 = 1 << 0;
+
+    pub const DEFAULT_SPICEVMC: u32 = SPICEVMC_LZ4;
 }
 
 /// Authentication mechanism
@@ -241,6 +246,26 @@ pub mod cursor_server {
 
 /// Cursor channel message types (client -> server)
 pub mod cursor_client {
+    pub const ACK_SYNC: u16 = 1;
+    pub const ACK: u16 = 2;
+    pub const PONG: u16 = 3;
+}
+
+/// SpiceVMC channel message types (server -> client)
+///
+/// Used by usbredir (type 9), port (type 10), and webdav (type 11) channels.
+/// Values from spice-protocol/spice/enums.h SPICE_MSG_SPICEVMC_*
+pub mod spicevmc_server {
+    pub const DATA: u16 = 101;
+    pub const COMPRESSED_DATA: u16 = 102;
+    pub const SET_ACK: u16 = 3;
+    pub const PING: u16 = 4;
+}
+
+/// SpiceVMC channel message types (client -> server)
+pub mod spicevmc_client {
+    pub const DATA: u16 = 101;
+    pub const COMPRESSED_DATA: u16 = 102;
     pub const ACK_SYNC: u16 = 1;
     pub const ACK: u16 = 2;
     pub const PONG: u16 = 3;

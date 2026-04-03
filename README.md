@@ -6,7 +6,8 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
-- **Multi-channel support** - Handles main, display, cursor, and inputs channels
+- **Multi-channel support** - Handles main, display, cursor, inputs, and usbredir channels
+- **USB device redirection** - Forward physical USB devices or present RAW disk images as virtual USB mass storage devices via `--usb-disk`
 - **TLS support** - Secure connections with inline CA certificates from .vv files
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
@@ -143,8 +144,8 @@ ryll --file connection.vv --capture /tmp/capture
 ```
 
 This writes:
-- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap` — per-channel
-  pcap files with fake TCP/IP headers, openable in Wireshark
+- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap` —
+  per-channel pcap files with fake TCP/IP headers, openable in Wireshark
 - `display.mp4` — H.264 video of the display surface at real timing
 
 See [STYLEGUIDE.md](STYLEGUIDE.md) for capture conventions.
@@ -180,7 +181,16 @@ src/
 │   ├── main_channel.rs  # Session management
 │   ├── display.rs       # Display rendering, GLZ dictionary
 │   ├── cursor.rs        # Cursor tracking
-│   └── inputs.rs        # Keyboard/mouse input
+│   ├── inputs.rs        # Keyboard/mouse input
+│   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+├── usbredir/
+│   ├── constants.rs     # usbredir message types, capabilities
+│   ├── messages.rs      # Wire format structs, read/write
+│   └── parser.rs        # Byte-stream parser
+├── usb/
+│   ├── mod.rs           # UsbDeviceBackend trait, device enumeration
+│   ├── real.rs          # Physical USB device backend (nusb)
+│   └── virtual_msc.rs   # Virtual mass storage (RAW disk images)
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression
@@ -196,6 +206,7 @@ src/
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
+- **nusb** - USB device access (pure Rust, no libusb)
 - **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version

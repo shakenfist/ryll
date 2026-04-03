@@ -44,6 +44,7 @@ communication between tasks.
 | Display channel | Receive images, decompress, queue for rendering |
 | Cursor channel | Track cursor position and visibility |
 | Inputs channel | Send keyboard/mouse events to server |
+| Usbredir channel | USB redirection via SpiceVMC data transport |
 | UI thread | egui rendering, input capture (GUI mode only) |
 
 ### Channel Communication
@@ -112,6 +113,7 @@ All SPICE messages use a 6-byte mini-header:
 | Display (2) | Graphics | surface_create, draw_copy, mark |
 | Inputs (3) | User input | key_down, key_up, mouse_position |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
+| Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 
 ## Image Types and Compression
 
@@ -275,6 +277,53 @@ the UEFI latency guest image, which changes screen colour on each keystroke -
 ideal for input-to-display latency testing. The image is downloaded on first
 run to `testdata/`. `make test-qemu-stop` shuts it down via PID file.
 
+## USB Redirection
+
+USB device redirection uses the SPICE usbredir channel (type 9) to
+forward USB devices to the remote VM. The implementation spans
+several protocol layers:
+
+```
+SPICE SpiceVMC (DATA/COMPRESSED_DATA messages)
+  └── usbredir protocol (hello, device_connect, control/bulk/interrupt packets)
+        └── USB Mass Storage Bulk-Only Transport (for virtual disks)
+              └── SCSI commands (INQUIRY, READ/WRITE(10), etc.)
+                    └── RAW file I/O (seek + read/write at LBA * 512)
+```
+
+### Device backends
+
+The `UsbDeviceBackend` trait (`src/usb/mod.rs`) abstracts over device
+types. The `DeviceBackend` enum provides non-object-safe dispatch:
+
+- **RealDevice** (`src/usb/real.rs`): Physical USB device via the `nusb`
+  crate. Detaches kernel drivers, claims interfaces, forwards control/bulk/
+  interrupt transfers.
+- **VirtualMsc** (`src/usb/virtual_msc.rs`): Emulated USB mass storage
+  device backed by a RAW disk image. Implements BOT protocol (CBW/CSW) and
+  8 SCSI commands. Reports as a USB 2.0 High Speed removable disk.
+
+### Channel handler flow
+
+1. Channel connects, sends usbredir hello with capabilities.
+2. Server responds with hello.
+3. If `--usb-disk` is configured, auto-connects after hello.
+4. Device attachment sends `ep_info`, `interface_info`, `device_connect`.
+5. Server sends lifecycle messages (`set_configuration`, `reset`, etc.)
+   and data transfers (`control_packet`, `bulk_packet`).
+6. Interrupt endpoints use background tokio polling tasks.
+7. Disconnection aborts polling tasks and sends `device_disconnect`.
+
+### CLI usage
+
+```bash
+ryll --file conn.vv --usb-disk /path/to/image.raw       # read-write
+ryll --file conn.vv --usb-disk-ro /path/to/image.raw     # read-only
+```
+
+See `docs/configuration.md` for details. Use `make test-qemu-usb` to start
+a QEMU instance with USB redirection enabled.
+
 ## Capture Mode
 
 When `--capture <DIR>` is specified, ryll records:
@@ -282,7 +331,7 @@ When `--capture <DIR>` is specified, ryll records:
 ### Protocol capture (pcap)
 
 Each SPICE channel writes a separate pcap file (`main.pcap`,
-`display.pcap`, `cursor.pcap`, `inputs.pcap`) containing
+`display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`) containing
 decrypted SPICE mini-header messages wrapped in fake TCP/IP
 headers. Wireshark can open these directly.
 

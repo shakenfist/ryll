@@ -239,4 +239,27 @@ pub mod message_names {
             _ => "unknown",
         }
     }
+
+    /// Get SpiceVMC/usbredir server message name
+    pub fn spicevmc_server(msg_type: u16) -> &'static str {
+        match msg_type {
+            spicevmc_server::DATA => "vmc_data",
+            spicevmc_server::COMPRESSED_DATA => "vmc_compressed_data",
+            spicevmc_server::SET_ACK => "set_ack",
+            spicevmc_server::PING => "ping",
+            _ => "unknown",
+        }
+    }
+
+    /// Get SpiceVMC/usbredir client message name
+    pub fn spicevmc_client(msg_type: u16) -> &'static str {
+        match msg_type {
+            spicevmc_client::DATA => "vmc_data",
+            spicevmc_client::COMPRESSED_DATA => "vmc_compressed_data",
+            spicevmc_client::ACK_SYNC => "ack_sync",
+            spicevmc_client::ACK => "ack",
+            spicevmc_client::PONG => "pong",
+            _ => "unknown",
+        }
+    }
 }

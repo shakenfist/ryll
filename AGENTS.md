@@ -113,7 +113,18 @@ src/
 │   ├── display.rs       # Surface management, image decoding,
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
-│   └── inputs.rs        # Keyboard scancodes, mouse events
+│   ├── inputs.rs        # Keyboard scancodes, mouse events
+│   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+├── usbredir/            # usbredir protocol parser
+│   ├── constants.rs     # Message types, capabilities, status codes
+│   ├── messages.rs      # Wire format structs, read/write
+│   └── parser.rs        # Byte-stream parser, unit tests
+├── usb/                 # USB device backend abstraction
+│   ├── mod.rs           # UsbDeviceBackend trait, TransferResult,
+│   │                    #   DeviceSource, UsbDeviceInfo, enumeration
+│   ├── real.rs          # Physical device backend (nusb crate)
+│   └── virtual_msc.rs   # Virtual USB mass storage (RAW images,
+│                        #   BOT protocol, SCSI command set)
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)

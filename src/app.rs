@@ -12,9 +12,9 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel,
+    MainChannel, UsbredirChannel,
 };
-use crate::config::Config;
+use crate::config::{Config, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::{ChannelType, SpiceClient};
 
@@ -145,6 +145,9 @@ pub struct RyllApp {
 
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
+
+    // USB device status
+    usb_device_description: Option<String>,
 }
 
 impl RyllApp {
@@ -152,6 +155,7 @@ impl RyllApp {
         cc: &eframe::CreationContext<'_>,
         config: Config,
         cadence: bool,
+        virtual_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
     ) -> Self {
         // Create event channel
@@ -175,6 +179,7 @@ impl RyllApp {
                     config_clone,
                     event_tx_clone,
                     input_rx,
+                    virtual_disks,
                     capture_clone,
                     counter_clone,
                 )
@@ -209,6 +214,7 @@ impl RyllApp {
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
+            usb_device_description: None,
         }
     }
 
@@ -318,6 +324,15 @@ impl RyllApp {
                 ChannelEvent::Error(msg) => {
                     error!("app: channel error: {}", msg);
                     self.error_message = Some(msg);
+                }
+
+                ChannelEvent::UsbChannelReady => {
+                    info!("app: USB redirection channel connected");
+                }
+
+                ChannelEvent::UsbDeviceConnected(desc) => {
+                    info!("app: USB device connected: {}", desc);
+                    self.usb_device_description = Some(desc);
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -555,6 +570,11 @@ impl eframe::App for RyllApp {
                         ui.label("Cadence: ON");
                     }
 
+                    if let Some(ref desc) = self.usb_device_description {
+                        ui.separator();
+                        ui.label(format!("USB: {}", desc));
+                    }
+
                     // Bandwidth sparkline (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(self.bandwidth.label());
@@ -702,6 +722,7 @@ async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
+    virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
 ) -> Result<()> {
@@ -815,6 +836,22 @@ async fn run_connection(
                 break;
             }
 
+            ChannelType::Usbredir => {
+                let stream = client
+                    .connect_channel(session_id, channel_type, channel_id)
+                    .await?;
+                let (_usb_tx, usb_rx) = mpsc::channel(16);
+                let mut channel = UsbredirChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    usb_rx,
+                    virtual_disks.clone(),
+                    capture.clone(),
+                    byte_counter.clone(),
+                );
+                handles.push(tokio::spawn(async move { channel.run().await }));
+            }
+
             _ => {
                 info!(
                     "Skipping channel: {} (id={})",
@@ -839,6 +876,7 @@ async fn run_connection(
 pub async fn run_headless(
     config: Config,
     cadence: bool,
+    virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
 ) -> Result<()> {
     info!("Running in headless mode");
@@ -854,7 +892,15 @@ pub async fn run_headless(
 
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
-        run_connection(config, event_tx, input_rx, capture, byte_counter).await
+        run_connection(
+            config,
+            event_tx,
+            input_rx,
+            virtual_disks,
+            capture,
+            byte_counter,
+        )
+        .await
     });
     // Pin the handle so it can be polled multiple times in the select loop
     tokio::pin!(connection_handle);
@@ -893,6 +939,9 @@ pub async fn run_headless(
                     ChannelEvent::Disconnected(ChannelType::Main) => {
                         info!("Main channel disconnected, exiting");
                         break;
+                    }
+                    ChannelEvent::UsbDeviceConnected(desc) => {
+                        info!("headless: USB device connected: {}", desc);
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);
