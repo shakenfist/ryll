@@ -11,7 +11,7 @@ pub use main_channel::MainChannel;
 pub use usbredir::UsbredirChannel;
 
 use crate::protocol::ChannelType;
-use crate::usb::UsbDeviceInfo;
+use crate::usb::{DeviceBackend, UsbDeviceInfo};
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
@@ -98,6 +98,15 @@ pub enum InputEvent {
 
     /// Mouse button released
     MouseUp { button: u32, x: u32, y: u32 },
+}
+
+/// Commands sent from the app to the usbredir channel.
+#[allow(dead_code)]
+pub enum UsbCommand {
+    /// Connect a device using the given backend.
+    ConnectDevice(Box<DeviceBackend>),
+    /// Disconnect the currently connected device.
+    DisconnectDevice,
 }
 
 /// Decoded cursor image in RGBA format

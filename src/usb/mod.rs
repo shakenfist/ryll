@@ -155,6 +155,101 @@ pub trait UsbDeviceBackend: Send {
     fn description(&self) -> String;
 }
 
+// ── Device backend enum dispatch ───────────────────────
+
+/// Enum dispatch wrapper for UsbDeviceBackend implementations.
+///
+/// Avoids `Box<dyn UsbDeviceBackend>` which requires object-safety
+/// (the trait has `impl Future` returns). Phase 7 will add a
+/// `Virtual(VirtualMsc)` variant here.
+pub enum DeviceBackend {
+    Real(real::RealDevice),
+}
+
+impl UsbDeviceBackend for DeviceBackend {
+    fn device_info(&self) -> DeviceConnect {
+        match self {
+            DeviceBackend::Real(d) => d.device_info(),
+        }
+    }
+
+    fn endpoint_info(&self) -> EpInfo {
+        match self {
+            DeviceBackend::Real(d) => d.endpoint_info(),
+        }
+    }
+
+    fn interface_info(&self) -> InterfaceInfo {
+        match self {
+            DeviceBackend::Real(d) => d.interface_info(),
+        }
+    }
+
+    async fn set_configuration(&mut self, configuration: u8) -> Result<Status> {
+        match self {
+            DeviceBackend::Real(d) => d.set_configuration(configuration).await,
+        }
+    }
+
+    async fn get_configuration(&mut self) -> Result<u8> {
+        match self {
+            DeviceBackend::Real(d) => d.get_configuration().await,
+        }
+    }
+
+    async fn set_alt_setting(&mut self, interface: u8, alt_setting: u8) -> Result<Status> {
+        match self {
+            DeviceBackend::Real(d) => d.set_alt_setting(interface, alt_setting).await,
+        }
+    }
+
+    async fn get_alt_setting(&mut self, interface: u8) -> Result<u8> {
+        match self {
+            DeviceBackend::Real(d) => d.get_alt_setting(interface).await,
+        }
+    }
+
+    async fn reset(&mut self) -> Result<()> {
+        match self {
+            DeviceBackend::Real(d) => d.reset().await,
+        }
+    }
+
+    async fn control_transfer(
+        &mut self,
+        setup: &ControlSetup,
+        data: &[u8],
+    ) -> Result<TransferResult> {
+        match self {
+            DeviceBackend::Real(d) => d.control_transfer(setup, data).await,
+        }
+    }
+
+    async fn bulk_in(&mut self, endpoint: u8, max_len: usize) -> Result<TransferResult> {
+        match self {
+            DeviceBackend::Real(d) => d.bulk_in(endpoint, max_len).await,
+        }
+    }
+
+    async fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<TransferResult> {
+        match self {
+            DeviceBackend::Real(d) => d.bulk_out(endpoint, data).await,
+        }
+    }
+
+    fn is_virtual(&self) -> bool {
+        match self {
+            DeviceBackend::Real(d) => d.is_virtual(),
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            DeviceBackend::Real(d) => d.description(),
+        }
+    }
+}
+
 // ── Device enumeration types ───────────────────────────
 
 /// Where a USB device comes from.

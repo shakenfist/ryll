@@ -823,9 +823,11 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
+                let (_usb_tx, usb_rx) = mpsc::channel(16);
                 let mut channel = UsbredirChannel::new(
                     stream,
                     event_tx.clone(),
+                    usb_rx,
                     capture.clone(),
                     byte_counter.clone(),
                 );
