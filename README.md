@@ -188,7 +188,8 @@ src/
 │   └── parser.rs        # Byte-stream parser
 ├── usb/
 │   ├── mod.rs           # UsbDeviceBackend trait, device enumeration
-│   └── real.rs          # Physical USB device backend (nusb)
+│   ├── real.rs          # Physical USB device backend (nusb)
+│   └── virtual_msc.rs   # Virtual mass storage (RAW disk images)
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression

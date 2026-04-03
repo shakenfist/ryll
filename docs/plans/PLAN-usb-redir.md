@@ -334,7 +334,7 @@ protocol handling.
 | 4. Real device enumeration and passthrough | [PLAN-usb-redir-phase-04-real-devices.md](PLAN-usb-redir-phase-04-real-devices.md) | Complete |
 | 5. Device connection lifecycle | [PLAN-usb-redir-phase-05-device-connect.md](PLAN-usb-redir-phase-05-device-connect.md) | Complete |
 | 6. Control and bulk transfers | [PLAN-usb-redir-phase-06-transfers.md](PLAN-usb-redir-phase-06-transfers.md) | Complete |
-| 7. Virtual mass storage device (RAW images) | [PLAN-usb-redir-phase-07-virtual-msc.md](PLAN-usb-redir-phase-07-virtual-msc.md) | Not started |
+| 7. Virtual mass storage device (RAW images) | [PLAN-usb-redir-phase-07-virtual-msc.md](PLAN-usb-redir-phase-07-virtual-msc.md) | Complete |
 | 8. UI integration | [PLAN-usb-redir-phase-08-ui.md](PLAN-usb-redir-phase-08-ui.md) | Not started |
 | 9. Interrupt transfers | [PLAN-usb-redir-phase-09-interrupt.md](PLAN-usb-redir-phase-09-interrupt.md) | Not started |
 | 10. Testing and QEMU setup | [PLAN-usb-redir-phase-10-testing.md](PLAN-usb-redir-phase-10-testing.md) | Not started |

@@ -122,7 +122,9 @@ src/
 ├── usb/                 # USB device backend abstraction
 │   ├── mod.rs           # UsbDeviceBackend trait, TransferResult,
 │   │                    #   DeviceSource, UsbDeviceInfo, enumeration
-│   └── real.rs          # Physical device backend (nusb crate)
+│   ├── real.rs          # Physical device backend (nusb crate)
+│   └── virtual_msc.rs   # Virtual USB mass storage (RAW images,
+│                        #   BOT protocol, SCSI command set)
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)
