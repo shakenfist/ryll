@@ -1,6 +1,6 @@
 [package]
 name = "ryll"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A Rust SPICE VDI test client"
 license = "Apache-2.0"
@@ -76,6 +76,9 @@ anyhow = "1"
 
 # Async channels
 async-channel = "2"
+
+# TCP keepalive configuration (matches spice-gtk behaviour)
+socket2 = { version = "0.6", features = ["all"] }
 
 # USB device access (pure Rust, no libusb)
 nusb = "0.2"

@@ -108,13 +108,17 @@ impl BandwidthTracker {
     }
 
     /// Format the most recent bandwidth value for display.
+    ///
+    /// The result is right-padded to a fixed width so the status bar
+    /// doesn't jitter when the value or unit changes.
     fn label(&self) -> String {
-        match self.history.last() {
+        let raw = match self.history.last() {
             Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
             None => String::from("-- B/s"),
-        }
+        };
+        format!("{:<10}", raw)
     }
 }
 

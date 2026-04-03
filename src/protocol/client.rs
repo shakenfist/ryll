@@ -1,6 +1,8 @@
 /// SPICE client connection management
 use anyhow::{anyhow, Result};
+use socket2::SockRef;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -188,6 +190,18 @@ impl SpiceClient {
         // Connect TCP
         let tcp_stream = TcpStream::connect(&addr).await?;
         tcp_stream.set_nodelay(true)?;
+
+        // Enable TCP keepalive to prevent NAT/firewall idle timeouts and
+        // detect dead connections.  Values match spice-gtk behaviour:
+        // 30 s idle before first probe, then 3 probes at 15 s intervals
+        // (75 s total to detect a dead peer).
+        let sock_ref = SockRef::from(&tcp_stream);
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(30))
+            .with_interval(Duration::from_secs(15))
+            .with_retries(3);
+        sock_ref.set_keepalive(true)?;
+        sock_ref.set_tcp_keepalive(&keepalive)?;
 
         // Wrap in TLS if needed
         let mut stream = if use_tls {

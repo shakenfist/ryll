@@ -75,7 +75,19 @@ communication between tasks.
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)
   to the UI thread
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
-  inputs channel handler
+  inputs channel handler. The channel is bounded (256 slots). The consumer
+  coalesces consecutive MouseMove events into a single position update to
+  prevent the channel from filling during network stalls, which would cause
+  the producer's `try_send` to silently drop critical button events
+
+### TCP Keepalive
+
+All channel sockets enable TCP keepalive to match spice-gtk: 30 s idle
+before the first probe, then 3 probes at 15 s intervals (75 s total to
+detect a dead peer).  This prevents NAT/firewall idle timeouts from
+silently breaking channel connections, which is especially important for
+secondary channels that can be idle for extended periods (the SPICE
+server only pings them every 300 s).
 
 ## SPICE Protocol
 

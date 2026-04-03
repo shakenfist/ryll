@@ -138,9 +138,38 @@ impl InputsChannel {
                     }
                 }
 
-                // Handle input events from UI
+                // Handle input events from UI.
+                //
+                // After waking on the first event, drain everything currently
+                // queued and coalesce consecutive MouseMove events into a single
+                // position update.  This keeps the channel from filling up during
+                // network stalls (which would cause try_send on the producer side
+                // to silently drop critical button events) and reduces the number
+                // of TCP writes we need to make.
                 Some(event) = input_rx.recv() => {
-                    self.handle_input_event(event).await?;
+                    let mut batch = vec![event];
+                    while let Ok(next) = input_rx.try_recv() {
+                        batch.push(next);
+                    }
+
+                    let mut i = 0;
+                    while i < batch.len() {
+                        if matches!(batch[i], InputEvent::MouseMove { .. }) {
+                            // Find the last consecutive MouseMove in this run.
+                            let mut last_move = i;
+                            while last_move + 1 < batch.len()
+                                && matches!(batch[last_move + 1], InputEvent::MouseMove { .. })
+                            {
+                                last_move += 1;
+                            }
+                            // Send only the final position from the run.
+                            self.handle_input_event(batch[last_move].clone()).await?;
+                            i = last_move + 1;
+                        } else {
+                            self.handle_input_event(batch[i].clone()).await?;
+                            i += 1;
+                        }
+                    }
                 }
             }
         }

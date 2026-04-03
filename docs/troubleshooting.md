@@ -149,6 +149,9 @@ are sent but the display never updates in response.
 **Symptom:** Mouse cursor visible but clicks don't register.
 
 **Causes:**
+- Network stalls can cause the input channel to fill with mouse motion
+  events, which previously caused button press/release events to be
+  silently dropped (fixed in 0.1.2 via motion coalescing)
 - Known issue: mouse clicks through kerbside proxy may not
   produce display responses depending on VM/agent config
 - The SPICE agent in the VM may not be running
@@ -157,8 +160,31 @@ are sent but the display never updates in response.
 1. Use Tab to navigate instead of mouse clicking
 2. Check `/tmp/ryll.log` for `inputs: mouse down:` lines
    to confirm clicks are being sent
-3. The `tools/test_click.py` script can test click delivery
+3. Submit a bug report (F12) with category **Input** — the
+   channel-state.json will show whether button events are
+   reaching the wire
+4. The `tools/test_click.py` script can test click delivery
    independently of ryll
+
+### Session becomes unresponsive after idle period
+
+**Symptom:** After leaving the session idle for a few minutes, all
+input (keyboard and mouse) stops working. The display may also
+freeze.
+
+**Causes:**
+- NAT devices, firewalls, or load balancers can silently drop idle
+  TCP connections. Prior to 0.1.2 ryll did not set TCP keepalive,
+  so idle channel sockets could be dropped without either end
+  detecting it
+- The SPICE server pings secondary channels only every 300 s; if
+  the TCP path is already broken, the ping never arrives
+
+**Solutions:**
+1. Upgrade to 0.1.2+ which enables TCP keepalive (30 s idle,
+   3 probes at 15 s) on all channel sockets
+2. If the problem persists, check whether a network appliance
+   between client and server has an unusually short idle timeout
 
 ## Performance Issues
 
