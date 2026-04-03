@@ -1,12 +1,15 @@
-/// Bug report infrastructure — per-channel traffic ring buffer.
+/// Bug report infrastructure — per-channel traffic ring buffer
+/// and channel state snapshots.
 ///
 /// Always active regardless of `--capture`.  Retains the most
 /// recent protocol traffic for bug report export and live
-/// traffic viewer display.
+/// traffic viewer display.  Channel snapshots capture mutable
+/// state for JSON serialisation in bug reports.
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
 use tracing::debug;
 
 #[cfg(feature = "capture")]
@@ -297,6 +300,170 @@ impl TrafficBuffers {
     }
 }
 
+// ── Channel state snapshots ─────────────────────────────────
+
+/// Result of a single image decode in the display channel.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct DecodeResult {
+    /// SPICE image type (e.g. "GlzRgb", "Lz4", "Pixmap").
+    pub image_type: String,
+    /// Image ID from the ImageDescriptor.
+    pub image_id: u64,
+    /// Decoded width in pixels.
+    pub width: u32,
+    /// Decoded height in pixels.
+    pub height: u32,
+    /// Whether this was a cache hit (FromCache type).
+    pub from_cache: bool,
+    /// Whether decompression succeeded.
+    pub success: bool,
+    /// Seconds since session start when this decode occurred.
+    pub timestamp_secs: f64,
+}
+
+/// Snapshot of the display channel's mutable state.
+#[derive(Debug, Clone, Default, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct DisplaySnapshot {
+    pub image_cache_entries: usize,
+    pub image_cache_ids: Vec<u64>,
+    pub image_cache_bytes: usize,
+    pub recent_decodes: VecDeque<DecodeResult>,
+    pub ack_generation: u32,
+    pub ack_window: u32,
+    pub message_count: u32,
+    pub last_ack: u32,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// A recorded input event for the inputs channel snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct InputEventRecord {
+    /// "KeyDown", "KeyUp", "MouseDown", "MouseUp", "MouseMove".
+    pub event_type: String,
+    /// Scancode for key events, 0 for mouse events.
+    pub scancode: u32,
+    /// Mouse position (0,0 for key events).
+    pub x: u32,
+    pub y: u32,
+    /// Button bitmask for mouse press/release events.
+    pub button_mask: u32,
+    /// Seconds since session start.
+    pub timestamp_secs: f64,
+}
+
+/// Snapshot of the inputs channel's mutable state.
+#[derive(Debug, Clone, Default, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct InputsSnapshot {
+    pub button_state: u32,
+    pub motion_count: u32,
+    pub secs_since_last_key: Option<f64>,
+    pub recent_events: VecDeque<InputEventRecord>,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// Summary of a cached cursor shape.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct CursorCacheEntry {
+    pub cursor_id: u64,
+    pub width: u16,
+    pub height: u16,
+    pub hot_spot_x: u16,
+    pub hot_spot_y: u16,
+}
+
+/// Snapshot of the cursor channel's mutable state.
+#[derive(Debug, Clone, Default, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct CursorSnapshot {
+    pub cache_entries: usize,
+    pub cache_contents: Vec<CursorCacheEntry>,
+    pub ack_generation: u32,
+    pub ack_window: u32,
+    pub message_count: u32,
+    pub last_ack: u32,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// Snapshot of the main channel's mutable state.
+#[derive(Debug, Clone, Default, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct MainSnapshot {
+    pub session_id: Option<u32>,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+}
+
+/// Summary of an active display surface.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct SurfaceInfo {
+    pub surface_id: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Snapshot of application-level state.
+#[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // read in Phase 3 (bug report zip)
+pub struct AppSnapshot {
+    pub fps: f64,
+    pub bandwidth_history: Vec<f32>,
+    pub bandwidth_current: f32,
+    pub last_latency: Option<f64>,
+    pub frames_received: u64,
+    pub surfaces: Vec<SurfaceInfo>,
+    pub cursor_pos: (u16, u16),
+    pub cursor_visible: bool,
+    pub mouse_mode: u32,
+    pub connected: bool,
+    pub uptime_secs: f64,
+}
+
+impl Default for AppSnapshot {
+    fn default() -> Self {
+        AppSnapshot {
+            fps: 0.0,
+            bandwidth_history: Vec::new(),
+            bandwidth_current: 0.0,
+            last_latency: None,
+            frames_received: 0,
+            surfaces: Vec::new(),
+            cursor_pos: (0, 0),
+            cursor_visible: true,
+            mouse_mode: 0,
+            connected: false,
+            uptime_secs: 0.0,
+        }
+    }
+}
+
+/// Holds all four per-channel snapshot `Arc<Mutex<T>>`s.
+pub struct ChannelSnapshots {
+    pub display: Arc<Mutex<DisplaySnapshot>>,
+    pub inputs: Arc<Mutex<InputsSnapshot>>,
+    pub cursor: Arc<Mutex<CursorSnapshot>>,
+    pub main: Arc<Mutex<MainSnapshot>>,
+}
+
+impl ChannelSnapshots {
+    pub fn new() -> Self {
+        ChannelSnapshots {
+            display: Arc::new(Mutex::new(DisplaySnapshot::default())),
+            inputs: Arc::new(Mutex::new(InputsSnapshot::default())),
+            cursor: Arc::new(Mutex::new(CursorSnapshot::default())),
+            main: Arc::new(Mutex::new(MainSnapshot::default())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +540,94 @@ mod tests {
         let buffers = TrafficBuffers::new();
         buffers.record_sent("nonexistent", 1, "test", &[0u8; 10]);
         // Should not panic
+    }
+
+    #[test]
+    fn test_display_snapshot_serialises() {
+        let mut snap = DisplaySnapshot::default();
+        snap.image_cache_entries = 3;
+        snap.image_cache_ids = vec![1, 2, 3];
+        snap.image_cache_bytes = 12345;
+        snap.recent_decodes.push_back(DecodeResult {
+            image_type: "GlzRgb".to_string(),
+            image_id: 42,
+            width: 800,
+            height: 600,
+            from_cache: false,
+            success: true,
+            timestamp_secs: 1.5,
+        });
+        snap.bytes_in = 100_000;
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"image_cache_entries\": 3"));
+        assert!(json.contains("\"image_type\": \"GlzRgb\""));
+        assert!(json.contains("\"bytes_in\": 100000"));
+    }
+
+    #[test]
+    fn test_inputs_snapshot_serialises() {
+        let mut snap = InputsSnapshot::default();
+        snap.button_state = 1;
+        snap.recent_events.push_back(InputEventRecord {
+            event_type: "KeyDown".to_string(),
+            scancode: 0x1E,
+            x: 0,
+            y: 0,
+            button_mask: 0,
+            timestamp_secs: 2.0,
+        });
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"button_state\": 1"));
+        assert!(json.contains("\"event_type\": \"KeyDown\""));
+    }
+
+    #[test]
+    fn test_cursor_snapshot_serialises() {
+        let mut snap = CursorSnapshot::default();
+        snap.cache_entries = 1;
+        snap.cache_contents.push(CursorCacheEntry {
+            cursor_id: 99,
+            width: 24,
+            height: 24,
+            hot_spot_x: 0,
+            hot_spot_y: 0,
+        });
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"cursor_id\": 99"));
+    }
+
+    #[test]
+    fn test_main_snapshot_serialises() {
+        let snap = MainSnapshot {
+            session_id: Some(42),
+            bytes_in: 500,
+            bytes_out: 100,
+        };
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"session_id\": 42"));
+    }
+
+    #[test]
+    fn test_app_snapshot_serialises() {
+        let mut snap = AppSnapshot::default();
+        snap.fps = 59.9;
+        snap.connected = true;
+        snap.surfaces.push(SurfaceInfo {
+            surface_id: 0,
+            width: 1920,
+            height: 1080,
+        });
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"fps\": 59.9"));
+        assert!(json.contains("\"connected\": true"));
+        assert!(json.contains("\"surface_id\": 0"));
+    }
+
+    #[test]
+    fn test_channel_snapshots_new() {
+        let snapshots = ChannelSnapshots::new();
+        let display = snapshots.display.lock().unwrap();
+        assert_eq!(display.bytes_in, 0);
+        assert_eq!(display.recent_decodes.len(), 0);
     }
 }

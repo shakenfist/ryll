@@ -1,14 +1,14 @@
 /// Inputs channel handler - keyboard and mouse input
 use anyhow::Result;
 use eframe::egui;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::app::ByteCounter;
-use crate::bugreport::TrafficBuffers;
+use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -24,6 +24,9 @@ use super::{ChannelEvent, InputEvent};
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
 
+/// Maximum number of recent input events to keep in the snapshot.
+const MAX_RECENT_EVENTS: usize = 50;
+
 pub struct InputsChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -35,6 +38,8 @@ pub struct InputsChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    snapshot: Arc<Mutex<InputsSnapshot>>,
+    recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -47,6 +52,7 @@ impl InputsChannel {
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
+        snapshot: Arc<Mutex<InputsSnapshot>>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -59,6 +65,8 @@ impl InputsChannel {
             capture,
             byte_counter,
             traffic,
+            snapshot,
+            recent_events: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -187,6 +195,7 @@ impl InputsChannel {
                 .await?;
         }
 
+        self.update_snapshot();
         Ok(())
     }
 
@@ -276,6 +285,8 @@ impl InputsChannel {
     }
 
     async fn handle_input_event(&mut self, event: InputEvent) -> Result<()> {
+        let ts = self.traffic.elapsed().as_secs_f64();
+
         match event {
             InputEvent::KeyDown(scancode) => {
                 self.last_key_time = Some(Instant::now());
@@ -288,6 +299,15 @@ impl InputsChannel {
                     .await
                     .ok();
 
+                self.record_event(InputEventRecord {
+                    event_type: "KeyDown".to_string(),
+                    scancode,
+                    x: 0,
+                    y: 0,
+                    button_mask: 0,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
@@ -297,6 +317,15 @@ impl InputsChannel {
             }
 
             InputEvent::KeyUp(scancode) => {
+                self.record_event(InputEventRecord {
+                    event_type: "KeyUp".to_string(),
+                    scancode,
+                    x: 0,
+                    y: 0,
+                    button_mask: 0,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 KeyEvent::write(scancode, &mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
@@ -308,6 +337,15 @@ impl InputsChannel {
             InputEvent::MouseMove { x, y } => {
                 // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                    self.record_event(InputEventRecord {
+                        event_type: "MouseMove".to_string(),
+                        scancode: 0,
+                        x,
+                        y,
+                        button_mask: self.button_state,
+                        timestamp_secs: ts,
+                    });
+
                     let mut payload = Vec::new();
                     MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
@@ -327,6 +365,15 @@ impl InputsChannel {
 
                 self.button_state |= button;
 
+                self.record_event(InputEventRecord {
+                    event_type: "MouseDown".to_string(),
+                    scancode: 0,
+                    x,
+                    y,
+                    button_mask: button,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
@@ -340,6 +387,15 @@ impl InputsChannel {
             InputEvent::MouseUp { button, x, y } => {
                 self.button_state &= !button;
 
+                self.record_event(InputEventRecord {
+                    event_type: "MouseUp".to_string(),
+                    scancode: 0,
+                    x,
+                    y,
+                    button_mask: button,
+                    timestamp_secs: ts,
+                });
+
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
@@ -350,6 +406,25 @@ impl InputsChannel {
         }
 
         Ok(())
+    }
+
+    /// Record an input event in the local deque.
+    fn record_event(&mut self, event: InputEventRecord) {
+        self.recent_events.push_back(event);
+        if self.recent_events.len() > MAX_RECENT_EVENTS {
+            self.recent_events.pop_front();
+        }
+    }
+
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.button_state = self.button_state;
+        snap.motion_count = self.motion_count;
+        snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
+        snap.recent_events = self.recent_events.clone();
+        snap.bytes_in = self.bytes_in;
+        snap.bytes_out = self.bytes_out;
     }
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
@@ -366,7 +441,9 @@ impl InputsChannel {
             logging::log_message("sent", "inputs", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("inputs", msg_type, msg_name, data);
-        self.send(data).await
+        let result = self.send(data).await;
+        self.update_snapshot();
+        result
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {

@@ -1,15 +1,14 @@
 /// Display channel handler - surfaces, image rendering
 use anyhow::Result;
 use flate2::read::ZlibDecoder;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use std::sync::Arc;
-
 use crate::app::ByteCounter;
-use crate::bugreport::TrafficBuffers;
+use crate::bugreport::{DecodeResult, DisplaySnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::decompression::{decompress_glz, decompress_lz, DecompressedImage};
 use crate::protocol::link::SpiceStream;
@@ -144,6 +143,9 @@ fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<Deco
     })
 }
 
+/// Maximum number of recent decode results to keep in the snapshot.
+const MAX_RECENT_DECODES: usize = 20;
+
 pub struct DisplayChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -152,6 +154,8 @@ pub struct DisplayChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    snapshot: Arc<Mutex<DisplaySnapshot>>,
+    recent_decodes: VecDeque<DecodeResult>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -167,6 +171,7 @@ impl DisplayChannel {
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
+        snapshot: Arc<Mutex<DisplaySnapshot>>,
     ) -> Self {
         DisplayChannel {
             stream,
@@ -176,6 +181,8 @@ impl DisplayChannel {
             capture,
             byte_counter,
             traffic,
+            snapshot,
+            recent_decodes: VecDeque::new(),
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -283,6 +290,7 @@ impl DisplayChannel {
             }
         }
 
+        self.update_snapshot();
         Ok(())
     }
 
@@ -729,6 +737,18 @@ impl DisplayChannel {
             }
         };
 
+        // Record this decode attempt in the snapshot history.
+        let is_from_cache = matches!(image_type, Some(ImageType::FromCache));
+        self.record_decode(DecodeResult {
+            image_type: format!("{:?}", image_type),
+            image_id: img_desc.image_id,
+            width: img_desc.width,
+            height: img_desc.height,
+            from_cache: is_from_cache,
+            success: decompressed.is_some(),
+            timestamp_secs: self.traffic.elapsed().as_secs_f64(),
+        });
+
         if decompressed.is_none() {
             info!(
                 "display: draw_copy: no pixels produced for type={:?}",
@@ -764,6 +784,33 @@ impl DisplayChannel {
         Ok(())
     }
 
+    /// Record a decode result and update the snapshot.
+    fn record_decode(&mut self, decode: DecodeResult) {
+        self.recent_decodes.push_back(decode);
+        if self.recent_decodes.len() > MAX_RECENT_DECODES {
+            self.recent_decodes.pop_front();
+        }
+    }
+
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.ack_generation = self.ack_generation;
+        snap.ack_window = self.ack_window;
+        snap.message_count = self.message_count;
+        snap.last_ack = self.last_ack;
+        snap.bytes_in = self.bytes_in;
+        snap.bytes_out = self.bytes_out;
+        snap.image_cache_entries = self.previous_images.len();
+        snap.image_cache_bytes = self.previous_images.values().map(|v| v.len()).sum();
+        snap.image_cache_ids = {
+            let mut ids: Vec<u64> = self.previous_images.keys().copied().collect();
+            ids.sort_unstable();
+            ids
+        };
+        snap.recent_decodes = self.recent_decodes.clone();
+    }
+
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(display_client::ACK, &[]);
         self.send_with_log(display_client::ACK, &msg).await?;
@@ -779,7 +826,9 @@ impl DisplayChannel {
         }
         self.traffic
             .record_sent("display", msg_type, msg_name, data);
-        self.send(data).await
+        let result = self.send(data).await;
+        self.update_snapshot();
+        result
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {

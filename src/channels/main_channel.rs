@@ -1,11 +1,11 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::Result;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
-use crate::bugreport::TrafficBuffers;
+use crate::bugreport::{MainSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
@@ -25,6 +25,7 @@ pub struct MainChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
 }
@@ -36,6 +37,7 @@ impl MainChannel {
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
+        snapshot: Arc<Mutex<MainSnapshot>>,
     ) -> Self {
         MainChannel {
             stream,
@@ -45,6 +47,7 @@ impl MainChannel {
             capture,
             byte_counter,
             traffic,
+            snapshot,
             bytes_in: 0,
             bytes_out: 0,
         }
@@ -122,6 +125,7 @@ impl MainChannel {
             self.handle_message(header.message_type, &payload).await?;
         }
 
+        self.update_snapshot();
         Ok(())
     }
 
@@ -286,6 +290,14 @@ impl MainChannel {
         Ok(())
     }
 
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.session_id = self.session_id;
+        snap.bytes_in = self.bytes_in;
+        snap.bytes_out = self.bytes_out;
+    }
+
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
@@ -298,7 +310,9 @@ impl MainChannel {
             logging::log_message("sent", "main", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("main", msg_type, msg_name, data);
-        self.send(data).await
+        let result = self.send(data).await;
+        self.update_snapshot();
+        result
     }
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {

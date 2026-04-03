@@ -100,7 +100,11 @@ src/
 ├── app.rs               # egui App, event loop, headless runner,
 │                        #   bandwidth sparkline
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
-│                        #   TrafficRingBuffer, TrafficBuffers)
+│                        #   TrafficRingBuffer, TrafficBuffers),
+│                        #   channel state snapshots (DisplaySnapshot,
+│                        #   InputsSnapshot, CursorSnapshot,
+│                        #   MainSnapshot, AppSnapshot,
+│                        #   ChannelSnapshots)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
@@ -197,4 +201,5 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | openh264 | H.264 video encoding for --capture mode (optional, `capture` feature) |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
 | image | JPEG decoding (with `jpeg` feature only) |
+| serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |

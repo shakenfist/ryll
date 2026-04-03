@@ -19,6 +19,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 - **Traffic ring buffer** - Always-active per-channel ring buffer (50 MB total) retaining recent protocol traffic for bug reports
+- **Channel state snapshots** - Per-channel `Arc<Mutex<T>>` snapshots of mutable state (image cache, input events, cursor cache, session info, app metrics) updated in real time and serialisable to JSON for bug reports
 
 ## Installation
 
@@ -173,7 +174,7 @@ This will:
 src/
 ├── main.rs              # CLI entry point, Ctrl+C handler
 ├── app.rs               # egui App, bandwidth sparkline
-├── bugreport.rs         # Traffic ring buffer for bug reports
+├── bugreport.rs         # Traffic ring buffer + channel snapshots
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
 ├── protocol/

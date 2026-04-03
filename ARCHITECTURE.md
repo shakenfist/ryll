@@ -425,6 +425,31 @@ shared via `Arc<TrafficBuffers>` between all channel handler tasks
 and the UI thread. This supports both bug report export (Phase 3)
 and a live traffic viewer (Phase 6).
 
+## Channel State Snapshots
+
+Each channel handler maintains an `Arc<Mutex<T>>` snapshot struct
+that captures the channel's mutable state. The snapshots are updated
+in-place after every batch of processed messages and after every sent
+message. All snapshot structs derive `serde::Serialize` so they can be
+written to JSON for bug reports (Phase 3).
+
+| Snapshot struct | Channel | Key fields |
+|----------------|---------|------------|
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20), ACK state, bytes in/out |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, bytes in/out |
+| `MainSnapshot` | Main | Session ID, bytes in/out |
+| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
+
+The `ChannelSnapshots` struct in `src/bugreport.rs` holds the four
+channel snapshot `Arc<Mutex<T>>` values and is created alongside
+`TrafficBuffers` in `run_connection()`. The `AppSnapshot` is
+maintained separately by the `RyllApp` event loop.
+
+Updates hold the mutex only briefly (copying a handful of scalars
+and small collections), so contention with the UI thread is
+negligible.
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-use crate::bugreport::TrafficBuffers;
+use crate::bugreport::{AppSnapshot, ChannelSnapshots, SurfaceInfo, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
@@ -157,6 +157,12 @@ pub struct RyllApp {
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     #[allow(dead_code)]
     traffic: Arc<TrafficBuffers>,
+
+    // Channel state snapshots (always active, for bug reports)
+    #[allow(dead_code)]
+    channel_snapshots: ChannelSnapshots,
+    #[allow(dead_code)]
+    app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
 }
 
 impl RyllApp {
@@ -177,6 +183,10 @@ impl RyllApp {
         // Traffic ring buffers (always active)
         let traffic = Arc::new(TrafficBuffers::new());
 
+        // Channel state snapshots (always active)
+        let channel_snapshots = ChannelSnapshots::new();
+        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
@@ -184,6 +194,12 @@ impl RyllApp {
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
+        let snaps_for_conn = ChannelSnapshots {
+            display: channel_snapshots.display.clone(),
+            inputs: channel_snapshots.inputs.clone(),
+            cursor: channel_snapshots.cursor.clone(),
+            main: channel_snapshots.main.clone(),
+        };
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -196,6 +212,7 @@ impl RyllApp {
                     capture_clone,
                     counter_clone,
                     traffic_clone,
+                    snaps_for_conn,
                 )
                 .await
                 {
@@ -227,6 +244,8 @@ impl RyllApp {
             capture,
             usb_device_description: None,
             traffic,
+            channel_snapshots,
+            app_snapshot,
         }
     }
 
@@ -364,6 +383,46 @@ impl RyllApp {
                 _ => {}
             }
         }
+
+        self.update_app_snapshot();
+    }
+
+    /// Sync app-level state to the shared snapshot.
+    fn update_app_snapshot(&self) {
+        let mut snap = self.app_snapshot.lock().unwrap();
+
+        // FPS from sliding-window frame_times
+        snap.fps = if self.stats.frame_times.len() >= 2 {
+            let oldest = self.stats.frame_times.first().unwrap();
+            let newest = self.stats.frame_times.last().unwrap();
+            let elapsed = newest.duration_since(*oldest).as_secs_f64();
+            if elapsed > 0.0 {
+                (self.stats.frame_times.len() - 1) as f64 / elapsed
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        snap.bandwidth_history = self.bandwidth.history.clone();
+        snap.bandwidth_current = self.bandwidth.history.last().copied().unwrap_or(0.0);
+        snap.last_latency = self.stats.last_latency;
+        snap.frames_received = self.stats.frames_received;
+        snap.surfaces = self
+            .surfaces
+            .values()
+            .map(|s| SurfaceInfo {
+                surface_id: s.id,
+                width: s.width,
+                height: s.height,
+            })
+            .collect();
+        snap.cursor_pos = self.cursor_pos;
+        snap.cursor_visible = self.cursor_visible;
+        snap.mouse_mode = self.mouse_mode;
+        snap.connected = self.connected;
+        snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
@@ -745,6 +804,7 @@ async fn run_connection(
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    snapshots: ChannelSnapshots,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -761,6 +821,7 @@ async fn run_connection(
         capture.clone(),
         byte_counter.clone(),
         traffic.clone(),
+        snapshots.main,
     );
 
     // Spawn main channel task
@@ -825,6 +886,7 @@ async fn run_connection(
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
+                    snapshots.display.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -839,6 +901,7 @@ async fn run_connection(
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
+                    snapshots.cursor.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -854,6 +917,7 @@ async fn run_connection(
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
+                    snapshots.inputs.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -917,6 +981,9 @@ pub async fn run_headless(
     // Traffic ring buffers (always active)
     let traffic = Arc::new(TrafficBuffers::new());
 
+    // Channel state snapshots (always active)
+    let snapshots = ChannelSnapshots::new();
+
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
         run_connection(
@@ -927,6 +994,7 @@ pub async fn run_headless(
             capture,
             byte_counter,
             traffic,
+            snapshots,
         )
         .await
     });
