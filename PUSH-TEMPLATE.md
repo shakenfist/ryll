@@ -46,6 +46,7 @@ checks before I push:
 
  * Has `docs/` been updated to reflect any new or changed
    features?
+ * Are all planning files in `docs/plans/`?
  * Has `ARCHITECTURE.md` been updated if this change adds
    or modifies channels, message types, compression
    algorithms, or the connection model?

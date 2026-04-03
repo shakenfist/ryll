@@ -14,6 +14,8 @@ TLS/RSA, LZ/GLZ compression), research as needed to give a
 confident answer. Flag any uncertainty explicitly rather than
 guessing.
 
+All planning documents should go into `docs/plans/`.
+
 Consult `ARCHITECTURE.md` for the system architecture
 overview, channel types, and data flow. Consult `AGENTS.md`
 for build commands, project conventions, code organisation,
