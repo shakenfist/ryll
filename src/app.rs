@@ -518,6 +518,27 @@ impl RyllApp {
         report.write_zip(&output_dir)
     }
 
+    /// Run a bug report and set the status bar message from the result.
+    fn finish_bug_report(
+        &mut self,
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+    ) {
+        match self.generate_bug_report(report_type, description, region) {
+            Ok(path) => {
+                let msg = format!("Bug report saved to {}", path.display());
+                info!("app: {}", msg);
+                self.bug_status_message = Some((msg, Instant::now()));
+            }
+            Err(e) => {
+                let msg = format!("Bug report failed: {}", e);
+                error!("app: {}", msg);
+                self.bug_status_message = Some((msg, Instant::now()));
+            }
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         // Don't forward input to the SPICE server when
         // the bug report dialog or region selection is active.
@@ -621,18 +642,7 @@ impl eframe::App for RyllApp {
             if esc {
                 let report_type = self.bug_report_type;
                 let description = self.bug_description.clone();
-                match self.generate_bug_report(report_type, description, None) {
-                    Ok(path) => {
-                        let msg = format!("Bug report saved to {}", path.display());
-                        info!("app: {}", msg);
-                        self.bug_status_message = Some((msg, Instant::now()));
-                    }
-                    Err(e) => {
-                        let msg = format!("Bug report failed: {}", e);
-                        error!("app: {}", msg);
-                        self.bug_status_message = Some((msg, Instant::now()));
-                    }
-                }
+                self.finish_bug_report(report_type, description, None);
                 self.region_select_active = false;
                 self.region_drag_start = None;
                 self.region_drag_end = None;
@@ -1051,18 +1061,7 @@ impl eframe::App for RyllApp {
                     // Non-display: generate immediately
                     let report_type = self.bug_report_type;
                     let description = self.bug_description.clone();
-                    match self.generate_bug_report(report_type, description, None) {
-                        Ok(path) => {
-                            let msg = format!("Bug report saved to {}", path.display());
-                            info!("app: {}", msg);
-                            self.bug_status_message = Some((msg, Instant::now()));
-                        }
-                        Err(e) => {
-                            let msg = format!("Bug report failed: {}", e);
-                            error!("app: {}", msg);
-                            self.bug_status_message = Some((msg, Instant::now()));
-                        }
-                    }
+                    self.finish_bug_report(report_type, description, None);
                 }
                 self.show_bug_dialog = false;
             }
@@ -1163,18 +1162,7 @@ impl eframe::App for RyllApp {
                 };
                 let report_type = self.bug_report_type;
                 let description = self.bug_description.clone();
-                match self.generate_bug_report(report_type, description, Some(region)) {
-                    Ok(path) => {
-                        let msg = format!("Bug report saved to {}", path.display());
-                        info!("app: {}", msg);
-                        self.bug_status_message = Some((msg, Instant::now()));
-                    }
-                    Err(e) => {
-                        let msg = format!("Bug report failed: {}", e);
-                        error!("app: {}", msg);
-                        self.bug_status_message = Some((msg, Instant::now()));
-                    }
-                }
+                self.finish_bug_report(report_type, description, Some(region));
                 self.region_select_active = false;
                 self.region_drag_start = None;
                 self.region_drag_end = None;
