@@ -166,6 +166,26 @@ are sent but the display never updates in response.
 4. The `tools/test_click.py` script can test click delivery
    independently of ryll
 
+### Session becomes unresponsive after idle period
+
+**Symptom:** After leaving the session idle for a few minutes, all
+input (keyboard and mouse) stops working. The display may also
+freeze.
+
+**Causes:**
+- NAT devices, firewalls, or load balancers can silently drop idle
+  TCP connections. Prior to 0.1.2 ryll did not set TCP keepalive,
+  so idle channel sockets could be dropped without either end
+  detecting it
+- The SPICE server pings secondary channels only every 300 s; if
+  the TCP path is already broken, the ping never arrives
+
+**Solutions:**
+1. Upgrade to 0.1.2+ which enables TCP keepalive (30 s idle,
+   3 probes at 15 s) on all channel sockets
+2. If the problem persists, check whether a network appliance
+   between client and server has an unusually short idle timeout
+
 ## Performance Issues
 
 ### High CPU usage
