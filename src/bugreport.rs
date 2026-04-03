@@ -95,18 +95,24 @@ impl TrafficRingBuffer {
     /// Write all buffered pcap frames to a pcap file at the
     /// given path.  Returns the number of frames written.
     #[cfg(feature = "capture")]
-    #[allow(dead_code)] // used in Phase 3 (bug report zip)
+    #[allow(dead_code)]
     pub fn drain_to_pcap(&self, path: &std::path::Path) -> anyhow::Result<usize> {
+        use std::fs::File;
+        let file = File::create(path)?;
+        self.write_pcap_to(file)
+    }
+
+    /// Write all buffered pcap frames to a writer.
+    #[cfg(feature = "capture")]
+    pub fn write_pcap_to<W: std::io::Write>(&self, writer: W) -> anyhow::Result<usize> {
         use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
         use pcap_file::DataLink;
-        use std::fs::File;
 
-        let file = File::create(path)?;
         let header = PcapHeader {
             datalink: DataLink::ETHERNET,
             ..Default::default()
         };
-        let mut writer = PcapWriter::with_header(file, header)?;
+        let mut pcap = PcapWriter::with_header(writer, header)?;
 
         let mut count = 0;
         for entry in &self.entries {
@@ -115,7 +121,7 @@ impl TrafficRingBuffer {
                 entry.pcap_frame.len() as u32,
                 &entry.pcap_frame,
             );
-            writer.write_packet(&packet).ok();
+            pcap.write_packet(&packet).ok();
             count += 1;
         }
 
@@ -298,6 +304,25 @@ impl TrafficBuffers {
             }
         }
     }
+
+    /// Drain a channel's ring buffer to pcap bytes in memory.
+    /// Returns `None` if the capture feature is disabled or the
+    /// channel name is unknown.
+    pub fn drain_channel_pcap_bytes(&self, channel: &str) -> Option<Vec<u8>> {
+        #[cfg(feature = "capture")]
+        {
+            let buf = self.buffer_for(channel)?;
+            let guard = buf.lock().unwrap();
+            let mut output = Vec::new();
+            guard.write_pcap_to(&mut output).ok()?;
+            Some(output)
+        }
+        #[cfg(not(feature = "capture"))]
+        {
+            let _ = channel;
+            None
+        }
+    }
 }
 
 // ── Channel state snapshots ─────────────────────────────────
@@ -461,6 +486,246 @@ impl ChannelSnapshots {
             cursor: Arc::new(Mutex::new(CursorSnapshot::default())),
             main: Arc::new(Mutex::new(MainSnapshot::default())),
         }
+    }
+}
+
+// ── Timestamp utilities ────────────────────────────────────
+
+/// Return the current UTC time as an ISO-8601 string without
+/// pulling in a datetime crate.  Uses UNIX_EPOCH + SystemTime.
+pub(crate) fn chrono_now() -> String {
+    use std::time::SystemTime;
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs();
+            // Rough UTC decomposition (no leap-second handling)
+            let days = secs / 86400;
+            let time_secs = secs % 86400;
+            let h = time_secs / 3600;
+            let m = (time_secs % 3600) / 60;
+            let s = time_secs % 60;
+
+            // Days since 1970-01-01 → (year, month, day)
+            // Algorithm from Howard Hinnant's date library (public domain)
+            let z = days as i64 + 719468;
+            let era = if z >= 0 { z } else { z - 146096 } / 146097;
+            let doe = (z - era * 146097) as u64;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let y = yoe as i64 + era * 400;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let mon = if mp < 10 { mp + 3 } else { mp - 9 };
+            let year = if mon <= 2 { y + 1 } else { y };
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                year, mon, d, h, m, s
+            )
+        }
+        Err(_) => String::from("unknown"),
+    }
+}
+
+/// Filename-safe timestamp: colons replaced with hyphens.
+pub(crate) fn filename_timestamp() -> String {
+    chrono_now().replace(':', "-")
+}
+
+// ── PNG encoding ───────────────────────────────────────────
+
+/// Encode RGBA pixels to PNG bytes in memory.
+pub(crate) fn encode_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let cursor = std::io::Cursor::new(&mut buf);
+        let mut encoder = png::Encoder::new(cursor, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(pixels)?;
+    }
+    Ok(buf)
+}
+
+// ── Bug report assembly ────────────────────────────────────
+
+/// Which channel the bug report is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)] // variants used in Phase 4 (GUI trigger)
+pub enum BugReportType {
+    Display,
+    Input,
+    Cursor,
+    Connection,
+}
+
+impl BugReportType {
+    /// SPICE channel name used for ring buffer drain and snapshot
+    /// selection.
+    pub fn channel_name(&self) -> &'static str {
+        match self {
+            BugReportType::Display => "display",
+            BugReportType::Input => "inputs",
+            BugReportType::Cursor => "cursor",
+            BugReportType::Connection => "main",
+        }
+    }
+}
+
+/// Highlighted region for display bug reports.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportRegion {
+    pub left: u32,
+    pub top: u32,
+    pub right: u32,
+    pub bottom: u32,
+}
+
+/// Top-level metadata written to metadata.json.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportMetadata {
+    pub ryll_version: String,
+    pub platform_os: String,
+    pub platform_arch: String,
+    pub report_type: BugReportType,
+    pub channel: String,
+    pub description: String,
+    pub region: Option<ReportRegion>,
+    pub timestamp: String,
+    pub target_host: String,
+    pub target_port: u16,
+    pub session_uptime_secs: f64,
+}
+
+/// A fully assembled bug report ready to write to disk.
+pub struct BugReport {
+    /// Serialised metadata.json content.
+    metadata_json: String,
+    /// Serialised session.json (AppSnapshot).
+    session_json: String,
+    /// Serialised channel-state.json.
+    channel_state_json: String,
+    /// Pcap bytes (None when capture feature disabled).
+    pcap_bytes: Option<Vec<u8>>,
+    /// PNG screenshot bytes (display reports only).
+    screenshot_png: Option<Vec<u8>>,
+}
+
+impl BugReport {
+    /// Assemble a bug report from the available data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        surface_pixels: Option<(&[u8], u32, u32)>,
+    ) -> anyhow::Result<Self> {
+        // 1. Session snapshot (AppSnapshot)
+        let mut session = app_snapshot.lock().unwrap().clone();
+        session.uptime_secs = traffic.elapsed().as_secs_f64();
+        let session_json = serde_json::to_string_pretty(&session)?;
+
+        // 2. Channel state snapshot
+        let channel_state_json = match report_type {
+            BugReportType::Display => {
+                let snap = channel_snapshots.display.lock().unwrap().clone();
+                serde_json::to_string_pretty(&snap)?
+            }
+            BugReportType::Input => {
+                let snap = channel_snapshots.inputs.lock().unwrap().clone();
+                serde_json::to_string_pretty(&snap)?
+            }
+            BugReportType::Cursor => {
+                let snap = channel_snapshots.cursor.lock().unwrap().clone();
+                serde_json::to_string_pretty(&snap)?
+            }
+            BugReportType::Connection => {
+                let snap = channel_snapshots.main.lock().unwrap().clone();
+                serde_json::to_string_pretty(&snap)?
+            }
+        };
+
+        // 3. Pcap traffic for the affected channel
+        let pcap_bytes = traffic.drain_channel_pcap_bytes(report_type.channel_name());
+
+        // 4. PNG screenshot (display reports only)
+        let screenshot_png = if report_type == BugReportType::Display {
+            if let Some((pixels, w, h)) = surface_pixels {
+                Some(encode_png(pixels, w, h)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 5. Report metadata
+        let metadata = ReportMetadata {
+            ryll_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform_os: std::env::consts::OS.to_string(),
+            platform_arch: std::env::consts::ARCH.to_string(),
+            report_type,
+            channel: report_type.channel_name().to_string(),
+            description,
+            region,
+            timestamp: chrono_now(),
+            target_host: target_host.to_string(),
+            target_port,
+            session_uptime_secs: session.uptime_secs,
+        };
+        let metadata_json = serde_json::to_string_pretty(&metadata)?;
+
+        Ok(BugReport {
+            metadata_json,
+            session_json,
+            channel_state_json,
+            pcap_bytes,
+            screenshot_png,
+        })
+    }
+
+    /// Write the bug report as a zip file to `dir`.
+    /// Creates `dir` if it does not exist.
+    /// Returns the path of the written file.
+    pub fn write_zip(&self, dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        std::fs::create_dir_all(dir)?;
+
+        let filename = format!("ryll-bugreport-{}.zip", filename_timestamp());
+        let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(self.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(self.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(self.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = self.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        if let Some(ref png) = self.screenshot_png {
+            zip.start_file("screenshot.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        zip.finish()?;
+        Ok(path)
     }
 }
 
@@ -629,5 +894,177 @@ mod tests {
         let display = snapshots.display.lock().unwrap();
         assert_eq!(display.bytes_in, 0);
         assert_eq!(display.recent_decodes.len(), 0);
+    }
+
+    #[test]
+    fn test_chrono_now_format() {
+        let ts = chrono_now();
+        // Should match YYYY-MM-DDTHH:MM:SSZ pattern
+        assert_eq!(ts.len(), 20);
+        assert!(ts.ends_with('Z'));
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[7..8], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[13..14], ":");
+        assert_eq!(&ts[16..17], ":");
+    }
+
+    #[test]
+    fn test_filename_timestamp() {
+        let ts = filename_timestamp();
+        assert!(!ts.contains(':'));
+        assert!(ts.ends_with('Z'));
+    }
+
+    #[test]
+    fn test_encode_png() {
+        // 2x2 red RGBA image
+        let pixels = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let png_bytes = encode_png(&pixels, 2, 2).unwrap();
+        // PNG magic bytes
+        assert_eq!(&png_bytes[..4], b"\x89PNG");
+        assert!(png_bytes.len() > 20);
+    }
+
+    #[test]
+    fn test_report_metadata_serialises() {
+        let meta = ReportMetadata {
+            ryll_version: "0.1.0".to_string(),
+            platform_os: "linux".to_string(),
+            platform_arch: "x86_64".to_string(),
+            report_type: BugReportType::Display,
+            channel: "display".to_string(),
+            description: "test bug".to_string(),
+            region: Some(ReportRegion {
+                left: 10,
+                top: 20,
+                right: 200,
+                bottom: 150,
+            }),
+            timestamp: "2026-04-03T12:34:56Z".to_string(),
+            target_host: "192.168.1.100".to_string(),
+            target_port: 5900,
+            session_uptime_secs: 45.3,
+        };
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        assert!(json.contains("\"report_type\": \"Display\""));
+        assert!(json.contains("\"channel\": \"display\""));
+        assert!(json.contains("\"description\": \"test bug\""));
+        assert!(json.contains("\"left\": 10"));
+    }
+
+    #[test]
+    fn test_bug_report_assemble_display() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // 2x2 red RGBA pixels
+        let pixels = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::new(
+            BugReportType::Display,
+            "corruption test".to_string(),
+            Some(ReportRegion {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            }),
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&pixels, 2, 2)),
+        )
+        .unwrap();
+
+        // Write zip to a temp directory
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-display");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+        assert!(path.exists());
+
+        // Open and verify contents
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"session.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        assert!(names.contains(&"screenshot.png".to_string()));
+
+        // Verify metadata contains expected fields
+        {
+            let mut meta_file = archive.by_name("metadata.json").unwrap();
+            let mut meta_str = String::new();
+            std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
+            assert!(meta_str.contains("\"report_type\": \"Display\""));
+            assert!(meta_str.contains("\"description\": \"corruption test\""));
+        }
+
+        // Verify screenshot starts with PNG magic
+        {
+            let mut png_file = archive.by_name("screenshot.png").unwrap();
+            let mut png_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut png_file, &mut png_bytes).unwrap();
+            assert_eq!(&png_bytes[..4], b"\x89PNG");
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bug_report_assemble_input() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::new(
+            BugReportType::Input,
+            "keyboard not working".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-input");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+        assert!(path.exists());
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"session.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        // No screenshot for input reports
+        assert!(!names.contains(&"screenshot.png".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bug_report_type_channel_name() {
+        assert_eq!(BugReportType::Display.channel_name(), "display");
+        assert_eq!(BugReportType::Input.channel_name(), "inputs");
+        assert_eq!(BugReportType::Cursor.channel_name(), "cursor");
+        assert_eq!(BugReportType::Connection.channel_name(), "main");
     }
 }

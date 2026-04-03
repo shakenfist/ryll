@@ -20,6 +20,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 - **Traffic ring buffer** - Always-active per-channel ring buffer (50 MB total) retaining recent protocol traffic for bug reports
 - **Channel state snapshots** - Per-channel `Arc<Mutex<T>>` snapshots of mutable state (image cache, input events, cursor cache, session info, app metrics) updated in real time and serialisable to JSON for bug reports
+- **Bug report zip output** - Self-contained zip files with metadata, channel state, protocol traffic (pcap), and screenshots for sharing with developers (GUI trigger coming soon)
 
 ## Installation
 

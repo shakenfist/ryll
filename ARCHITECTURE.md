@@ -450,6 +450,33 @@ Updates hold the mutex only briefly (copying a handful of scalars
 and small collections), so contention with the UI thread is
 negligible.
 
+## Bug Report Assembly
+
+`BugReport` in `src/bugreport.rs` assembles a self-contained zip
+file from the ring buffer, channel snapshots, and app state.  The
+zip contains:
+
+```
+ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
+├── metadata.json       # report type, description, ryll version,
+│                       #   platform, target host/port, timestamp
+├── session.json        # AppSnapshot (FPS, bandwidth, surfaces)
+├── channel-state.json  # snapshot of the affected channel
+├── traffic.pcap        # ring buffer pcap (capture feature only)
+└── screenshot.png      # display reports only (RGBA → PNG)
+```
+
+Report types are `Display`, `Input`, `Cursor`, and `Connection`,
+each mapping to one SPICE channel.  `BugReport::new()` gathers
+and serialises all data synchronously.  `BugReport::write_zip()`
+writes the zip to the capture directory's `bug-reports/`
+subdirectory (if `--capture` is active) or the current working
+directory.
+
+`RyllApp::generate_bug_report()` is the high-level entry point
+that collects surface pixels, constructs the `BugReport`, and
+writes the zip.
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.

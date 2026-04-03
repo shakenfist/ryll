@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
-use crate::bugreport::{AppSnapshot, ChannelSnapshots, SurfaceInfo, TrafficBuffers};
+use crate::bugreport::{
+    AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion, SurfaceInfo,
+    TrafficBuffers,
+};
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
@@ -155,14 +158,15 @@ pub struct RyllApp {
     usb_device_description: Option<String>,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
-    #[allow(dead_code)]
     traffic: Arc<TrafficBuffers>,
 
     // Channel state snapshots (always active, for bug reports)
-    #[allow(dead_code)]
     channel_snapshots: ChannelSnapshots,
-    #[allow(dead_code)]
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
+
+    // Connection target for bug report metadata
+    target_host: String,
+    target_port: u16,
 }
 
 impl RyllApp {
@@ -186,6 +190,10 @@ impl RyllApp {
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+
+        // Save connection target for bug report metadata
+        let target_host = config.host.clone();
+        let target_port = config.port;
 
         // Spawn connection task
         let config_clone = config.clone();
@@ -246,6 +254,8 @@ impl RyllApp {
             traffic,
             channel_snapshots,
             app_snapshot,
+            target_host,
+            target_port,
         }
     }
 
@@ -423,6 +433,46 @@ impl RyllApp {
         snap.mouse_mode = self.mouse_mode;
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
+    }
+
+    /// Generate a bug report and write it to disk.
+    /// Returns the path of the written zip file.
+    #[allow(dead_code)] // called from Phase 4 GUI
+    pub fn generate_bug_report(
+        &self,
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        // Get surface pixels for display reports
+        let surface_data = if report_type == BugReportType::Display {
+            self.surfaces
+                .get(&0)
+                .map(|s| (s.pixels(), s.width, s.height))
+        } else {
+            None
+        };
+
+        // Assemble the report
+        let report = BugReport::new(
+            report_type,
+            description,
+            region,
+            &self.target_host,
+            self.target_port,
+            &self.traffic,
+            &self.channel_snapshots,
+            &self.app_snapshot,
+            surface_data,
+        )?;
+
+        // Determine output directory
+        let output_dir = match &self.capture {
+            Some(cap) => cap.dir.join("bug-reports"),
+            None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        };
+
+        report.write_zip(&output_dir)
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {

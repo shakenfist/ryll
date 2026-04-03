@@ -104,7 +104,8 @@ src/
 │                        #   channel state snapshots (DisplaySnapshot,
 │                        #   InputsSnapshot, CursorSnapshot,
 │                        #   MainSnapshot, AppSnapshot,
-│                        #   ChannelSnapshots)
+│                        #   ChannelSnapshots), bug report assembly
+│                        #   (BugReport, BugReportType, ReportMetadata)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
@@ -202,4 +203,6 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
 | image | JPEG decoding (with `jpeg` feature only) |
 | serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
+| zip | Zip file output for bug reports |
+| png | PNG encoding for bug report screenshots |
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |
