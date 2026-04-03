@@ -124,83 +124,44 @@ attach to a bug report or email.
 
 ## Open questions
 
-1. **Where should bug reports be written?** Options:
-   a. The `--capture` directory if specified, otherwise a
-      temp directory.
-   b. Always to a well-known location like
-      `~/.ryll/bug-reports/`.
-   c. A `--bug-report-dir` CLI flag.
+1. ~~**Where should bug reports be written?**~~ **Resolved**:
+   If `--capture` is active, write to a `bug-reports/`
+   subdirectory within the capture dir. Otherwise write to
+   the current working directory. File name includes
+   timestamp: `ryll-bugreport-2026-04-03T12-34-56Z.zip`.
 
-   **Recommendation**: If `--capture` is active, write to
-   a `bug-reports/` subdirectory within the capture dir.
-   Otherwise write to the current working directory. The
-   file name should include the timestamp so multiple
-   reports don't collide:
-   `ryll-bugreport-2026-04-03T12-34-56Z.zip`.
-
-2. **How much traffic to buffer?** 30 seconds of display
-   pcap at full rate could be 100-300 MB for an active
-   HD session. Options:
-   a. Buffer raw SPICE messages in a ring buffer (less
-      overhead than re-wrapping in pcap on flush).
-   b. Cap the buffer at a fixed memory limit (e.g. 50 MB)
-      rather than a fixed time window.
-   c. Buffer pcap packets directly (reuse existing pcap
-      frame construction code).
-
-   **Recommendation**: Use option (c) — buffer the
+2. ~~**How much traffic to buffer?**~~ **Resolved**: Buffer
    already-constructed pcap frames in a `VecDeque` ring
    buffer, capped at a configurable memory limit (default
    50 MB across all channels, with per-channel proportional
-   limits). This reuses `PcapChannelWriter`'s existing frame
-   construction code and means the bug report pcap files are
-   identical in format to the full-capture pcap files.
-   When `--capture` is active, the ring buffer can share
-   the same constructed frames (write to disk AND push to
-   the ring buffer).
+   limits). Reuses `PcapChannelWriter`'s existing frame
+   construction code. When `--capture` is active, the ring
+   buffer shares the same constructed frames (write to disk
+   AND push to the ring buffer).
 
-3. **Region highlighting for display bugs — drag selection
-   or click-based?** Options:
-   a. Drag a rectangle over the corrupted region.
-   b. Click two corners.
-   c. Both, with drag as default.
+3. ~~**Region highlighting for display bugs — drag selection
+   or click-based?**~~ **Resolved**: Drag selection. A
+   translucent instruction banner ("Click and drag to select
+   the affected region — press Escape to skip") is shown at
+   the top of the surface while in selection mode. The
+   selection is drawn as a translucent red overlay while
+   dragging.
 
-   **Recommendation**: Drag selection (option a). This is
-   the most natural interaction. The selection is drawn as
-   a translucent red overlay while dragging.
+4. ~~**Should we capture the full surface pixels or just the
+   highlighted region?**~~ **Resolved**: Full surface as PNG,
+   with region coordinates in the JSON metadata. The
+   developer can crop locally. The bug report dialog
+   includes a privacy warning before capture (see below).
 
-4. **Should we capture the full surface pixels or just the
-   highlighted region?** Capturing the full surface as a PNG
-   gives the developer complete context. The highlighted
-   region is metadata (coordinates) overlaid on the full
-   image, not a separate crop.
+5. ~~**Optional user description?**~~ **Resolved**: Yes,
+   include a text input in the bug report dialog. The
+   description is included in the metadata JSON. Allow the
+   user to skip it (empty string is fine).
 
-   **Recommendation**: Full surface as PNG, with region
-   coordinates in the JSON metadata. The developer can
-   crop locally.
-
-5. **Optional user description?** It would be helpful to let
-   the user type a brief description of what they saw. This
-   could be a simple text input dialog after region
-   selection.
-
-   **Recommendation**: Yes, show a small text input dialog
-   after the user selects a region (or immediately for
-   non-display reports). The description is included in the
-   metadata JSON. Allow the user to skip it (empty string).
-
-6. **Should the ring buffer always be active?** It uses
-   memory. Options:
-   a. Always active (simplest, but ~50 MB overhead).
-   b. Only when a `--enable-bug-reports` flag is set.
-   c. Always active but with a smaller default (e.g. 10 MB),
-      configurable via `--bug-report-buffer-size`.
-
-   **Recommendation**: Option (c). Default 10 MB ring
-   buffer is modest and means the feature is always
-   available without needing to predict when a bug will
-   occur. Users can increase it if they're actively
-   hunting a bug.
+6. ~~**Should the ring buffer always be active?**~~
+   **Resolved**: Always active with a 50 MB default. Modern
+   machines have plenty of memory and ryll is otherwise
+   conservative. No CLI flag needed — just always buffer.
 
 ## Execution
 
@@ -211,7 +172,8 @@ attach to a bug report or email.
 | 3. Bug report assembly and zip output | PLAN-bug-reports-phase-03-zip-output.md | Not started |
 | 4. GUI: report button and description dialog | PLAN-bug-reports-phase-04-gui-button.md | Not started |
 | 5. GUI: display region selection | PLAN-bug-reports-phase-05-region-select.md | Not started |
-| 6. Documentation and testing | PLAN-bug-reports-phase-06-docs.md | Not started |
+| 6. GUI: live traffic viewer | PLAN-bug-reports-phase-06-traffic-viewer.md | Not started |
+| 7. Documentation and testing | PLAN-bug-reports-phase-07-docs.md | Not started |
 
 ### Phase 1: Ring buffer infrastructure
 
@@ -220,18 +182,26 @@ seconds (or N bytes) of pcap-formatted protocol traffic.
 
 - Add a `TrafficRingBuffer` struct to `capture.rs` (or a
   new `bugreport.rs` module) that wraps a
-  `VecDeque<(Duration, Vec<u8>)>` with a configurable
-  byte-count cap.
-- Each entry is a timestamped pcap frame (same format as
-  `PcapChannelWriter` produces).
-- `push()` appends a frame and evicts oldest entries when
+  `VecDeque<TrafficEntry>` with a byte-count cap.
+- Each `TrafficEntry` contains:
+  - `timestamp: Duration` — relative to session start.
+  - `channel: String` — "main", "display", etc.
+  - `direction: Direction` — Sent or Received.
+  - `message_type: u16` — SPICE message type ID.
+  - `message_name: String` — human-readable name (from
+    `protocol::logging::message_names`).
+  - `payload_size: u32` — message payload size.
+  - `pcap_frame: Vec<u8>` — the full pcap frame (for
+    writing to the bug report pcap file).
+- `push()` appends an entry and evicts oldest entries when
   the byte cap is exceeded.
-- `drain_to_pcap()` writes all buffered frames to a pcap
-  file (for inclusion in the zip).
+- `drain_to_pcap()` writes all buffered pcap frames to a
+  file (for inclusion in the bug report zip).
+- `recent()` returns a slice/iterator of recent entries
+  for display in the traffic viewer UI (Phase 7).
 - The ring buffer is always active (not gated behind
   `--capture`). It lives alongside the `CaptureSession`
-  but is independent of it.
-- Add `--bug-report-buffer-size` CLI flag (default 10 MB).
+  but is independent of it. Fixed 50 MB cap.
 - Each channel handler calls `ring_buffer.push()` in its
   read loop and send method, mirroring the existing
   `capture.packet_sent()`/`capture.packet_received()` calls.
@@ -331,11 +301,16 @@ dialog flow for non-display reports.
 - Add a small button (e.g. "Report") at the right end of
   the status bar, before the bandwidth sparkline.
 - Clicking the button opens a modal panel with:
-  1. Channel selector (radio buttons: Display, Input,
+  1. A privacy warning: "Bug reports may contain sensitive
+     data including screen contents, typed keystrokes, and
+     protocol traffic. Review the report before sharing and
+     ensure no confidential information is visible on screen
+     or was recently typed."
+  2. Channel selector (radio buttons: Display, Input,
      Cursor, Connection). Only show channels that are
      currently connected.
-  2. Text input for a brief description (optional).
-  3. "Capture" and "Cancel" buttons.
+  3. Text input for a brief description (optional).
+  4. "Capture" and "Cancel" buttons.
 - For Display: clicking "Capture" enters region selection
   mode (Phase 5). For other channels: clicking "Capture"
   immediately assembles and writes the bug report.
@@ -350,6 +325,9 @@ bug reports.
 
 - After the user selects "Display" and clicks "Capture",
   the app enters a selection mode:
+  - A translucent instruction banner is shown at the top
+    of the surface: "Click and drag to select the affected
+    region — press Escape to skip".
   - The cursor changes to a crosshair.
   - The user drags a rectangle over the corrupted region.
   - While dragging, a translucent red rectangle is drawn
@@ -367,7 +345,33 @@ bug reports.
   the selection rectangle onto a *second* annotated PNG
   to make it visually obvious to the developer.
 
-### Phase 6: Documentation and testing
+### Phase 6: GUI — live traffic viewer
+
+Add a "Traffic" button to the status bar that opens a
+scrollable panel showing recent protocol messages from the
+ring buffer.
+
+- A small "Traffic" button in the status bar (next to the
+  "Report" button).
+- Clicking it toggles a side panel or bottom panel showing
+  a scrollable table of recent messages.
+- Each row shows: timestamp (relative, e.g. "-2.3s"),
+  channel name (colour-coded), direction arrow (→ sent,
+  ← received), message type name, and payload size.
+- The list auto-scrolls to show newest messages, with a
+  pause button to freeze scrolling for inspection.
+- Clicking a row could expand it to show hex dump of the
+  first N bytes of the payload (optional, may defer).
+- Channel filter checkboxes at the top of the panel to
+  show/hide individual channels (e.g. hide the noisy
+  display channel to focus on inputs).
+- The panel reads from the ring buffer's `recent()`
+  iterator via the shared `Arc<Mutex<>>` state. Since
+  egui repaints at ~60fps, this gives near-real-time
+  visibility.
+- Keyboard shortcut: F11 toggles the traffic viewer.
+
+### Phase 7: Documentation and testing
 
 - Update `README.md` to document the bug report feature,
   including the keyboard shortcut (F12) and what's
