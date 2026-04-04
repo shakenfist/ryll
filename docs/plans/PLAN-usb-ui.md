@@ -229,7 +229,7 @@ Pre-existing bug: in `src/usb/real.rs:98-100`,
 
 ```rust
 source: DeviceSource::Physical {
-    bus: info.device_address(),   // BUG: should be bus_number()
+    bus: info.device_address(),   // BUG: should be busnum()
     address: info.device_address(),
 },
 ```
@@ -240,7 +240,7 @@ re-lookup will fail silently or match the wrong device.
 
 Fix:
 - Change `bus: info.device_address()` to
-  `bus: info.bus_number()` (nusb provides this method).
+  `bus: info.busnum()` (nusb provides this method).
 - Verify the `DeviceSource::Physical` fields are correct
   by logging a few real devices if USB hardware is
   available, or by reading nusb docs/source to confirm
@@ -428,7 +428,7 @@ matching one, because nusb device handles are not
 1. Calls `nusb::list_devices().wait()` to get the current
    device list.
 2. Iterates to find the device matching `(bus, address)`
-   using `info.bus_number()` and `info.device_address()`.
+   using `info.busnum()` and `info.device_address()`.
 3. If found, calls `RealDevice::open(&info).await`.
 4. If not found (device unplugged between enumeration and
    connect), sends `ChannelEvent::UsbConnectFailed(
@@ -692,7 +692,7 @@ because the following statements will be true:
 - **enumerate_physical bus field** (phase 1): both `bus`
   and `address` in `DeviceSource::Physical` were set to
   `info.device_address()`. The `bus` field should use
-  `info.bus_number()`. This pre-existing bug from the
+  `info.busnum()`. This pre-existing bug from the
   original USB implementation (PLAN-usb-redir phase 4)
   would have caused physical device re-lookup by identity
   to fail or match the wrong device.
