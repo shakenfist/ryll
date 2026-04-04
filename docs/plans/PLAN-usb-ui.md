@@ -212,7 +212,7 @@ the CLI flags.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Fix enumerate_physical bus field | [PLAN-usb-ui-phase-01-bus-fix.md](PLAN-usb-ui-phase-01-bus-fix.md) | Not started |
+| 1. Fix enumerate_physical bus field | [PLAN-usb-ui-phase-01-bus-fix.md](PLAN-usb-ui-phase-01-bus-fix.md) | Complete |
 | 2. Wire usb_tx and channel events | [PLAN-usb-ui-phase-02-wire-tx.md](PLAN-usb-ui-phase-02-wire-tx.md) | Not started |
 | 3. USB panel and status bar button | [PLAN-usb-ui-phase-03-panel.md](PLAN-usb-ui-phase-03-panel.md) | Not started |
 | 4. Device enumeration display | [PLAN-usb-ui-phase-04-enumerate.md](PLAN-usb-ui-phase-04-enumerate.md) | Not started |
