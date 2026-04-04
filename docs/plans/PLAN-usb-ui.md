@@ -219,7 +219,7 @@ the CLI flags.
 | 5. Connect and disconnect controls | [PLAN-usb-ui-phase-05-connect.md](PLAN-usb-ui-phase-05-connect.md) | Complete |
 | 6. Add virtual disk at runtime | [PLAN-usb-ui-phase-06-add-disk.md](PLAN-usb-ui-phase-06-add-disk.md) | Complete |
 | 7. Status feedback and polish | [PLAN-usb-ui-phase-07-polish.md](PLAN-usb-ui-phase-07-polish.md) | Complete |
-| 8. Documentation | [PLAN-usb-ui-phase-08-docs.md](PLAN-usb-ui-phase-08-docs.md) | Not started |
+| 8. Documentation | [PLAN-usb-ui-phase-08-docs.md](PLAN-usb-ui-phase-08-docs.md) | Complete |
 
 ### Phase 1: Fix enumerate_physical bus field
 
