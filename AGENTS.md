@@ -177,6 +177,8 @@ src/
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
   on Linux, macOS (ARM), and Windows on every push to `develop` and
   on pull requests. CI runs native `cargo` (not Docker).
+- **macOS native development** -- see `docs/development-macos.md` for
+  building and testing locally on macOS without Docker or Homebrew
 
 ### Pre-commit
 

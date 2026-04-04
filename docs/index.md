@@ -81,6 +81,7 @@ both ends of the traffic through the proxy. This would allow:
 
 - [Binary Portability](portability.md) - How to share built binaries
 - [Configuration](configuration.md) - CLI options and .vv file format
+- [macOS Development](development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](troubleshooting.md) - Common issues and debugging
 
 ## Project Files

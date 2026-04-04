@@ -99,6 +99,11 @@ apt-get install -y \
     libwayland-dev libssl-dev pkg-config
 ```
 
+**macOS** (Apple Silicon): No additional system libraries are needed --
+just Xcode Command Line Tools and Rust. See
+[docs/development-macos.md](docs/development-macos.md) for full setup
+instructions.
+
 ## Usage
 
 ### Connect using a .vv configuration file
@@ -237,6 +242,7 @@ In the `docs/` directory:
 - [Documentation Index](docs/index.md) - What ryll is and why it exists
 - [Installation](docs/installation.md) - Pre-built packages and install instructions
 - [Configuration](docs/configuration.md) - CLI options and .vv file format
+- [macOS Development](docs/development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
 - [Binary Portability](docs/portability.md) - How to share binaries between machines
 - [Releasing](docs/releasing.md) - How to publish a new release

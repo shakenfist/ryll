@@ -83,3 +83,6 @@ Note that `--capture` mode is not available on Windows builds.
 If no pre-built package is available for your platform, you can build
 ryll from source. See the [README](../README.md) for build instructions
 and the [portability guide](portability.md) for platform-specific notes.
+
+For macOS development and interactive testing, see the
+[macOS development guide](development-macos.md).
