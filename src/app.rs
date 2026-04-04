@@ -22,7 +22,7 @@ use crate::channels::{
 use crate::config::{Config, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::{ChannelType, SpiceClient};
-use crate::usb::{self, UsbDeviceInfo};
+use crate::usb::{self, DeviceSource, UsbDeviceInfo};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -168,7 +168,6 @@ pub struct RyllApp {
     capture: Option<Arc<CaptureSession>>,
 
     // USB command sender and state
-    #[allow(dead_code)] // used in phase 5 (connect/disconnect controls)
     usb_tx: Option<mpsc::Sender<UsbCommand>>,
     usb_channel_ready: bool,
     usb_connecting: bool,
@@ -954,6 +953,8 @@ impl eframe::App for RyllApp {
                 self.usb_devices_enumerated = true;
             }
 
+            let mut usb_action = None;
+
             egui::SidePanel::right("usb_panel")
                 .default_width(300.0)
                 .show(ctx, |ui| {
@@ -980,9 +981,22 @@ impl eframe::App for RyllApp {
                         ui.label(format!("Connected: {}", desc));
                     }
 
+                    // Error message (if any)
+                    if let Some(ref err) = self.usb_error_message {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+
+                    // Connecting indicator
+                    if self.usb_connecting {
+                        ui.separator();
+                        ui.label("Connecting...");
+                    }
+
                     ui.separator();
 
-                    // Device list
+                    // Device list with connect/disconnect buttons
+                    let buttons_disabled = !self.usb_channel_ready || self.usb_connecting;
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.usb_available_devices.is_empty() {
                             ui.colored_label(egui::Color32::GRAY, "No USB devices found.");
@@ -997,13 +1011,60 @@ impl eframe::App for RyllApp {
                                 ui.horizontal(|ui| {
                                     if is_connected {
                                         ui.colored_label(egui::Color32::GREEN, "\u{25CF}");
+                                        ui.label(&label);
+                                        if ui
+                                            .add_enabled(
+                                                !buttons_disabled,
+                                                egui::Button::new("Disconnect"),
+                                            )
+                                            .clicked()
+                                        {
+                                            usb_action = Some(UsbCommand::DisconnectDevice);
+                                        }
+                                    } else {
+                                        ui.label(&label);
+                                        let connect_enabled = !buttons_disabled
+                                            && self.usb_device_description.is_none();
+                                        if ui
+                                            .add_enabled(
+                                                connect_enabled,
+                                                egui::Button::new("Connect"),
+                                            )
+                                            .clicked()
+                                        {
+                                            usb_action = Some(match &device.source {
+                                                DeviceSource::Physical { bus, address } => {
+                                                    UsbCommand::ConnectPhysical {
+                                                        bus: *bus,
+                                                        address: *address,
+                                                    }
+                                                }
+                                                DeviceSource::VirtualDisk { path, read_only } => {
+                                                    UsbCommand::ConnectVirtualDisk {
+                                                        path: path.clone(),
+                                                        read_only: *read_only,
+                                                    }
+                                                }
+                                            });
+                                        }
                                     }
-                                    ui.label(&label);
                                 });
                             }
                         }
                     });
                 });
+
+            // Execute USB action outside the closure
+            if let Some(cmd) = usb_action {
+                self.usb_error_message = None;
+                self.usb_connecting = true;
+                if let Some(ref tx) = self.usb_tx {
+                    if let Err(e) = tx.try_send(cmd) {
+                        self.usb_connecting = false;
+                        self.usb_error_message = Some(format!("Failed to send command: {}", e));
+                    }
+                }
+            }
         }
 
         // Main display area (no margin so the surface fills edge-to-edge)
