@@ -2,6 +2,7 @@
 use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,6 +22,7 @@ use crate::channels::{
 use crate::config::{Config, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::{ChannelType, SpiceClient};
+use crate::usb::{self, UsbDeviceInfo};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -197,6 +199,9 @@ pub struct RyllApp {
 
     // USB panel state
     show_usb_panel: bool,
+    usb_available_devices: Vec<UsbDeviceInfo>,
+    usb_virtual_disks: Vec<(PathBuf, bool)>,
+    usb_devices_enumerated: bool,
 
     // Traffic viewer state
     show_traffic_viewer: bool,
@@ -236,6 +241,12 @@ impl RyllApp {
         // Save connection target for bug report metadata
         let target_host = config.host.clone();
         let target_port = config.port;
+
+        // Retain virtual disk paths for UI re-enumeration
+        let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
+            .iter()
+            .map(|d| (d.path.clone(), d.read_only))
+            .collect();
 
         // Spawn connection task
         let config_clone = config.clone();
@@ -312,6 +323,9 @@ impl RyllApp {
             region_drag_start: None,
             region_drag_end: None,
             show_usb_panel: false,
+            usb_available_devices: Vec::new(),
+            usb_virtual_disks,
+            usb_devices_enumerated: false,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -934,10 +948,23 @@ impl eframe::App for RyllApp {
 
         // USB device management panel (conditional)
         if self.show_usb_panel {
+            // Auto-enumerate on first open
+            if !self.usb_devices_enumerated {
+                self.usb_available_devices = usb::enumerate_devices(&self.usb_virtual_disks);
+                self.usb_devices_enumerated = true;
+            }
+
             egui::SidePanel::right("usb_panel")
                 .default_width(300.0)
                 .show(ctx, |ui| {
-                    ui.heading("USB Devices");
+                    // Header with refresh button
+                    ui.horizontal(|ui| {
+                        ui.heading("USB Devices");
+                        if ui.small_button("Refresh").clicked() {
+                            self.usb_available_devices =
+                                usb::enumerate_devices(&self.usb_virtual_disks);
+                        }
+                    });
                     ui.separator();
 
                     // Channel status
@@ -954,7 +981,28 @@ impl eframe::App for RyllApp {
                     }
 
                     ui.separator();
-                    ui.colored_label(egui::Color32::GRAY, "Device list and controls coming soon.");
+
+                    // Device list
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.usb_available_devices.is_empty() {
+                            ui.colored_label(egui::Color32::GRAY, "No USB devices found.");
+                        } else {
+                            for device in &self.usb_available_devices {
+                                let label = device.label();
+                                let is_connected = self
+                                    .usb_device_description
+                                    .as_ref()
+                                    .is_some_and(|d| *d == label);
+
+                                ui.horizontal(|ui| {
+                                    if is_connected {
+                                        ui.colored_label(egui::Color32::GREEN, "\u{25CF}");
+                                    }
+                                    ui.label(&label);
+                                });
+                            }
+                        }
+                    });
                 });
         }
 
