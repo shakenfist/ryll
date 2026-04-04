@@ -474,23 +474,20 @@ impl RyllApp {
                 ChannelEvent::UsbDeviceConnected(desc) => {
                     info!("app: USB device connected: {}", desc);
                     self.usb_device_description = Some(desc);
-                    self.usb_connecting = false;
-                    self.usb_disconnecting = false;
+                    self.clear_usb_operation_flags();
                     self.usb_connected_at = Some(Instant::now());
                 }
 
                 ChannelEvent::UsbDeviceDisconnected => {
                     info!("app: USB device disconnected");
                     self.usb_device_description = None;
-                    self.usb_connecting = false;
-                    self.usb_disconnecting = false;
+                    self.clear_usb_operation_flags();
                     self.usb_connected_at = None;
                 }
 
                 ChannelEvent::UsbConnectFailed(err) => {
                     error!("app: USB connect failed: {}", err);
-                    self.usb_connecting = false;
-                    self.usb_disconnecting = false;
+                    self.clear_usb_operation_flags();
                     self.usb_error_message = Some(err);
                     self.usb_error_time = Some(Instant::now());
                 }
@@ -503,8 +500,7 @@ impl RyllApp {
                     if channel == ChannelType::Usbredir {
                         self.usb_channel_ready = false;
                         self.usb_device_description = None;
-                        self.usb_connecting = false;
-                        self.usb_disconnecting = false;
+                        self.clear_usb_operation_flags();
                         self.usb_connected_at = None;
                     }
                 }
@@ -514,6 +510,12 @@ impl RyllApp {
         }
 
         self.update_app_snapshot();
+    }
+
+    /// Clear USB operation-in-progress flags.
+    fn clear_usb_operation_flags(&mut self) {
+        self.usb_connecting = false;
+        self.usb_disconnecting = false;
     }
 
     /// Sync app-level state to the shared snapshot.

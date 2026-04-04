@@ -335,7 +335,12 @@ impl UsbredirChannel {
                             self.connect_device(backend).await?;
                         }
                         Err(e) => {
-                            warn!("usbredir: failed to open {}: {}", disk.path.display(), e);
+                            let msg = format!("Failed to open {}: {}", disk.path.display(), e);
+                            warn!("usbredir: {}", msg);
+                            self.event_tx
+                                .send(ChannelEvent::UsbConnectFailed(msg))
+                                .await
+                                .ok();
                         }
                     }
                 }
