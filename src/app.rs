@@ -108,17 +108,13 @@ impl BandwidthTracker {
     }
 
     /// Format the most recent bandwidth value for display.
-    ///
-    /// The result is right-padded to a fixed width so the status bar
-    /// doesn't jitter when the value or unit changes.
     fn label(&self) -> String {
-        let raw = match self.history.last() {
+        match self.history.last() {
             Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
             None => String::from("-- B/s"),
-        };
-        format!("{:<10}", raw)
+        }
     }
 }
 
@@ -154,6 +150,11 @@ pub struct RyllApp {
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
+
+    // Bitmask of mouse buttons we have forwarded as pressed to the
+    // inputs channel.  Used to send synthetic releases when input
+    // forwarding is suppressed (e.g. bug report dialog opens).
+    forwarded_buttons: u32,
 
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
@@ -279,6 +280,7 @@ impl RyllApp {
             error_message: None,
             mouse_mode: 0,
             last_mouse_pos: None,
+            forwarded_buttons: 0,
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
@@ -751,7 +753,13 @@ impl eframe::App for RyllApp {
 
                     // Bandwidth sparkline and buttons (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(self.bandwidth.label());
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(75.0, ui.available_height()),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(self.bandwidth.label());
+                            },
+                        );
                         if self.bandwidth.history.len() >= 2 {
                             let max_val = self
                                 .bandwidth
@@ -932,7 +940,8 @@ impl eframe::App for RyllApp {
                     }
 
                     // Handle mouse input on the surface (suppressed during dialog/selection)
-                    if !self.show_bug_dialog && !self.region_select_active {
+                    let input_suppressed = self.show_bug_dialog || self.region_select_active;
+                    if !input_suppressed {
                         if let Some(tx) = &self.input_tx {
                             // Send mouse position only when it changes
                             if let Some(pos) = response.hover_pos() {
@@ -956,6 +965,7 @@ impl eframe::App for RyllApp {
                                 ] {
                                     if i.pointer.button_pressed(button) {
                                         let spice_btn = mouse_button_to_spice(button);
+                                        self.forwarded_buttons |= spice_btn;
                                         let _ = tx.try_send(InputEvent::MouseDown {
                                             button: spice_btn,
                                             x: pos.0,
@@ -968,6 +978,7 @@ impl eframe::App for RyllApp {
                                     }
                                     if i.pointer.button_released(button) {
                                         let spice_btn = mouse_button_to_spice(button);
+                                        self.forwarded_buttons &= !spice_btn;
                                         let _ = tx.try_send(InputEvent::MouseUp {
                                             button: spice_btn,
                                             x: pos.0,
@@ -981,6 +992,29 @@ impl eframe::App for RyllApp {
                                 }
                             });
                         }
+                    } else if self.forwarded_buttons != 0 {
+                        // Input forwarding just became suppressed (e.g. the
+                        // bug report dialog opened) while one or more mouse
+                        // buttons were held.  Send synthetic releases so the
+                        // server doesn't stay in a stuck "button held" state.
+                        if let Some(tx) = &self.input_tx {
+                            let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                            for bit in 0..5u32 {
+                                let mask = 1 << bit;
+                                if self.forwarded_buttons & mask != 0 {
+                                    let _ = tx.try_send(InputEvent::MouseUp {
+                                        button: mask,
+                                        x: pos.0,
+                                        y: pos.1,
+                                    });
+                                    debug!(
+                                        "app: synthetic mouse up button={} at ({},{})",
+                                        mask, pos.0, pos.1
+                                    );
+                                }
+                            }
+                        }
+                        self.forwarded_buttons = 0;
                     }
                 }
 

@@ -152,6 +152,9 @@ are sent but the display never updates in response.
 - Network stalls can cause the input channel to fill with mouse motion
   events, which previously caused button press/release events to be
   silently dropped (fixed in 0.1.2 via motion coalescing)
+- Opening a UI dialog (bug report, traffic viewer) while a mouse button
+  is held could suppress the release event, leaving the server stuck in
+  a "button held" state (fixed in 0.1.2 via synthetic releases)
 - Known issue: mouse clicks through kerbside proxy may not
   produce display responses depending on VM/agent config
 - The SPICE agent in the VM may not be running
