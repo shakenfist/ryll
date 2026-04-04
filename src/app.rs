@@ -195,6 +195,9 @@ pub struct RyllApp {
     region_drag_start: Option<(u32, u32)>,
     region_drag_end: Option<(u32, u32)>,
 
+    // USB panel state
+    show_usb_panel: bool,
+
     // Traffic viewer state
     show_traffic_viewer: bool,
     traffic_viewer_entries: Vec<TrafficViewEntry>,
@@ -308,6 +311,7 @@ impl RyllApp {
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
+            show_usb_panel: false,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -821,6 +825,9 @@ impl eframe::App for RyllApp {
                         if ui.small_button("Traffic").clicked() {
                             self.show_traffic_viewer = !self.show_traffic_viewer;
                         }
+                        if ui.small_button("USB").clicked() {
+                            self.show_usb_panel = !self.show_usb_panel;
+                        }
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
@@ -922,6 +929,32 @@ impl eframe::App for RyllApp {
                                 });
                             }
                         });
+                });
+        }
+
+        // USB device management panel (conditional)
+        if self.show_usb_panel {
+            egui::SidePanel::right("usb_panel")
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    ui.heading("USB Devices");
+                    ui.separator();
+
+                    // Channel status
+                    if self.usb_channel_ready {
+                        ui.label("Channel: Ready");
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "Channel: Not available");
+                    }
+
+                    // Connected device (if any)
+                    if let Some(ref desc) = self.usb_device_description {
+                        ui.separator();
+                        ui.label(format!("Connected: {}", desc));
+                    }
+
+                    ui.separator();
+                    ui.colored_label(egui::Color32::GRAY, "Device list and controls coming soon.");
                 });
         }
 
