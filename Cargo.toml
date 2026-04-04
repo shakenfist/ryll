@@ -83,6 +83,9 @@ socket2 = { version = "0.6", features = ["all"] }
 # USB device access (pure Rust, no libusb)
 nusb = "0.2"
 
+# Native file dialog for USB disk image selection
+rfd = "0.15"
+
 [dev-dependencies]
 tempfile = "3"
 

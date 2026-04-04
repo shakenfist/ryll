@@ -202,6 +202,11 @@ pub struct RyllApp {
     usb_virtual_disks: Vec<(PathBuf, bool)>,
     usb_devices_enumerated: bool,
 
+    // File picker for adding virtual disks
+    usb_add_disk_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    usb_add_disk_readonly: bool,
+    usb_add_disk_message: Option<String>,
+
     // Traffic viewer state
     show_traffic_viewer: bool,
     traffic_viewer_entries: Vec<TrafficViewEntry>,
@@ -325,6 +330,9 @@ impl RyllApp {
             usb_available_devices: Vec::new(),
             usb_virtual_disks,
             usb_devices_enumerated: false,
+            usb_add_disk_rx: None,
+            usb_add_disk_readonly: false,
+            usb_add_disk_message: None,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -953,6 +961,47 @@ impl eframe::App for RyllApp {
                 self.usb_devices_enumerated = true;
             }
 
+            // Poll for file picker result
+            let mut picked_path = None;
+            if let Some(ref rx) = self.usb_add_disk_rx {
+                if let Ok(result) = rx.try_recv() {
+                    picked_path = Some(result);
+                }
+            }
+            if picked_path.is_some() {
+                self.usb_add_disk_rx = None;
+            }
+            if let Some(Some(path)) = picked_path {
+                self.usb_add_disk_message = None;
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        if !meta.is_file() {
+                            self.usb_add_disk_message =
+                                Some("Selected path is not a regular file.".to_string());
+                        } else if meta.len() < 512 {
+                            self.usb_add_disk_message =
+                                Some("File is too small (< 512 bytes).".to_string());
+                        } else {
+                            let read_only = self.usb_add_disk_readonly;
+                            self.usb_virtual_disks.push((path.clone(), read_only));
+                            self.usb_available_devices =
+                                usb::enumerate_devices(&self.usb_virtual_disks);
+                            let warn = if meta.len() % 512 != 0 {
+                                " (warning: size not a multiple of 512)"
+                            } else {
+                                ""
+                            };
+                            let ro = if read_only { " [RO]" } else { "" };
+                            self.usb_add_disk_message =
+                                Some(format!("Added: {}{}{}", path.display(), ro, warn));
+                        }
+                    }
+                    Err(e) => {
+                        self.usb_add_disk_message = Some(format!("Cannot read file: {}", e));
+                    }
+                }
+            }
+
             let mut usb_action = None;
 
             egui::SidePanel::right("usb_panel")
@@ -1052,6 +1101,37 @@ impl eframe::App for RyllApp {
                             }
                         }
                     });
+
+                    // Add virtual disk section
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.usb_add_disk_readonly, "Read-only");
+                        let picker_active = self.usb_add_disk_rx.is_some();
+                        if ui
+                            .add_enabled(!picker_active, egui::Button::new("Add Disk..."))
+                            .clicked()
+                        {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = rfd::FileDialog::new()
+                                    .set_title("Select RAW disk image")
+                                    .add_filter("Disk images", &["raw", "img"])
+                                    .add_filter("All files", &["*"])
+                                    .pick_file();
+                                let _ = tx.send(result);
+                            });
+                            self.usb_add_disk_rx = Some(rx);
+                        }
+                    });
+
+                    // Add-disk message
+                    if let Some(ref msg) = self.usb_add_disk_message {
+                        if msg.starts_with("Added:") {
+                            ui.label(msg);
+                        } else {
+                            ui.colored_label(egui::Color32::RED, msg);
+                        }
+                    }
                 });
 
             // Execute USB action outside the closure
