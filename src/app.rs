@@ -108,17 +108,13 @@ impl BandwidthTracker {
     }
 
     /// Format the most recent bandwidth value for display.
-    ///
-    /// The result is right-padded to a fixed width so the status bar
-    /// doesn't jitter when the value or unit changes.
     fn label(&self) -> String {
-        let raw = match self.history.last() {
+        match self.history.last() {
             Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
             None => String::from("-- B/s"),
-        };
-        format!("{:<10}", raw)
+        }
     }
 }
 
@@ -751,7 +747,13 @@ impl eframe::App for RyllApp {
 
                     // Bandwidth sparkline and buttons (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(self.bandwidth.label());
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(75.0, ui.available_height()),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(self.bandwidth.label());
+                            },
+                        );
                         if self.bandwidth.history.len() >= 2 {
                             let max_val = self
                                 .bandwidth
