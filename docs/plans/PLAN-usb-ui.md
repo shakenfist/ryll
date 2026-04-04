@@ -213,12 +213,12 @@ the CLI flags.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Fix enumerate_physical bus field | [PLAN-usb-ui-phase-01-bus-fix.md](PLAN-usb-ui-phase-01-bus-fix.md) | Complete |
-| 2. Wire usb_tx and channel events | [PLAN-usb-ui-phase-02-wire-tx.md](PLAN-usb-ui-phase-02-wire-tx.md) | Not started |
-| 3. USB panel and status bar button | [PLAN-usb-ui-phase-03-panel.md](PLAN-usb-ui-phase-03-panel.md) | Not started |
-| 4. Device enumeration display | [PLAN-usb-ui-phase-04-enumerate.md](PLAN-usb-ui-phase-04-enumerate.md) | Not started |
-| 5. Connect and disconnect controls | [PLAN-usb-ui-phase-05-connect.md](PLAN-usb-ui-phase-05-connect.md) | Not started |
-| 6. Add virtual disk at runtime | [PLAN-usb-ui-phase-06-add-disk.md](PLAN-usb-ui-phase-06-add-disk.md) | Not started |
-| 7. Status feedback and polish | [PLAN-usb-ui-phase-07-polish.md](PLAN-usb-ui-phase-07-polish.md) | Not started |
+| 2. Wire usb_tx and channel events | [PLAN-usb-ui-phase-02-wire-tx.md](PLAN-usb-ui-phase-02-wire-tx.md) | Complete |
+| 3. USB panel and status bar button | [PLAN-usb-ui-phase-03-panel.md](PLAN-usb-ui-phase-03-panel.md) | Complete |
+| 4. Device enumeration display | [PLAN-usb-ui-phase-04-enumerate.md](PLAN-usb-ui-phase-04-enumerate.md) | Complete |
+| 5. Connect and disconnect controls | [PLAN-usb-ui-phase-05-connect.md](PLAN-usb-ui-phase-05-connect.md) | Complete |
+| 6. Add virtual disk at runtime | [PLAN-usb-ui-phase-06-add-disk.md](PLAN-usb-ui-phase-06-add-disk.md) | Complete |
+| 7. Status feedback and polish | [PLAN-usb-ui-phase-07-polish.md](PLAN-usb-ui-phase-07-polish.md) | Complete |
 | 8. Documentation | [PLAN-usb-ui-phase-08-docs.md](PLAN-usb-ui-phase-08-docs.md) | Not started |
 
 ### Phase 1: Fix enumerate_physical bus field
@@ -686,6 +686,14 @@ because the following statements will be true:
   bar for consistency. This would affect the existing
   connection error display, channel disconnect messages,
   and the new USB error feedback.
+- **UsbredirSnapshot for bug reports**: add a dedicated
+  `UsbredirSnapshot` struct to `ChannelSnapshots` (like
+  the existing `DisplaySnapshot`, `InputsSnapshot`, etc.)
+  that captures usbredir channel state — connected device
+  info, backend type, transfer counters, active endpoints,
+  interrupt poll state. Currently `BugReportType::Usb`
+  captures pcap traffic but uses an empty JSON object for
+  channel state.
 
 ### Bugs fixed during this work
 
