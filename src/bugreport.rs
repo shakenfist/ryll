@@ -606,6 +606,7 @@ pub enum BugReportType {
     Input,
     Cursor,
     Connection,
+    Usb,
 }
 
 impl BugReportType {
@@ -617,6 +618,7 @@ impl BugReportType {
             BugReportType::Input => "inputs",
             BugReportType::Cursor => "cursor",
             BugReportType::Connection => "main",
+            BugReportType::Usb => "usbredir",
         }
     }
 }
@@ -696,6 +698,10 @@ impl BugReport {
             BugReportType::Connection => {
                 let snap = channel_snapshots.main.lock().unwrap().clone();
                 serde_json::to_string_pretty(&snap)?
+            }
+            BugReportType::Usb => {
+                // No dedicated usbredir snapshot yet; pcap traffic is captured via channel_name()
+                "{}".to_string()
             }
         };
 

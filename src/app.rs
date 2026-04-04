@@ -171,8 +171,11 @@ pub struct RyllApp {
     usb_tx: Option<mpsc::Sender<UsbCommand>>,
     usb_channel_ready: bool,
     usb_connecting: bool,
+    usb_disconnecting: bool,
     usb_error_message: Option<String>,
+    usb_error_time: Option<Instant>,
     usb_device_description: Option<String>,
+    usb_connected_at: Option<Instant>,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
@@ -312,8 +315,11 @@ impl RyllApp {
             usb_tx: Some(usb_tx),
             usb_channel_ready: false,
             usb_connecting: false,
+            usb_disconnecting: false,
             usb_error_message: None,
+            usb_error_time: None,
             usb_device_description: None,
+            usb_connected_at: None,
             traffic,
             channel_snapshots,
             app_snapshot,
@@ -469,18 +475,24 @@ impl RyllApp {
                     info!("app: USB device connected: {}", desc);
                     self.usb_device_description = Some(desc);
                     self.usb_connecting = false;
+                    self.usb_disconnecting = false;
+                    self.usb_connected_at = Some(Instant::now());
                 }
 
                 ChannelEvent::UsbDeviceDisconnected => {
                     info!("app: USB device disconnected");
                     self.usb_device_description = None;
                     self.usb_connecting = false;
+                    self.usb_disconnecting = false;
+                    self.usb_connected_at = None;
                 }
 
                 ChannelEvent::UsbConnectFailed(err) => {
                     error!("app: USB connect failed: {}", err);
                     self.usb_connecting = false;
+                    self.usb_disconnecting = false;
                     self.usb_error_message = Some(err);
+                    self.usb_error_time = Some(Instant::now());
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -492,6 +504,8 @@ impl RyllApp {
                         self.usb_channel_ready = false;
                         self.usb_device_description = None;
                         self.usb_connecting = false;
+                        self.usb_disconnecting = false;
+                        self.usb_connected_at = None;
                     }
                 }
 
@@ -1002,7 +1016,21 @@ impl eframe::App for RyllApp {
                 }
             }
 
+            // Auto-clear USB errors after 10 seconds
+            if let Some(error_time) = self.usb_error_time {
+                if error_time.elapsed() > Duration::from_secs(10) {
+                    self.usb_error_message = None;
+                    self.usb_error_time = None;
+                }
+            }
+
+            // Request repaint for elapsed timer and error auto-clear
+            if self.usb_connected_at.is_some() || self.usb_error_time.is_some() {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+
             let mut usb_action = None;
+            let mut open_usb_bug_report = false;
 
             egui::SidePanel::right("usb_panel")
                 .default_width(300.0)
@@ -1024,28 +1052,50 @@ impl eframe::App for RyllApp {
                         ui.colored_label(egui::Color32::GRAY, "Channel: Not available");
                     }
 
-                    // Connected device (if any)
+                    // Connected device with elapsed time
                     if let Some(ref desc) = self.usb_device_description {
                         ui.separator();
-                        ui.label(format!("Connected: {}", desc));
+                        let elapsed = self
+                            .usb_connected_at
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        let mins = elapsed / 60;
+                        let secs = elapsed % 60;
+                        ui.label(format!("Connected: {} ({}m {}s)", desc, mins, secs));
                     }
 
-                    // Error message (if any)
-                    if let Some(ref err) = self.usb_error_message {
+                    // Error message with dismiss and bug report buttons
+                    if self.usb_error_message.is_some() {
                         ui.separator();
-                        ui.colored_label(egui::Color32::RED, err);
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            self.usb_error_message.as_ref().unwrap(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Dismiss").clicked() {
+                                self.usb_error_message = None;
+                                self.usb_error_time = None;
+                            }
+                            if ui.small_button("Report this as a bug").clicked() {
+                                open_usb_bug_report = true;
+                            }
+                        });
                     }
 
-                    // Connecting indicator
+                    // Operation in progress indicator
                     if self.usb_connecting {
                         ui.separator();
                         ui.label("Connecting...");
+                    } else if self.usb_disconnecting {
+                        ui.separator();
+                        ui.label("Disconnecting...");
                     }
 
                     ui.separator();
 
                     // Device list with connect/disconnect buttons
-                    let buttons_disabled = !self.usb_channel_ready || self.usb_connecting;
+                    let buttons_disabled =
+                        !self.usb_channel_ready || self.usb_connecting || self.usb_disconnecting;
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.usb_available_devices.is_empty() {
                             ui.colored_label(egui::Color32::GRAY, "No USB devices found.");
@@ -1137,13 +1187,28 @@ impl eframe::App for RyllApp {
             // Execute USB action outside the closure
             if let Some(cmd) = usb_action {
                 self.usb_error_message = None;
-                self.usb_connecting = true;
+                self.usb_error_time = None;
+                let is_disconnect = matches!(cmd, UsbCommand::DisconnectDevice);
+                if is_disconnect {
+                    self.usb_disconnecting = true;
+                } else {
+                    self.usb_connecting = true;
+                }
                 if let Some(ref tx) = self.usb_tx {
                     if let Err(e) = tx.try_send(cmd) {
                         self.usb_connecting = false;
+                        self.usb_disconnecting = false;
                         self.usb_error_message = Some(format!("Failed to send command: {}", e));
+                        self.usb_error_time = Some(Instant::now());
                     }
                 }
+            }
+
+            // Open bug report dialog for USB error (two-pass)
+            if open_usb_bug_report {
+                self.show_bug_dialog = true;
+                self.bug_report_type = BugReportType::Usb;
+                self.bug_description = self.usb_error_message.clone().unwrap_or_default();
             }
         }
 
@@ -1318,6 +1383,11 @@ impl eframe::App for RyllApp {
                         &mut self.bug_report_type,
                         BugReportType::Connection,
                         "Connection (session + main channel)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Usb,
+                        "USB (usbredir channel + device state)",
                     );
 
                     ui.add_space(4.0);
