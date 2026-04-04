@@ -16,7 +16,7 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, UsbredirChannel,
+    MainChannel, UsbCommand, UsbredirChannel,
 };
 use crate::config::{Config, VirtualDiskConfig};
 use crate::display::DisplaySurface;
@@ -165,7 +165,12 @@ pub struct RyllApp {
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
 
-    // USB device status
+    // USB command sender and state
+    #[allow(dead_code)] // used in phase 5 (connect/disconnect controls)
+    usb_tx: Option<mpsc::Sender<UsbCommand>>,
+    usb_channel_ready: bool,
+    usb_connecting: bool,
+    usb_error_message: Option<String>,
     usb_device_description: Option<String>,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
@@ -210,9 +215,10 @@ impl RyllApp {
         virtual_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
     ) -> Self {
-        // Create event channel
+        // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+        let (usb_tx, usb_rx) = mpsc::channel(16);
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -249,6 +255,7 @@ impl RyllApp {
                     config_clone,
                     event_tx_clone,
                     input_rx,
+                    usb_rx,
                     virtual_disks,
                     capture_clone,
                     counter_clone,
@@ -284,6 +291,10 @@ impl RyllApp {
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
+            usb_tx: Some(usb_tx),
+            usb_channel_ready: false,
+            usb_connecting: false,
+            usb_error_message: None,
             usb_device_description: None,
             traffic,
             channel_snapshots,
@@ -426,17 +437,36 @@ impl RyllApp {
 
                 ChannelEvent::UsbChannelReady => {
                     info!("app: USB redirection channel connected");
+                    self.usb_channel_ready = true;
                 }
 
                 ChannelEvent::UsbDeviceConnected(desc) => {
                     info!("app: USB device connected: {}", desc);
                     self.usb_device_description = Some(desc);
+                    self.usb_connecting = false;
+                }
+
+                ChannelEvent::UsbDeviceDisconnected => {
+                    info!("app: USB device disconnected");
+                    self.usb_device_description = None;
+                    self.usb_connecting = false;
+                }
+
+                ChannelEvent::UsbConnectFailed(err) => {
+                    error!("app: USB connect failed: {}", err);
+                    self.usb_connecting = false;
+                    self.usb_error_message = Some(err);
                 }
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
                     if channel == ChannelType::Main {
                         self.connected = false;
+                    }
+                    if channel == ChannelType::Usbredir {
+                        self.usb_channel_ready = false;
+                        self.usb_device_description = None;
+                        self.usb_connecting = false;
                     }
                 }
 
@@ -1326,6 +1356,7 @@ async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
+    usb_rx: mpsc::Receiver<UsbCommand>,
     virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
@@ -1399,6 +1430,7 @@ async fn run_connection(
 
     // Connect other channels
     let mut handles = vec![main_handle];
+    let mut usb_rx = Some(usb_rx);
 
     for (channel_type, channel_id) in channels {
         match channel_type {
@@ -1451,19 +1483,25 @@ async fn run_connection(
             }
 
             ChannelType::Usbredir => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let (_usb_tx, usb_rx) = mpsc::channel(16);
-                let mut channel = UsbredirChannel::new(
-                    stream,
-                    event_tx.clone(),
-                    usb_rx,
-                    virtual_disks.clone(),
-                    capture.clone(),
-                    byte_counter.clone(),
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                if let Some(usb_rx) = usb_rx.take() {
+                    let stream = client
+                        .connect_channel(session_id, channel_type, channel_id)
+                        .await?;
+                    let mut channel = UsbredirChannel::new(
+                        stream,
+                        event_tx.clone(),
+                        usb_rx,
+                        virtual_disks.clone(),
+                        capture.clone(),
+                        byte_counter.clone(),
+                    );
+                    handles.push(tokio::spawn(async move { channel.run().await }));
+                } else {
+                    info!(
+                        "Skipping additional usbredir channel (id={}): only one supported",
+                        channel_id
+                    );
+                }
             }
 
             _ => {
@@ -1500,6 +1538,7 @@ pub async fn run_headless(
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+    let (_usb_tx, usb_rx) = mpsc::channel(16);
 
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
@@ -1516,6 +1555,7 @@ pub async fn run_headless(
             config,
             event_tx,
             input_rx,
+            usb_rx,
             virtual_disks,
             capture,
             byte_counter,
@@ -1564,6 +1604,12 @@ pub async fn run_headless(
                     }
                     ChannelEvent::UsbDeviceConnected(desc) => {
                         info!("headless: USB device connected: {}", desc);
+                    }
+                    ChannelEvent::UsbDeviceDisconnected => {
+                        info!("headless: USB device disconnected");
+                    }
+                    ChannelEvent::UsbConnectFailed(err) => {
+                        error!("headless: USB connect failed: {}", err);
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);

@@ -76,6 +76,13 @@ pub enum ChannelEvent {
     /// A USB device was successfully connected
     UsbDeviceConnected(String),
 
+    /// A USB device was disconnected
+    UsbDeviceDisconnected,
+
+    /// A USB device connection attempt failed
+    #[allow(dead_code)]
+    UsbConnectFailed(String),
+
     /// Available USB devices changed (enumeration result)
     #[allow(dead_code)]
     UsbDevicesChanged(Vec<UsbDeviceInfo>),

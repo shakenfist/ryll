@@ -681,6 +681,10 @@ impl UsbredirChannel {
             self.send_usbredir(msg_type::DEVICE_DISCONNECT, 0, &[])
                 .await?;
             self.backend = None;
+            self.event_tx
+                .send(ChannelEvent::UsbDeviceDisconnected)
+                .await
+                .ok();
         }
         Ok(())
     }
