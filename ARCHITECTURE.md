@@ -336,6 +336,50 @@ ryll --file conn.vv --usb-disk-ro /path/to/image.raw     # read-only
 See `docs/configuration.md` for details. Use `make test-qemu-usb` to start
 a QEMU instance with USB redirection enabled.
 
+### GUI Components
+
+The USB panel is a right-side panel toggled by the "USB" status bar button,
+rendered alongside the traffic viewer panel (both use `egui::SidePanel::right`
+with different IDs).
+
+**State tracking on RyllApp:**
+
+- `usb_tx` — mpsc sender to the UsbredirChannel, created in `RyllApp::new()`
+  and threaded through `run_connection()`. Mirrors the `input_tx` pattern.
+- `usb_channel_ready` — set when `UsbChannelReady` event arrives, cleared on
+  usbredir channel disconnect.
+- `usb_connecting` / `usb_disconnecting` — operation in progress flags, cleared
+  on success/failure events.
+- `usb_device_description` — set by `UsbDeviceConnected`, cleared by
+  `UsbDeviceDisconnected` and channel disconnect.
+- `usb_connected_at` — timestamp for the elapsed connection timer.
+- `usb_available_devices` — enumerated device list, refreshed on panel open
+  and via Refresh button.
+- `usb_virtual_disks` — session-scoped virtual disk paths from CLI flags and
+  runtime additions.
+
+**Command flow:**
+
+The GUI sends identity-based `UsbCommand` variants (`ConnectPhysical { bus,
+address }`, `ConnectVirtualDisk { path, read_only }`, `DisconnectDevice`) via
+`usb_tx`. The channel handler does async device lookup and open in its tokio
+context, sending `UsbDeviceConnected`, `UsbDeviceDisconnected`, or
+`UsbConnectFailed` events back to the app. If a device is already connected
+when a connect command arrives, the handler disconnects it first.
+
+**File picker:**
+
+The "Add Disk..." button spawns `rfd::FileDialog` on a background thread. The
+result is polled via `std::sync::mpsc::try_recv()` each frame. Selected files
+are validated (regular file, >= 512 bytes) and added to the session's virtual
+disk list.
+
+**Bug report integration:**
+
+USB errors show a "Report this as a bug" button that opens the bug report
+dialog pre-populated with `BugReportType::Usb`, which captures the usbredir
+channel's pcap traffic.
+
 ## Capture Mode
 
 When `--capture <DIR>` is specified, ryll records:

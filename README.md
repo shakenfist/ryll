@@ -7,7 +7,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
 - **Multi-channel support** - Handles main, display, cursor, inputs, and usbredir channels
-- **USB device redirection** - Forward physical USB devices or present RAW disk images as virtual USB mass storage devices via `--usb-disk`
+- **USB device redirection** - Forward physical USB devices or present RAW disk images as virtual USB mass storage devices. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
 - **TLS support** - Secure connections with inline CA certificates from .vv files
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
@@ -20,6 +20,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
 - **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, and screenshots; Display reports include interactive region selection to highlight corruption
 - **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
+- **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 
 ## Installation
 
