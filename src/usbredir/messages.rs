@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, Read};
 
 // ── Header ─────────────────────────────────────────────
 
@@ -147,17 +147,25 @@ impl DeviceConnect {
     }
 }
 
-/// InterfaceInfo (type 4) — 128 bytes.
+/// InterfaceInfo (type 4) — 132 bytes.
+///
+/// Wire format (little-endian):
+///   u32  interface_count          — number of valid entries
+///   u8   interface[32]            — interface numbers
+///   u8   interface_class[32]
+///   u8   interface_subclass[32]
+///   u8   interface_protocol[32]
 #[derive(Debug, Clone)]
 pub struct InterfaceInfo {
-    pub interface_count: [u8; 32],
+    pub interface_count: u32,
+    pub interface: [u8; 32],
     pub interface_class: [u8; 32],
     pub interface_subclass: [u8; 32],
     pub interface_protocol: [u8; 32],
 }
 
 impl InterfaceInfo {
-    pub const SIZE: usize = 128;
+    pub const SIZE: usize = 132;
 
     pub fn read(data: &[u8]) -> io::Result<Self> {
         if data.len() < Self::SIZE {
@@ -166,21 +174,28 @@ impl InterfaceInfo {
                 "not enough data for InterfaceInfo",
             ));
         }
-        let mut info = InterfaceInfo {
-            interface_count: [0u8; 32],
-            interface_class: [0u8; 32],
-            interface_subclass: [0u8; 32],
-            interface_protocol: [0u8; 32],
-        };
-        info.interface_count.copy_from_slice(&data[0..32]);
-        info.interface_class.copy_from_slice(&data[32..64]);
-        info.interface_subclass.copy_from_slice(&data[64..96]);
-        info.interface_protocol.copy_from_slice(&data[96..128]);
-        Ok(info)
+        let mut rdr = io::Cursor::new(data);
+        let interface_count = rdr.read_u32::<LittleEndian>()?;
+        let mut interface = [0u8; 32];
+        let mut interface_class = [0u8; 32];
+        let mut interface_subclass = [0u8; 32];
+        let mut interface_protocol = [0u8; 32];
+        rdr.read_exact(&mut interface)?;
+        rdr.read_exact(&mut interface_class)?;
+        rdr.read_exact(&mut interface_subclass)?;
+        rdr.read_exact(&mut interface_protocol)?;
+        Ok(InterfaceInfo {
+            interface_count,
+            interface,
+            interface_class,
+            interface_subclass,
+            interface_protocol,
+        })
     }
 
     pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.extend_from_slice(&self.interface_count);
+        buf.write_u32::<LittleEndian>(self.interface_count)?;
+        buf.extend_from_slice(&self.interface);
         buf.extend_from_slice(&self.interface_class);
         buf.extend_from_slice(&self.interface_subclass);
         buf.extend_from_slice(&self.interface_protocol);
@@ -695,12 +710,13 @@ mod tests {
     #[test]
     fn interface_info_round_trip() {
         let mut orig = InterfaceInfo {
-            interface_count: [0u8; 32],
+            interface_count: 1,
+            interface: [0u8; 32],
             interface_class: [0u8; 32],
             interface_subclass: [0u8; 32],
             interface_protocol: [0u8; 32],
         };
-        orig.interface_count[0] = 1;
+        orig.interface[0] = 0;
         orig.interface_class[0] = 0x08;
         orig.interface_subclass[0] = 0x06;
         orig.interface_protocol[0] = 0x50;
@@ -708,7 +724,8 @@ mod tests {
         orig.write(&mut buf).unwrap();
         assert_eq!(buf.len(), InterfaceInfo::SIZE);
         let parsed = InterfaceInfo::read(&buf).unwrap();
-        assert_eq!(parsed.interface_count[0], 1);
+        assert_eq!(parsed.interface_count, 1);
+        assert_eq!(parsed.interface[0], 0);
         assert_eq!(parsed.interface_class[0], 0x08);
         assert_eq!(parsed.interface_protocol[0], 0x50);
     }

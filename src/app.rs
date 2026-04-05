@@ -1216,13 +1216,25 @@ impl eframe::App for RyllApp {
         }
 
         // Main display area (no margin so the surface fills edge-to-edge)
+        let mut open_channel_bug_report = false;
         let panel_frame = egui::Frame::none().inner_margin(0.0);
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                if let Some(error) = &self.error_message {
-                    ui.colored_label(egui::Color32::RED, format!("Error: {}", error));
+                if self.error_message.is_some() {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("Error: {}", self.error_message.as_ref().unwrap()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Dismiss").clicked() {
+                            self.error_message = None;
+                        }
+                        if ui.small_button("Report this as a bug").clicked() {
+                            open_channel_bug_report = true;
+                        }
+                    });
                     ui.separator();
                 }
 
@@ -1344,6 +1356,13 @@ impl eframe::App for RyllApp {
                     });
                 }
             });
+
+        // Open bug report dialog for channel error (two-pass)
+        if open_channel_bug_report {
+            self.show_bug_dialog = true;
+            self.bug_report_type = BugReportType::Connection;
+            self.bug_description = self.error_message.clone().unwrap_or_default();
+        }
 
         // Bug report dialog (two-pass: render then act)
         let mut dialog_action = None;
@@ -1811,8 +1830,16 @@ async fn run_connection(
 
     // Wait for all channel tasks
     for handle in handles {
-        if let Err(e) = handle.await {
-            error!("Channel task error: {}", e);
+        match handle.await {
+            Err(e) => {
+                error!("Channel task panic: {}", e);
+            }
+            Ok(Err(e)) => {
+                let msg = format!("channel error: {}", e);
+                error!("app: {}", msg);
+                event_tx.send(ChannelEvent::Error(msg)).await.ok();
+            }
+            Ok(Ok(())) => {}
         }
     }
 

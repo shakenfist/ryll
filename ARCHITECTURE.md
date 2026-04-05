@@ -380,7 +380,9 @@ disk list.
 
 USB errors show a "Report this as a bug" button that opens the bug report
 dialog pre-populated with `BugReportType::Usb`, which captures the usbredir
-channel's pcap traffic.
+channel's pcap traffic. Generic channel errors (displayed in the central
+panel) also offer a bug report button pre-populated with
+`BugReportType::Connection`.
 
 ## Capture Mode
 
