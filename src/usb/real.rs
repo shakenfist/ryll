@@ -97,7 +97,7 @@ pub fn enumerate_physical() -> Vec<UsbDeviceInfo> {
     devices
         .map(|info| UsbDeviceInfo {
             source: DeviceSource::Physical {
-                bus: info.device_address(),
+                bus: info.busnum(),
                 address: info.device_address(),
             },
             vendor_id: info.vendor_id(),

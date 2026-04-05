@@ -2,6 +2,7 @@
 use anyhow::Result;
 use eframe::egui;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,11 +17,12 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, UsbredirChannel,
+    MainChannel, UsbCommand, UsbredirChannel,
 };
 use crate::config::{Config, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::{ChannelType, SpiceClient};
+use crate::usb::{self, DeviceSource, UsbDeviceInfo};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -165,8 +167,15 @@ pub struct RyllApp {
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
 
-    // USB device status
+    // USB command sender and state
+    usb_tx: Option<mpsc::Sender<UsbCommand>>,
+    usb_channel_ready: bool,
+    usb_connecting: bool,
+    usb_disconnecting: bool,
+    usb_error_message: Option<String>,
+    usb_error_time: Option<Instant>,
     usb_device_description: Option<String>,
+    usb_connected_at: Option<Instant>,
 
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
@@ -190,6 +199,17 @@ pub struct RyllApp {
     region_drag_start: Option<(u32, u32)>,
     region_drag_end: Option<(u32, u32)>,
 
+    // USB panel state
+    show_usb_panel: bool,
+    usb_available_devices: Vec<UsbDeviceInfo>,
+    usb_virtual_disks: Vec<(PathBuf, bool)>,
+    usb_devices_enumerated: bool,
+
+    // File picker for adding virtual disks
+    usb_add_disk_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    usb_add_disk_readonly: bool,
+    usb_add_disk_message: Option<String>,
+
     // Traffic viewer state
     show_traffic_viewer: bool,
     traffic_viewer_entries: Vec<TrafficViewEntry>,
@@ -210,9 +230,10 @@ impl RyllApp {
         virtual_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
     ) -> Self {
-        // Create event channel
+        // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+        let (usb_tx, usb_rx) = mpsc::channel(16);
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -227,6 +248,12 @@ impl RyllApp {
         // Save connection target for bug report metadata
         let target_host = config.host.clone();
         let target_port = config.port;
+
+        // Retain virtual disk paths for UI re-enumeration
+        let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
+            .iter()
+            .map(|d| (d.path.clone(), d.read_only))
+            .collect();
 
         // Spawn connection task
         let config_clone = config.clone();
@@ -249,6 +276,7 @@ impl RyllApp {
                     config_clone,
                     event_tx_clone,
                     input_rx,
+                    usb_rx,
                     virtual_disks,
                     capture_clone,
                     counter_clone,
@@ -284,7 +312,14 @@ impl RyllApp {
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
+            usb_tx: Some(usb_tx),
+            usb_channel_ready: false,
+            usb_connecting: false,
+            usb_disconnecting: false,
+            usb_error_message: None,
+            usb_error_time: None,
             usb_device_description: None,
+            usb_connected_at: None,
             traffic,
             channel_snapshots,
             app_snapshot,
@@ -297,6 +332,13 @@ impl RyllApp {
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
+            show_usb_panel: false,
+            usb_available_devices: Vec::new(),
+            usb_virtual_disks,
+            usb_devices_enumerated: false,
+            usb_add_disk_rx: None,
+            usb_add_disk_readonly: false,
+            usb_add_disk_message: None,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -426,17 +468,40 @@ impl RyllApp {
 
                 ChannelEvent::UsbChannelReady => {
                     info!("app: USB redirection channel connected");
+                    self.usb_channel_ready = true;
                 }
 
                 ChannelEvent::UsbDeviceConnected(desc) => {
                     info!("app: USB device connected: {}", desc);
                     self.usb_device_description = Some(desc);
+                    self.clear_usb_operation_flags();
+                    self.usb_connected_at = Some(Instant::now());
+                }
+
+                ChannelEvent::UsbDeviceDisconnected => {
+                    info!("app: USB device disconnected");
+                    self.usb_device_description = None;
+                    self.clear_usb_operation_flags();
+                    self.usb_connected_at = None;
+                }
+
+                ChannelEvent::UsbConnectFailed(err) => {
+                    error!("app: USB connect failed: {}", err);
+                    self.clear_usb_operation_flags();
+                    self.usb_error_message = Some(err);
+                    self.usb_error_time = Some(Instant::now());
                 }
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
                     if channel == ChannelType::Main {
                         self.connected = false;
+                    }
+                    if channel == ChannelType::Usbredir {
+                        self.usb_channel_ready = false;
+                        self.usb_device_description = None;
+                        self.clear_usb_operation_flags();
+                        self.usb_connected_at = None;
                     }
                 }
 
@@ -445,6 +510,12 @@ impl RyllApp {
         }
 
         self.update_app_snapshot();
+    }
+
+    /// Clear USB operation-in-progress flags.
+    fn clear_usb_operation_flags(&mut self) {
+        self.usb_connecting = false;
+        self.usb_disconnecting = false;
     }
 
     /// Sync app-level state to the shared snapshot.
@@ -791,6 +862,9 @@ impl eframe::App for RyllApp {
                         if ui.small_button("Traffic").clicked() {
                             self.show_traffic_viewer = !self.show_traffic_viewer;
                         }
+                        if ui.small_button("USB").clicked() {
+                            self.show_usb_panel = !self.show_usb_panel;
+                        }
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
@@ -893,6 +967,252 @@ impl eframe::App for RyllApp {
                             }
                         });
                 });
+        }
+
+        // USB device management panel (conditional)
+        if self.show_usb_panel {
+            // Auto-enumerate on first open
+            if !self.usb_devices_enumerated {
+                self.usb_available_devices = usb::enumerate_devices(&self.usb_virtual_disks);
+                self.usb_devices_enumerated = true;
+            }
+
+            // Poll for file picker result
+            let mut picked_path = None;
+            if let Some(ref rx) = self.usb_add_disk_rx {
+                if let Ok(result) = rx.try_recv() {
+                    picked_path = Some(result);
+                }
+            }
+            if picked_path.is_some() {
+                self.usb_add_disk_rx = None;
+            }
+            if let Some(Some(path)) = picked_path {
+                self.usb_add_disk_message = None;
+                match std::fs::metadata(&path) {
+                    Ok(meta) => {
+                        if !meta.is_file() {
+                            self.usb_add_disk_message =
+                                Some("Selected path is not a regular file.".to_string());
+                        } else if meta.len() < 512 {
+                            self.usb_add_disk_message =
+                                Some("File is too small (< 512 bytes).".to_string());
+                        } else {
+                            let read_only = self.usb_add_disk_readonly;
+                            self.usb_virtual_disks.push((path.clone(), read_only));
+                            self.usb_available_devices =
+                                usb::enumerate_devices(&self.usb_virtual_disks);
+                            let warn = if meta.len() % 512 != 0 {
+                                " (warning: size not a multiple of 512)"
+                            } else {
+                                ""
+                            };
+                            let ro = if read_only { " [RO]" } else { "" };
+                            self.usb_add_disk_message =
+                                Some(format!("Added: {}{}{}", path.display(), ro, warn));
+                        }
+                    }
+                    Err(e) => {
+                        self.usb_add_disk_message = Some(format!("Cannot read file: {}", e));
+                    }
+                }
+            }
+
+            // Auto-clear USB errors after 10 seconds
+            if let Some(error_time) = self.usb_error_time {
+                if error_time.elapsed() > Duration::from_secs(10) {
+                    self.usb_error_message = None;
+                    self.usb_error_time = None;
+                }
+            }
+
+            // Request repaint for elapsed timer and error auto-clear
+            if self.usb_connected_at.is_some() || self.usb_error_time.is_some() {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+
+            let mut usb_action = None;
+            let mut open_usb_bug_report = false;
+
+            egui::SidePanel::right("usb_panel")
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    // Header with refresh button
+                    ui.horizontal(|ui| {
+                        ui.heading("USB Devices");
+                        if ui.small_button("Refresh").clicked() {
+                            self.usb_available_devices =
+                                usb::enumerate_devices(&self.usb_virtual_disks);
+                        }
+                    });
+                    ui.separator();
+
+                    // Channel status
+                    if self.usb_channel_ready {
+                        ui.label("Channel: Ready");
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "Channel: Not available");
+                    }
+
+                    // Connected device with elapsed time
+                    if let Some(ref desc) = self.usb_device_description {
+                        ui.separator();
+                        let elapsed = self
+                            .usb_connected_at
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        let mins = elapsed / 60;
+                        let secs = elapsed % 60;
+                        ui.label(format!("Connected: {} ({}m {}s)", desc, mins, secs));
+                    }
+
+                    // Error message with dismiss and bug report buttons
+                    if self.usb_error_message.is_some() {
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            self.usb_error_message.as_ref().unwrap(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Dismiss").clicked() {
+                                self.usb_error_message = None;
+                                self.usb_error_time = None;
+                            }
+                            if ui.small_button("Report this as a bug").clicked() {
+                                open_usb_bug_report = true;
+                            }
+                        });
+                    }
+
+                    // Operation in progress indicator
+                    if self.usb_connecting {
+                        ui.separator();
+                        ui.label("Connecting...");
+                    } else if self.usb_disconnecting {
+                        ui.separator();
+                        ui.label("Disconnecting...");
+                    }
+
+                    ui.separator();
+
+                    // Device list with connect/disconnect buttons
+                    let buttons_disabled =
+                        !self.usb_channel_ready || self.usb_connecting || self.usb_disconnecting;
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if self.usb_available_devices.is_empty() {
+                            ui.colored_label(egui::Color32::GRAY, "No USB devices found.");
+                        } else {
+                            for device in &self.usb_available_devices {
+                                let label = device.label();
+                                let is_connected = self
+                                    .usb_device_description
+                                    .as_ref()
+                                    .is_some_and(|d| *d == label);
+
+                                ui.horizontal(|ui| {
+                                    if is_connected {
+                                        ui.colored_label(egui::Color32::GREEN, "\u{25CF}");
+                                        ui.label(&label);
+                                        if ui
+                                            .add_enabled(
+                                                !buttons_disabled,
+                                                egui::Button::new("Disconnect"),
+                                            )
+                                            .clicked()
+                                        {
+                                            usb_action = Some(UsbCommand::DisconnectDevice);
+                                        }
+                                    } else {
+                                        ui.label(&label);
+                                        let connect_enabled = !buttons_disabled
+                                            && self.usb_device_description.is_none();
+                                        if ui
+                                            .add_enabled(
+                                                connect_enabled,
+                                                egui::Button::new("Connect"),
+                                            )
+                                            .clicked()
+                                        {
+                                            usb_action = Some(match &device.source {
+                                                #[cfg(target_os = "linux")]
+                                                DeviceSource::Physical { bus, address } => {
+                                                    UsbCommand::ConnectPhysical {
+                                                        bus: *bus,
+                                                        address: *address,
+                                                    }
+                                                }
+                                                DeviceSource::VirtualDisk { path, read_only } => {
+                                                    UsbCommand::ConnectVirtualDisk {
+                                                        path: path.clone(),
+                                                        read_only: *read_only,
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+
+                    // Add virtual disk section
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.usb_add_disk_readonly, "Read-only");
+                        let picker_active = self.usb_add_disk_rx.is_some();
+                        if ui
+                            .add_enabled(!picker_active, egui::Button::new("Add Disk..."))
+                            .clicked()
+                        {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = rfd::FileDialog::new()
+                                    .set_title("Select RAW disk image")
+                                    .add_filter("Disk images", &["raw", "img"])
+                                    .add_filter("All files", &["*"])
+                                    .pick_file();
+                                let _ = tx.send(result);
+                            });
+                            self.usb_add_disk_rx = Some(rx);
+                        }
+                    });
+
+                    // Add-disk message
+                    if let Some(ref msg) = self.usb_add_disk_message {
+                        if msg.starts_with("Added:") {
+                            ui.label(msg);
+                        } else {
+                            ui.colored_label(egui::Color32::RED, msg);
+                        }
+                    }
+                });
+
+            // Execute USB action outside the closure
+            if let Some(cmd) = usb_action {
+                self.usb_error_message = None;
+                self.usb_error_time = None;
+                let is_disconnect = matches!(cmd, UsbCommand::DisconnectDevice);
+                if is_disconnect {
+                    self.usb_disconnecting = true;
+                } else {
+                    self.usb_connecting = true;
+                }
+                if let Some(ref tx) = self.usb_tx {
+                    if let Err(e) = tx.try_send(cmd) {
+                        self.usb_connecting = false;
+                        self.usb_disconnecting = false;
+                        self.usb_error_message = Some(format!("Failed to send command: {}", e));
+                        self.usb_error_time = Some(Instant::now());
+                    }
+                }
+            }
+
+            // Open bug report dialog for USB error (two-pass)
+            if open_usb_bug_report {
+                self.show_bug_dialog = true;
+                self.bug_report_type = BugReportType::Usb;
+                self.bug_description = self.usb_error_message.clone().unwrap_or_default();
+            }
         }
 
         // Main display area (no margin so the surface fills edge-to-edge)
@@ -1066,6 +1386,11 @@ impl eframe::App for RyllApp {
                         &mut self.bug_report_type,
                         BugReportType::Connection,
                         "Connection (session + main channel)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Usb,
+                        "USB (usbredir channel + device state)",
                     );
 
                     ui.add_space(4.0);
@@ -1326,6 +1651,7 @@ async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
+    usb_rx: mpsc::Receiver<UsbCommand>,
     virtual_disks: Vec<VirtualDiskConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
@@ -1399,6 +1725,7 @@ async fn run_connection(
 
     // Connect other channels
     let mut handles = vec![main_handle];
+    let mut usb_rx = Some(usb_rx);
 
     for (channel_type, channel_id) in channels {
         match channel_type {
@@ -1451,19 +1778,25 @@ async fn run_connection(
             }
 
             ChannelType::Usbredir => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let (_usb_tx, usb_rx) = mpsc::channel(16);
-                let mut channel = UsbredirChannel::new(
-                    stream,
-                    event_tx.clone(),
-                    usb_rx,
-                    virtual_disks.clone(),
-                    capture.clone(),
-                    byte_counter.clone(),
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                if let Some(usb_rx) = usb_rx.take() {
+                    let stream = client
+                        .connect_channel(session_id, channel_type, channel_id)
+                        .await?;
+                    let mut channel = UsbredirChannel::new(
+                        stream,
+                        event_tx.clone(),
+                        usb_rx,
+                        virtual_disks.clone(),
+                        capture.clone(),
+                        byte_counter.clone(),
+                    );
+                    handles.push(tokio::spawn(async move { channel.run().await }));
+                } else {
+                    info!(
+                        "Skipping additional usbredir channel (id={}): only one supported",
+                        channel_id
+                    );
+                }
             }
 
             _ => {
@@ -1500,6 +1833,7 @@ pub async fn run_headless(
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+    let (_usb_tx, usb_rx) = mpsc::channel(16);
 
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
@@ -1516,6 +1850,7 @@ pub async fn run_headless(
             config,
             event_tx,
             input_rx,
+            usb_rx,
             virtual_disks,
             capture,
             byte_counter,
@@ -1564,6 +1899,12 @@ pub async fn run_headless(
                     }
                     ChannelEvent::UsbDeviceConnected(desc) => {
                         info!("headless: USB device connected: {}", desc);
+                    }
+                    ChannelEvent::UsbDeviceDisconnected => {
+                        info!("headless: USB device disconnected");
+                    }
+                    ChannelEvent::UsbConnectFailed(err) => {
+                        error!("headless: USB connect failed: {}", err);
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);

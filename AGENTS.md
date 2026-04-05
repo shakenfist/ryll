@@ -92,6 +92,17 @@ Ryll uses:
    TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
    length (65535 bytes), which would panic in the header construction code.
 
+10. **USB panel uses identity-based commands** - The GUI sends device identity
+    (bus/address for physical, path/read-only for virtual) rather than
+    pre-opened device handles via `UsbCommand`. The channel handler does async
+    device lookup and open in its tokio context. This avoids async operations
+    in the synchronous egui render loop and keeps device lifecycle management
+    co-located in the channel handler. Physical USB device support
+    (`RealDevice`, `DeviceSource::Physical`, `UsbCommand::ConnectPhysical`)
+    is gated with `#[cfg(target_os = "linux")]` — on macOS/Windows only
+    virtual disk devices are available. The file picker for adding virtual disks
+    also runs on a background thread with results polled via `try_recv()`.
+
 ## Code Organisation
 
 ```
@@ -99,7 +110,8 @@ src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
 │                        #   bandwidth sparkline, bug report dialog,
-│                        #   live traffic viewer panel
+│                        #   live traffic viewer panel, USB device
+│                        #   management panel
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
 │                        #   TrafficRingBuffer, TrafficBuffers),
 │                        #   channel state snapshots (DisplaySnapshot,
@@ -133,7 +145,7 @@ src/
 ├── usb/                 # USB device backend abstraction
 │   ├── mod.rs           # UsbDeviceBackend trait, TransferResult,
 │   │                    #   DeviceSource, UsbDeviceInfo, enumeration
-│   ├── real.rs          # Physical device backend (nusb crate)
+│   ├── real.rs          # Physical device backend (nusb, Linux only)
 │   └── virtual_msc.rs   # Virtual USB mass storage (RAW images,
 │                        #   BOT protocol, SCSI command set)
 ├── decompression/       # Image decompression

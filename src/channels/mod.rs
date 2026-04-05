@@ -10,8 +10,10 @@ pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
 pub use usbredir::UsbredirChannel;
 
+use std::path::PathBuf;
+
 use crate::protocol::ChannelType;
-use crate::usb::{DeviceBackend, UsbDeviceInfo};
+use crate::usb::UsbDeviceInfo;
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
@@ -76,6 +78,12 @@ pub enum ChannelEvent {
     /// A USB device was successfully connected
     UsbDeviceConnected(String),
 
+    /// A USB device was disconnected
+    UsbDeviceDisconnected,
+
+    /// A USB device connection attempt failed
+    UsbConnectFailed(String),
+
     /// Available USB devices changed (enumeration result)
     #[allow(dead_code)]
     UsbDevicesChanged(Vec<UsbDeviceInfo>),
@@ -104,10 +112,12 @@ pub enum InputEvent {
 }
 
 /// Commands sent from the app to the usbredir channel.
-#[allow(dead_code)]
 pub enum UsbCommand {
-    /// Connect a device using the given backend.
-    ConnectDevice(Box<DeviceBackend>),
+    /// Connect a physical USB device by bus/address (Linux only).
+    #[cfg(target_os = "linux")]
+    ConnectPhysical { bus: u8, address: u8 },
+    /// Connect a virtual mass storage disk image.
+    ConnectVirtualDisk { path: PathBuf, read_only: bool },
     /// Disconnect the currently connected device.
     DisconnectDevice,
 }

@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(target_os = "linux")]
+use nusb::MaybeFuture;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -18,6 +20,8 @@ use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
+#[cfg(target_os = "linux")]
+use crate::usb::real::RealDevice;
 use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
 use crate::usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
@@ -333,7 +337,12 @@ impl UsbredirChannel {
                             self.connect_device(backend).await?;
                         }
                         Err(e) => {
-                            warn!("usbredir: failed to open {}: {}", disk.path.display(), e);
+                            let msg = format!("Failed to open {}: {}", disk.path.display(), e);
+                            warn!("usbredir: {}", msg);
+                            self.event_tx
+                                .send(ChannelEvent::UsbConnectFailed(msg))
+                                .await
+                                .ok();
                         }
                     }
                 }
@@ -631,9 +640,83 @@ impl UsbredirChannel {
 
     async fn handle_usb_command(&mut self, cmd: UsbCommand) -> Result<()> {
         match cmd {
-            UsbCommand::ConnectDevice(backend) => {
-                self.connect_device(*backend).await?;
+            #[cfg(target_os = "linux")]
+            UsbCommand::ConnectPhysical { bus, address } => {
+                // Disconnect existing device if any
+                if self.backend.is_some() {
+                    self.disconnect_device().await?;
+                }
+
+                // Re-enumerate to find the device
+                let devices = match nusb::list_devices().wait() {
+                    Ok(iter) => iter,
+                    Err(e) => {
+                        let msg = format!("Failed to enumerate USB devices: {}", e);
+                        warn!("usbredir: {}", msg);
+                        self.event_tx
+                            .send(ChannelEvent::UsbConnectFailed(msg))
+                            .await
+                            .ok();
+                        return Ok(());
+                    }
+                };
+
+                let nusb_info = devices
+                    .into_iter()
+                    .find(|d| d.busnum() == bus && d.device_address() == address);
+
+                match nusb_info {
+                    None => {
+                        let msg = format!(
+                            "Device not found (bus {} addr {}) — may have been unplugged",
+                            bus, address,
+                        );
+                        warn!("usbredir: {}", msg);
+                        self.event_tx
+                            .send(ChannelEvent::UsbConnectFailed(msg))
+                            .await
+                            .ok();
+                    }
+                    Some(info) => match RealDevice::open(&info).await {
+                        Ok(dev) => {
+                            self.connect_device(DeviceBackend::Real(dev)).await?;
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "Failed to open device (bus {} addr {}): {}",
+                                bus, address, e,
+                            );
+                            warn!("usbredir: {}", msg);
+                            self.event_tx
+                                .send(ChannelEvent::UsbConnectFailed(msg))
+                                .await
+                                .ok();
+                        }
+                    },
+                }
             }
+
+            UsbCommand::ConnectVirtualDisk { path, read_only } => {
+                // Disconnect existing device if any
+                if self.backend.is_some() {
+                    self.disconnect_device().await?;
+                }
+
+                match VirtualMsc::open(path.clone(), read_only).await {
+                    Ok(msc) => {
+                        self.connect_device(DeviceBackend::Virtual(msc)).await?;
+                    }
+                    Err(e) => {
+                        let msg = format!("Failed to open {}: {}", path.display(), e);
+                        warn!("usbredir: {}", msg);
+                        self.event_tx
+                            .send(ChannelEvent::UsbConnectFailed(msg))
+                            .await
+                            .ok();
+                    }
+                }
+            }
+
             UsbCommand::DisconnectDevice => {
                 self.disconnect_device().await?;
             }
@@ -681,6 +764,10 @@ impl UsbredirChannel {
             self.send_usbredir(msg_type::DEVICE_DISCONNECT, 0, &[])
                 .await?;
             self.backend = None;
+            self.event_tx
+                .send(ChannelEvent::UsbDeviceDisconnected)
+                .await
+                .ok();
         }
         Ok(())
     }
