@@ -159,7 +159,8 @@ impl RealDevice {
             ep_max_packet_size: [0u16; 32],
         };
         let mut iface_info = InterfaceInfo {
-            interface_count: [0u8; 32],
+            interface_count: 0,
+            interface: [0u8; 32],
             interface_class: [0u8; 32],
             interface_subclass: [0u8; 32],
             interface_protocol: [0u8; 32],
@@ -173,12 +174,13 @@ impl RealDevice {
 
             // Read interface descriptor
             if let Some(desc) = iface.descriptor() {
-                let idx = iface_num as usize;
+                let idx = iface_info.interface_count as usize;
                 if idx < 32 {
-                    iface_info.interface_count[idx] = 1;
+                    iface_info.interface[idx] = iface_num;
                     iface_info.interface_class[idx] = desc.class();
                     iface_info.interface_subclass[idx] = desc.subclass();
                     iface_info.interface_protocol[idx] = desc.protocol();
+                    iface_info.interface_count += 1;
 
                     // Read endpoint descriptors
                     for ep_desc in desc.endpoints() {

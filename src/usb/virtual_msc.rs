@@ -708,12 +708,13 @@ impl UsbDeviceBackend for VirtualMsc {
 
     fn interface_info(&self) -> InterfaceInfo {
         let mut info = InterfaceInfo {
-            interface_count: [0u8; 32],
+            interface_count: 1,
+            interface: [0u8; 32],
             interface_class: [0u8; 32],
             interface_subclass: [0u8; 32],
             interface_protocol: [0u8; 32],
         };
-        info.interface_count[0] = 1;
+        info.interface[0] = 0; // Interface number 0
         info.interface_class[0] = 0x08; // Mass Storage
         info.interface_subclass[0] = 0x06; // SCSI
         info.interface_protocol[0] = 0x50; // Bulk-Only Transport
