@@ -309,8 +309,9 @@ The `UsbDeviceBackend` trait (`src/usb/mod.rs`) abstracts over device
 types. The `DeviceBackend` enum provides non-object-safe dispatch:
 
 - **RealDevice** (`src/usb/real.rs`): Physical USB device via the `nusb`
-  crate. Detaches kernel drivers, claims interfaces, forwards control/bulk/
-  interrupt transfers.
+  crate. Linux only (`#[cfg(target_os = "linux")]`). Detaches kernel drivers,
+  claims interfaces, forwards control/bulk/interrupt transfers. On non-Linux
+  platforms, only virtual devices are available.
 - **VirtualMsc** (`src/usb/virtual_msc.rs`): Emulated USB mass storage
   device backed by a RAW disk image. Implements BOT protocol (CBW/CSW) and
   8 SCSI commands. Reports as a USB 2.0 High Speed removable disk.
@@ -361,7 +362,8 @@ with different IDs).
 **Command flow:**
 
 The GUI sends identity-based `UsbCommand` variants (`ConnectPhysical { bus,
-address }`, `ConnectVirtualDisk { path, read_only }`, `DisconnectDevice`) via
+address }` (Linux only), `ConnectVirtualDisk { path, read_only }`,
+`DisconnectDevice`) via
 `usb_tx`. The channel handler does async device lookup and open in its tokio
 context, sending `UsbDeviceConnected`, `UsbDeviceDisconnected`, or
 `UsbConnectFailed` events back to the app. If a device is already connected

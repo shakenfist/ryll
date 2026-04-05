@@ -113,7 +113,8 @@ pub enum InputEvent {
 
 /// Commands sent from the app to the usbredir channel.
 pub enum UsbCommand {
-    /// Connect a physical USB device by bus/address.
+    /// Connect a physical USB device by bus/address (Linux only).
+    #[cfg(target_os = "linux")]
     ConnectPhysical { bus: u8, address: u8 },
     /// Connect a virtual mass storage disk image.
     ConnectVirtualDisk { path: PathBuf, read_only: bool },

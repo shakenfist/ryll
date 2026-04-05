@@ -1134,6 +1134,7 @@ impl eframe::App for RyllApp {
                                             .clicked()
                                         {
                                             usb_action = Some(match &device.source {
+                                                #[cfg(target_os = "linux")]
                                                 DeviceSource::Physical { bus, address } => {
                                                     UsbCommand::ConnectPhysical {
                                                         bus: *bus,

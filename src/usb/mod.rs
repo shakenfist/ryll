@@ -6,6 +6,7 @@
 //! knowing whether the device is real hardware or software-emulated.
 #![allow(dead_code)]
 
+#[cfg(target_os = "linux")]
 pub mod real;
 pub mod virtual_msc;
 
@@ -198,6 +199,7 @@ pub trait UsbDeviceBackend: Send {
 /// Avoids `Box<dyn UsbDeviceBackend>` which requires object-safety
 /// (the trait has `impl Future` returns).
 pub enum DeviceBackend {
+    #[cfg(target_os = "linux")]
     Real(real::RealDevice),
     Virtual(virtual_msc::VirtualMsc),
 }
@@ -205,6 +207,7 @@ pub enum DeviceBackend {
 impl UsbDeviceBackend for DeviceBackend {
     fn device_info(&self) -> DeviceConnect {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.device_info(),
             DeviceBackend::Virtual(d) => d.device_info(),
         }
@@ -212,6 +215,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     fn endpoint_info(&self) -> EpInfo {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.endpoint_info(),
             DeviceBackend::Virtual(d) => d.endpoint_info(),
         }
@@ -219,6 +223,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     fn interface_info(&self) -> InterfaceInfo {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.interface_info(),
             DeviceBackend::Virtual(d) => d.interface_info(),
         }
@@ -226,6 +231,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn set_configuration(&mut self, configuration: u8) -> Result<Status> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.set_configuration(configuration).await,
             DeviceBackend::Virtual(d) => d.set_configuration(configuration).await,
         }
@@ -233,6 +239,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn get_configuration(&mut self) -> Result<u8> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.get_configuration().await,
             DeviceBackend::Virtual(d) => d.get_configuration().await,
         }
@@ -240,6 +247,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn set_alt_setting(&mut self, interface: u8, alt_setting: u8) -> Result<Status> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.set_alt_setting(interface, alt_setting).await,
             DeviceBackend::Virtual(d) => d.set_alt_setting(interface, alt_setting).await,
         }
@@ -247,6 +255,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn get_alt_setting(&mut self, interface: u8) -> Result<u8> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.get_alt_setting(interface).await,
             DeviceBackend::Virtual(d) => d.get_alt_setting(interface).await,
         }
@@ -254,6 +263,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn reset(&mut self) -> Result<()> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.reset().await,
             DeviceBackend::Virtual(d) => d.reset().await,
         }
@@ -265,6 +275,7 @@ impl UsbDeviceBackend for DeviceBackend {
         data: &[u8],
     ) -> Result<TransferResult> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.control_transfer(setup, data).await,
             DeviceBackend::Virtual(d) => d.control_transfer(setup, data).await,
         }
@@ -272,6 +283,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn bulk_in(&mut self, endpoint: u8, max_len: usize) -> Result<TransferResult> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.bulk_in(endpoint, max_len).await,
             DeviceBackend::Virtual(d) => d.bulk_in(endpoint, max_len).await,
         }
@@ -279,6 +291,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn bulk_out(&mut self, endpoint: u8, data: &[u8]) -> Result<TransferResult> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.bulk_out(endpoint, data).await,
             DeviceBackend::Virtual(d) => d.bulk_out(endpoint, data).await,
         }
@@ -290,6 +303,7 @@ impl UsbDeviceBackend for DeviceBackend {
         tx: mpsc::Sender<InterruptData>,
     ) -> Result<tokio::task::JoinHandle<()>> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.start_interrupt_in(endpoint, tx).await,
             DeviceBackend::Virtual(d) => d.start_interrupt_in(endpoint, tx).await,
         }
@@ -297,6 +311,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     async fn interrupt_out(&mut self, endpoint: u8, data: &[u8]) -> Result<TransferResult> {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.interrupt_out(endpoint, data).await,
             DeviceBackend::Virtual(d) => d.interrupt_out(endpoint, data).await,
         }
@@ -304,6 +319,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     fn is_virtual(&self) -> bool {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.is_virtual(),
             DeviceBackend::Virtual(d) => d.is_virtual(),
         }
@@ -311,6 +327,7 @@ impl UsbDeviceBackend for DeviceBackend {
 
     fn description(&self) -> String {
         match self {
+            #[cfg(target_os = "linux")]
             DeviceBackend::Real(d) => d.description(),
             DeviceBackend::Virtual(d) => d.description(),
         }
@@ -322,7 +339,8 @@ impl UsbDeviceBackend for DeviceBackend {
 /// Where a USB device comes from.
 #[derive(Debug, Clone)]
 pub enum DeviceSource {
-    /// A physical USB device on the host.
+    /// A physical USB device on the host (Linux only).
+    #[cfg(target_os = "linux")]
     Physical { bus: u8, address: u8 },
     /// A virtual mass storage device backed by a RAW disk image.
     VirtualDisk { path: PathBuf, read_only: bool },
@@ -346,6 +364,7 @@ impl UsbDeviceInfo {
     /// Short label for UI display.
     pub fn label(&self) -> String {
         match &self.source {
+            #[cfg(target_os = "linux")]
             DeviceSource::Physical { bus, address } => {
                 format!(
                     "{} [{:04x}:{:04x}] (bus {} addr {})",
@@ -390,11 +409,14 @@ pub fn is_ep_in(ep: u8) -> bool {
 
 // ── Enumeration ────────────────────────────────────────
 
-/// Enumerate all available USB devices (physical + configured virtual).
+/// Enumerate all available USB devices (physical on Linux + configured virtual).
 ///
 /// `virtual_disks` comes from CLI flags (`--usb-disk`).
 pub fn enumerate_devices(virtual_disks: &[(PathBuf, bool)]) -> Vec<UsbDeviceInfo> {
+    #[cfg(target_os = "linux")]
     let mut devices = real::enumerate_physical();
+    #[cfg(not(target_os = "linux"))]
+    let mut devices = Vec::new();
 
     // Virtual disk devices
     for (path, read_only) in virtual_disks {
@@ -456,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn device_info_label_physical() {
         let info = UsbDeviceInfo {
             source: DeviceSource::Physical { bus: 1, address: 5 },

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+#[cfg(target_os = "linux")]
 use nusb::MaybeFuture;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -19,6 +20,7 @@ use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
+#[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
 use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
@@ -638,6 +640,7 @@ impl UsbredirChannel {
 
     async fn handle_usb_command(&mut self, cmd: UsbCommand) -> Result<()> {
         match cmd {
+            #[cfg(target_os = "linux")]
             UsbCommand::ConnectPhysical { bus, address } => {
                 // Disconnect existing device if any
                 if self.backend.is_some() {
