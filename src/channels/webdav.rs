@@ -345,6 +345,16 @@ impl WebdavChannel {
                 return Ok(());
             };
 
+            // Cap concurrent clients to prevent resource exhaustion
+            if self.clients.len() >= 64 {
+                warn!(
+                    "webdav: rejecting client {} — too many concurrent clients ({})",
+                    frame.client_id,
+                    self.clients.len()
+                );
+                return Ok(());
+            }
+
             info!(
                 "webdav: new client {} ({} bytes initial data)",
                 frame.client_id,

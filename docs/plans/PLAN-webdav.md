@@ -558,6 +558,11 @@ because the following statements will be true:
   VMC LZ4 code built here should also be wired into the
   usbredir channel's send path, which currently only
   decompresses.
+- **Extract shared VMC channel boilerplate**: usbredir.rs
+  and webdav.rs share ~105 lines of identical code
+  (process_messages, SET_ACK/PING/PONG handling,
+  handle_vmc_compressed_data, send helpers). Worth
+  extracting if a third VMC channel is added.
 
 ### Bugs fixed during this work
 
