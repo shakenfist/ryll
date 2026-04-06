@@ -303,7 +303,7 @@ ryll's existing approach.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. SpiceVMC port channel transport | PLAN-webdav-phase-01-port-channel.md | Not started |
+| 1. SpiceVMC port channel transport | PLAN-webdav-phase-01-port-channel.md | Complete |
 | 2. Mux protocol (demux and remux) | PLAN-webdav-phase-02-mux-protocol.md | Not started |
 | 3. Embedded WebDAV server | PLAN-webdav-phase-03-webdav-server.md | Not started |
 | 4. Integration (mux ↔ WebDAV server) | PLAN-webdav-phase-04-integration.md | Not started |
