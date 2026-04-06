@@ -3,8 +3,9 @@
 /// Handles the SPICE SpiceVMC transport for the WebDAV channel
 /// (channel type 11). This carries multiplexed HTTP traffic between
 /// the guest's spice-webdavd daemon and the client's embedded WebDAV
-/// server. The mux protocol and WebDAV server are stubbed in this
-/// initial implementation — only the SPICE transport layer is active.
+/// server. The mux demultiplexer parses client-framed data from the
+/// guest; the actual WebDAV server is not yet connected (phase 3/4).
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -19,8 +20,15 @@ use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
+use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
 
 use super::{ChannelEvent, WebdavCommand};
+
+/// Per-client state for a mux-multiplexed HTTP connection.
+struct MuxClient {
+    /// Bytes of HTTP request data received so far.
+    bytes_received: u64,
+}
 
 pub struct WebdavChannel {
     stream: SpiceStream,
@@ -42,6 +50,10 @@ pub struct WebdavChannel {
 
     // Sharing state
     shared_dir: Option<ShareDirConfig>,
+
+    // Mux protocol state
+    demuxer: MuxDemuxer,
+    clients: HashMap<i64, MuxClient>,
 }
 
 impl WebdavChannel {
@@ -67,6 +79,8 @@ impl WebdavChannel {
             bytes_in: 0,
             bytes_out: 0,
             shared_dir: auto_share_dir,
+            demuxer: MuxDemuxer::new(),
+            clients: HashMap::new(),
         }
     }
 
@@ -232,12 +246,54 @@ impl WebdavChannel {
     }
 
     /// Handle raw VMC data from the server (mux frames from the guest).
-    /// Stubbed for now — the mux demultiplexer will be added in phase 2.
     async fn handle_vmc_data(&mut self, payload: &[u8]) -> Result<()> {
-        debug!(
-            "webdav: received {} bytes of VMC data (mux stub)",
-            payload.len()
-        );
+        self.demuxer.feed(payload);
+
+        while let Some(frame) = self.demuxer.next_frame() {
+            self.handle_mux_frame(frame).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Dispatch a single demuxed mux frame.
+    async fn handle_mux_frame(&mut self, frame: MuxFrame) -> Result<()> {
+        if frame.data.is_empty() {
+            // Client disconnect
+            if self.clients.remove(&frame.client_id).is_some() {
+                debug!("webdav: client {} disconnected", frame.client_id);
+            } else {
+                debug!(
+                    "webdav: client {} disconnect for unknown client (stale close)",
+                    frame.client_id
+                );
+            }
+        } else if let Some(client) = self.clients.get_mut(&frame.client_id) {
+            // Existing client — forward data
+            client.bytes_received += frame.data.len() as u64;
+            debug!(
+                "webdav: client {} received {} bytes (total {})",
+                frame.client_id,
+                frame.data.len(),
+                client.bytes_received,
+            );
+            // Phase 4 will forward to the WebDAV server here.
+        } else {
+            // New client
+            info!(
+                "webdav: new client {} ({} bytes initial data)",
+                frame.client_id,
+                frame.data.len(),
+            );
+            self.clients.insert(
+                frame.client_id,
+                MuxClient {
+                    bytes_received: frame.data.len() as u64,
+                },
+            );
+            // Phase 4 will create a WebDAV server connection here.
+        }
+
         Ok(())
     }
 
@@ -331,6 +387,19 @@ impl WebdavChannel {
     async fn send_data(&mut self, data: &[u8]) -> Result<()> {
         let msg = make_message(spicevmc_client::DATA, data);
         self.send_with_log(spicevmc_client::DATA, &msg).await
+    }
+
+    /// Send a mux-framed response to the guest.
+    #[allow(dead_code)] // used in phase 4 when WebDAV server produces responses
+    async fn send_mux_frame(&mut self, client_id: i64, data: &[u8]) -> Result<()> {
+        let frame = mux::encode_mux_frame(client_id, data);
+        self.send_data(&frame).await
+    }
+
+    /// Signal to the guest that we are closing a client connection.
+    #[allow(dead_code)] // used in phase 4 when WebDAV server produces responses
+    async fn send_mux_close(&mut self, client_id: i64) -> Result<()> {
+        self.send_mux_frame(client_id, &[]).await
     }
 
     /// Send data with LZ4 compression if it saves space, otherwise send uncompressed.
