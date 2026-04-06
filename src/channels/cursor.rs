@@ -314,13 +314,16 @@ impl CursorChannel {
 
     /// Parse SpiceCursor data and emit a CursorShape event if successful.
     async fn parse_and_emit_cursor(&mut self, data: &[u8]) {
-        if data.len() < SpiceCursorHeader::SIZE {
-            // No cursor data in this message
+        if data.len() < SpiceCursorHeader::FLAGS_SIZE {
             return;
         }
 
         let header = match SpiceCursorHeader::read(data) {
-            Ok(h) => h,
+            Ok(Some(h)) => h,
+            Ok(None) => {
+                debug!("cursor: FLAG_NONE set, no cursor data");
+                return;
+            }
             Err(e) => {
                 warn!("cursor: failed to parse SpiceCursorHeader: {}", e);
                 return;
@@ -344,7 +347,6 @@ impl CursorChannel {
         );
 
         if from_cache {
-            // Look up cached cursor by unique_id
             if let Some(img) = self.cursor_cache.get(&header.unique_id) {
                 info!("cursor: using cached cursor id={}", header.unique_id);
                 self.event_tx
@@ -361,7 +363,6 @@ impl CursorChannel {
             return;
         }
 
-        // Pixel data follows the header
         let pixel_data = &data[SpiceCursorHeader::SIZE..];
         let image = decode_cursor_pixels(&header, pixel_data);
 
@@ -527,17 +528,17 @@ mod tests {
     use super::*;
 
     fn build_cursor_payload(
-        cursor_type: u16,
+        cursor_type: u8,
         width: u16,
         height: u16,
-        flags: u32,
+        flags: u16,
         pixel_data: &[u8],
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        // SpiceCursorHeader: flags(4) + unique_id(8) + type(2) + w(2) + h(2) + hx(2) + hy(2)
+        // SpiceCursor: flags(2) + unique_id(8) + type(1) + w(2) + h(2) + hx(2) + hy(2)
         buf.extend_from_slice(&flags.to_le_bytes());
         buf.extend_from_slice(&1u64.to_le_bytes()); // unique_id = 1
-        buf.extend_from_slice(&cursor_type.to_le_bytes());
+        buf.push(cursor_type);
         buf.extend_from_slice(&width.to_le_bytes());
         buf.extend_from_slice(&height.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // hot_spot_x
@@ -548,7 +549,6 @@ mod tests {
 
     #[test]
     fn test_alpha_cursor_argb_to_rgba() {
-        // 2x2 alpha cursor: BGRA pixels
         let pixels: Vec<u8> = vec![
             0x10, 0x20, 0x30, 0x80, // B=0x10, G=0x20, R=0x30, A=0x80
             0x40, 0x50, 0x60, 0xFF, // B=0x40, G=0x50, R=0x60, A=0xFF
@@ -556,7 +556,7 @@ mod tests {
             0xFF, 0xFF, 0xFF, 0xFF, // opaque white
         ];
         let data = build_cursor_payload(0, 2, 2, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap();
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
         let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
         assert!(result.is_some());
 
@@ -586,10 +586,9 @@ mod tests {
 
     #[test]
     fn test_color32_cursor_xrgb_to_rgba() {
-        // 1x1 color32 cursor: BGRX pixel
         let pixels: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0x00]; // B=AA, G=BB, R=CC, x=00
         let data = build_cursor_payload(6, 1, 1, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap();
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
         let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
         assert!(result.is_some());
 
@@ -599,9 +598,8 @@ mod tests {
 
     #[test]
     fn test_from_cache_flag_no_pixel_data() {
-        // Header with FROM_CACHE flag — no pixel data expected
         let data = build_cursor_payload(0, 24, 24, SpiceCursorHeader::FLAG_FROM_CACHE, &[]);
-        let header = SpiceCursorHeader::read(&data).unwrap();
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
         assert_eq!(
             header.flags & SpiceCursorHeader::FLAG_FROM_CACHE,
             SpiceCursorHeader::FLAG_FROM_CACHE
@@ -611,9 +609,16 @@ mod tests {
     }
 
     #[test]
+    fn test_flag_none_returns_none() {
+        let data = build_cursor_payload(0, 24, 24, SpiceCursorHeader::FLAG_NONE, &[]);
+        let result = SpiceCursorHeader::read(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
     fn test_zero_dimension_cursor_returns_none() {
         let data = build_cursor_payload(0, 0, 0, 0, &[]);
-        let header = SpiceCursorHeader::read(&data).unwrap();
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
         let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
         assert!(result.is_none());
     }
