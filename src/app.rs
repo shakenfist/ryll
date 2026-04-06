@@ -210,8 +210,8 @@ pub struct RyllApp {
     usb_add_disk_readonly: bool,
     usb_add_disk_message: Option<String>,
 
-    // WebDAV panel state (fields used in phase 5 UI panel)
-    #[allow(dead_code)]
+    // WebDAV panel state
+    show_webdav_panel: bool,
     webdav_tx: Option<mpsc::Sender<WebdavCommand>>,
     webdav_channel_ready: bool,
     webdav_shared_dir: Option<String>,
@@ -220,6 +220,8 @@ pub struct RyllApp {
     webdav_connected_at: Option<Instant>,
     webdav_error_message: Option<String>,
     webdav_error_time: Option<Instant>,
+    webdav_pick_dir_rx: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    webdav_pick_dir_readonly: bool,
 
     // Traffic viewer state
     show_traffic_viewer: bool,
@@ -231,6 +233,7 @@ pub struct RyllApp {
     traffic_filter_inputs: bool,
     traffic_filter_cursor: bool,
     traffic_filter_usbredir: bool,
+    traffic_filter_webdav: bool,
 }
 
 impl RyllApp {
@@ -355,6 +358,7 @@ impl RyllApp {
             usb_add_disk_rx: None,
             usb_add_disk_readonly: false,
             usb_add_disk_message: None,
+            show_webdav_panel: false,
             webdav_channel_ready: false,
             webdav_shared_dir: None,
             webdav_read_only: false,
@@ -362,6 +366,8 @@ impl RyllApp {
             webdav_connected_at: None,
             webdav_error_message: None,
             webdav_error_time: None,
+            webdav_pick_dir_rx: None,
+            webdav_pick_dir_readonly: false,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -371,6 +377,7 @@ impl RyllApp {
             traffic_filter_inputs: true,
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
+            traffic_filter_webdav: true,
         }
     }
 
@@ -920,6 +927,9 @@ impl eframe::App for RyllApp {
                         if ui.small_button("USB").clicked() {
                             self.show_usb_panel = !self.show_usb_panel;
                         }
+                        if ui.small_button("Folders").clicked() {
+                            self.show_webdav_panel = !self.show_webdav_panel;
+                        }
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
@@ -965,6 +975,7 @@ impl eframe::App for RyllApp {
                         ui.checkbox(&mut self.traffic_filter_inputs, "Inputs");
                         ui.checkbox(&mut self.traffic_filter_cursor, "Cursor");
                         ui.checkbox(&mut self.traffic_filter_usbredir, "USB");
+                        ui.checkbox(&mut self.traffic_filter_webdav, "WebDAV");
                     });
                     ui.separator();
 
@@ -982,6 +993,7 @@ impl eframe::App for RyllApp {
                                     "inputs" => self.traffic_filter_inputs,
                                     "cursor" => self.traffic_filter_cursor,
                                     "usbredir" => self.traffic_filter_usbredir,
+                                    "webdav" => self.traffic_filter_webdav,
                                     _ => true,
                                 };
                                 if !visible {
@@ -1000,6 +1012,7 @@ impl eframe::App for RyllApp {
                                     "inputs" => egui::Color32::from_rgb(255, 180, 80),
                                     "cursor" => egui::Color32::from_rgb(200, 130, 255),
                                     "usbredir" => egui::Color32::from_rgb(255, 100, 100),
+                                    "webdav" => egui::Color32::from_rgb(100, 200, 200),
                                     _ => egui::Color32::GRAY,
                                 };
                                 let size_str = format_size(entry.wire_size);
@@ -1267,6 +1280,126 @@ impl eframe::App for RyllApp {
                 self.show_bug_dialog = true;
                 self.bug_report_type = BugReportType::Usb;
                 self.bug_description = self.usb_error_message.clone().unwrap_or_default();
+            }
+        }
+
+        // ── WebDAV Folders panel ─────────────────────────
+        if self.show_webdav_panel {
+            // Poll directory picker result
+            let mut picked_dir = None;
+            if let Some(ref rx) = self.webdav_pick_dir_rx {
+                if let Ok(result) = rx.try_recv() {
+                    picked_dir = Some(result);
+                }
+            }
+            if picked_dir.is_some() {
+                self.webdav_pick_dir_rx = None;
+            }
+
+            let mut webdav_action = None;
+
+            if let Some(Some(path)) = picked_dir {
+                if path.is_dir() {
+                    webdav_action = Some(WebdavCommand::ShareDirectory {
+                        path,
+                        read_only: self.webdav_pick_dir_readonly,
+                    });
+                }
+            }
+
+            // Auto-clear WebDAV errors after 10 seconds
+            if let Some(error_time) = self.webdav_error_time {
+                if error_time.elapsed() > Duration::from_secs(10) {
+                    self.webdav_error_message = None;
+                    self.webdav_error_time = None;
+                }
+            }
+
+            // Request repaint for elapsed timer and error auto-clear
+            if self.webdav_connected_at.is_some() || self.webdav_error_time.is_some() {
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+
+            egui::SidePanel::right("webdav_panel")
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    ui.heading("Shared Folders");
+                    ui.separator();
+
+                    // Channel status
+                    if self.webdav_channel_ready {
+                        ui.label("Channel: Ready");
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "Channel: Not available");
+                    }
+
+                    // Active share with elapsed timer
+                    if self.webdav_sharing_active {
+                        if let Some(ref dir) = self.webdav_shared_dir {
+                            ui.separator();
+                            let elapsed = self
+                                .webdav_connected_at
+                                .map(|t| t.elapsed().as_secs())
+                                .unwrap_or(0);
+                            let mins = elapsed / 60;
+                            let secs = elapsed % 60;
+                            let ro = if self.webdav_read_only { " [RO]" } else { "" };
+                            ui.label(format!("Sharing: {}{} ({}m {}s)", dir, ro, mins, secs));
+                            if ui.button("Stop Sharing").clicked() {
+                                webdav_action = Some(WebdavCommand::StopSharing);
+                            }
+                        }
+                    }
+
+                    // Error display
+                    if self.webdav_error_message.is_some() {
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            self.webdav_error_message.as_ref().unwrap(),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.small_button("Dismiss").clicked() {
+                                self.webdav_error_message = None;
+                                self.webdav_error_time = None;
+                            }
+                        });
+                    }
+
+                    // Share controls (when not sharing)
+                    if !self.webdav_sharing_active {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut self.webdav_pick_dir_readonly, "Read-only");
+                            let picker_active = self.webdav_pick_dir_rx.is_some();
+                            let enabled = self.webdav_channel_ready && !picker_active;
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("Share Directory..."))
+                                .clicked()
+                            {
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                std::thread::spawn(move || {
+                                    let result = rfd::FileDialog::new()
+                                        .set_title("Select directory to share")
+                                        .pick_folder();
+                                    let _ = tx.send(result);
+                                });
+                                self.webdav_pick_dir_rx = Some(rx);
+                            }
+                        });
+                    }
+                });
+
+            // Execute WebDAV action outside the closure
+            if let Some(cmd) = webdav_action {
+                self.webdav_error_message = None;
+                self.webdav_error_time = None;
+                if let Some(ref tx) = self.webdav_tx {
+                    if let Err(e) = tx.try_send(cmd) {
+                        self.webdav_error_message = Some(format!("Failed to send command: {}", e));
+                        self.webdav_error_time = Some(Instant::now());
+                    }
+                }
             }
         }
 
