@@ -306,7 +306,7 @@ ryll's existing approach.
 | 1. SpiceVMC port channel transport | PLAN-webdav-phase-01-port-channel.md | Complete |
 | 2. Mux protocol (demux and remux) | PLAN-webdav-phase-02-mux-protocol.md | Complete |
 | 3. Embedded WebDAV server | PLAN-webdav-phase-03-webdav-server.md | Complete |
-| 4. Integration (mux ↔ WebDAV server) | PLAN-webdav-phase-04-integration.md | Not started |
+| 4. Integration (mux ↔ WebDAV server) | PLAN-webdav-phase-04-integration.md | Complete |
 | 5. UI panel | PLAN-webdav-phase-05-ui.md | Not started |
 | 6. Testing and QEMU setup | PLAN-webdav-phase-06-testing.md | Not started |
 
