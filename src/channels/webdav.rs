@@ -3,14 +3,15 @@
 /// Handles the SPICE SpiceVMC transport for the WebDAV channel
 /// (channel type 11). This carries multiplexed HTTP traffic between
 /// the guest's spice-webdavd daemon and the client's embedded WebDAV
-/// server. The mux demultiplexer parses client-framed data from the
-/// guest; the actual WebDAV server is not yet connected (phase 3/4).
+/// server. Each mux client gets a DuplexStream pair connecting the
+/// mux layer to a per-client hyper/dav-server instance.
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
@@ -21,13 +22,27 @@ use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
 use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
+use crate::webdav::server::WebdavServer;
 
 use super::{ChannelEvent, WebdavCommand};
+
+/// Response data from a per-client reader task back to the main loop.
+struct MuxResponse {
+    client_id: i64,
+    data: Vec<u8>, // empty = client connection finished
+}
 
 /// Per-client state for a mux-multiplexed HTTP connection.
 struct MuxClient {
     /// Bytes of HTTP request data received so far.
     bytes_received: u64,
+    /// Write half of the client end of the DuplexStream.
+    /// Request data from the guest is written here.
+    write_half: WriteHalf<tokio::io::DuplexStream>,
+    /// Handle for the hyper server task.
+    server_handle: tokio::task::JoinHandle<()>,
+    /// Handle for the response reader task.
+    reader_handle: tokio::task::JoinHandle<()>,
 }
 
 pub struct WebdavChannel {
@@ -54,6 +69,14 @@ pub struct WebdavChannel {
     // Mux protocol state
     demuxer: MuxDemuxer,
     clients: HashMap<i64, MuxClient>,
+
+    // Response channel: per-client reader tasks send
+    // response data here for muxing back to the guest.
+    response_tx: mpsc::Sender<MuxResponse>,
+    response_rx: mpsc::Receiver<MuxResponse>,
+
+    // WebDAV server (None until sharing is started)
+    server: Option<WebdavServer>,
 }
 
 impl WebdavChannel {
@@ -65,6 +88,7 @@ impl WebdavChannel {
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
     ) -> Self {
+        let (response_tx, response_rx) = mpsc::channel(256);
         WebdavChannel {
             stream,
             event_tx,
@@ -81,6 +105,9 @@ impl WebdavChannel {
             shared_dir: auto_share_dir,
             demuxer: MuxDemuxer::new(),
             clients: HashMap::new(),
+            response_tx,
+            response_rx,
+            server: None,
         }
     }
 
@@ -92,24 +119,40 @@ impl WebdavChannel {
             .await
             .ok();
 
-        // If a shared directory was configured via CLI, signal that sharing is active
+        // If a shared directory was configured via CLI, create the server
         if let Some(ref dir) = self.shared_dir {
             let path_str = dir.path.display().to_string();
-            info!(
-                "webdav: auto-sharing directory: {} (read_only={})",
-                path_str, dir.read_only,
-            );
-            self.event_tx
-                .send(ChannelEvent::WebdavSharingStarted {
-                    path: path_str,
-                    read_only: dir.read_only,
-                })
-                .await
-                .ok();
+            match WebdavServer::new(dir.path.clone(), dir.read_only) {
+                Ok(server) => {
+                    info!(
+                        "webdav: auto-sharing directory: {} (read_only={})",
+                        path_str, dir.read_only,
+                    );
+                    self.server = Some(server);
+                    self.event_tx
+                        .send(ChannelEvent::WebdavSharingStarted {
+                            path: path_str,
+                            read_only: dir.read_only,
+                        })
+                        .await
+                        .ok();
+                }
+                Err(e) => {
+                    error!("webdav: failed to create server for {}: {}", path_str, e);
+                    self.event_tx
+                        .send(ChannelEvent::WebdavError(format!(
+                            "Failed to share {}: {}",
+                            path_str, e
+                        )))
+                        .await
+                        .ok();
+                }
+            }
         }
 
         loop {
             let webdav_rx = &mut self.webdav_rx;
+            let response_rx = &mut self.response_rx;
 
             tokio::select! {
                 // Network read
@@ -130,6 +173,7 @@ impl WebdavChannel {
                     let (n, chunk) = result?;
                     if n == 0 {
                         info!("webdav: channel disconnected");
+                        self.shutdown_all_clients();
                         self.event_tx
                             .send(ChannelEvent::Disconnected(ChannelType::Webdav))
                             .await
@@ -145,6 +189,11 @@ impl WebdavChannel {
                     self.bytes_in += n as u64;
 
                     self.process_messages().await?;
+                }
+
+                // Response data from per-client reader tasks
+                Some(resp) = response_rx.recv() => {
+                    self.handle_response(resp).await?;
                 }
 
                 // WebDAV commands from the app
@@ -260,8 +309,12 @@ impl WebdavChannel {
     async fn handle_mux_frame(&mut self, frame: MuxFrame) -> Result<()> {
         if frame.data.is_empty() {
             // Client disconnect
-            if self.clients.remove(&frame.client_id).is_some() {
-                debug!("webdav: client {} disconnected", frame.client_id);
+            if let Some(client) = self.clients.remove(&frame.client_id) {
+                debug!("webdav: client {} disconnected by guest", frame.client_id);
+                // Dropping write_half causes hyper to see EOF.
+                // Abort tasks as a safety net.
+                client.server_handle.abort();
+                client.reader_handle.abort();
             } else {
                 debug!(
                     "webdav: client {} disconnect for unknown client (stale close)",
@@ -269,31 +322,120 @@ impl WebdavChannel {
                 );
             }
         } else if let Some(client) = self.clients.get_mut(&frame.client_id) {
-            // Existing client — forward data
+            // Existing client — forward data to its DuplexStream
             client.bytes_received += frame.data.len() as u64;
-            debug!(
-                "webdav: client {} received {} bytes (total {})",
-                frame.client_id,
-                frame.data.len(),
-                client.bytes_received,
-            );
-            // Phase 4 will forward to the WebDAV server here.
+            if let Err(e) = client.write_half.write_all(&frame.data).await {
+                warn!(
+                    "webdav: failed to write to client {}: {}",
+                    frame.client_id, e
+                );
+                // Remove the broken client
+                if let Some(client) = self.clients.remove(&frame.client_id) {
+                    client.server_handle.abort();
+                    client.reader_handle.abort();
+                }
+            }
         } else {
-            // New client
+            // New client — create DuplexStream pair and spawn tasks
+            let Some(ref server) = self.server else {
+                warn!(
+                    "webdav: received data for client {} but no directory is shared",
+                    frame.client_id
+                );
+                return Ok(());
+            };
+
             info!(
                 "webdav: new client {} ({} bytes initial data)",
                 frame.client_id,
                 frame.data.len(),
             );
+
+            let (client_end, server_end) = tokio::io::duplex(65536);
+            let (read_half, mut write_half) = tokio::io::split(client_end);
+
+            // Spawn server task: hyper + dav-server on the server end
+            let server_clone = server.clone();
+            let cid = frame.client_id;
+            let server_handle = tokio::spawn(async move {
+                if let Err(e) = server_clone.serve_client(server_end).await {
+                    debug!("webdav: server task for client {} ended: {}", cid, e);
+                }
+            });
+
+            // Spawn reader task: reads response bytes from client end,
+            // sends them back to the main loop via response_tx
+            let tx = self.response_tx.clone();
+            let reader_cid = frame.client_id;
+            let reader_handle = tokio::spawn(async move {
+                let mut read_half = read_half;
+                let mut buf = [0u8; 65536];
+                loop {
+                    match read_half.read(&mut buf).await {
+                        Ok(0) | Err(_) => {
+                            // Connection closed or error — signal completion
+                            tx.send(MuxResponse {
+                                client_id: reader_cid,
+                                data: vec![],
+                            })
+                            .await
+                            .ok();
+                            break;
+                        }
+                        Ok(n) => {
+                            if tx
+                                .send(MuxResponse {
+                                    client_id: reader_cid,
+                                    data: buf[..n].to_vec(),
+                                })
+                                .await
+                                .is_err()
+                            {
+                                break; // Channel closed, main loop is gone
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Write initial request data
+            if let Err(e) = write_half.write_all(&frame.data).await {
+                warn!(
+                    "webdav: failed to write initial data for client {}: {}",
+                    frame.client_id, e
+                );
+                server_handle.abort();
+                reader_handle.abort();
+                return Ok(());
+            }
+
             self.clients.insert(
                 frame.client_id,
                 MuxClient {
                     bytes_received: frame.data.len() as u64,
+                    write_half,
+                    server_handle,
+                    reader_handle,
                 },
             );
-            // Phase 4 will create a WebDAV server connection here.
         }
 
+        Ok(())
+    }
+
+    /// Handle response data from a per-client reader task.
+    async fn handle_response(&mut self, resp: MuxResponse) -> Result<()> {
+        if resp.data.is_empty() {
+            // Client connection finished — send close frame to guest
+            debug!("webdav: client {} finished, sending close", resp.client_id);
+            self.send_mux_close(resp.client_id).await?;
+            if let Some(client) = self.clients.remove(&resp.client_id) {
+                client.server_handle.abort();
+                client.reader_handle.abort();
+            }
+        } else {
+            self.send_mux_frame(resp.client_id, &resp.data).await?;
+        }
         Ok(())
     }
 
@@ -355,21 +497,38 @@ impl WebdavChannel {
         match cmd {
             WebdavCommand::ShareDirectory { path, read_only } => {
                 let path_str = path.display().to_string();
-                info!(
-                    "webdav: sharing directory: {} (read_only={})",
-                    path_str, read_only
-                );
-                self.shared_dir = Some(ShareDirConfig { path, read_only });
-                self.event_tx
-                    .send(ChannelEvent::WebdavSharingStarted {
-                        path: path_str,
-                        read_only,
-                    })
-                    .await
-                    .ok();
+                match WebdavServer::new(path.clone(), read_only) {
+                    Ok(server) => {
+                        info!(
+                            "webdav: sharing directory: {} (read_only={})",
+                            path_str, read_only
+                        );
+                        self.server = Some(server);
+                        self.shared_dir = Some(ShareDirConfig { path, read_only });
+                        self.event_tx
+                            .send(ChannelEvent::WebdavSharingStarted {
+                                path: path_str,
+                                read_only,
+                            })
+                            .await
+                            .ok();
+                    }
+                    Err(e) => {
+                        error!("webdav: failed to create server for {}: {}", path_str, e);
+                        self.event_tx
+                            .send(ChannelEvent::WebdavError(format!(
+                                "Failed to share {}: {}",
+                                path_str, e
+                            )))
+                            .await
+                            .ok();
+                    }
+                }
             }
             WebdavCommand::StopSharing => {
                 info!("webdav: stopped sharing");
+                self.shutdown_all_clients();
+                self.server = None;
                 self.shared_dir = None;
                 self.event_tx
                     .send(ChannelEvent::WebdavSharingStopped)
@@ -380,24 +539,32 @@ impl WebdavChannel {
         Ok(())
     }
 
+    // ── Client lifecycle ──────────────────────────────
+
+    /// Abort all client tasks and clear the client map.
+    fn shutdown_all_clients(&mut self) {
+        for (cid, client) in self.clients.drain() {
+            debug!("webdav: shutting down client {}", cid);
+            client.server_handle.abort();
+            client.reader_handle.abort();
+        }
+    }
+
     // ── Send helpers ───────────────────────────────────
 
     /// Send raw bytes wrapped in a SPICEVMC_DATA SPICE message.
-    #[allow(dead_code)]
     async fn send_data(&mut self, data: &[u8]) -> Result<()> {
         let msg = make_message(spicevmc_client::DATA, data);
         self.send_with_log(spicevmc_client::DATA, &msg).await
     }
 
     /// Send a mux-framed response to the guest.
-    #[allow(dead_code)] // used in phase 4 when WebDAV server produces responses
     async fn send_mux_frame(&mut self, client_id: i64, data: &[u8]) -> Result<()> {
         let frame = mux::encode_mux_frame(client_id, data);
         self.send_data(&frame).await
     }
 
     /// Signal to the guest that we are closing a client connection.
-    #[allow(dead_code)] // used in phase 4 when WebDAV server produces responses
     async fn send_mux_close(&mut self, client_id: i64) -> Result<()> {
         self.send_mux_frame(client_id, &[]).await
     }

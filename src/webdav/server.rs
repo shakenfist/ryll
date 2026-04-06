@@ -22,12 +22,10 @@ use tokio::io::DuplexStream;
 ///
 /// Cheaply cloneable — the inner `DavHandler` wraps an `Arc`.
 #[derive(Clone)]
-#[allow(dead_code)] // used in phase 4 when mux clients are connected
 pub struct WebdavServer {
     handler: DavHandler,
 }
 
-#[allow(dead_code)] // used in phase 4 when mux clients are connected
 impl WebdavServer {
     /// Create a new WebDAV server serving `root`.
     ///
