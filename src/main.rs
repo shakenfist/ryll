@@ -25,6 +25,7 @@ mod protocol;
 mod settings;
 mod usb;
 mod usbredir;
+mod webdav;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,7 +38,9 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
 use crate::capture::CaptureSession;
-use crate::config::{parse_virtual_disks, Args, Config, VirtualDiskConfig};
+use crate::config::{
+    parse_share_dir, parse_virtual_disks, Args, Config, ShareDirConfig, VirtualDiskConfig,
+};
 
 /// Flag set by the Ctrl+C handler to request graceful shutdown.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -101,6 +104,9 @@ fn main() -> Result<()> {
     // Parse virtual disk configs (validates paths early)
     let virtual_disks = parse_virtual_disks(&args)?;
 
+    // Parse shared directory config (validates path early)
+    let share_dir = parse_share_dir(&args)?;
+
     // Create capture session if requested
     #[cfg(feature = "capture")]
     let capture = match &args.capture {
@@ -116,9 +122,9 @@ fn main() -> Result<()> {
     let capture: Option<Arc<CaptureSession>> = None;
 
     if args.headless {
-        run_headless(config, &args, virtual_disks, capture)
+        run_headless(config, &args, virtual_disks, share_dir, capture)
     } else {
-        run_gui(config, &args, virtual_disks, capture)
+        run_gui(config, &args, virtual_disks, share_dir, capture)
     }
 }
 
@@ -126,19 +132,22 @@ fn run_headless(
     config: Config,
     args: &Args,
     virtual_disks: Vec<VirtualDiskConfig>,
+    share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime
-        .block_on(async { app::run_headless(config, args.cadence, virtual_disks, capture).await })
+    runtime.block_on(async {
+        app::run_headless(config, args.cadence, virtual_disks, share_dir, capture).await
+    })
 }
 
 fn run_gui(
     config: Config,
     args: &Args,
     virtual_disks: Vec<VirtualDiskConfig>,
+    share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
 ) -> Result<()> {
     info!("Starting GUI");
@@ -160,6 +169,7 @@ fn run_gui(
                 config,
                 cadence,
                 virtual_disks,
+                share_dir,
                 capture,
             )))
         }),

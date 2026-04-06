@@ -6,8 +6,9 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
-- **Multi-channel support** - Handles main, display, cursor, inputs, and usbredir channels
+- **Multi-channel support** - Handles main, display, cursor, inputs, usbredir, and webdav channels
 - **USB device redirection** - Forward physical USB devices (Linux only) or present RAW disk images as virtual USB mass storage devices on all platforms. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
+- **WebDAV folder sharing** - Share a local directory with the guest VM via the SPICE WebDAV channel. The guest mounts the share via `spice-webdavd` + `davfs2`. Supports read-write and read-only modes. Interactive "Folders" panel in the GUI for directory selection and share management. CLI flags (`--share-dir`, `--share-dir-ro`) for headless/scripted use
 - **TLS support** - Secure connections with inline CA certificates from .vv files
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
@@ -21,6 +22,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, and screenshots; Display reports include interactive region selection to highlight corruption
 - **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
+- **Folder sharing** - Click "Folders" in the status bar for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
 
 ## Installation
 
@@ -154,8 +156,9 @@ ryll --file connection.vv --capture /tmp/capture
 This writes:
 - `metadata.json` — session context (ryll version, platform, target host)
   for self-describing capture directories in bug reports
-- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap` —
-  per-channel pcap files with fake TCP/IP headers, openable in Wireshark
+- `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`,
+  `webdav.pcap` — per-channel pcap files with fake TCP/IP headers, openable
+  in Wireshark
 - `display.mp4` — H.264 video of the display surface at real timing
 
 See [STYLEGUIDE.md](STYLEGUIDE.md) for capture conventions.
@@ -193,7 +196,8 @@ src/
 │   ├── display.rs       # Display rendering, GLZ dictionary
 │   ├── cursor.rs        # Cursor tracking
 │   ├── inputs.rs        # Keyboard/mouse input
-│   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+│   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
+│   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
 ├── usbredir/
 │   ├── constants.rs     # usbredir message types, capabilities
 │   ├── messages.rs      # Wire format structs, read/write
@@ -202,6 +206,10 @@ src/
 │   ├── mod.rs           # UsbDeviceBackend trait, device enumeration
 │   ├── real.rs          # Physical USB device backend (nusb, Linux only)
 │   └── virtual_msc.rs   # Virtual mass storage (RAW disk images)
+├── webdav/
+│   ├── mod.rs           # WebDAV module
+│   ├── mux.rs           # Mux protocol (client multiplexing)
+│   └── server.rs        # Embedded WebDAV server (dav-server + hyper)
 ├── decompression/
 │   ├── glz.rs           # GLZ decompression
 │   └── lz.rs            # LZ decompression
@@ -218,6 +226,8 @@ src/
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
 - **nusb** - USB device access (pure Rust, no libusb)
+- **dav-server** - WebDAV server (RFC 4918, LocalFs backend)
+- **hyper** - HTTP/1.1 framing for WebDAV byte-stream transport
 - **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version

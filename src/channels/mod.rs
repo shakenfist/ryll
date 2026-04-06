@@ -3,12 +3,14 @@ pub mod display;
 pub mod inputs;
 pub mod main_channel;
 pub mod usbredir;
+pub mod webdav;
 
 pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
 pub use usbredir::UsbredirChannel;
+pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
@@ -88,6 +90,19 @@ pub enum ChannelEvent {
     #[allow(dead_code)]
     UsbDevicesChanged(Vec<UsbDeviceInfo>),
 
+    /// A WebDAV channel connected successfully
+    WebdavChannelReady,
+
+    /// WebDAV folder sharing started
+    WebdavSharingStarted { path: String, read_only: bool },
+
+    /// WebDAV folder sharing stopped
+    WebdavSharingStopped,
+
+    /// A WebDAV error occurred
+    #[allow(dead_code)] // used in later phases when WebDAV serving is implemented
+    WebdavError(String),
+
     /// Channel disconnected
     Disconnected(ChannelType),
 }
@@ -109,6 +124,15 @@ pub enum InputEvent {
 
     /// Mouse button released
     MouseUp { button: u32, x: u32, y: u32 },
+}
+
+/// Commands sent from the app to the webdav channel.
+#[allow(dead_code)] // variants constructed in phase 5 (UI panel)
+pub enum WebdavCommand {
+    /// Start sharing a local directory.
+    ShareDirectory { path: PathBuf, read_only: bool },
+    /// Stop sharing the current directory.
+    StopSharing,
 }
 
 /// Commands sent from the app to the usbredir channel.

@@ -126,6 +126,7 @@ All SPICE messages use a 6-byte mini-header:
 | Inputs (3) | User input | key_down, key_up, mouse_position |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
 | Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
+| WebDAV (11) | Folder sharing | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 
 ## Image Types and Compression
 
@@ -384,6 +385,92 @@ channel's pcap traffic. Generic channel errors (displayed in the central
 panel) also offer a bug report button pre-populated with
 `BugReportType::Connection`.
 
+## WebDAV Folder Sharing
+
+WebDAV folder sharing uses the SPICE WebDAV channel (type 11) to export a
+local directory to the guest VM. Like usbredir, it uses the SpiceVMC transport
+(`SPICEVMC_DATA` / `SPICEVMC_COMPRESSED_DATA` messages). The guest's
+`spice-webdavd` daemon issues HTTP WebDAV requests through the channel;
+ryll runs an embedded WebDAV server that fulfils them against the local
+filesystem.
+
+### Protocol layers
+
+```
+SPICE SpiceVMC (DATA/COMPRESSED_DATA messages)
+  └── Mux protocol (client_id + size + HTTP data)
+        └── HTTP/1.1 (parsed by hyper)
+              └── WebDAV (RFC 4918, handled by dav-server with LocalFs)
+                    └── Local filesystem I/O
+```
+
+### Mux protocol
+
+The WebDAV channel multiplexes multiple concurrent HTTP clients over a
+single byte stream. Each frame is:
+
+```
+client_id:  i64 LE  (8 bytes) — identifies the HTTP client
+data_size:  u16 LE  (2 bytes) — payload size (0 = disconnect)
+data:       [u8]    (data_size bytes) — raw HTTP bytes
+```
+
+The `MuxDemuxer` (`src/webdav/mux.rs`) accumulates bytes and extracts
+complete frames, handling frames that span VMC messages or are packed
+together.
+
+### Per-client architecture
+
+Each mux client gets a `tokio::io::DuplexStream` pair:
+
+```
+Guest HTTP request bytes
+       │
+       ▼
+  DuplexStream (client end, split)
+  ├── write half: held in MuxClient, main loop writes request data
+  └── read half: reader task reads response data, sends via mpsc
+       │
+       ▼
+  DuplexStream (server end)
+       │
+       ▼
+  TokioIo → hyper http1::serve_connection() → dav-server DavHandler
+       │
+       ▼
+  Local filesystem (via dav-server LocalFs)
+```
+
+Response data flows back through an `mpsc::Sender<MuxResponse>` from
+the per-client reader task to the main `run()` loop, which muxes the
+responses back to the guest. This is the same pattern used by usbredir's
+interrupt polling tasks.
+
+### Server lifecycle
+
+The `WebdavServer` (`src/webdav/server.rs`) wraps `dav-server::DavHandler`
+with `LocalFs` and is cheaply cloneable (inner `Arc`). It is created when
+a `ShareDirectory` command arrives from the UI or `--share-dir` is
+specified on the CLI, and destroyed on `StopSharing`. Read-only mode uses
+`DavMethodSet::WEBDAV_RO` to restrict allowed HTTP methods.
+
+### CLI usage
+
+```bash
+ryll --file conn.vv --share-dir /path/to/dir          # read-write
+ryll --file conn.vv --share-dir /path/to/dir --share-dir-ro  # read-only
+```
+
+See `docs/configuration.md` for details. Use `make test-qemu-webdav` to start
+a QEMU instance with WebDAV enabled.
+
+### GUI Components
+
+The Folders panel is a right-side panel toggled by the "Folders" status bar
+button. It mirrors the USB panel structure: channel status indicator, active
+share display with elapsed timer, error display with auto-clear, read-only
+checkbox, and native directory picker via `rfd::FileDialog::pick_folder`.
+
 ## Capture Mode
 
 When `--capture <DIR>` is specified, ryll records:
@@ -398,7 +485,8 @@ reports or debugging.
 ### Protocol capture (pcap)
 
 Each SPICE channel writes a separate pcap file (`main.pcap`,
-`display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`) containing
+`display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`,
+`webdav.pcap`) containing
 decrypted SPICE mini-header messages wrapped in fake TCP/IP
 headers. Wireshark can open these directly.
 

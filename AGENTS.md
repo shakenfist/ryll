@@ -103,6 +103,13 @@ Ryll uses:
     virtual disk devices are available. The file picker for adding virtual disks
     also runs on a background thread with results polled via `try_recv()`.
 
+11. **WebDAV shares local directory via embedded HTTP server** - Each mux
+    client gets a `tokio::io::DuplexStream`; hyper parses HTTP/1.1 and
+    dav-server handles WebDAV operations against the local filesystem.
+    Response data flows back to the main loop via `mpsc::Sender<MuxResponse>`,
+    the same pattern used by usbredir's interrupt polling tasks. The Folders
+    UI panel mirrors the USB panel structure.
+
 ## Code Organisation
 
 ```
@@ -111,7 +118,7 @@ src/
 ├── app.rs               # egui App, event loop, headless runner,
 │                        #   bandwidth sparkline, bug report dialog,
 │                        #   live traffic viewer panel, USB device
-│                        #   management panel
+│                        #   management panel, WebDAV folders panel
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
 │                        #   TrafficRingBuffer, TrafficBuffers),
 │                        #   channel state snapshots (DisplaySnapshot,
@@ -137,7 +144,8 @@ src/
 │   ├── inputs.rs        # Keyboard scancodes (with E0 extended
 │                        #   prefix for nav cluster), mouse events,
 │                        #   motion coalescing to prevent channel backpressure
-│   └── usbredir.rs      # USB redirection (SpiceVMC transport)
+│   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
+│   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser
 │   ├── constants.rs     # Message types, capabilities, status codes
 │   ├── messages.rs      # Wire format structs, read/write
@@ -148,6 +156,10 @@ src/
 │   ├── real.rs          # Physical device backend (nusb, Linux only)
 │   └── virtual_msc.rs   # Virtual USB mass storage (RAW images,
 │                        #   BOT protocol, SCSI command set)
+├── webdav/              # WebDAV folder sharing
+│   ├── mod.rs           # Module declaration
+│   ├── mux.rs           # Mux protocol (client multiplexing, unit tests)
+│   └── server.rs        # Embedded WebDAV server (dav-server + hyper)
 ├── decompression/       # Image decompression
 │   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
 │   └── lz.rs            # LZ (simpler, single-frame)
