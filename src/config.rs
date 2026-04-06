@@ -53,6 +53,14 @@ pub struct Args {
     /// Present a RAW disk image as a read-only USB mass storage device (repeatable)
     #[arg(long = "usb-disk-ro")]
     pub usb_disk_ro: Vec<String>,
+
+    /// Share a local directory with the guest via WebDAV (SPICE folder sharing)
+    #[arg(long = "share-dir")]
+    pub share_dir: Option<String>,
+
+    /// Make the shared directory read-only
+    #[arg(long = "share-dir-ro")]
+    pub share_dir_ro: bool,
 }
 
 /// SPICE connection configuration
@@ -227,6 +235,36 @@ pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
     }
 
     Ok(disks)
+}
+
+/// Parsed shared directory configuration from CLI flags.
+#[derive(Debug, Clone)]
+pub struct ShareDirConfig {
+    pub path: PathBuf,
+    pub read_only: bool,
+}
+
+/// Parse shared directory config from CLI args, validating the path.
+pub fn parse_share_dir(args: &Args) -> Result<Option<ShareDirConfig>> {
+    match &args.share_dir {
+        Some(path_str) => {
+            let path = PathBuf::from(path_str);
+            if !path.exists() {
+                return Err(anyhow!("Shared directory not found: {}", path.display()));
+            }
+            if !path.is_dir() {
+                return Err(anyhow!(
+                    "Shared path is not a directory: {}",
+                    path.display()
+                ));
+            }
+            Ok(Some(ShareDirConfig {
+                path,
+                read_only: args.share_dir_ro,
+            }))
+        }
+        None => Ok(None),
+    }
 }
 
 fn validate_disk_path(path: &Path) -> Result<()> {

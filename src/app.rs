@@ -17,9 +17,9 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, UsbCommand, UsbredirChannel,
+    MainChannel, UsbCommand, UsbredirChannel, WebdavChannel, WebdavCommand,
 };
-use crate::config::{Config, VirtualDiskConfig};
+use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::{ChannelType, SpiceClient};
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
@@ -210,6 +210,17 @@ pub struct RyllApp {
     usb_add_disk_readonly: bool,
     usb_add_disk_message: Option<String>,
 
+    // WebDAV panel state (fields used in phase 5 UI panel)
+    #[allow(dead_code)]
+    webdav_tx: Option<mpsc::Sender<WebdavCommand>>,
+    webdav_channel_ready: bool,
+    webdav_shared_dir: Option<String>,
+    webdav_read_only: bool,
+    webdav_sharing_active: bool,
+    webdav_connected_at: Option<Instant>,
+    webdav_error_message: Option<String>,
+    webdav_error_time: Option<Instant>,
+
     // Traffic viewer state
     show_traffic_viewer: bool,
     traffic_viewer_entries: Vec<TrafficViewEntry>,
@@ -228,12 +239,14 @@ impl RyllApp {
         config: Config,
         cadence: bool,
         virtual_disks: Vec<VirtualDiskConfig>,
+        share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
     ) -> Self {
         // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
+        let (webdav_tx, webdav_rx) = mpsc::channel(16);
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -277,7 +290,9 @@ impl RyllApp {
                     event_tx_clone,
                     input_rx,
                     usb_rx,
+                    webdav_rx,
                     virtual_disks,
+                    share_dir,
                     capture_clone,
                     counter_clone,
                     traffic_clone,
@@ -313,6 +328,7 @@ impl RyllApp {
             bandwidth: BandwidthTracker::new(byte_counter),
             capture,
             usb_tx: Some(usb_tx),
+            webdav_tx: Some(webdav_tx),
             usb_channel_ready: false,
             usb_connecting: false,
             usb_disconnecting: false,
@@ -339,6 +355,13 @@ impl RyllApp {
             usb_add_disk_rx: None,
             usb_add_disk_readonly: false,
             usb_add_disk_message: None,
+            webdav_channel_ready: false,
+            webdav_shared_dir: None,
+            webdav_read_only: false,
+            webdav_sharing_active: false,
+            webdav_connected_at: None,
+            webdav_error_message: None,
+            webdav_error_time: None,
             show_traffic_viewer: false,
             traffic_viewer_entries: Vec::new(),
             traffic_viewer_last_refresh: Instant::now(),
@@ -492,6 +515,32 @@ impl RyllApp {
                     self.usb_error_time = Some(Instant::now());
                 }
 
+                ChannelEvent::WebdavChannelReady => {
+                    info!("app: WebDAV channel connected");
+                    self.webdav_channel_ready = true;
+                }
+
+                ChannelEvent::WebdavSharingStarted { path, read_only } => {
+                    info!("app: WebDAV sharing started: {} (ro={})", path, read_only);
+                    self.webdav_shared_dir = Some(path);
+                    self.webdav_read_only = read_only;
+                    self.webdav_sharing_active = true;
+                    self.webdav_connected_at = Some(Instant::now());
+                }
+
+                ChannelEvent::WebdavSharingStopped => {
+                    info!("app: WebDAV sharing stopped");
+                    self.webdav_shared_dir = None;
+                    self.webdav_sharing_active = false;
+                    self.webdav_connected_at = None;
+                }
+
+                ChannelEvent::WebdavError(err) => {
+                    error!("app: WebDAV error: {}", err);
+                    self.webdav_error_message = Some(err);
+                    self.webdav_error_time = Some(Instant::now());
+                }
+
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
                     if channel == ChannelType::Main {
@@ -502,6 +551,12 @@ impl RyllApp {
                         self.usb_device_description = None;
                         self.clear_usb_operation_flags();
                         self.usb_connected_at = None;
+                    }
+                    if channel == ChannelType::Webdav {
+                        self.webdav_channel_ready = false;
+                        self.webdav_shared_dir = None;
+                        self.webdav_sharing_active = false;
+                        self.webdav_connected_at = None;
                     }
                 }
 
@@ -1671,7 +1726,9 @@ async fn run_connection(
     event_tx: mpsc::Sender<ChannelEvent>,
     input_rx: mpsc::Receiver<InputEvent>,
     usb_rx: mpsc::Receiver<UsbCommand>,
+    webdav_rx: mpsc::Receiver<WebdavCommand>,
     virtual_disks: Vec<VirtualDiskConfig>,
+    share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -1745,6 +1802,7 @@ async fn run_connection(
     // Connect other channels
     let mut handles = vec![main_handle];
     let mut usb_rx = Some(usb_rx);
+    let mut webdav_rx = Some(webdav_rx);
 
     for (channel_type, channel_id) in channels {
         match channel_type {
@@ -1818,6 +1876,28 @@ async fn run_connection(
                 }
             }
 
+            ChannelType::Webdav => {
+                if let Some(webdav_rx) = webdav_rx.take() {
+                    let stream = client
+                        .connect_channel(session_id, channel_type, channel_id)
+                        .await?;
+                    let mut channel = WebdavChannel::new(
+                        stream,
+                        event_tx.clone(),
+                        webdav_rx,
+                        share_dir.clone(),
+                        capture.clone(),
+                        byte_counter.clone(),
+                    );
+                    handles.push(tokio::spawn(async move { channel.run().await }));
+                } else {
+                    info!(
+                        "Skipping additional webdav channel (id={}): only one supported",
+                        channel_id
+                    );
+                }
+            }
+
             _ => {
                 info!(
                     "Skipping channel: {} (id={})",
@@ -1851,6 +1931,7 @@ pub async fn run_headless(
     config: Config,
     cadence: bool,
     virtual_disks: Vec<VirtualDiskConfig>,
+    share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
 ) -> Result<()> {
     info!("Running in headless mode");
@@ -1861,6 +1942,7 @@ pub async fn run_headless(
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
     let (_usb_tx, usb_rx) = mpsc::channel(16);
+    let (_webdav_tx, webdav_rx) = mpsc::channel(16);
 
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
@@ -1878,7 +1960,9 @@ pub async fn run_headless(
             event_tx,
             input_rx,
             usb_rx,
+            webdav_rx,
             virtual_disks,
+            share_dir,
             capture,
             byte_counter,
             traffic,
@@ -1932,6 +2016,18 @@ pub async fn run_headless(
                     }
                     ChannelEvent::UsbConnectFailed(err) => {
                         error!("headless: USB connect failed: {}", err);
+                    }
+                    ChannelEvent::WebdavChannelReady => {
+                        info!("headless: WebDAV channel connected");
+                    }
+                    ChannelEvent::WebdavSharingStarted { path, read_only } => {
+                        info!("headless: WebDAV sharing: {} (ro={})", path, read_only);
+                    }
+                    ChannelEvent::WebdavSharingStopped => {
+                        info!("headless: WebDAV sharing stopped");
+                    }
+                    ChannelEvent::WebdavError(err) => {
+                        error!("headless: WebDAV error: {}", err);
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);

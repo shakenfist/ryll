@@ -189,3 +189,24 @@ test-qemu-usb: test-qemu-stop $(QEMU_TEST_IMAGE) testdata/usb-test.raw
 		-pidfile $(QEMU_PID_FILE)
 	@echo "QEMU SPICE+USB server on port $(QEMU_SPICE_PORT) (PID $$(cat $(QEMU_PID_FILE)))"
 	@echo "Connect: ryll --direct localhost:$(QEMU_SPICE_PORT) --usb-disk testdata/usb-test.raw"
+
+# Start a test QEMU instance with SPICE and WebDAV folder sharing enabled.
+# Connect with: ryll --direct localhost:$(QEMU_SPICE_PORT) --share-dir /tmp/test-share
+test-qemu-webdav: test-qemu-stop $(QEMU_TEST_IMAGE)
+	cp $(OVMF_VARS) $(QEMU_VARS_COPY)
+	qemu-system-x86_64 \
+		-display none \
+		-machine q35 \
+		-m 256 \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(QEMU_VARS_COPY) \
+		-drive file=$(QEMU_TEST_IMAGE),format=qcow2,if=virtio \
+		-vga qxl \
+		-spice port=$(QEMU_SPICE_PORT),disable-ticketing=on \
+		-device virtio-serial-pci,id=virtio-serial0 \
+		-chardev spiceport,name=org.spice-space.webdav.0,id=webdav0 \
+		-device virtserialport,chardev=webdav0,name=org.spice-space.webdav.0 \
+		-daemonize \
+		-pidfile $(QEMU_PID_FILE)
+	@echo "QEMU SPICE+WebDAV server on port $(QEMU_SPICE_PORT) (PID $$(cat $(QEMU_PID_FILE)))"
+	@echo "Connect: ryll --direct localhost:$(QEMU_SPICE_PORT) --share-dir /tmp/test-share"
