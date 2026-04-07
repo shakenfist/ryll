@@ -7,23 +7,18 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::sync::{Arc, Mutex};
 
 use super::DecompressedImage;
 
 const GLZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
+const CROSS_REF_MAX_RETRIES: u32 = 20;
+const CROSS_REF_RETRY_MS: u64 = 5;
 
-/// Decompress GLZ image data
-///
-/// # Arguments
-/// * `data` - The compressed GLZ data
-/// * `previous_images` - Dictionary of previously decompressed images for cross-frame refs
-///
-/// # Returns
-/// * `DecompressedImage` with RGBA pixels
-pub fn decompress_glz(
+pub async fn decompress_glz(
     data: &[u8],
-    previous_images: &HashMap<u64, Vec<u8>>,
+    previous_images: &Arc<Mutex<HashMap<u64, Vec<u8>>>>,
 ) -> Result<DecompressedImage> {
     if data.len() < 33 {
         return Err(anyhow!("GLZ data too short for header"));
@@ -57,7 +52,7 @@ pub fn decompress_glz(
 
     let type_packed = cursor.read_u8()?;
     let _img_type = type_packed & 0x0F;
-    let _top_down = (type_packed >> 4) & 0x01;
+    let top_down = (type_packed >> 4) & 0x01 != 0;
 
     let width = cursor.read_u32::<BigEndian>()?;
     let height = cursor.read_u32::<BigEndian>()?;
@@ -66,11 +61,12 @@ pub fn decompress_glz(
     let win_head_dist = cursor.read_u32::<BigEndian>()?;
 
     tracing::debug!(
-        "glz: header id={}, {}x{}, type={}, win_head_dist={}",
+        "glz: header id={}, {}x{}, type={}, top_down={}, win_head_dist={}",
         image_id,
         width,
         height,
         _img_type,
+        top_down,
         win_head_dist
     );
 
@@ -213,25 +209,36 @@ pub fn decompress_glz(
             } else {
                 // Copy from a previous image in the dictionary
                 let source_id = image_id.wrapping_sub(image_dist);
-                if let Some(prev_img) = previous_images.get(&source_id) {
-                    let mut pi_idx = pixel_offset * 4;
-                    for _ in 0..length {
-                        if out_idx + 4 > output_size || pi_idx + 4 > prev_img.len() {
-                            break;
-                        }
-                        output[out_idx] = prev_img[pi_idx];
-                        output[out_idx + 1] = prev_img[pi_idx + 1];
-                        output[out_idx + 2] = prev_img[pi_idx + 2];
-                        output[out_idx + 3] = prev_img[pi_idx + 3];
-                        out_idx += 4;
-                        pi_idx += 4;
+
+                let mut found = false;
+                for attempt in 0..=CROSS_REF_MAX_RETRIES {
+                    if attempt > 0 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(CROSS_REF_RETRY_MS)).await;
                     }
-                } else {
-                    // Image not in dictionary -- leave pixels black
+                    let dict = previous_images.lock().unwrap();
+                    if let Some(prev_img) = dict.get(&source_id) {
+                        let mut pi_idx = pixel_offset * 4;
+                        for _ in 0..length {
+                            if out_idx + 4 > output_size || pi_idx + 4 > prev_img.len() {
+                                break;
+                            }
+                            output[out_idx] = prev_img[pi_idx];
+                            output[out_idx + 1] = prev_img[pi_idx + 1];
+                            output[out_idx + 2] = prev_img[pi_idx + 2];
+                            output[out_idx + 3] = prev_img[pi_idx + 3];
+                            out_idx += 4;
+                            pi_idx += 4;
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
                     tracing::warn!(
                         "glz: cross-image ref to id {} not in dictionary \
-                         (current={}, dist={})",
+                         after {} retries (current={}, dist={})",
                         source_id,
+                        CROSS_REF_MAX_RETRIES,
                         image_id,
                         image_dist
                     );
@@ -241,12 +248,22 @@ pub fn decompress_glz(
         }
     }
 
+    if !top_down {
+        let row_bytes = width as usize * 4;
+        let mut flipped = vec![0u8; output.len()];
+        for y in 0..height as usize {
+            let src = y * row_bytes;
+            let dst = (height as usize - 1 - y) * row_bytes;
+            flipped[dst..dst + row_bytes].copy_from_slice(&output[src..src + row_bytes]);
+        }
+        output = flipped;
+    }
+
     Ok(DecompressedImage {
         width,
         height,
         pixels: output,
         image_id,
-        win_head_dist: Some(win_head_dist as u64),
     })
 }
 
@@ -275,7 +292,9 @@ mod tests {
             header.extend_from_slice(&[0, 128, 255]); // BGR
         }
 
-        let result = decompress_glz(&header, &HashMap::new());
+        let dict = Arc::new(Mutex::new(HashMap::new()));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(decompress_glz(&header, &dict));
         assert!(result.is_ok());
 
         let img = result.unwrap();

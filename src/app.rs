@@ -125,9 +125,11 @@ pub struct RyllApp {
     // Communication channels
     event_rx: mpsc::Receiver<ChannelEvent>,
     input_tx: Option<mpsc::Sender<InputEvent>>,
+    resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
+    last_sent_resize: Option<(u32, u32)>,
 
     // Display state
-    surfaces: HashMap<u32, DisplaySurface>,
+    surfaces: HashMap<(u8, u32), DisplaySurface>,
 
     // Cursor state
     cursor_pos: (u16, u16),
@@ -244,12 +246,15 @@ impl RyllApp {
         virtual_disks: Vec<VirtualDiskConfig>,
         share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
+        monitors: u8,
     ) -> Self {
         // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
+        let (resize_tx, resize_rx) = mpsc::channel(32);
+        let resize_tx = Arc::new(resize_tx);
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -274,6 +279,7 @@ impl RyllApp {
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
+        let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
@@ -300,6 +306,8 @@ impl RyllApp {
                     counter_clone,
                     traffic_clone,
                     snaps_for_conn,
+                    monitors,
+                    resize_rx_for_conn,
                 )
                 .await
                 {
@@ -313,6 +321,8 @@ impl RyllApp {
         RyllApp {
             event_rx,
             input_tx: Some(input_tx),
+            resize_tx: Some(resize_tx),
+            last_sent_resize: None,
             surfaces: HashMap::new(),
             cursor_pos: (0, 0),
             cursor_visible: true,
@@ -390,22 +400,32 @@ impl RyllApp {
                 }
 
                 ChannelEvent::SurfaceCreated {
+                    display_channel_id,
                     surface_id,
                     width,
                     height,
                 } => {
-                    info!("app: surface {} created: {}x{}", surface_id, width, height);
-                    self.surfaces
-                        .insert(surface_id, DisplaySurface::new(surface_id, width, height));
+                    info!(
+                        "app: surface {}:{} created: {}x{}",
+                        display_channel_id, surface_id, width, height
+                    );
+                    self.surfaces.insert(
+                        (display_channel_id, surface_id),
+                        DisplaySurface::new(surface_id, width, height),
+                    );
                     self.pending_resize = Some((width as f32, height as f32));
                 }
 
-                ChannelEvent::SurfaceDestroyed { surface_id } => {
-                    info!("app: surface {} destroyed", surface_id);
-                    self.surfaces.remove(&surface_id);
+                ChannelEvent::SurfaceDestroyed {
+                    display_channel_id,
+                    surface_id,
+                } => {
+                    info!("app: surface {}:{} destroyed", display_channel_id, surface_id);
+                    self.surfaces.remove(&(display_channel_id, surface_id));
                 }
 
                 ChannelEvent::ImageReady {
+                    display_channel_id,
                     surface_id,
                     left,
                     top,
@@ -417,7 +437,7 @@ impl RyllApp {
                     // Auto-create surface if the server draws before sending
                     // SURFACE_CREATE (QEMU does this for the primary surface).
                     if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.surfaces.entry(surface_id)
+                        self.surfaces.entry((display_channel_id, surface_id))
                     {
                         let surf_w = left + width;
                         let surf_h = top + height;
@@ -429,7 +449,10 @@ impl RyllApp {
                         self.pending_resize = Some((surf_w as f32, surf_h as f32));
                     }
 
-                    let surface = self.surfaces.get_mut(&surface_id).unwrap();
+                    let surface = self
+                        .surfaces
+                        .get_mut(&(display_channel_id, surface_id))
+                        .unwrap();
                     surface.blit(left, top, width, height, &pixels);
                     self.stats.frames_received += 1;
                     debug!(
@@ -448,7 +471,11 @@ impl RyllApp {
 
                     // Capture a video frame if enabled
                     if let Some(ref capture) = self.capture {
-                        if let Some(surface) = self.surfaces.get(&0) {
+                        if let Some(surface) = self
+                            .surfaces
+                            .values()
+                            .max_by_key(|s| (s.width as u64) * (s.height as u64))
+                        {
                             capture.frame(0, surface.pixels(), surface.width, surface.height);
                         }
                     }
@@ -476,6 +503,10 @@ impl RyllApp {
                         if mode == 1 { "server" } else { "client" }
                     );
                     self.mouse_mode = mode;
+                }
+
+                ChannelEvent::MonitorsConfig { width, height } => {
+                    debug!("app: requested monitors config {}x{}", width, height);
                 }
 
                 ChannelEvent::Statistics {
@@ -629,7 +660,8 @@ impl RyllApp {
         // Get surface pixels for display reports
         let surface_data = if report_type == BugReportType::Display {
             self.surfaces
-                .get(&0)
+                .values()
+                .max_by_key(|s| (s.width as u64) * (s.height as u64))
                 .map(|s| (s.pixels(), s.width, s.height))
         } else {
             None
@@ -737,6 +769,40 @@ impl RyllApp {
             }
         }
     }
+
+    fn maybe_send_monitors_resize(&mut self, ctx: &egui::Context) {
+        let Some(tx) = &self.resize_tx else {
+            return;
+        };
+
+        let viewport_size = ctx.input(|i| {
+            i.viewport()
+                .inner_rect
+                .map(|rect| rect.size())
+                .unwrap_or_else(|| i.screen_rect().size())
+        });
+
+        let mut width = viewport_size.x.max(0.0) as u32;
+        let mut height = (viewport_size.y - STATS_BAR_HEIGHT).max(0.0) as u32;
+
+        width -= width % 8;
+        height -= height % 8;
+        width = width.max(8);
+        height = height.max(8);
+
+        if self.last_sent_resize.is_none() {
+            self.last_sent_resize = Some((width, height));
+            return;
+        }
+
+        if self.last_sent_resize == Some((width, height)) {
+            return;
+        }
+
+        if tx.try_send((width, height)).is_ok() {
+            self.last_sent_resize = Some((width, height));
+        }
+    }
 }
 
 impl eframe::App for RyllApp {
@@ -756,14 +822,11 @@ impl eframe::App for RyllApp {
         self.process_events();
 
         // Resize viewport to match the remote surface (plus stats bar)
-        if let Some((w, h)) = self.pending_resize.take() {
-            let total_h = h + STATS_BAR_HEIGHT;
-            info!(
-                "app: resizing viewport to {}x{} (surface {}x{})",
-                w, total_h, w, h
-            );
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+        if let Some((_w, _h)) = self.pending_resize.take() {
+            debug!("app: surface resize {}x{} (not resizing window)", _w, _h);
         }
+
+        self.maybe_send_monitors_resize(ctx);
 
         // Tick the bandwidth tracker
         self.bandwidth.tick();
@@ -1433,108 +1496,93 @@ impl eframe::App for RyllApp {
                     return;
                 }
 
-                // Display surfaces
-                for surface in self.surfaces.values_mut() {
-                    let width = surface.width;
-                    let height = surface.height;
-                    let texture = surface.texture(ctx);
-                    let size = egui::vec2(width as f32, height as f32);
+                let mut keys: Vec<(u8, u32)> = self.surfaces.keys().copied().collect();
+                keys.sort_unstable();
+                let primary_key = keys
+                    .iter()
+                    .copied()
+                    .find(|(_, sid)| *sid == 0)
+                    .or_else(|| keys.first().copied());
 
-                    let response = ui.add(
-                        egui::Image::new(texture)
-                            .fit_to_exact_size(size)
-                            .sense(egui::Sense::click_and_drag()),
-                    );
+                if let Some(primary_key) = primary_key {
+                    if let Some(surface) = self.surfaces.get_mut(&primary_key) {
+                        let width = surface.width;
+                        let height = surface.height;
+                        let texture = surface.texture(ctx);
+                        let size = egui::vec2(width as f32, height as f32);
 
-                    // Track the surface rect for cursor overlay positioning
-                    self.surface_rect = response.rect;
+                        let response = ui.add(
+                            egui::Image::new(texture)
+                                .fit_to_exact_size(size)
+                                .sense(egui::Sense::click_and_drag()),
+                        );
 
-                    // Hide the OS cursor when hovering over the surface
-                    // (show crosshair during region selection instead)
-                    if response.hovered()
-                        && !self.region_select_active
-                        && self.cursor_image.is_some()
-                    {
-                        ui.ctx()
-                            .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
-                    }
+                        self.surface_rect = response.rect;
 
-                    // Handle mouse input on the surface (suppressed during dialog/selection)
-                    let input_suppressed = self.show_bug_dialog || self.region_select_active;
-                    if !input_suppressed {
-                        if let Some(tx) = &self.input_tx {
-                            // Send mouse position only when it changes
-                            if let Some(pos) = response.hover_pos() {
-                                let x = (pos.x - response.rect.min.x).max(0.0) as u32;
-                                let y = (pos.y - response.rect.min.y).max(0.0) as u32;
-                                if self.last_mouse_pos != Some((x, y)) {
-                                    self.last_mouse_pos = Some((x, y));
-                                    let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                        if response.hovered()
+                            && !self.region_select_active
+                            && self.cursor_image.is_some()
+                        {
+                            ui.ctx()
+                                .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
+                        }
+
+                        let input_suppressed = self.show_bug_dialog || self.region_select_active;
+                        if !input_suppressed {
+                            if let Some(tx) = &self.input_tx {
+                                if let Some(pos) = response.hover_pos() {
+                                    let x = (pos.x - response.rect.min.x).max(0.0) as u32;
+                                    let y = (pos.y - response.rect.min.y).max(0.0) as u32;
+                                    if self.last_mouse_pos != Some((x, y)) {
+                                        self.last_mouse_pos = Some((x, y));
+                                        let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                                    }
                                 }
-                            }
 
-                            // Mouse buttons — use the raw pointer state from egui
-                            // so press and release are sent at the correct times,
-                            // not batched together on release like clicked_by().
-                            ctx.input(|i| {
+                                ctx.input(|i| {
+                                    let pos = self.last_mouse_pos.unwrap_or((0, 0));
+                                    for button in [
+                                        egui::PointerButton::Primary,
+                                        egui::PointerButton::Secondary,
+                                        egui::PointerButton::Middle,
+                                    ] {
+                                        if i.pointer.button_pressed(button) {
+                                            let spice_btn = mouse_button_to_spice(button);
+                                            self.forwarded_buttons |= spice_btn;
+                                            let _ = tx.try_send(InputEvent::MouseDown {
+                                                button: spice_btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                        }
+                                        if i.pointer.button_released(button) {
+                                            let spice_btn = mouse_button_to_spice(button);
+                                            self.forwarded_buttons &= !spice_btn;
+                                            let _ = tx.try_send(InputEvent::MouseUp {
+                                                button: spice_btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                        }
+                                    }
+                                });
+                            }
+                        } else if self.forwarded_buttons != 0 {
+                            if let Some(tx) = &self.input_tx {
                                 let pos = self.last_mouse_pos.unwrap_or((0, 0));
-                                for button in [
-                                    egui::PointerButton::Primary,
-                                    egui::PointerButton::Secondary,
-                                    egui::PointerButton::Middle,
-                                ] {
-                                    if i.pointer.button_pressed(button) {
-                                        let spice_btn = mouse_button_to_spice(button);
-                                        self.forwarded_buttons |= spice_btn;
-                                        let _ = tx.try_send(InputEvent::MouseDown {
-                                            button: spice_btn,
-                                            x: pos.0,
-                                            y: pos.1,
-                                        });
-                                        debug!(
-                                            "app: mouse down {:?} at ({},{})",
-                                            button, pos.0, pos.1
-                                        );
-                                    }
-                                    if i.pointer.button_released(button) {
-                                        let spice_btn = mouse_button_to_spice(button);
-                                        self.forwarded_buttons &= !spice_btn;
+                                for bit in 0..5u32 {
+                                    let mask = 1 << bit;
+                                    if self.forwarded_buttons & mask != 0 {
                                         let _ = tx.try_send(InputEvent::MouseUp {
-                                            button: spice_btn,
+                                            button: mask,
                                             x: pos.0,
                                             y: pos.1,
                                         });
-                                        debug!(
-                                            "app: mouse up {:?} at ({},{})",
-                                            button, pos.0, pos.1
-                                        );
                                     }
-                                }
-                            });
-                        }
-                    } else if self.forwarded_buttons != 0 {
-                        // Input forwarding just became suppressed (e.g. the
-                        // bug report dialog opened) while one or more mouse
-                        // buttons were held.  Send synthetic releases so the
-                        // server doesn't stay in a stuck "button held" state.
-                        if let Some(tx) = &self.input_tx {
-                            let pos = self.last_mouse_pos.unwrap_or((0, 0));
-                            for bit in 0..5u32 {
-                                let mask = 1 << bit;
-                                if self.forwarded_buttons & mask != 0 {
-                                    let _ = tx.try_send(InputEvent::MouseUp {
-                                        button: mask,
-                                        x: pos.0,
-                                        y: pos.1,
-                                    });
-                                    debug!(
-                                        "app: synthetic mouse up button={} at ({},{})",
-                                        mask, pos.0, pos.1
-                                    );
                                 }
                             }
+                            self.forwarded_buttons = 0;
                         }
-                        self.forwarded_buttons = 0;
                     }
                 }
 
@@ -1866,6 +1914,8 @@ async fn run_connection(
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
     snapshots: ChannelSnapshots,
+    monitors: u8,
+    resize_rx: mpsc::Receiver<(u32, u32)>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -1883,6 +1933,8 @@ async fn run_connection(
         byte_counter.clone(),
         traffic.clone(),
         snapshots.main,
+        resize_rx,
+        monitors,
     );
 
     // Spawn main channel task
@@ -1936,6 +1988,7 @@ async fn run_connection(
     let mut handles = vec![main_handle];
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
+    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
 
     for (channel_type, channel_id) in channels {
         match channel_type {
@@ -1944,12 +1997,14 @@ async fn run_connection(
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
                 let mut channel = DisplayChannel::new(
+                    channel_id,
                     stream,
                     event_tx.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.display.clone(),
+                    shared_glz_dictionary.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2066,6 +2121,7 @@ pub async fn run_headless(
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
+    monitors: u8,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -2076,6 +2132,7 @@ pub async fn run_headless(
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
     let (_usb_tx, usb_rx) = mpsc::channel(16);
     let (_webdav_tx, webdav_rx) = mpsc::channel(16);
+    let (_resize_tx, resize_rx) = mpsc::channel(32);
 
     // Headless mode doesn't display bandwidth, but channels still need the counter
     let byte_counter = Arc::new(ByteCounter::new());
@@ -2100,6 +2157,8 @@ pub async fn run_headless(
             byte_counter,
             traffic,
             snapshots,
+            monitors,
+            resize_rx,
         )
         .await
     });
@@ -2129,6 +2188,8 @@ pub async fn run_headless(
                 match event {
                     ChannelEvent::SessionInitialized(id) => {
                         info!("Session {} initialized", id);
+                    }
+                    ChannelEvent::SurfaceCreated { .. } => {
                     }
                     ChannelEvent::ImageReady { .. } => {
                         stats.frames_received += 1;

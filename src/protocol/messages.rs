@@ -259,13 +259,14 @@ pub struct DrawCopyBase {
     pub bottom: u32,
     pub right: u32,
     pub clip_type: u8,
+    pub clip_rects: Vec<(u32, u32, u32, u32)>,
+    /// Byte offset past this struct (including any variable-length clip rects)
+    pub end_offset: usize,
 }
 
 impl DrawCopyBase {
-    pub const SIZE: usize = 21;
-
     pub fn read(data: &[u8]) -> io::Result<Self> {
-        if data.len() < Self::SIZE {
+        if data.len() < 21 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "Not enough data for DrawCopyBase",
@@ -273,13 +274,73 @@ impl DrawCopyBase {
         }
 
         let mut cursor = Cursor::new(data);
+        let surface_id = cursor.read_u32::<LittleEndian>()?;
+        let top = cursor.read_u32::<LittleEndian>()?;
+        let left = cursor.read_u32::<LittleEndian>()?;
+        let bottom = cursor.read_u32::<LittleEndian>()?;
+        let right = cursor.read_u32::<LittleEndian>()?;
+        let clip_type = cursor.read_u8()?;
+
+        let mut offset = 21usize;
+        let mut clip_rects = Vec::new();
+
+        // SPICE_CLIP_TYPE_RECTS = 1: followed by u32 count + count * SpiceRect(16 bytes)
+        if clip_type == 1 {
+            if data.len() < offset + 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Not enough data for clip rects count",
+                ));
+            }
+            let num_rects = u32::from_le_bytes([
+                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if data.len() < offset + num_rects * 16 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Not enough data for clip rects",
+                ));
+            }
+            for _ in 0..num_rects {
+                let top = u32::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                let left = u32::from_le_bytes([
+                    data[offset + 4],
+                    data[offset + 5],
+                    data[offset + 6],
+                    data[offset + 7],
+                ]);
+                let bottom = u32::from_le_bytes([
+                    data[offset + 8],
+                    data[offset + 9],
+                    data[offset + 10],
+                    data[offset + 11],
+                ]);
+                let right = u32::from_le_bytes([
+                    data[offset + 12],
+                    data[offset + 13],
+                    data[offset + 14],
+                    data[offset + 15],
+                ]);
+                clip_rects.push((left, top, right, bottom));
+                offset += 16;
+            }
+        }
+
         Ok(DrawCopyBase {
-            surface_id: cursor.read_u32::<LittleEndian>()?,
-            top: cursor.read_u32::<LittleEndian>()?,
-            left: cursor.read_u32::<LittleEndian>()?,
-            bottom: cursor.read_u32::<LittleEndian>()?,
-            right: cursor.read_u32::<LittleEndian>()?,
-            clip_type: cursor.read_u8()?,
+            surface_id,
+            top,
+            left,
+            bottom,
+            right,
+            clip_type,
+            clip_rects,
+            end_offset: offset,
         })
     }
 }
@@ -481,8 +542,19 @@ impl MousePosition {
 pub struct MouseButton;
 
 impl MouseButton {
+    fn mask_to_id(mask: u32) -> u32 {
+        match mask {
+            0x01 => 1, // LEFT
+            0x02 => 2, // MIDDLE
+            0x04 => 3, // RIGHT
+            0x08 => 4, // UP (scroll)
+            0x10 => 5, // DOWN (scroll)
+            _ => 0,
+        }
+    }
+
     pub fn write(button: u32, buttons_state: u32, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(button)?;
+        buf.write_u32::<LittleEndian>(Self::mask_to_id(button))?;
         buf.write_u32::<LittleEndian>(buttons_state)?;
         Ok(())
     }
