@@ -22,6 +22,22 @@ MODE="${1:-check}"  # "check" or "fix"
 UID_VAL=$(id -u)
 GID_VAL=$(id -g)
 
+# Ensure cargo cache directories exist and are writable by the current
+# user.  Docker creates mount-point directories as root when they do
+# not exist on the host, so subsequent runs with -u fail.  We create
+# them first, and if they already exist as root from a previous run
+# we use a throwaway container to fix ownership (no sudo required).
+for dir in "$PROJECT_ROOT/.cargo-cache/registry" \
+           "$PROJECT_ROOT/.cargo-cache/git"; do
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir"
+    elif [ ! -w "$dir" ]; then
+        echo "Fixing ownership of $dir ..."
+        docker run --rm -v "$dir":/fixme alpine \
+            chown -R "$UID_VAL:$GID_VAL" /fixme
+    fi
+done
+
 run_in_docker() {
     docker run --rm \
         -v "$PROJECT_ROOT":/workspace \
