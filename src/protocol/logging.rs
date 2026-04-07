@@ -118,6 +118,10 @@ pub mod message_names {
             main_server::NOTIFY => "notify",
             main_server::INIT => "init",
             main_server::CHANNELS_LIST => "channels_list",
+            main_server::AGENT_CONNECTED => "agent_connected",
+            main_server::AGENT_DISCONNECTED => "agent_disconnected",
+            main_server::AGENT_DATA => "agent_data",
+            main_server::AGENT_TOKEN => "agent_token",
             _ => "unknown",
         }
     }
@@ -132,6 +136,9 @@ pub mod message_names {
             main_client::MIGRATE_DATA => "migrate_data",
             main_client::DISCONNECTING => "disconnecting",
             main_client::ATTACH_CHANNELS => "attach_channels",
+            main_client::AGENT_START => "agent_start",
+            main_client::AGENT_DATA => "agent_data",
+            main_client::AGENT_TOKEN => "agent_token",
             _ => "unknown",
         }
     }

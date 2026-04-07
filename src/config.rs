@@ -46,6 +46,10 @@ pub struct Args {
     #[arg(long)]
     pub capture: Option<String>,
 
+    /// Number of monitors to connect (default: 1)
+    #[arg(long, default_value_t = 1)]
+    pub monitors: u8,
+
     /// Present a RAW disk image as a USB mass storage device (repeatable)
     #[arg(long = "usb-disk")]
     pub usb_disk: Vec<String>,

@@ -1,5 +1,6 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::Result;
+use byteorder::{LittleEndian, WriteBytesExt};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -17,11 +18,26 @@ use crate::settings;
 
 use super::ChannelEvent;
 
+const VD_AGENT_PROTOCOL: u32 = 1;
+const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 1;
+const VD_AGENT_MONITORS_CONFIG: u32 = 2;
+const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
+const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1;
+const VD_AGENT_CAP_REPLY: u32 = 2;
+const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
+
 pub struct MainChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
     buffer: Vec<u8>,
     session_id: Option<u32>,
+    agent_connected: bool,
+    agent_tokens: u32,
+    agent_caps_announced: bool,
+    monitors: u8,
+    monitors_config_rx: mpsc::Receiver<(u32, u32)>,
+    pending_monitors_config: Option<(u32, u32)>,
+    last_sent_monitors_config: Option<(u32, u32)>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -38,12 +54,21 @@ impl MainChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<MainSnapshot>>,
+        monitors_config_rx: mpsc::Receiver<(u32, u32)>,
+        monitors: u8,
     ) -> Self {
         MainChannel {
             stream,
             event_tx,
             buffer: Vec::with_capacity(65536),
             session_id: None,
+            agent_connected: false,
+            agent_tokens: 0,
+            agent_caps_announced: false,
+            monitors,
+            monitors_config_rx,
+            pending_monitors_config: None,
+            last_sent_monitors_config: None,
             capture,
             byte_counter,
             traffic,
@@ -62,38 +87,76 @@ impl MainChannel {
     pub async fn run(&mut self) -> Result<()> {
         info!("main: channel started");
 
+        let mut resize_debounce: Option<tokio::time::Instant> = None;
+
         loop {
-            // Read data into buffer
             let mut chunk = [0u8; 65536];
-            let n = match &mut self.stream {
-                SpiceStream::Plain(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
-                }
-                SpiceStream::Tls(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
+            let stream = &mut self.stream;
+            let monitors_config_rx = &mut self.monitors_config_rx;
+
+            let debounce_sleep = async {
+                match resize_debounce {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
                 }
             };
 
-            if n == 0 {
-                info!("main: channel disconnected");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Main))
-                    .await
-                    .ok();
-                break;
-            }
+            tokio::select! {
+                n = async {
+                    match stream {
+                        SpiceStream::Plain(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                        SpiceStream::Tls(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                    }
+                } => {
+                    let n = n?;
+                    if n == 0 {
+                        info!("main: channel disconnected");
+                        self.event_tx
+                            .send(ChannelEvent::Disconnected(ChannelType::Main))
+                            .await
+                            .ok();
+                        break;
+                    }
 
-            self.byte_counter.add(n as u64);
-            if let Some(ref c) = self.capture {
-                c.packet_received("main", &chunk[..n]);
-            }
-            self.buffer.extend_from_slice(&chunk[..n]);
-            self.bytes_in += n as u64;
+                    self.byte_counter.add(n as u64);
+                    if let Some(ref c) = self.capture {
+                        c.packet_received("main", &chunk[..n]);
+                    }
+                    self.buffer.extend_from_slice(&chunk[..n]);
+                    self.bytes_in += n as u64;
 
-            // Process complete messages
-            self.process_messages().await?;
+                    self.process_messages().await?;
+                }
+                resize = monitors_config_rx.recv() => {
+                    let Some((width, height)) = resize else {
+                        continue;
+                    };
+
+                    if self.last_sent_monitors_config == Some((width, height)) {
+                        continue;
+                    }
+
+                    self.pending_monitors_config = Some((width, height));
+                    resize_debounce = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+                }
+                _ = debounce_sleep => {
+                    resize_debounce = None;
+                    if let Some((width, height)) = self.pending_monitors_config {
+                        info!("main: resize debounced: {}x{}", width, height);
+                        self.event_tx
+                            .send(ChannelEvent::MonitorsConfig { width, height })
+                            .await
+                            .ok();
+                        self.maybe_send_agent_monitors_config().await?;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -165,6 +228,13 @@ impl MainChannel {
                 }
 
                 self.session_id = Some(init.session_id);
+                self.agent_connected = init.agent_connected != 0;
+                self.agent_tokens = init.agent_tokens;
+                self.agent_caps_announced = false;
+
+                if self.agent_connected {
+                    self.connect_agent().await?;
+                }
 
                 self.event_tx
                     .send(ChannelEvent::SessionInitialized(init.session_id))
@@ -281,6 +351,51 @@ impl MainChannel {
                     .ok();
             }
 
+            main_server::AGENT_CONNECTED => {
+                info!("main: vdagent connected");
+                self.agent_connected = true;
+                self.connect_agent().await?;
+            }
+
+            main_server::AGENT_DISCONNECTED => {
+                info!("main: vdagent disconnected");
+                self.agent_connected = false;
+                self.agent_caps_announced = false;
+            }
+
+            main_server::AGENT_DATA => {
+                if payload.len() >= 16 {
+                    let agent_type = u32::from_le_bytes([
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    let agent_size = u32::from_le_bytes([
+                        payload[12], payload[13], payload[14], payload[15],
+                    ]);
+                    debug!(
+                        "main: agent_data from server: type={}, size={}",
+                        agent_type, agent_size
+                    );
+                } else {
+                    debug!(
+                        "main: agent_data from server: {} bytes: {:02x?}",
+                        payload.len(),
+                        payload
+                    );
+                }
+            }
+
+            main_server::AGENT_TOKEN => {
+                if payload.len() >= 4 {
+                    let tokens = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    self.agent_tokens = self.agent_tokens.saturating_add(tokens);
+                } else {
+                    self.agent_tokens = self.agent_tokens.saturating_add(1);
+                    warn!("main: short AGENT_TOKEN payload ({} bytes)", payload.len());
+                }
+
+                self.maybe_send_announce_capabilities().await?;
+            }
+
             _ => {
                 // Unknown message - log with hex dump
                 logging::log_unknown("main", "received", msg_type, payload.len() as u32, payload);
@@ -301,6 +416,121 @@ impl MainChannel {
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    async fn connect_agent(&mut self) -> Result<()> {
+        self.send_agent_start().await?;
+        self.maybe_send_announce_capabilities().await
+    }
+
+    async fn send_agent_start(&mut self) -> Result<()> {
+        let mut payload = Vec::with_capacity(4);
+        payload.write_u32::<LittleEndian>(u32::MAX)?;
+        let msg = make_message(main_client::AGENT_START, &payload);
+        self.send_with_log(main_client::AGENT_START, &msg).await
+    }
+
+    async fn maybe_send_announce_capabilities(&mut self) -> Result<()> {
+        if !self.agent_connected || self.agent_caps_announced {
+            return Ok(());
+        }
+
+        let caps = (1u32 << VD_AGENT_CAP_MOUSE_STATE)
+            | (1u32 << VD_AGENT_CAP_MONITORS_CONFIG)
+            | (1u32 << VD_AGENT_CAP_REPLY);
+        let mut payload = Vec::with_capacity(8);
+        payload.write_u32::<LittleEndian>(1)?;
+        payload.write_u32::<LittleEndian>(caps)?;
+
+        if self.send_agent_data_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload).await? {
+            self.agent_caps_announced = true;
+        }
+
+        Ok(())
+    }
+
+    async fn maybe_send_agent_monitors_config(&mut self) -> Result<()> {
+
+        let Some((width, height)) = self.pending_monitors_config else {
+            debug!("main: monitors config: no pending config");
+            return Ok(());
+        };
+
+        if !self.agent_connected {
+            debug!("main: monitors config: agent not connected");
+            return Ok(());
+        }
+
+        if !self.agent_caps_announced {
+            debug!("main: monitors config: caps not announced yet");
+            return Ok(());
+        }
+
+        if self.last_sent_monitors_config == Some((width, height)) {
+            return Ok(());
+        }
+
+        info!("main: sending monitors config: {}x{}", width, height);
+        if self.send_agent_monitors_config(width, height).await? {
+            self.last_sent_monitors_config = Some((width, height));
+            self.pending_monitors_config = None;
+        } else {
+            debug!("main: monitors config: no agent tokens");
+        }
+
+        Ok(())
+    }
+
+    async fn send_agent_monitors_config(&mut self, width: u32, height: u32) -> Result<bool> {
+        let active = if self.monitors == 0 { 1 } else { self.monitors as u32 };
+        let flags = if active > 1 { VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS } else { 0 };
+
+        let mut payload = Vec::with_capacity(8 + active as usize * 20);
+        payload.write_u32::<LittleEndian>(active)?;
+        payload.write_u32::<LittleEndian>(flags)?;
+
+        for i in 0..active {
+            info!(
+                "main: monitors config[{}]: {}x{} pos=({},0) depth=32",
+                i, width, height, width * i
+            );
+            payload.write_u32::<LittleEndian>(height)?;
+            payload.write_u32::<LittleEndian>(width)?;
+            payload.write_u32::<LittleEndian>(32)?;
+            if active > 1 {
+                payload.write_u32::<LittleEndian>(width * i)?;
+            } else {
+                payload.write_u32::<LittleEndian>(0)?;
+            }
+            payload.write_u32::<LittleEndian>(0)?;
+        }
+
+        info!("main: agent monitors config: num_mon={}, flags={}", active, flags);
+
+        debug!("main: monitors config payload ({} bytes): {:02x?}", payload.len(), payload);
+
+        self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
+            .await
+    }
+
+    async fn send_agent_data_message(&mut self, ty: u32, payload: &[u8]) -> Result<bool> {
+        if self.agent_tokens == 0 {
+            return Ok(false);
+        }
+
+        let mut agent = Vec::with_capacity(16 + payload.len());
+        agent.write_u32::<LittleEndian>(VD_AGENT_PROTOCOL)?;
+        agent.write_u32::<LittleEndian>(ty)?;
+        agent.write_u64::<LittleEndian>(0)?;
+        agent.write_u32::<LittleEndian>(payload.len() as u32)?;
+        agent.extend_from_slice(payload);
+
+        debug!("main: agent_data wrapper ({} bytes): {:02x?}", agent.len(), agent);
+        let msg = make_message(main_client::AGENT_DATA, &agent);
+        self.send_with_log(main_client::AGENT_DATA, &msg).await?;
+        self.agent_tokens = self.agent_tokens.saturating_sub(1);
+
+        Ok(true)
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {

@@ -139,7 +139,8 @@ fn run_headless(
 
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        app::run_headless(config, args.cadence, virtual_disks, share_dir, capture).await
+        app::run_headless(config, args.cadence, virtual_disks, share_dir, capture, args.monitors)
+            .await
     })
 }
 
@@ -160,6 +161,7 @@ fn run_gui(
     };
 
     let cadence = args.cadence;
+    let monitors = args.monitors;
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -171,6 +173,7 @@ fn run_gui(
                 virtual_disks,
                 share_dir,
                 capture,
+                monitors,
             )))
         }),
     )

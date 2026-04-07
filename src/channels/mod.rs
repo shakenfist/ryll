@@ -28,16 +28,21 @@ pub enum ChannelEvent {
 
     /// Surface created
     SurfaceCreated {
+        display_channel_id: u8,
         surface_id: u32,
         width: u32,
         height: u32,
     },
 
     /// Surface destroyed
-    SurfaceDestroyed { surface_id: u32 },
+    SurfaceDestroyed {
+        display_channel_id: u8,
+        surface_id: u32,
+    },
 
     /// Image data ready to display
     ImageReady {
+        display_channel_id: u8,
         surface_id: u32,
         left: u32,
         top: u32,
@@ -59,6 +64,8 @@ pub enum ChannelEvent {
 
     /// Mouse mode from server (1=server, 2=client)
     MouseMode(u32),
+
+    MonitorsConfig { width: u32, height: u32 },
 
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]

@@ -144,6 +144,10 @@ pub mod main_server {
     pub const NOTIFY: u16 = 7;
     pub const INIT: u16 = 103;
     pub const CHANNELS_LIST: u16 = 104;
+    pub const AGENT_CONNECTED: u16 = 108;
+    pub const AGENT_DISCONNECTED: u16 = 109;
+    pub const AGENT_DATA: u16 = 110;
+    pub const AGENT_TOKEN: u16 = 111;
 }
 
 /// Main channel message types (client -> server)
@@ -155,6 +159,9 @@ pub mod main_client {
     pub const MIGRATE_DATA: u16 = 5;
     pub const DISCONNECTING: u16 = 6;
     pub const ATTACH_CHANNELS: u16 = 104;
+    pub const AGENT_START: u16 = 106;
+    pub const AGENT_DATA: u16 = 107;
+    pub const AGENT_TOKEN: u16 = 108;
 }
 
 /// Display channel message types (server -> client)
@@ -288,6 +295,9 @@ pub enum ImageType {
     JpegAlpha = 108,
     Lz4 = 109,
 }
+
+#[allow(dead_code)]
+pub const IMAGE_FLAGS_CACHE_ME: u8 = 1 << 0;
 
 impl ImageType {
     pub fn from_u8(value: u8) -> Option<Self> {

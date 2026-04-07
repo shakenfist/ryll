@@ -57,7 +57,7 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
     let width = cursor.read_u32::<BigEndian>()?;
     let height = cursor.read_u32::<BigEndian>()?;
     let _stride = cursor.read_u32::<BigEndian>()?;
-    let _top_down = cursor.read_u32::<BigEndian>()?;
+    let top_down = cursor.read_u32::<BigEndian>()? != 0;
 
     // Output buffer (RGBA)
     let output_size = (width as usize)
@@ -163,12 +163,22 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         }
     }
 
+    if !top_down {
+        let row_bytes = width as usize * 4;
+        let mut flipped = vec![0u8; output.len()];
+        for y in 0..height as usize {
+            let src = y * row_bytes;
+            let dst = (height as usize - 1 - y) * row_bytes;
+            flipped[dst..dst + row_bytes].copy_from_slice(&output[src..src + row_bytes]);
+        }
+        output = flipped;
+    }
+
     Ok(DecompressedImage {
         width,
         height,
         pixels: output,
-        image_id: 0, // LZ doesn't use image IDs
-        win_head_dist: None,
+        image_id: 0,
     })
 }
 

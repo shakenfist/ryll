@@ -414,6 +414,13 @@ impl InputsChannel {
             }
 
             InputEvent::MouseUp { button, x, y } => {
+                // Send position before button release (as spice-gtk does)
+                let mut pos_payload = Vec::new();
+                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
+                self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
+                    .await?;
+
                 self.button_state &= !button;
 
                 self.record_event(InputEventRecord {
