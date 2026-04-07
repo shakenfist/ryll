@@ -193,13 +193,19 @@ through kerbside.
 LZ4-compressed with a big-endian size prefix. The `spice_format`
 byte indicates the pixel format (4=BGRX, 6=BGRA, 3=BGR).
 
-**QUIC** -- Wavelet-based compression using Golomb coding. Each
+**QUIC** -- SPICE's proprietary image codec based on the SFALIC
+algorithm (Simple Fast Adaptive Lossless Image Compression). Not
+to be confused with the IETF QUIC network protocol. Each colour
 channel (R, G, B, and optionally A) is coded independently with
-an adaptive Golomb encoder. The decoder clamps Golomb coding
-parameters (code-word length and table index) to safe bounds to
-prevent panics on malformed data. QUIC images are preceded by a
-4-byte `data_size` (u32 LE), then a QUIC header containing the
-image dimensions, version (major=0, minor=1), and codec type.
+adaptive Golomb coding. The decoder is a pure-Rust port of the
+canonical C implementation in `spice-common/common/quic.c` — no
+pre-existing Rust crate provides SPICE QUIC decoding (the
+`spice-client` crate on crates.io only handles JPEG/PNG, and
+`spice-client-glib` wraps the C library via FFI). The decoder
+clamps Golomb coding parameters to safe bounds to prevent panics
+on malformed data. QUIC images are preceded by a 4-byte
+`data_size` (u32 LE), then a QUIC header containing the image
+dimensions, version (major=0, minor=1), and codec type.
 
 All decompressors output RGBA pixels (BGRX/BGRA/BGR on the wire
 is converted to RGBA with alpha=255 for opaque formats).
