@@ -293,10 +293,16 @@ impl DrawCopyBase {
                 ));
             }
             let num_rects = u32::from_le_bytes([
-                data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
             ]) as usize;
             offset += 4;
-            if data.len() < offset + num_rects * 16 {
+            let total_rect_bytes = num_rects.checked_mul(16).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "clip rects count overflow")
+            })?;
+            if data.len() < offset + total_rect_bytes {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "Not enough data for clip rects",

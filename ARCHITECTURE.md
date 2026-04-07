@@ -137,7 +137,7 @@ Values from `spice-protocol/spice/enums.h`:
 | Type | Name             | Status in ryll |
 |-----:|------------------|----------------|
 |    0 | Pixmap           | Supported (BitmapData header + raw BGRX/RGBA) |
-|    1 | Quic             | Not implemented |
+|    1 | Quic             | Supported (Golomb-coded wavelet compression) |
 |  100 | LZ_PLT           | Not implemented |
 |  101 | LZ_RGB           | Supported |
 |  102 | GLZ_RGB          | Supported (with cross-frame dictionary) |
@@ -177,7 +177,10 @@ includes a `win_head_dist` field that defines the reference window
 size; after decompressing an image, the display channel evicts all
 cached images whose id falls below `image_id - win_head_dist`. This
 replaced an earlier fixed-size cache that could evict images still
-needed by subsequent frames.
+needed by subsequent frames. In multi-monitor configurations, the
+GLZ dictionary is shared across all display channels via an
+`Arc<Mutex<HashMap>>` so that cross-frame references resolve
+correctly regardless of which display channel produced them.
 
 **LZ** — Simpler variant that only references pixels within the
 current image. No cross-frame dependencies.
@@ -189,6 +192,20 @@ through kerbside.
 **LZ4** — Fast per-row compression. Each row is individually
 LZ4-compressed with a big-endian size prefix. The `spice_format`
 byte indicates the pixel format (4=BGRX, 6=BGRA, 3=BGR).
+
+**QUIC** -- SPICE's proprietary image codec based on the SFALIC
+algorithm (Simple Fast Adaptive Lossless Image Compression). Not
+to be confused with the IETF QUIC network protocol. Each colour
+channel (R, G, B, and optionally A) is coded independently with
+adaptive Golomb coding. The decoder is a pure-Rust port of the
+canonical C implementation in `spice-common/common/quic.c` — no
+pre-existing Rust crate provides SPICE QUIC decoding (the
+`spice-client` crate on crates.io only handles JPEG/PNG, and
+`spice-client-glib` wraps the C library via FFI). The decoder
+clamps Golomb coding parameters to safe bounds to prevent panics
+on malformed data. QUIC images are preceded by a 4-byte
+`data_size` (u32 LE), then a QUIC header containing the image
+dimensions, version (major=0, minor=1), and codec type.
 
 All decompressors output RGBA pixels (BGRX/BGRA/BGR on the wire
 is converted to RGBA with alpha=255 for opaque formats).
@@ -218,6 +235,20 @@ The correct display server opcodes are:
 - `SURFACE_CREATE` = 314 (not 1, as some references suggest)
 - `MONITORS_CONFIG` = 317
 - `DRAW_COMPOSITE` = 318
+
+## Multi-Monitor Support
+
+Ryll supports multiple monitors via the `--monitors N` CLI option.
+Each monitor gets its own display channel, and the main channel
+sends a `VDAgentMonitorsConfig` message to the guest via the VDI
+port agent infrastructure to inform it of the desired monitor
+layout.
+
+Surfaces are isolated by a `(display_channel_id, surface_id)`
+tuple so that draw operations from different display channels
+target the correct surface even when surface IDs overlap across
+channels. This prevents cross-channel surface corruption in
+multi-head configurations.
 
 ## Display Rendering
 

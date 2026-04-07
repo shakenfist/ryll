@@ -21,11 +21,11 @@ const RGB32_PIXEL_B: usize = 0;
 const RGB32_PIXEL_SIZE: usize = 4;
 
 const BPPMASK: [u32; 33] = [
-    0x00000000, 0x00000001, 0x00000003, 0x00000007, 0x0000000f, 0x0000001f, 0x0000003f,
-    0x0000007f, 0x000000ff, 0x000001ff, 0x000003ff, 0x000007ff, 0x00000fff, 0x00001fff,
-    0x00003fff, 0x00007fff, 0x0000ffff, 0x0001ffff, 0x0003ffff, 0x0007ffff, 0x000fffff,
-    0x001fffff, 0x003fffff, 0x007fffff, 0x00ffffff, 0x01ffffff, 0x03ffffff, 0x07ffffff,
-    0x0fffffff, 0x1fffffff, 0x3fffffff, 0x7fffffff, 0xffffffff,
+    0x00000000, 0x00000001, 0x00000003, 0x00000007, 0x0000000f, 0x0000001f, 0x0000003f, 0x0000007f,
+    0x000000ff, 0x000001ff, 0x000003ff, 0x000007ff, 0x00000fff, 0x00001fff, 0x00003fff, 0x00007fff,
+    0x0000ffff, 0x0001ffff, 0x0003ffff, 0x0007ffff, 0x000fffff, 0x001fffff, 0x003fffff, 0x007fffff,
+    0x00ffffff, 0x01ffffff, 0x03ffffff, 0x07ffffff, 0x0fffffff, 0x1fffffff, 0x3fffffff, 0x7fffffff,
+    0xffffffff,
 ];
 
 const BESTTRIGTAB: [[u32; 11]; 3] = [
@@ -35,67 +35,54 @@ const BESTTRIGTAB: [[u32; 11]; 3] = [
 ];
 
 const J: [u8; 32] = [
-    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11,
-    12, 13, 14, 15,
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13,
+    14, 15,
 ];
 
 const LZEROES: [u8; 256] = [
-    8, 7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4,
-    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    8, 7, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 const TABRAND_CHAOS: [u32; 256] = [
-    0x02c57542, 0x35427717, 0x2f5a2153, 0x9244f155, 0x7bd26d07, 0x354c6052, 0x57329b28,
-    0x2993868e, 0x6cd8808c, 0x147b46e0, 0x99db66af, 0xe32b4cac, 0x1b671264, 0x9d433486,
-    0x62a4c192, 0x06089a4b, 0x9e3dce44, 0xdaabee13, 0x222425ea, 0xa46f331d, 0xcd589250,
-    0x8bb81d7f, 0xc8b736b9, 0x35948d33, 0xd7ac7fd0, 0x5fbe2803, 0x2cfbc105, 0x013dbc4e,
-    0x7a37820f, 0x39f88e9e, 0xedd58794, 0xc5076689, 0xfcada5a4, 0x64c2f46d, 0xb3ba3243,
-    0x8974b4f9, 0x5a05aebd, 0x20afcd00, 0x39e2b008, 0x88a18a45, 0x600bde29, 0xf3971ace,
-    0xf37b0a6b, 0x7041495b, 0x70b707ab, 0x06beffbb, 0x4206051f, 0xe13c4ee3, 0xc1a78327,
-    0x91aa067c, 0x8295f72a, 0x732917a6, 0x1d871b4d, 0x4048f136, 0xf1840e7e, 0x6a6048c1,
-    0x696cb71a, 0x7ff501c3, 0x0fc6310b, 0x57e0f83d, 0x8cc26e74, 0x11a525a2, 0x946934c7,
-    0x7cd888f0, 0x8f9d8604, 0x4f86e73b, 0x04520316, 0xdeeea20c, 0xf1def496, 0x67687288,
-    0xf540c5b2, 0x22401484, 0x3478658a, 0xc2385746, 0x01979c2c, 0x5dad73c8, 0x0321f58b,
-    0xf0fedbee, 0x92826ddf, 0x284bec73, 0x5b1a1975, 0x03df1e11, 0x20963e01, 0xa17cf12b,
-    0x740d776e, 0xa7a6bf3c, 0x01b5cce4, 0x1118aa76, 0xfc6fac0a, 0xce927e9b, 0x00bf2567,
-    0x806f216c, 0xbca69056, 0x795bd3e9, 0xc9dc4557, 0x8929b6c2, 0x789d52ec, 0x3f3fbf40,
-    0xb9197368, 0xa38c15b5, 0xc3b44fa8, 0xca8333b0, 0xb7e8d590, 0xbe807feb, 0xbf5f8360,
-    0xd99e2f5c, 0x372928e1, 0x7c757c4c, 0x0db5b154, 0xc01ede02, 0x1fc86e78, 0x1f3985be,
-    0xb4805c77, 0x00c880fa, 0x974c1b12, 0x35ab0214, 0xb2dc840d, 0x5b00ae37, 0xd313b026,
-    0xb260969d, 0x7f4c8879, 0x1734c4d3, 0x49068631, 0xb9f6a021, 0x6b863e6f, 0xcee5debf,
-    0x29f8c9fb, 0x53dd6880, 0x72b61223, 0x1f67a9fd, 0x0a0f6993, 0x13e59119, 0x11cca12e,
-    0xfe6b6766, 0x16b6effc, 0x97918fc4, 0xc2b8a563, 0x94f2f741, 0x0bfa8c9a, 0xd1537ae8,
-    0xc1da349c, 0x873c60ca, 0x95005b85, 0x9b5c080e, 0xbc8abbd9, 0xe1eab1d2, 0x6dac9070,
-    0x4ea9ebf1, 0xe0cf30d4, 0x1ef5bd7b, 0xd161043e, 0x5d2fa2e2, 0xff5d3cae, 0x86ed9f87,
-    0x2aa1daa1, 0xbd731a34, 0x9e8f4b22, 0xb1c2c67a, 0xc21758c9, 0xa182215d, 0xccb01948,
-    0x8d168df7, 0x04238cfe, 0x368c3dbc, 0x0aeadca5, 0xbad21c24, 0x0a71fee5, 0x9fc5d872,
-    0x54c152c6, 0xfc329483, 0x6783384a, 0xeddb3e1c, 0x65f90e30, 0x884ad098, 0xce81675a,
-    0x4b372f7d, 0x68bf9a39, 0x43445f1e, 0x40f8d8cb, 0x90d5acb6, 0x4cd07282, 0x349eeb06,
-    0x0c9d5332, 0x520b24ef, 0x80020447, 0x67976491, 0x2f931ca3, 0xfe9b0535, 0xfcd30220,
-    0x61a9e6cc, 0xa487d8d7, 0x3f7c5dd1, 0x7d0127c5, 0x48f51d15, 0x60dea871, 0xc9a91cb7,
-    0x58b53bb3, 0x9d5e0b2d, 0x624a78b4, 0x30dbee1b, 0x9bdf22e7, 0x1df5c299, 0x2d5643a7,
-    0xf4dd35ff, 0x03ca8fd6, 0x53b47ed8, 0x6f2c19aa, 0xfeb0c1f4, 0x49e54438, 0x2f2577e6,
-    0xbf876969, 0x72440ea9, 0xfa0bafb8, 0x74f5b3a0, 0x7dd357cd, 0x89ce1358, 0x6ef2cdda,
-    0x1e7767f3, 0xa6be9fdb, 0x4f5f88f8, 0xba994a3a, 0x08ca6b65, 0xe0893818, 0x9e00a16a,
-    0xf42bfc8f, 0x9972eedc, 0x749c8b51, 0x32c05f5e, 0xd706805f, 0x6bfbb7cf, 0xd9210a10,
-    0x31a1db97, 0x923a9559, 0x37a7a1f6, 0x059f8861, 0xca493e62, 0x65157e81, 0x8f6467dd,
-    0xab85ff9f, 0x9331aff2, 0x8616b9f5, 0xedbd5695, 0xee7e29b1, 0x313ac44f, 0xb903112f,
-    0x432ef649, 0xdc0a36c0, 0x61cf2bba, 0x81474925, 0xa8b6c7ad, 0xee5931de, 0xb2f8158d,
-    0x59fb7409, 0x2e3dfaed, 0x9af25a3f, 0xe1fed4d5,
+    0x02c57542, 0x35427717, 0x2f5a2153, 0x9244f155, 0x7bd26d07, 0x354c6052, 0x57329b28, 0x2993868e,
+    0x6cd8808c, 0x147b46e0, 0x99db66af, 0xe32b4cac, 0x1b671264, 0x9d433486, 0x62a4c192, 0x06089a4b,
+    0x9e3dce44, 0xdaabee13, 0x222425ea, 0xa46f331d, 0xcd589250, 0x8bb81d7f, 0xc8b736b9, 0x35948d33,
+    0xd7ac7fd0, 0x5fbe2803, 0x2cfbc105, 0x013dbc4e, 0x7a37820f, 0x39f88e9e, 0xedd58794, 0xc5076689,
+    0xfcada5a4, 0x64c2f46d, 0xb3ba3243, 0x8974b4f9, 0x5a05aebd, 0x20afcd00, 0x39e2b008, 0x88a18a45,
+    0x600bde29, 0xf3971ace, 0xf37b0a6b, 0x7041495b, 0x70b707ab, 0x06beffbb, 0x4206051f, 0xe13c4ee3,
+    0xc1a78327, 0x91aa067c, 0x8295f72a, 0x732917a6, 0x1d871b4d, 0x4048f136, 0xf1840e7e, 0x6a6048c1,
+    0x696cb71a, 0x7ff501c3, 0x0fc6310b, 0x57e0f83d, 0x8cc26e74, 0x11a525a2, 0x946934c7, 0x7cd888f0,
+    0x8f9d8604, 0x4f86e73b, 0x04520316, 0xdeeea20c, 0xf1def496, 0x67687288, 0xf540c5b2, 0x22401484,
+    0x3478658a, 0xc2385746, 0x01979c2c, 0x5dad73c8, 0x0321f58b, 0xf0fedbee, 0x92826ddf, 0x284bec73,
+    0x5b1a1975, 0x03df1e11, 0x20963e01, 0xa17cf12b, 0x740d776e, 0xa7a6bf3c, 0x01b5cce4, 0x1118aa76,
+    0xfc6fac0a, 0xce927e9b, 0x00bf2567, 0x806f216c, 0xbca69056, 0x795bd3e9, 0xc9dc4557, 0x8929b6c2,
+    0x789d52ec, 0x3f3fbf40, 0xb9197368, 0xa38c15b5, 0xc3b44fa8, 0xca8333b0, 0xb7e8d590, 0xbe807feb,
+    0xbf5f8360, 0xd99e2f5c, 0x372928e1, 0x7c757c4c, 0x0db5b154, 0xc01ede02, 0x1fc86e78, 0x1f3985be,
+    0xb4805c77, 0x00c880fa, 0x974c1b12, 0x35ab0214, 0xb2dc840d, 0x5b00ae37, 0xd313b026, 0xb260969d,
+    0x7f4c8879, 0x1734c4d3, 0x49068631, 0xb9f6a021, 0x6b863e6f, 0xcee5debf, 0x29f8c9fb, 0x53dd6880,
+    0x72b61223, 0x1f67a9fd, 0x0a0f6993, 0x13e59119, 0x11cca12e, 0xfe6b6766, 0x16b6effc, 0x97918fc4,
+    0xc2b8a563, 0x94f2f741, 0x0bfa8c9a, 0xd1537ae8, 0xc1da349c, 0x873c60ca, 0x95005b85, 0x9b5c080e,
+    0xbc8abbd9, 0xe1eab1d2, 0x6dac9070, 0x4ea9ebf1, 0xe0cf30d4, 0x1ef5bd7b, 0xd161043e, 0x5d2fa2e2,
+    0xff5d3cae, 0x86ed9f87, 0x2aa1daa1, 0xbd731a34, 0x9e8f4b22, 0xb1c2c67a, 0xc21758c9, 0xa182215d,
+    0xccb01948, 0x8d168df7, 0x04238cfe, 0x368c3dbc, 0x0aeadca5, 0xbad21c24, 0x0a71fee5, 0x9fc5d872,
+    0x54c152c6, 0xfc329483, 0x6783384a, 0xeddb3e1c, 0x65f90e30, 0x884ad098, 0xce81675a, 0x4b372f7d,
+    0x68bf9a39, 0x43445f1e, 0x40f8d8cb, 0x90d5acb6, 0x4cd07282, 0x349eeb06, 0x0c9d5332, 0x520b24ef,
+    0x80020447, 0x67976491, 0x2f931ca3, 0xfe9b0535, 0xfcd30220, 0x61a9e6cc, 0xa487d8d7, 0x3f7c5dd1,
+    0x7d0127c5, 0x48f51d15, 0x60dea871, 0xc9a91cb7, 0x58b53bb3, 0x9d5e0b2d, 0x624a78b4, 0x30dbee1b,
+    0x9bdf22e7, 0x1df5c299, 0x2d5643a7, 0xf4dd35ff, 0x03ca8fd6, 0x53b47ed8, 0x6f2c19aa, 0xfeb0c1f4,
+    0x49e54438, 0x2f2577e6, 0xbf876969, 0x72440ea9, 0xfa0bafb8, 0x74f5b3a0, 0x7dd357cd, 0x89ce1358,
+    0x6ef2cdda, 0x1e7767f3, 0xa6be9fdb, 0x4f5f88f8, 0xba994a3a, 0x08ca6b65, 0xe0893818, 0x9e00a16a,
+    0xf42bfc8f, 0x9972eedc, 0x749c8b51, 0x32c05f5e, 0xd706805f, 0x6bfbb7cf, 0xd9210a10, 0x31a1db97,
+    0x923a9559, 0x37a7a1f6, 0x059f8861, 0xca493e62, 0x65157e81, 0x8f6467dd, 0xab85ff9f, 0x9331aff2,
+    0x8616b9f5, 0xedbd5695, 0xee7e29b1, 0x313ac44f, 0xb903112f, 0x432ef649, 0xdc0a36c0, 0x61cf2bba,
+    0x81474925, 0xa8b6c7ad, 0xee5931de, 0xb2f8158d, 0x59fb7409, 0x2e3dfaed, 0x9af25a3f, 0xe1fed4d5,
 ];
 
 #[derive(Clone)]
@@ -198,12 +185,13 @@ fn golomb_decoding_8bpc(l: usize, bits: u32, family_8bpc: &Family) -> (u32, u32)
         let zeroprefix = cnt_l_zeroes(bits);
         let cwlen = zeroprefix + 1 + l as u32;
         let rc = (zeroprefix << l) | ((bits >> (32 - cwlen)) & BPPMASK[l]);
-        (cwlen, rc)
+        // Clamp to valid pixel range to prevent OOB on lookup tables
+        (cwlen, rc & 0xFF)
     } else {
         let cwlen = family_8bpc.not_gr_cw_len[l];
         let rc = family_8bpc.n_gr_codewords[l]
             + ((bits >> (32 - cwlen)) & BPPMASK[family_8bpc.not_gr_suffix_len[l] as usize]);
-        (cwlen, rc)
+        (cwlen, rc & 0xFF)
     }
 }
 
@@ -288,14 +276,24 @@ impl QuicBucket {
         self.counters = [0; 8];
     }
 
-    fn update_model_8bpc(&mut self, state: &mut CommonState, curval: u32, bpp: usize, family_8bpc: &Family) {
+    fn update_model_8bpc(
+        &mut self,
+        state: &mut CommonState,
+        curval: u32,
+        bpp: usize,
+        family_8bpc: &Family,
+    ) {
         let mut bestcode = bpp - 1;
-        self.counters[bestcode] = self.counters[bestcode]
-            .saturating_add(golomb_code_len_8bpc(curval, bestcode, family_8bpc));
+        self.counters[bestcode] = self.counters[bestcode].saturating_add(golomb_code_len_8bpc(
+            curval,
+            bestcode,
+            family_8bpc,
+        ));
         let mut bestcodelen = self.counters[bestcode];
 
         for i in (0..=(bpp - 2)).rev() {
-            self.counters[i] = self.counters[i].saturating_add(golomb_code_len_8bpc(curval, i, family_8bpc));
+            self.counters[i] =
+                self.counters[i].saturating_add(golomb_code_len_8bpc(curval, i, family_8bpc));
             if self.counters[i] < bestcodelen {
                 bestcode = i;
                 bestcodelen = self.counters[i];
@@ -728,8 +726,12 @@ impl QuicDecoder {
                     let rc0 = self.channels[c].correlate_row.row[0];
                     let z = self.channels[c].correlate_row.zero as usize;
                     let bidx = self.channels[c].buckets_ptrs[z];
-                    self.channels[c].buckets_buf[bidx]
-                        .update_model_8bpc(&mut self.rgb_state, rc0, bpc, &self.family_8bpc);
+                    self.channels[c].buckets_buf[bidx].update_model_8bpc(
+                        &mut self.rgb_state,
+                        rc0,
+                        bpc,
+                        &self.family_8bpc,
+                    );
                 }
             }
             i += 1;
@@ -747,12 +749,13 @@ impl QuicDecoder {
                     let prev_idx = self.channels[c].correlate_row.row[i - 1] as usize;
                     let bidx = self.channels[c].buckets_ptrs[prev_idx];
                     let bestcode = self.channels[c].buckets_buf[bidx].bestcode;
-                    let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
+                    let (cwlen, rc) =
+                        golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
                     self.channels[c].correlate_row.row[i] = rc;
                     let left = cur_row[(i - 1) * RGB32_PIXEL_SIZE + (2 - c)];
-                    cur_row[pixel + (2 - c)] = self.family_8bpc.xlat_l2u[rc as usize]
-                        .wrapping_add(left as u32) as u8
-                        & bpc_mask;
+                    cur_row[pixel + (2 - c)] =
+                        self.family_8bpc.xlat_l2u[rc as usize].wrapping_add(left as u32) as u8
+                            & bpc_mask;
                     if !self.decode_eatbits(cwlen) {
                         return false;
                     }
@@ -764,8 +767,12 @@ impl QuicDecoder {
                 let model_key = self.channels[c].correlate_row.row[stopidx - 1] as usize;
                 let bidx = self.channels[c].buckets_ptrs[model_key];
                 let val = self.channels[c].correlate_row.row[stopidx];
-                self.channels[c].buckets_buf[bidx]
-                    .update_model_8bpc(&mut self.rgb_state, val, bpc, &self.family_8bpc);
+                self.channels[c].buckets_buf[bidx].update_model_8bpc(
+                    &mut self.rgb_state,
+                    val,
+                    bpc,
+                    &self.family_8bpc,
+                );
             }
             stopidx = i + ((self.rgb_state.tabrand() & waitmask) as usize);
         }
@@ -875,8 +882,12 @@ impl QuicDecoder {
                     let z = self.channels[c].correlate_row.zero as usize;
                     let bidx = self.channels[c].buckets_ptrs[z];
                     let v = self.channels[c].correlate_row.row[0];
-                    self.channels[c].buckets_buf[bidx]
-                        .update_model_8bpc(&mut self.rgb_state, v, bpc, &self.family_8bpc);
+                    self.channels[c].buckets_buf[bidx].update_model_8bpc(
+                        &mut self.rgb_state,
+                        v,
+                        bpc,
+                        &self.family_8bpc,
+                    );
                 }
             }
             i += 1;
@@ -935,10 +946,14 @@ impl QuicDecoder {
                         let prev_idx = self.channels[c].correlate_row.row[i - 1] as usize;
                         let bidx = self.channels[c].buckets_ptrs[prev_idx];
                         let bestcode = self.channels[c].buckets_buf[bidx].bestcode;
-                        let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
+                        let (cwlen, rc) =
+                            golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
                         self.channels[c].correlate_row.row[i] = rc;
-                        let predicted = ((cur_row[pixelm1 + (2 - c)] as u16 + prev_row[pixel + (2 - c)] as u16) >> 1) as u32;
-                        cur_row[pixel + (2 - c)] = (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
+                        let left_val = cur_row[pixelm1 + (2 - c)] as u16;
+                        let above_val = prev_row[pixel + (2 - c)] as u16;
+                        let predicted = ((left_val + above_val) >> 1) as u32;
+                        cur_row[pixel + (2 - c)] =
+                            (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
                         if !self.decode_eatbits(cwlen) {
                             return false;
                         }
@@ -953,8 +968,12 @@ impl QuicDecoder {
                     let key = self.channels[c].correlate_row.row[stopidx - 1] as usize;
                     let bidx = self.channels[c].buckets_ptrs[key];
                     let value = self.channels[c].correlate_row.row[stopidx];
-                    self.channels[c].buckets_buf[bidx]
-                        .update_model_8bpc(&mut self.rgb_state, value, bpc, &self.family_8bpc);
+                    self.channels[c].buckets_buf[bidx].update_model_8bpc(
+                        &mut self.rgb_state,
+                        value,
+                        bpc,
+                        &self.family_8bpc,
+                    );
                 }
                 stopidx = i + ((self.rgb_state.tabrand() & waitmask) as usize);
             }
@@ -1005,10 +1024,14 @@ impl QuicDecoder {
                     let prev_idx = self.channels[c].correlate_row.row[i - 1] as usize;
                     let bidx = self.channels[c].buckets_ptrs[prev_idx];
                     let bestcode = self.channels[c].buckets_buf[bidx].bestcode;
-                    let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
+                    let (cwlen, rc) =
+                        golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
                     self.channels[c].correlate_row.row[i] = rc;
-                    let predicted = ((cur_row[pixelm1 + (2 - c)] as u16 + prev_row[pixel + (2 - c)] as u16) >> 1) as u32;
-                    cur_row[pixel + (2 - c)] = (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
+                    let left_val = cur_row[pixelm1 + (2 - c)] as u16;
+                    let above_val = prev_row[pixel + (2 - c)] as u16;
+                    let predicted = ((left_val + above_val) >> 1) as u32;
+                    cur_row[pixel + (2 - c)] =
+                        (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
                     if !self.decode_eatbits(cwlen) {
                         return false;
                     }
@@ -1058,6 +1081,7 @@ impl QuicDecoder {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn quic_four_uncompress_row0_seg(
         &mut self,
         channel_index: usize,
@@ -1170,7 +1194,15 @@ impl QuicDecoder {
             if self.channels[channel_index].state.wmileft > 0 {
                 let segment = self.channels[channel_index].state.wmileft;
                 let waitmask = BPPMASK[self.channels[channel_index].state.wmidx];
-                if !self.quic_four_uncompress_row0_seg(channel_index, pos, cur_row, pos + segment, waitmask, 8, 0xff) {
+                if !self.quic_four_uncompress_row0_seg(
+                    channel_index,
+                    pos,
+                    cur_row,
+                    pos + segment,
+                    waitmask,
+                    8,
+                    0xff,
+                ) {
                     return false;
                 }
                 pos += segment;
@@ -1184,7 +1216,15 @@ impl QuicDecoder {
 
         if width > 0 {
             let waitmask = BPPMASK[self.channels[channel_index].state.wmidx];
-            if !self.quic_four_uncompress_row0_seg(channel_index, pos, cur_row, pos + width, waitmask, 8, 0xff) {
+            if !self.quic_four_uncompress_row0_seg(
+                channel_index,
+                pos,
+                cur_row,
+                pos + width,
+                waitmask,
+                8,
+                0xff,
+            ) {
                 return false;
             }
             if DEFWMIMAX as usize > self.channels[channel_index].state.wmidx {
@@ -1194,6 +1234,7 @@ impl QuicDecoder {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn quic_four_uncompress_row_seg(
         &mut self,
         channel_index: usize,
@@ -1216,9 +1257,9 @@ impl QuicDecoder {
             };
             let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
             self.channels[channel_index].correlate_row.row[0] = rc;
-            cur_row[RGB32_PIXEL_PAD] =
-                (self.family_8bpc.xlat_l2u[rc as usize] + prev_row[RGB32_PIXEL_PAD] as u32) as u8
-                    & bpc_mask;
+            cur_row[RGB32_PIXEL_PAD] = (self.family_8bpc.xlat_l2u[rc as usize]
+                + prev_row[RGB32_PIXEL_PAD] as u32) as u8
+                & bpc_mask;
             if !self.decode_eatbits(cwlen) {
                 return false;
             }
@@ -1288,11 +1329,12 @@ impl QuicDecoder {
                     let bidx = self.channels[channel_index].buckets_ptrs[key];
                     last_bucket = bidx;
                     let bestcode = self.channels[channel_index].buckets_buf[bidx].bestcode;
-                    let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
+                    let (cwlen, rc) =
+                        golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
                     self.channels[channel_index].correlate_row.row[i] = rc;
-                    let predicted =
-                        ((cur_row[pixelm1 + RGB32_PIXEL_PAD] as u16 + prev_row[pixel + RGB32_PIXEL_PAD] as u16)
-                            >> 1) as u32;
+                    let predicted = ((cur_row[pixelm1 + RGB32_PIXEL_PAD] as u16
+                        + prev_row[pixel + RGB32_PIXEL_PAD] as u16)
+                        >> 1) as u32;
                     cur_row[pixel + RGB32_PIXEL_PAD] =
                         (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
                     if !self.decode_eatbits(cwlen) {
@@ -1354,9 +1396,9 @@ impl QuicDecoder {
                 let bestcode = self.channels[channel_index].buckets_buf[bidx].bestcode;
                 let (cwlen, rc) = golomb_decoding_8bpc(bestcode, self.io_word, &self.family_8bpc);
                 self.channels[channel_index].correlate_row.row[i] = rc;
-                let predicted =
-                    ((cur_row[pixelm1 + RGB32_PIXEL_PAD] as u16 + prev_row[pixel + RGB32_PIXEL_PAD] as u16)
-                        >> 1) as u32;
+                let predicted = ((cur_row[pixelm1 + RGB32_PIXEL_PAD] as u16
+                    + prev_row[pixel + RGB32_PIXEL_PAD] as u16)
+                    >> 1) as u32;
                 cur_row[pixel + RGB32_PIXEL_PAD] =
                     (self.family_8bpc.xlat_l2u[rc as usize] + predicted) as u8 & bpc_mask;
                 if !self.decode_eatbits(cwlen) {
@@ -1386,7 +1428,15 @@ impl QuicDecoder {
         {
             if self.channels[channel_index].state.wmileft > 0 {
                 let seg = self.channels[channel_index].state.wmileft;
-                if !self.quic_four_uncompress_row_seg(channel_index, prev_row, cur_row, pos, pos + seg, 8, 0xff) {
+                if !self.quic_four_uncompress_row_seg(
+                    channel_index,
+                    prev_row,
+                    cur_row,
+                    pos,
+                    pos + seg,
+                    8,
+                    0xff,
+                ) {
                     return false;
                 }
                 pos += seg;
@@ -1399,7 +1449,15 @@ impl QuicDecoder {
         }
 
         if width > 0 {
-            if !self.quic_four_uncompress_row_seg(channel_index, prev_row, cur_row, pos, pos + width, 8, 0xff) {
+            if !self.quic_four_uncompress_row_seg(
+                channel_index,
+                prev_row,
+                cur_row,
+                pos,
+                pos + width,
+                8,
+                0xff,
+            ) {
                 return false;
             }
             if DEFWMIMAX as usize > self.channels[channel_index].state.wmidx {
@@ -1479,13 +1537,21 @@ impl QuicDecoder {
 }
 
 pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    debug!("quic: decode: data_len={}, expected={}x{}", data.len(), width, height);
+    debug!(
+        "quic: decode: data_len={}, expected={}x{}",
+        data.len(),
+        width,
+        height
+    );
     let mut decoder = QuicDecoder::new();
     if !decoder.quic_decode_begin(data) {
         warn!("quic: decode_begin failed");
         return None;
     }
-    debug!("quic: header: type={}, size={}x{}", decoder.image_type, decoder.width, decoder.height);
+    debug!(
+        "quic: header: type={}, size={}x{}",
+        decoder.image_type, decoder.width, decoder.height
+    );
 
     if decoder.image_type != QUIC_IMAGE_TYPE_RGB32
         && decoder.image_type != QUIC_IMAGE_TYPE_RGB24
@@ -1496,7 +1562,20 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     }
 
     if decoder.width as u32 != width || decoder.height as u32 != height {
-        warn!("quic: size mismatch: quic={}x{} vs expected={}x{}", decoder.width, decoder.height, width, height);
+        warn!(
+            "quic: size mismatch: quic={}x{} vs expected={}x{}",
+            decoder.width, decoder.height, width, height
+        );
+        return None;
+    }
+
+    // Reject unreasonable dimensions to prevent huge allocations
+    // from a malicious server (16384x16384 = 1 GiB at 4 bpp).
+    if decoder.width > 16384 || decoder.height > 16384 {
+        warn!(
+            "quic: dimensions too large: {}x{}",
+            decoder.width, decoder.height
+        );
         return None;
     }
 
@@ -1510,10 +1589,10 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 
     let mut rgba = vec![0u8; total];
     for i in (0..total).step_by(4) {
-        let b = native[i + 0];
+        let b = native[i];
         let g = native[i + 1];
         let r = native[i + 2];
-        rgba[i + 0] = r;
+        rgba[i] = r;
         rgba[i + 1] = g;
         rgba[i + 2] = b;
         rgba[i + 3] = if decoder.image_type == QUIC_IMAGE_TYPE_RGBA {

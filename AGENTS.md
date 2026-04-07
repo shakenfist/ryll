@@ -110,6 +110,22 @@ Ryll uses:
     the same pattern used by usbredir's interrupt polling tasks. The Folders
     UI panel mirrors the USB panel structure.
 
+12. **QUIC decoder is a bespoke pure-Rust port** - SPICE QUIC is a
+    proprietary image codec (not the IETF QUIC network protocol). No
+    pre-existing Rust crate provides SPICE QUIC decoding, so the
+    decoder was ported from the canonical C source in
+    `spice-common/common/quic.c`. Constant tables (TABRAND_CHAOS,
+    BESTTRIGTAB, J) have been verified against the C reference.
+    Golomb coding parameters are clamped to safe bounds before use
+    to prevent out-of-bounds panics on malformed data.
+
+13. **Multi-monitor via agent infrastructure** - Multiple display channels
+    are opened (one per `--monitors N`) and the main channel sends
+    `VDAgentMonitorsConfig` to the guest via the VDI port agent protocol.
+    The GLZ dictionary is shared across display channels via
+    `Arc<Mutex<HashMap>>`. Surfaces are keyed by `(display_channel_id,
+    surface_id)` to prevent cross-channel collisions.
+
 ## Code Organisation
 
 ```

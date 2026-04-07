@@ -420,7 +420,10 @@ impl RyllApp {
                     display_channel_id,
                     surface_id,
                 } => {
-                    info!("app: surface {}:{} destroyed", display_channel_id, surface_id);
+                    info!(
+                        "app: surface {}:{} destroyed",
+                        display_channel_id, surface_id
+                    );
                     self.surfaces.remove(&(display_channel_id, surface_id));
                 }
 

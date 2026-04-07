@@ -47,6 +47,7 @@ pub struct MainChannel {
 }
 
 impl MainChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
@@ -365,12 +366,10 @@ impl MainChannel {
 
             main_server::AGENT_DATA => {
                 if payload.len() >= 16 {
-                    let agent_type = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
-                    let agent_size = u32::from_le_bytes([
-                        payload[12], payload[13], payload[14], payload[15],
-                    ]);
+                    let agent_type =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let agent_size =
+                        u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
                     debug!(
                         "main: agent_data from server: type={}, size={}",
                         agent_type, agent_size
@@ -386,7 +385,8 @@ impl MainChannel {
 
             main_server::AGENT_TOKEN => {
                 if payload.len() >= 4 {
-                    let tokens = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let tokens =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     self.agent_tokens = self.agent_tokens.saturating_add(tokens);
                 } else {
                     self.agent_tokens = self.agent_tokens.saturating_add(1);
@@ -442,7 +442,10 @@ impl MainChannel {
         payload.write_u32::<LittleEndian>(1)?;
         payload.write_u32::<LittleEndian>(caps)?;
 
-        if self.send_agent_data_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload).await? {
+        if self
+            .send_agent_data_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload)
+            .await?
+        {
             self.agent_caps_announced = true;
         }
 
@@ -450,7 +453,6 @@ impl MainChannel {
     }
 
     async fn maybe_send_agent_monitors_config(&mut self) -> Result<()> {
-
         let Some((width, height)) = self.pending_monitors_config else {
             debug!("main: monitors config: no pending config");
             return Ok(());
@@ -482,8 +484,16 @@ impl MainChannel {
     }
 
     async fn send_agent_monitors_config(&mut self, width: u32, height: u32) -> Result<bool> {
-        let active = if self.monitors == 0 { 1 } else { self.monitors as u32 };
-        let flags = if active > 1 { VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS } else { 0 };
+        let active = if self.monitors == 0 {
+            1
+        } else {
+            self.monitors as u32
+        };
+        let flags = if active > 1 {
+            VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS
+        } else {
+            0
+        };
 
         let mut payload = Vec::with_capacity(8 + active as usize * 20);
         payload.write_u32::<LittleEndian>(active)?;
@@ -492,7 +502,10 @@ impl MainChannel {
         for i in 0..active {
             info!(
                 "main: monitors config[{}]: {}x{} pos=({},0) depth=32",
-                i, width, height, width * i
+                i,
+                width,
+                height,
+                width * i
             );
             payload.write_u32::<LittleEndian>(height)?;
             payload.write_u32::<LittleEndian>(width)?;
@@ -505,9 +518,16 @@ impl MainChannel {
             payload.write_u32::<LittleEndian>(0)?;
         }
 
-        info!("main: agent monitors config: num_mon={}, flags={}", active, flags);
+        info!(
+            "main: agent monitors config: num_mon={}, flags={}",
+            active, flags
+        );
 
-        debug!("main: monitors config payload ({} bytes): {:02x?}", payload.len(), payload);
+        debug!(
+            "main: monitors config payload ({} bytes): {:02x?}",
+            payload.len(),
+            payload
+        );
 
         self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await
@@ -525,7 +545,11 @@ impl MainChannel {
         agent.write_u32::<LittleEndian>(payload.len() as u32)?;
         agent.extend_from_slice(payload);
 
-        debug!("main: agent_data wrapper ({} bytes): {:02x?}", agent.len(), agent);
+        debug!(
+            "main: agent_data wrapper ({} bytes): {:02x?}",
+            agent.len(),
+            agent
+        );
         let msg = make_message(main_client::AGENT_DATA, &agent);
         self.send_with_log(main_client::AGENT_DATA, &msg).await?;
         self.agent_tokens = self.agent_tokens.saturating_sub(1);

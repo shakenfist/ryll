@@ -174,6 +174,7 @@ impl DisplayChannel {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel_id: u8,
         stream: SpiceStream,
@@ -393,25 +394,46 @@ impl DisplayChannel {
                             break;
                         }
                         let head_id = u32::from_le_bytes([
-                            payload[offset], payload[offset+1], payload[offset+2], payload[offset+3],
+                            payload[offset],
+                            payload[offset + 1],
+                            payload[offset + 2],
+                            payload[offset + 3],
                         ]);
                         let surface_id = u32::from_le_bytes([
-                            payload[offset+4], payload[offset+5], payload[offset+6], payload[offset+7],
+                            payload[offset + 4],
+                            payload[offset + 5],
+                            payload[offset + 6],
+                            payload[offset + 7],
                         ]);
                         let width = u32::from_le_bytes([
-                            payload[offset+8], payload[offset+9], payload[offset+10], payload[offset+11],
+                            payload[offset + 8],
+                            payload[offset + 9],
+                            payload[offset + 10],
+                            payload[offset + 11],
                         ]);
                         let height = u32::from_le_bytes([
-                            payload[offset+12], payload[offset+13], payload[offset+14], payload[offset+15],
+                            payload[offset + 12],
+                            payload[offset + 13],
+                            payload[offset + 14],
+                            payload[offset + 15],
                         ]);
                         let x = u32::from_le_bytes([
-                            payload[offset+16], payload[offset+17], payload[offset+18], payload[offset+19],
+                            payload[offset + 16],
+                            payload[offset + 17],
+                            payload[offset + 18],
+                            payload[offset + 19],
                         ]);
                         let y = u32::from_le_bytes([
-                            payload[offset+20], payload[offset+21], payload[offset+22], payload[offset+23],
+                            payload[offset + 20],
+                            payload[offset + 21],
+                            payload[offset + 22],
+                            payload[offset + 23],
                         ]);
                         let flags = u32::from_le_bytes([
-                            payload[offset+24], payload[offset+25], payload[offset+26], payload[offset+27],
+                            payload[offset + 24],
+                            payload[offset + 25],
+                            payload[offset + 26],
+                            payload[offset + 27],
                         ]);
                         info!(
                             "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
@@ -467,8 +489,7 @@ impl DisplayChannel {
             display_server::INVALIDATE_LIST => {
                 // Wire: u16 count + (u8 type + u64 id) per entry
                 if payload.len() >= 2 {
-                    let count =
-                        u16::from_le_bytes([payload[0], payload[1]]) as usize;
+                    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
                     let entry_size = 9; // u8 type + u64 id
                     let mut removed = 0usize;
                     for i in 0..count {
@@ -588,10 +609,8 @@ impl DisplayChannel {
             payload[copy_start + 18],
             payload[copy_start + 19],
         ]);
-        let rop_descriptor = u16::from_le_bytes([
-            payload[copy_start + 20],
-            payload[copy_start + 21],
-        ]);
+        let rop_descriptor =
+            u16::from_le_bytes([payload[copy_start + 20], payload[copy_start + 21]]);
         let scale_mode = payload[copy_start + 22];
         let mask_flags = payload[copy_start + 23];
         let mask_pos_x = i32::from_le_bytes([
@@ -615,7 +634,8 @@ impl DisplayChannel {
 
         if settings::is_verbose() {
             debug!(
-                "display: draw_copy detail: rop={:#x}, scale_mode={}, mask_flags={:#x}, mask_pos=({},{}), mask_bitmap_offset={}, clip_type={}, clip_rects={}",
+                "display: draw_copy detail: rop={:#x}, scale={}, mask={:#x}, \
+                 pos=({},{}), mask_bmp={}, clip_type={}, clip_rects={}",
                 rop_descriptor,
                 scale_mode,
                 mask_flags,
@@ -749,11 +769,7 @@ impl DisplayChannel {
                                 rgba[di] = src_row[si + 2]; // R
                                 rgba[di + 1] = src_row[si + 1]; // G
                                 rgba[di + 2] = src_row[si]; // B
-                                rgba[di + 3] = if bmp_fmt == 9 {
-                                    src_row[si + 3]
-                                } else {
-                                    255
-                                };
+                                rgba[di + 3] = if bmp_fmt == 9 { src_row[si + 3] } else { 255 };
                             }
                         }
                         Some(DecompressedImage {
@@ -819,15 +835,13 @@ impl DisplayChannel {
                     let mut decoder = ZlibDecoder::new(zlib_data);
                     let mut glz_data = Vec::new();
                     match decoder.read_to_end(&mut glz_data) {
-                        Ok(_) => {
-                            match decompress_glz(&glz_data, &self.glz_dictionary).await {
-                                Ok(img) => Some(img),
-                                Err(e) => {
-                                    warn!("display: ZLIB_GLZ_RGB GLZ decompression failed: {}", e);
-                                    None
-                                }
+                        Ok(_) => match decompress_glz(&glz_data, &self.glz_dictionary).await {
+                            Ok(img) => Some(img),
+                            Err(e) => {
+                                warn!("display: ZLIB_GLZ_RGB GLZ decompression failed: {}", e);
+                                None
                             }
-                        }
+                        },
                         Err(e) => {
                             warn!("display: ZLIB_GLZ_RGB zlib decompression failed: {}", e);
                             None
@@ -903,8 +917,7 @@ impl DisplayChannel {
                         image_data[2],
                         image_data[3],
                     ]) as usize;
-                    let quic_data =
-                        &image_data[4..4 + data_size.min(image_data.len() - 4)];
+                    let quic_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match quic_decode(quic_data, img_desc.width, img_desc.height) {
                         Some(rgba) => Some(DecompressedImage {
                             width: img_desc.width,
@@ -953,11 +966,12 @@ impl DisplayChannel {
                 Some(ImageType::GlzRgb) | Some(ImageType::ZlibGlzRgb)
             );
             if is_glz {
-                self.glz_dictionary.lock().unwrap()
+                self.glz_dictionary
+                    .lock()
+                    .unwrap()
                     .insert(img.image_id, img.pixels.clone());
             } else {
-                self.image_cache
-                    .insert(img.image_id, img.pixels.clone());
+                self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 
             let mut out_width = img.width;
@@ -968,10 +982,7 @@ impl DisplayChannel {
             let crop_h = src_bottom.saturating_sub(src_top);
             if crop_w > 0
                 && crop_h > 0
-                && (src_left != 0
-                    || src_top != 0
-                    || crop_w != out_width
-                    || crop_h != out_height)
+                && (src_left != 0 || src_top != 0 || crop_w != out_width || crop_h != out_height)
             {
                 let src_w = out_width as usize;
                 let src_h = out_height as usize;
@@ -1081,7 +1092,9 @@ impl DisplayChannel {
         snap.image_cache_bytes = self.image_cache.values().map(|v| v.len()).sum::<usize>()
             + glz_dict.values().map(|v| v.len()).sum::<usize>();
         snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self.image_cache.keys()
+            let mut ids: Vec<u64> = self
+                .image_cache
+                .keys()
                 .chain(glz_dict.keys())
                 .copied()
                 .collect();
