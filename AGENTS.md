@@ -110,6 +110,20 @@ Ryll uses:
     the same pattern used by usbredir's interrupt polling tasks. The Folders
     UI panel mirrors the USB panel structure.
 
+12. **QUIC decoder with Golomb coding bounds clamping** - The QUIC image
+    decoder uses adaptive Golomb coding for each colour channel. Coding
+    parameters (code-word length and table index) are clamped to safe
+    bounds before use to prevent out-of-bounds panics on malformed or
+    truncated QUIC data. This is a security consideration since SPICE
+    image data may come from untrusted sources.
+
+13. **Multi-monitor via agent infrastructure** - Multiple display channels
+    are opened (one per `--monitors N`) and the main channel sends
+    `VDAgentMonitorsConfig` to the guest via the VDI port agent protocol.
+    The GLZ dictionary is shared across display channels via
+    `Arc<Mutex<HashMap>>`. Surfaces are keyed by `(display_channel_id,
+    surface_id)` to prevent cross-channel collisions.
+
 ## Code Organisation
 
 ```

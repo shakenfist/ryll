@@ -5,7 +5,8 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 ## Features
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
-- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, and Pixmap image types
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types
+- **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
 - **Multi-channel support** - Handles main, display, cursor, inputs, usbredir, and webdav channels
 - **USB device redirection** - Forward physical USB devices (Linux only) or present RAW disk images as virtual USB mass storage devices on all platforms. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
 - **WebDAV folder sharing** - Share a local directory with the guest VM via the SPICE WebDAV channel. The guest mounts the share via `spice-webdavd` + `davfs2`. Supports read-write and read-only modes. Interactive "Folders" panel in the GUI for directory selection and share management. CLI flags (`--share-dir`, `--share-dir-ro`) for headless/scripted use
@@ -139,6 +140,7 @@ Options:
   --headless             Run in headless mode (no GUI)
   --cadence              Enable cadence mode (automatic keystroke every 2 seconds)
   -v, --verbose          Enable verbose logging
+  --monitors <N>         Number of monitors (default 1)
   --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
   -h, --help             Print help
