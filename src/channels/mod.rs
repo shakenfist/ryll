@@ -57,7 +57,11 @@ pub enum ChannelEvent {
     DisplayMark,
 
     /// Cursor position updated
-    CursorPosition { x: u16, y: u16, visible: bool },
+    CursorPosition {
+        x: u16,
+        y: u16,
+        visible: bool,
+    },
 
     /// Cursor image shape updated
     CursorShape(CursorImage),
@@ -65,7 +69,10 @@ pub enum ChannelEvent {
     /// Mouse mode from server (1=server, 2=client)
     MouseMode(u32),
 
-    MonitorsConfig { width: u32, height: u32 },
+    MonitorsConfig {
+        width: u32,
+        height: u32,
+    },
 
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]
@@ -76,7 +83,9 @@ pub enum ChannelEvent {
     },
 
     /// Latency measurement
-    Latency { key_timestamp: f64 },
+    Latency {
+        key_timestamp: f64,
+    },
 
     /// Connection error
     Error(String),
@@ -101,7 +110,10 @@ pub enum ChannelEvent {
     WebdavChannelReady,
 
     /// WebDAV folder sharing started
-    WebdavSharingStarted { path: String, read_only: bool },
+    WebdavSharingStarted {
+        path: String,
+        read_only: bool,
+    },
 
     /// WebDAV folder sharing stopped
     WebdavSharingStopped,

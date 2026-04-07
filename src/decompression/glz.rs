@@ -213,7 +213,8 @@ pub async fn decompress_glz(
                 let mut found = false;
                 for attempt in 0..=CROSS_REF_MAX_RETRIES {
                     if attempt > 0 {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(CROSS_REF_RETRY_MS)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(CROSS_REF_RETRY_MS))
+                            .await;
                     }
                     let dict = previous_images.lock().unwrap();
                     if let Some(prev_img) = dict.get(&source_id) {
