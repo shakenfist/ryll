@@ -28,11 +28,24 @@ Pre-built `.deb` packages for Debian/Ubuntu are available from
 [GitHub Releases](https://github.com/shakenfist/ryll/releases). See
 [docs/installation.md](docs/installation.md) for all platforms.
 
-## CI
+## CI and Automation
 
 GitHub Actions CI builds and tests ryll on Linux, macOS (Apple Silicon),
-and Windows on every push to `develop` and on pull requests. The workflow
-is at `.github/workflows/ci.yml`.
+and Windows on every push to `develop` and on pull requests. PRs also
+receive an automated code review via Claude Code.
+
+Workflows in `.github/workflows/`:
+
+| Workflow | Purpose |
+|----------|---------|
+| `ci.yml` | Lint, build, test (multi-platform), automated PR review |
+| `release.yml` | Build and publish release artifacts |
+| `codeql-analysis.yml` | CodeQL security scanning |
+| `renovate.yml` | Automated dependency updates (hourly) |
+| `export-repo-config.yml` | Daily repository configuration export |
+| `pr-re-review.yml` | Bot-triggered PR re-review (`@shakenfist-bot please re-review`) |
+| `pr-address-comments.yml` | Bot-triggered comment addressing (`@shakenfist-bot please address comments`) |
+| `pr-retest.yml` | Bot-triggered CI re-run (`@shakenfist-bot please retest`) |
 
 ## Building
 

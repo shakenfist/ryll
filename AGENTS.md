@@ -188,7 +188,14 @@ src/
 - **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
   on Linux, macOS (ARM), and Windows on every push to `develop` and
-  on pull requests. CI runs native `cargo` (not Docker).
+  on pull requests. CI runs native `cargo` (not Docker). PRs also
+  receive an automated code review via the shared
+  `shakenfist/actions/review-pr-with-claude` action.
+- **Bot-triggered workflows** for PR automation:
+  `@shakenfist-bot please re-review`, `please address comments`,
+  `please retest`
+- **Renovate** for automated dependency updates (`renovate.json`)
+- **CodeQL** for security scanning (`.github/workflows/codeql-analysis.yml`)
 - **macOS native development** -- see `docs/development-macos.md` for
   building and testing locally on macOS without Docker or Homebrew
 
