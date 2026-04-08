@@ -610,9 +610,87 @@ placeholder commit lands.)
 
 ### Discoveries during execution
 
-(To be filled in by Claude after Step 3, capturing anything
-surprising that came up during local preparation, the operator
-publish, or the crates.io page review.)
+* **Mid-phase rename from `decompression` to `compression`.**
+  After Step 1 was already partially in progress (the
+  decompression placeholder directory had been created and
+  the protocol placeholder was being written), the operator
+  asked to rename the first crate to `shakenfist-spice-
+  compression` so the eventual crate could cover both
+  directions of the SPICE codecs in a single namespace. This
+  was handled by:
+  1. Renaming the in-flight (untracked) directory.
+  2. Re-verifying `shakenfist-spice-compression` was also
+     available on crates.io (it was, 404).
+  3. Updating Decision #6 in the master plan to capture the
+     naming rationale, the master plan's other references
+     to the old name, and both phase plan files.
+  4. Committing the rename as a standalone documentation-only
+     commit (26c38c0) before the placeholder commit (42c8e8a),
+     so the two changes stayed logically separate.
+  The rename did not require any extra crates.io action — the
+  old name was never published, only mentioned in
+  yet-to-be-committed plan text.
+
+* **Operator publishes via docker, not native cargo.** The
+  operator's machine has docker but no native cargo
+  installation. Publishes were performed by passing the
+  short-lived crates.io API token into the existing `ryll-dev`
+  devcontainer image via `-e CARGO_REGISTRY_TOKEN=...`, with a
+  `for` loop wrapping `cargo publish -p <name>`. This worked
+  cleanly: docker has network access by default,
+  `CARGO_REGISTRY_TOKEN` is read by cargo without needing a
+  prior `cargo login`, and the token never touched disk inside
+  the container (no `~/.cargo/credentials.toml` write). Worth
+  remembering for future publish operations.
+
+* **Token scoping recommendation.** The publish was performed
+  with a `publish-new`-only token scoped to the three
+  crate-name patterns and an expiration of 1 day. This is the
+  correct security posture for a one-shot reservation publish:
+  even if the token had leaked, an attacker could not have
+  used it to publish updates to existing crates, change
+  ownership, yank, or publish new crates outside the
+  reservation namespace.
+
+* **All three publishes succeeded within ~7 seconds.** The
+  three uploads landed at 2026-04-08T11:31:06, 11:31:09, and
+  11:31:13 UTC respectively. crate sizes 1.6-2 KB each. No
+  retries needed, no metadata rejections, no rate limiting.
+  Cargo's `--dry-run` correctly predicted the package
+  contents and the verification build succeeded for all
+  three before the real publish.
+
+* **`.cargo_vcs_info.json` was added to the published
+  tarballs.** During local dry-run inspection (Step 1), the
+  packaged tarballs contained 5 files (Cargo.toml,
+  Cargo.toml.orig, Cargo.lock, README.md, src/lib.rs) but
+  *not* `.cargo_vcs_info.json`, because the working tree had
+  uncommitted changes when the dry-run ran. Once the
+  placeholders were committed (42c8e8a) and the operator
+  published from the clean tree, the VCS info file was added
+  automatically by cargo. This is expected cargo behaviour
+  and was correctly anticipated in Step 1's tarball inspection
+  notes.
+
+* **No need to push the branch first.** The Phase 2 plan
+  flagged this as a recommendation (open question #4), but in
+  practice the README links pointing at
+  `develop/docs/plans/PLAN-crate-extraction.md` will 404 only
+  until `display-iteration` is merged to `develop`, which is
+  expected to happen as part of normal merge cadence. Since
+  the crates.io pages will be visited primarily by us in the
+  short term (and by anyone running `cargo search shakenfist`
+  who is curious), the broken link for the first day or two
+  is not a meaningful problem.
+
+* **Verification via the crates.io HTTP API.** Rather than
+  manually clicking through three crates.io pages in a
+  browser, all the success-criteria checks (version, license,
+  repository, owner, yanked status) were verified by hitting
+  `https://crates.io/api/v1/crates/<name>` and parsing the
+  JSON. This is more thorough than visual inspection and is
+  recorded here in case future phases want to do the same
+  for `0.1.0` publish verification.
 
 ### Back brief
 

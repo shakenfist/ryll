@@ -382,7 +382,7 @@ the initial extraction.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Convert ryll to a Cargo workspace | PLAN-crate-extraction-phase-01-workspace.md | Complete |
-| 2. Reserve crate names on crates.io | PLAN-crate-extraction-phase-02-reserve-names.md | In progress |
+| 2. Reserve crate names on crates.io | PLAN-crate-extraction-phase-02-reserve-names.md | Complete |
 | 3. Extract shakenfist-spice-compression crate | PLAN-crate-extraction-phase-03-compression.md | Not started |
 | 4. Extract shakenfist-spice-protocol crate | PLAN-crate-extraction-phase-04-protocol.md | Not started |
 | 5. Extract shakenfist-spice-usbredir crate | PLAN-crate-extraction-phase-05-usbredir.md | Not started |
