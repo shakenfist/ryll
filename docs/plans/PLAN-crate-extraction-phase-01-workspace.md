@@ -89,7 +89,7 @@ completed work and should NOT be rewritten.
 
 Convert the ryll repository into a Cargo workspace with `ryll`
 as the sole initial member, so that subsequent extraction phases
-can add `shakenfist-spice-decompression`,
+can add `shakenfist-spice-compression`,
 `shakenfist-spice-protocol`, and `shakenfist-spice-usbredir` as
 sibling workspace members.
 
@@ -123,7 +123,7 @@ confusing tree once the extracted crates land:
 ryll-repo/
 ├── Cargo.toml                       # workspace + ryll package
 ├── src/                             # ryll source (named "src/" not "ryll/")
-├── shakenfist-spice-decompression/
+├── shakenfist-spice-compression/
 ├── shakenfist-spice-protocol/
 └── shakenfist-spice-usbredir/
 ```
@@ -143,7 +143,7 @@ ryll-repo/
 ├── ryll/
 │   ├── Cargo.toml                   # [package] name = "ryll"
 │   └── src/
-├── shakenfist-spice-decompression/
+├── shakenfist-spice-compression/
 ├── shakenfist-spice-protocol/
 └── shakenfist-spice-usbredir/
 ```
@@ -320,7 +320,7 @@ Steps within the commit:
      sections move with the file unchanged.
    - **Important**: `version` does NOT move into
      `[workspace.package]` — each future workspace member
-     (decompression, protocol, usbredir) will have its own
+     (compression, protocol, usbredir) will have its own
      independent version. ryll's version stays per-package.
 4. Create the new top-level `Cargo.toml`:
    ```toml

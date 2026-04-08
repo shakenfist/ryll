@@ -93,7 +93,7 @@ the initial extraction.
    multi-crate workspaces:
 
    ```toml
-   shakenfist-spice-decompression = { path = "../shakenfist-spice-decompression", version = "0.1" }
+   shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1" }
    ```
 
    Cargo uses the path for local workspace builds and the version
@@ -105,7 +105,7 @@ the initial extraction.
 2. **GLZ async / tokio dependency: accept it.** The GLZ
    decompressor is currently `async fn` because of the
    cross-channel retry loop (it awaits a tokio sleep), so
-   `shakenfist-spice-decompression` will pull in tokio as a
+   `shakenfist-spice-compression` will pull in tokio as a
    dependency. Rationale:
    - Both ryll and the planned kerbside rewrite already use
      tokio, so neither consumer pays a real cost.
@@ -124,7 +124,7 @@ the initial extraction.
 
 3. **Crate naming: `shakenfist-spice-*` prefix.** The extracted
    crates will be named:
-   - `shakenfist-spice-decompression`
+   - `shakenfist-spice-compression`
    - `shakenfist-spice-protocol`
    - `shakenfist-spice-usbredir`
 
@@ -246,7 +246,7 @@ the initial extraction.
    for consistency. This is an API cleanup only — the wire
    format is unchanged.
 
-6. **Single `shakenfist-spice-decompression` crate with
+6. **Single `shakenfist-spice-compression` crate with
    feature-gated algorithms.** All four SPICE image codecs
    (QUIC, GLZ, LZ, LZ4) live in one crate rather than one crate
    per algorithm. Rationale:
@@ -266,11 +266,23 @@ the initial extraction.
      GLZ needs tokio (for the async cross-channel retry loop).
      Cargo feature flags handle this cleanly.
 
+   **The crate is named "compression", not "decompression",**
+   even though the initial `0.1.0` release will only contain
+   decompression code (matching what ryll has today). The
+   broader name reserves namespace for future compression
+   implementations of the same codecs, which a SPICE proxy
+   (such as the planned Rust rewrite of kerbside) or
+   server-side tooling will eventually want. A single crate
+   that covers both directions is more convenient than
+   splitting compression and decompression across two crates,
+   and the alternative — renaming the crate later — would be
+   a breaking change to every consumer's `Cargo.toml`.
+
    The crate will use feature flags to let consumers opt out of
    algorithms they don't need (and their transitive deps):
 
    ```toml
-   # shakenfist-spice-decompression/Cargo.toml
+   # shakenfist-spice-compression/Cargo.toml
    [features]
    default = ["quic", "glz", "lz", "lz4"]
    quic = []
@@ -289,7 +301,11 @@ the initial extraction.
    And each decoder module is `#[cfg(feature = "...")]`-gated in
    `lib.rs`. Ryll and kerbside depend with default features;
    hypothetical QUIC-only consumers can set `default-features =
-   false, features = ["quic"]` and pay nothing for tokio.
+   false, features = ["quic"]` and pay nothing for tokio. Once
+   compression code is added, additional features (e.g.
+   `quic-encode`, `lz4-encode`) may be introduced to gate the
+   per-direction code, but the existing decoder features
+   remain stable.
 
    This decision should be revisited if one of the decoders
    grows beyond ~5k LOC, if genuine non-SPICE users of a single
@@ -299,7 +315,7 @@ the initial extraction.
 7. **Reserve crate names on crates.io early.** As soon as the
    workspace exists, publish minimal `0.0.0` placeholder crates
    for all three names:
-   - `shakenfist-spice-decompression`
+   - `shakenfist-spice-compression`
    - `shakenfist-spice-protocol`
    - `shakenfist-spice-usbredir`
 
@@ -367,7 +383,7 @@ the initial extraction.
 |-------|------|--------|
 | 1. Convert ryll to a Cargo workspace | PLAN-crate-extraction-phase-01-workspace.md | Complete |
 | 2. Reserve crate names on crates.io | PLAN-crate-extraction-phase-02-reserve-names.md | In progress |
-| 3. Extract shakenfist-spice-decompression crate | PLAN-crate-extraction-phase-03-decompression.md | Not started |
+| 3. Extract shakenfist-spice-compression crate | PLAN-crate-extraction-phase-03-compression.md | Not started |
 | 4. Extract shakenfist-spice-protocol crate | PLAN-crate-extraction-phase-04-protocol.md | Not started |
 | 5. Extract shakenfist-spice-usbredir crate | PLAN-crate-extraction-phase-05-usbredir.md | Not started |
 | 6. Introduce ConnectionConfig and move SpiceClient into protocol crate | PLAN-crate-extraction-phase-06-client.md | Not started |
@@ -385,7 +401,7 @@ soon as the workspace exists, before any extraction work begins.
 This phase is small and self-contained but time-sensitive — it
 should ship promptly to minimise the squatting window.
 
-For each of `shakenfist-spice-decompression`,
+For each of `shakenfist-spice-compression`,
 `shakenfist-spice-protocol`, and `shakenfist-spice-usbredir`:
 
 1. Create a new workspace member directory with a minimal
@@ -410,10 +426,16 @@ required since the resolver will prefer `0.1.0` automatically.
 
 This phase makes no changes to ryll itself.
 
-### Phase 3: Extract shakenfist-spice-decompression
+### Phase 3: Extract shakenfist-spice-compression
 
-Create a new workspace member `shakenfist-spice-decompression`
-containing:
+Note: per Decision #6, the crate is named "compression" even
+though the initial `0.1.0` release will only contain
+**decompression** code (matching ryll's current scope). The
+broader name reserves namespace for compression
+implementations of the same codecs in future minor releases.
+
+Replace the `0.0.0` placeholder created in Phase 2 with the
+real implementation, containing:
 - `DecompressedImage` struct (always available)
 - QUIC decoder (`quic.rs`, feature `quic`)
 - GLZ decoder (`glz.rs`, feature `glz`, pulls in tokio)
@@ -426,15 +448,15 @@ need a subset can disable default features and opt in to the
 ones they need.
 
 As a prerequisite to the extraction, move the LZ4 decoder out of
-`src/channels/display.rs` (function `decompress_spice_lz4`) and
-into `src/decompression/lz4.rs` alongside the other decoders.
-LZ4 is a general-purpose SPICE image codec and does not belong
-in the display channel implementation; it was only there for
-historical reasons. This move should be a standalone commit that
-lands before the crate extraction begins, so the "create new
-crate and move files" step stays mechanical.
+`ryll/src/channels/display.rs` (function `decompress_spice_lz4`)
+and into `ryll/src/decompression/lz4.rs` alongside the other
+decoders. LZ4 is a general-purpose SPICE image codec and does
+not belong in the display channel implementation; it was only
+there for historical reasons. This move should be a standalone
+commit that lands before the crate extraction begins, so the
+"create new crate and move files" step stays mechanical.
 
-Update ryll to `use shakenfist_spice_decompression::*` instead of
+Update ryll to `use shakenfist_spice_compression::*` instead of
 the local module. All existing tests must continue to pass.
 
 ### Phase 4: Extract shakenfist-spice-protocol
@@ -503,7 +525,7 @@ because the following statements will be true:
 * Each crate has no `use crate::` imports pointing at ryll
   application code.
 * CI runs tests for all workspace members.
-* The kerbside proxy can add `shakenfist-spice-decompression`
+* The kerbside proxy can add `shakenfist-spice-compression`
   and `shakenfist-spice-protocol` as git dependencies and use
   them without pulling in ryll's GUI, input, or channel
   management code.

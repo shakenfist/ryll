@@ -52,7 +52,7 @@ Decision #7 mandates that the three target crate names be
 reserved on crates.io with `0.0.0` placeholder publishes
 before any extraction work begins:
 
-- `shakenfist-spice-decompression`
+- `shakenfist-spice-compression`
 - `shakenfist-spice-protocol`
 - `shakenfist-spice-usbredir`
 
@@ -83,7 +83,7 @@ phases.
 
 After this phase completes:
 
-- `shakenfist-spice-decompression`,
+- `shakenfist-spice-compression`,
   `shakenfist-spice-protocol`, and
   `shakenfist-spice-usbredir` exist on crates.io as version
   `0.0.0`, owned by the operator's crates.io account.
@@ -149,7 +149,7 @@ Before starting Step 1, Claude verifies:
    in the interim. For each of the three names:
    ```sh
    curl -sI -o /dev/null -w "%{http_code}\n" \
-     "https://crates.io/api/v1/crates/shakenfist-spice-decompression"
+     "https://crates.io/api/v1/crates/shakenfist-spice-compression"
    ```
    All three must return `404`. If any returns `200`, **stop
    and re-plan immediately** — someone else has claimed the
@@ -297,15 +297,22 @@ intent, and substantive publishing will follow.
 
 ### Per-crate "What this crate will contain" text
 
-**`shakenfist-spice-decompression`:**
+**`shakenfist-spice-compression`:**
 
 > When released, this crate will provide pure-Rust
-> implementations of the SPICE image-stream decompression
-> algorithms: QUIC (the SPICE wavelet/arithmetic codec, not
-> the QUIC transport protocol), GLZ (dictionary-based
-> cross-frame LZ), LZ (single-frame LZ), and LZ4. Each
-> algorithm will be gated behind a Cargo feature for
-> dependency-minimisation.
+> implementations of the SPICE image-stream codecs: QUIC (the
+> SPICE wavelet/arithmetic codec, not the QUIC transport
+> protocol), GLZ (dictionary-based cross-frame LZ), LZ
+> (single-frame LZ), and LZ4. Each algorithm will be gated
+> behind a Cargo feature for dependency-minimisation.
+>
+> The initial `0.1.0` release will contain decompression only,
+> matching what the ryll client needs today. The crate name
+> deliberately covers both directions so that compression
+> implementations of the same codecs can be added in future
+> minor releases without a crate rename. SPICE proxies (such
+> as the planned Rust rewrite of the kerbside proxy) and
+> server-side tooling are likely to want compression as well.
 
 **`shakenfist-spice-protocol`:**
 
@@ -340,7 +347,7 @@ Steps within the commit:
 1. For each of the three crate names, create the directory
    structure under the workspace root:
    ```
-   shakenfist-spice-decompression/
+   shakenfist-spice-compression/
    ├── Cargo.toml
    ├── README.md
    └── src/lib.rs
@@ -361,7 +368,7 @@ Steps within the commit:
    resolver = "2"
    members = [
        "ryll",
-       "shakenfist-spice-decompression",
+       "shakenfist-spice-compression",
        "shakenfist-spice-protocol",
        "shakenfist-spice-usbredir",
    ]
@@ -386,7 +393,7 @@ Steps within the commit:
 5. **Critical: dry-run each publish.** For each of the three
    crates, from the workspace root:
    ```sh
-   cargo publish --dry-run -p shakenfist-spice-decompression
+   cargo publish --dry-run -p shakenfist-spice-compression
    cargo publish --dry-run -p shakenfist-spice-protocol
    cargo publish --dry-run -p shakenfist-spice-usbredir
    ```
@@ -408,13 +415,13 @@ Steps within the commit:
    concrete `edition`, `license`, `authors`, `repository`
    values, not `.workspace = true` references):
    ```sh
-   tar -xzOf target/package/shakenfist-spice-decompression-0.0.0.crate \
-       shakenfist-spice-decompression-0.0.0/Cargo.toml
+   tar -xzOf target/package/shakenfist-spice-compression-0.0.0.crate \
+       shakenfist-spice-compression-0.0.0/Cargo.toml
    ```
    Confirm the README and `lib.rs` are also present in the
    tarball listing:
    ```sh
-   tar -tzf target/package/shakenfist-spice-decompression-0.0.0.crate
+   tar -tzf target/package/shakenfist-spice-compression-0.0.0.crate
    ```
    Expected files: `Cargo.toml`, `Cargo.toml.orig`, `README.md`,
    `src/lib.rs`, `.cargo_vcs_info.json`, and possibly
@@ -452,7 +459,7 @@ Operator pre-flight:
 Publish sequence (run from the workspace root):
 
 ```sh
-cargo publish -p shakenfist-spice-decompression
+cargo publish -p shakenfist-spice-compression
 cargo publish -p shakenfist-spice-protocol
 cargo publish -p shakenfist-spice-usbredir
 ```
@@ -460,7 +467,7 @@ cargo publish -p shakenfist-spice-usbredir
 The order does not matter; the crates are independent. After
 each one completes, visit:
 
-- <https://crates.io/crates/shakenfist-spice-decompression>
+- <https://crates.io/crates/shakenfist-spice-compression>
 - <https://crates.io/crates/shakenfist-spice-protocol>
 - <https://crates.io/crates/shakenfist-spice-usbredir>
 
@@ -542,7 +549,7 @@ After the operator confirms all three publishes succeeded:
 We will know Phase 2 has been successfully implemented when:
 
 * The repository contains three new workspace member
-  directories: `shakenfist-spice-decompression/`,
+  directories: `shakenfist-spice-compression/`,
   `shakenfist-spice-protocol/`, and
   `shakenfist-spice-usbredir/`, each with `Cargo.toml`,
   `README.md`, and `src/lib.rs`.
@@ -573,7 +580,7 @@ We will know Phase 2 has been successfully implemented when:
 ### Future work
 
 * **`0.1.0` publishes** happen at the end of Phases 3, 4, and
-  5 (decompression, protocol, usbredir respectively), once
+  5 (compression, protocol, usbredir respectively), once
   each crate's API stabilises. That work is tracked under the
   master plan's "Future work" section, not here.
 * **Adding co-owners on crates.io** for bus-factor — see open
