@@ -126,6 +126,9 @@ pub(crate) fn build_tcp_frame(
     tcp.ack = true;
 
     let ip_payload_len = tcp.header_len() + tcp_payload_len;
+    if ip_payload_len > 65515 {
+        return Vec::new();
+    }
     let mut ipv4 =
         Ipv4Header::new(ip_payload_len as u16, 64, IpNumber::TCP, src_ip, dst_ip).unwrap();
     ipv4.dont_fragment = true;
