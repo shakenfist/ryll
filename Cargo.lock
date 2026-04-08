@@ -4144,6 +4144,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shakenfist-spice-compression"
+version = "0.0.0"
+
+[[package]]
+name = "shakenfist-spice-protocol"
+version = "0.0.0"
+
+[[package]]
+name = "shakenfist-spice-usbredir"
+version = "0.0.0"
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

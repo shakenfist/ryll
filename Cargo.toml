@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["ryll"]
+members = [
+    "ryll",
+    "shakenfist-spice-compression",
+    "shakenfist-spice-protocol",
+    "shakenfist-spice-usbredir",
+]
 
 [workspace.package]
 edition = "2021"
