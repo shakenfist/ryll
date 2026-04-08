@@ -112,7 +112,7 @@ jobs:
 
       - name: Build .rpm package
         if: runner.os == 'Linux'
-        run: cargo generate-rpm
+        run: cargo generate-rpm -p ryll
 
       - name: Upload .rpm artifact
         if: runner.os == 'Linux'
