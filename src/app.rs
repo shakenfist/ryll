@@ -29,7 +29,7 @@ const EVENT_CHANNEL_SIZE: usize = 1024;
 const INPUT_CHANNEL_SIZE: usize = 256;
 
 /// Approximate height of the stats bar at the bottom of the window
-const STATS_BAR_HEIGHT: f32 = 10.0;
+const STATS_BAR_HEIGHT: f32 = 20.0;
 
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
@@ -127,6 +127,7 @@ pub struct RyllApp {
     input_tx: Option<mpsc::Sender<InputEvent>>,
     resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
     last_sent_resize: Option<(u32, u32)>,
+    volume_control: Arc<crate::channels::playback::VolumeControl>,
 
     // Display state
     surfaces: HashMap<(u8, u32), DisplaySurface>,
@@ -255,6 +256,7 @@ impl RyllApp {
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
         let (resize_tx, resize_rx) = mpsc::channel(32);
         let resize_tx = Arc::new(resize_tx);
+        let volume_control = crate::channels::playback::VolumeControl::new();
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -291,6 +293,7 @@ impl RyllApp {
             main: channel_snapshots.main.clone(),
         };
 
+        let vol_for_conn = volume_control.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
@@ -308,6 +311,7 @@ impl RyllApp {
                     snaps_for_conn,
                     monitors,
                     resize_rx_for_conn,
+                    vol_for_conn,
                 )
                 .await
                 {
@@ -323,6 +327,7 @@ impl RyllApp {
             input_tx: Some(input_tx),
             resize_tx: Some(resize_tx),
             last_sent_resize: None,
+            volume_control,
             surfaces: HashMap::new(),
             cursor_pos: (0, 0),
             cursor_visible: true,
@@ -950,8 +955,20 @@ impl eframe::App for RyllApp {
                         ui.label(format!("USB: {}", desc));
                     }
 
-                    // Bandwidth sparkline and buttons (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let vol = &self.volume_control;
+                        let mut muted = vol.muted();
+                        if ui.small_button(if muted { "🔇" } else { "🔊" }).clicked() {
+                            muted = !muted;
+                            vol.set_muted(muted);
+                        }
+                        let mut v = vol.volume() as f32;
+                        let slider = egui::Slider::new(&mut v, 0.0..=100.0).show_value(false);
+                        if ui.add_sized([80.0, ui.available_height()], slider).changed() {
+                            vol.set_volume(v as u8);
+                        }
+                        ui.separator();
+
                         ui.allocate_ui_with_layout(
                             egui::vec2(75.0, ui.available_height()),
                             egui::Layout::right_to_left(egui::Align::Center),
@@ -1919,6 +1936,7 @@ async fn run_connection(
     snapshots: ChannelSnapshots,
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
+    volume_control: Arc<crate::channels::playback::VolumeControl>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -2089,6 +2107,20 @@ async fn run_connection(
                 }
             }
 
+            ChannelType::Playback => {
+                let stream = client
+                    .connect_channel(session_id, channel_type, channel_id)
+                    .await?;
+                let mut channel = crate::channels::playback::PlaybackChannel::new(
+                    stream,
+                    event_tx.clone(),
+                    byte_counter.clone(),
+                    traffic.clone(),
+                    volume_control.clone(),
+                );
+                handles.push(tokio::spawn(async move { channel.run().await }));
+            }
+
             _ => {
                 info!(
                     "Skipping channel: {} (id={})",
@@ -2162,6 +2194,7 @@ pub async fn run_headless(
             snapshots,
             monitors,
             resize_rx,
+            crate::channels::playback::VolumeControl::new(),
         )
         .await
     });
