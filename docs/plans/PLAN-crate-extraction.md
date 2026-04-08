@@ -365,7 +365,7 @@ the initial extraction.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Convert ryll to a Cargo workspace | PLAN-crate-extraction-phase-01-workspace.md | In progress |
+| 1. Convert ryll to a Cargo workspace | PLAN-crate-extraction-phase-01-workspace.md | Complete |
 | 2. Reserve crate names on crates.io | PLAN-crate-extraction-phase-02-reserve-names.md | Not started |
 | 3. Extract shakenfist-spice-decompression crate | PLAN-crate-extraction-phase-03-decompression.md | Not started |
 | 4. Extract shakenfist-spice-protocol crate | PLAN-crate-extraction-phase-04-protocol.md | Not started |

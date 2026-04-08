@@ -482,10 +482,39 @@ We will know Phase 1 has been successfully implemented when:
 
 ### Bugs fixed during this work
 
-(None expected. Phase 1 is purely structural and should not
-surface or fix any bugs. If a bug is encountered, record it
-here and consider whether it should be fixed in this phase or
-in a separate commit.)
+* **Five clippy lints in test code** surfaced by the
+  `cargo clippy --workspace --all-targets` pre-flight check.
+  CI was previously running plain `cargo clippy` without
+  `--all-targets`, so test-target lints were not being
+  enforced. Fixed in commit 7191d9e (separate from the
+  workspace conversion itself):
+  - `bugreport.rs` (4 occurrences): test snapshot constructors
+    used `let mut x = T::default(); x.field = ...;` patterns
+    that triggered `field_reassign_with_default`. Converted to
+    struct literal syntax with `..Default::default()`.
+  - `webdav/server.rs` (1 occurrence): test helper
+    `header_value` had a needless explicit lifetime. Elided.
+
+### Discoveries during execution
+
+* **`cargo generate-rpm -p` is not standard cargo `-p`
+  semantics.** Unlike `cargo deb -p ryll`, which works on both
+  the pre- and post-conversion layouts, `cargo generate-rpm -p
+  ryll` interprets its argument as a `<name>/Cargo.toml` path
+  lookup. On the pre-conversion single-package layout there is
+  no `ryll/Cargo.toml`, so the command fails with "No such
+  file or directory". As a result, the `-p ryll` flag for
+  `cargo generate-rpm` had to move from Step 1 (CI flag
+  no-ops) into Step 3 (the structural commit), so that the
+  flag and the path it references land atomically.
+* **Git rename detection got confused** by the new top-level
+  `Cargo.toml` having the same path as the original. Step 3
+  shows up as `modified: Cargo.toml` + `new file: ryll/Cargo.toml`
+  rather than a clean rename. The end state is correct and
+  `git log --follow ryll/Cargo.toml` should still find the
+  history via similarity scoring at log time, but the cosmetic
+  diff is less clean than ideal. The 35 source files in
+  `src/` -> `ryll/src/` did all register as 100% renames.
 
 ### Back brief
 
