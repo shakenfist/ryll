@@ -37,10 +37,10 @@ jobs:
             libwayland-dev libssl-dev
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: Build (${{ matrix.name }})
@@ -85,10 +85,10 @@ jobs:
             libwayland-dev libssl-dev
 
       - name: Build
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --release -p ryll ${{ matrix.features }}
 
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }}
 
       - name: Install cargo-deb
         if: runner.os == 'Linux'
@@ -96,7 +96,7 @@ jobs:
 
       - name: Build .deb package
         if: runner.os == 'Linux'
-        run: cargo deb --no-build
+        run: cargo deb --no-build -p ryll
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'

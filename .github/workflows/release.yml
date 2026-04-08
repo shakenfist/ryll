@@ -106,10 +106,10 @@ jobs:
             libwayland-dev libssl-dev
 
       - name: Build
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --release -p ryll ${{ matrix.features }}
 
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }}
 
       # --- Linux: .deb and .rpm ---
 
@@ -119,7 +119,7 @@ jobs:
 
       - name: Build .deb package
         if: runner.os == 'Linux'
-        run: cargo deb --no-build
+        run: cargo deb --no-build -p ryll
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'
