@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::{Arc, Mutex};
 
-use super::DecompressedImage;
+use crate::DecompressedImage;
 
 const GLZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;

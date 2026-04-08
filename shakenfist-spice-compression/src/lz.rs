@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-use super::DecompressedImage;
+use crate::DecompressedImage;
 
 const LZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;

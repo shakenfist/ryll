@@ -5,7 +5,7 @@
 /// compressed row data. Returns RGBA pixels.
 use tracing::{debug, warn};
 
-use super::DecompressedImage;
+use crate::DecompressedImage;
 
 /// Decompress a SPICE LZ4 image.
 pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<DecompressedImage> {

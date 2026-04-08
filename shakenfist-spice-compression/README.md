@@ -1,54 +1,64 @@
 # shakenfist-spice-compression
 
-**This crate is a functionally empty crate that exists to
-reserve the crate name for an upcoming pure-Rust SPICE image
-compression and decompression library extracted from the
-[ryll](https://github.com/shakenfist/ryll) SPICE client. It
-should not be used.**
+Pure-Rust implementations of the SPICE image-stream
+decompression algorithms:
+
+- **QUIC** — the SPICE wavelet/arithmetic codec (not the QUIC
+  transport protocol). Feature `quic` (default).
+- **GLZ** — dictionary-based cross-frame LZ with a shared
+  previous-images dictionary. Async because of a cross-channel
+  retry loop. Feature `glz` (default), pulls in `tokio`.
+- **LZ** — single-frame LZ. Feature `lz` (default).
+- **LZ4** — SPICE's per-row LZ4 image format (each row is
+  independently compressed with `lz4_flex` and a 4-byte length
+  prefix). Feature `lz4` (default), pulls in `lz4_flex`.
+
+All four decoders return a `DecompressedImage { width, height,
+pixels: Vec<u8>, image_id }` on success (with the historical
+exception of `quic_decode`, which returns `Option<Vec<u8>>` and
+leaves the wrapping to the caller — this asymmetry will be
+smoothed out before the first published release). The struct
+is `#[non_exhaustive]`; construct via `DecompressedImage::new(...)`.
 
 ## Status
 
-Reserved by the [shakenfist](https://github.com/shakenfist)
-project. The real `0.1.0` release will be published when the
-extraction work in
-[ryll](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md)
-lands. Until then, this `0.0.0` release is intentionally
-empty.
+This crate is **not yet published to crates.io**. The `0.0.0`
+entry there is a Phase 2 name reservation; the real `0.1.0`
+release will follow once API polish is complete (see the
+[extraction plan](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md)
+for the polish list).
 
-## What this crate will contain
+The crate name deliberately covers both directions of the
+codecs (compression and decompression) so that compression
+implementations can be added in future minor releases without
+a crate rename. SPICE proxies (such as the planned Rust
+rewrite of the shakenfist kerbside proxy) and server-side
+tooling are likely to want compression as well as
+decompression. The current `0.1.0`-target code is
+decompression only, matching what ryll needs today.
 
-When released, this crate will provide pure-Rust
-implementations of the SPICE image-stream codecs: QUIC (the
-SPICE wavelet/arithmetic codec, not the QUIC transport
-protocol), GLZ (dictionary-based cross-frame LZ), LZ
-(single-frame LZ), and LZ4. Each algorithm will be gated
-behind a Cargo feature for dependency-minimisation.
+Internal consumers (ryll itself and the planned kerbside
+rewrite) should depend on this crate via a workspace path or a
+git dependency until `0.1.0` ships.
 
-The initial `0.1.0` release will contain decompression only,
-matching what the ryll client needs today. The crate name
-deliberately covers both directions so that compression
-implementations of the same codecs can be added in future
-minor releases without a crate rename. SPICE proxies (such as
-the planned Rust rewrite of the kerbside proxy) and
-server-side tooling are likely to want compression as well as
-decompression, and a single crate that covers both is more
-convenient than splitting them.
+## Usage
 
-## Why a placeholder?
+```rust,ignore
+use shakenfist_spice_compression::{decompress_glz, DecompressedImage};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-crates.io has a flat, immutable, first-come namespace. We are
-publishing this empty crate now to prevent the name from being
-claimed by an unrelated party (typosquatter, AI-generated junk
-crate, well-meaning third party) before the real
-implementation is ready. This is consistent with the
-[Rust Forge crate ownership policy](https://forge.rust-lang.org/policies/crate-ownership.html)'s
-guidance on reservation crates: the README clearly states the
-intent, and substantive publishing will follow.
+// Shared GLZ dictionary across all display channels.
+let dict: Arc<Mutex<HashMap<u64, Vec<u8>>>> =
+    Arc::new(Mutex::new(HashMap::new()));
 
-## Project links
+// Decompress a GLZ image from wire bytes.
+let image: DecompressedImage =
+    decompress_glz(glz_bytes, &dict).await?;
+# Ok::<(), anyhow::Error>(())
+```
 
-- Source repository:
-  <https://github.com/shakenfist/ryll>
-- Extraction plan:
-  <https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md>
-- Issues / contact: file via the ryll repository
+## Source
+
+Extracted from the
+[ryll](https://github.com/shakenfist/ryll) SPICE client.

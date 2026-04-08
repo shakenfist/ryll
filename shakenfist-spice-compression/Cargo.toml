@@ -5,5 +5,19 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Reserved name for an upcoming pure-Rust SPICE image compression and decompression library (QUIC, GLZ, LZ, LZ4) extracted from the ryll SPICE client."
+description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), extracted from the ryll SPICE client. Reserved crate name; the first published release will follow as 0.1.0 once the API has stabilised."
 readme = "README.md"
+
+[features]
+default = ["quic", "glz", "lz", "lz4"]
+quic = []
+glz = ["dep:tokio"]
+lz = []
+lz4 = ["dep:lz4_flex"]
+
+[dependencies]
+anyhow = "1"
+byteorder = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync", "time"], optional = true }
+lz4_flex = { version = "0.11", optional = true }

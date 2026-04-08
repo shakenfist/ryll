@@ -44,8 +44,17 @@ configparser = "3"
 # HTTP for URL config fetching
 reqwest = { version = "0.12", features = ["blocking"] }
 
-# LZ4 decompression for SPICE image type 109
+# LZ4 compression/decompression for general data (webdav, usbredir).
+# SPICE image LZ4 lives in shakenfist-spice-compression below.
 lz4_flex = "0.11"
+
+# Extracted SPICE codecs (workspace member; placeholder name
+# reservation is on crates.io as 0.0.0, real release will follow
+# as 0.1.0 once API polish is complete). The path dependency has
+# no `version` qualifier yet because the local crate is still at
+# 0.0.0 to match the published placeholder; the dual-spec idiom
+# only works once the local version reaches 0.1.0.
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"

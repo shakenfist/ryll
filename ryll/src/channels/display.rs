@@ -10,9 +10,6 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{DecodeResult, DisplaySnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
-use crate::decompression::{
-    decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
-};
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{
@@ -21,6 +18,9 @@ use crate::protocol::messages::{
 };
 use crate::protocol::{display_client, display_server, ChannelType, ImageType};
 use crate::settings;
+use shakenfist_spice_compression::{
+    decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
+};
 
 use super::ChannelEvent;
 
@@ -653,12 +653,12 @@ impl DisplayChannel {
                                 rgba[di + 3] = if bmp_fmt == 9 { src_row[si + 3] } else { 255 };
                             }
                         }
-                        Some(DecompressedImage {
+                        Some(DecompressedImage::new(
                             width,
                             height,
-                            pixels: rgba,
-                            image_id: img_desc.image_id,
-                        })
+                            rgba,
+                            img_desc.image_id,
+                        ))
                     }
                 }
             }
@@ -746,12 +746,12 @@ impl DisplayChannel {
             Some(ImageType::FromCache) => {
                 // Look up in cache
                 if let Some(pixels) = self.image_cache.get(&img_desc.image_id) {
-                    Some(DecompressedImage {
-                        width: img_desc.width,
-                        height: img_desc.height,
-                        pixels: pixels.clone(),
-                        image_id: img_desc.image_id,
-                    })
+                    Some(DecompressedImage::new(
+                        img_desc.width,
+                        img_desc.height,
+                        pixels.clone(),
+                        img_desc.image_id,
+                    ))
                 } else {
                     warn!("display: image {} not in cache", img_desc.image_id);
                     None
@@ -773,12 +773,12 @@ impl DisplayChannel {
                     match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
                         Ok(img) => {
                             let rgba = img.to_rgba8();
-                            Some(DecompressedImage {
-                                width: rgba.width(),
-                                height: rgba.height(),
-                                pixels: rgba.into_raw(),
-                                image_id: img_desc.image_id,
-                            })
+                            Some(DecompressedImage::new(
+                                rgba.width(),
+                                rgba.height(),
+                                rgba.into_raw(),
+                                img_desc.image_id,
+                            ))
                         }
                         Err(e) => {
                             warn!("display: JPEG decode failed: {}", e);
@@ -800,12 +800,12 @@ impl DisplayChannel {
                     ]) as usize;
                     let quic_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match quic_decode(quic_data, img_desc.width, img_desc.height) {
-                        Some(rgba) => Some(DecompressedImage {
-                            width: img_desc.width,
-                            height: img_desc.height,
-                            pixels: rgba,
-                            image_id: img_desc.image_id,
-                        }),
+                        Some(rgba) => Some(DecompressedImage::new(
+                            img_desc.width,
+                            img_desc.height,
+                            rgba,
+                            img_desc.image_id,
+                        )),
                         None => {
                             warn!("display: QUIC decode failed");
                             None

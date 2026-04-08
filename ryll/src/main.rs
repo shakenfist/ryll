@@ -19,7 +19,6 @@ mod capture {
 }
 mod channels;
 mod config;
-mod decompression;
 mod display;
 mod protocol;
 mod settings;
