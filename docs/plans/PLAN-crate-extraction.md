@@ -540,6 +540,34 @@ because the following statements will be true:
   will prefer over the placeholder) so external projects can
   consume them via normal Cargo dependencies. Optionally yank
   the `0.0.0` placeholders after the real releases land.
+* **First proper crates.io release of ryll itself** -- The
+  `ryll` crate name was reserved on crates.io alongside the
+  three `shakenfist-spice-*` placeholders, but as a one-off
+  `0.0.0` publish from a temporary directory outside the
+  workspace (because the workspace already has a `ryll`
+  member with the same name). The real first publish needs:
+  - `keywords` (max 5, lowercase, alphanumeric+hyphen) and
+    `categories` (from the official crates.io list) added to
+    `ryll/Cargo.toml`.
+  - `homepage`, `documentation`, and explicit `readme` fields.
+  - A dependency review to confirm every transitive dep
+    publishes cleanly (no path-only deps without a version
+    pin, no git deps).
+  - A decision about whether the default `capture` feature
+    set is too heavy for `cargo install ryll` users on a
+    minimal system, and whether the GUI dependencies (eframe,
+    X11/Wayland/GL dev packages) need a more useful "missing
+    system dep" error message.
+  - A release-workflow step that publishes `ryll` to crates.io
+    alongside the existing GitHub release artefacts, so future
+    tags don't drift between the two distribution channels.
+  - A version bump from `0.1.3` to `0.1.4` (or higher) for
+    the first real release, since `0.0.0` is already taken by
+    the placeholder.
+
+  This work is deliberately deferred to keep the crate
+  extraction plan focused; the placeholder removes the
+  squatting risk in the meantime.
 * **WebDAV mux extraction** -- The `src/webdav/mux.rs` module is
   also self-contained and could become a crate if other projects
   need SPICE WebDAV channel support.
