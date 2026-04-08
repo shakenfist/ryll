@@ -864,10 +864,13 @@ mod tests {
 
     #[test]
     fn test_display_snapshot_serialises() {
-        let mut snap = DisplaySnapshot::default();
-        snap.image_cache_entries = 3;
-        snap.image_cache_ids = vec![1, 2, 3];
-        snap.image_cache_bytes = 12345;
+        let mut snap = DisplaySnapshot {
+            image_cache_entries: 3,
+            image_cache_ids: vec![1, 2, 3],
+            image_cache_bytes: 12345,
+            bytes_in: 100_000,
+            ..Default::default()
+        };
         snap.recent_decodes.push_back(DecodeResult {
             image_type: "GlzRgb".to_string(),
             image_id: 42,
@@ -877,7 +880,6 @@ mod tests {
             success: true,
             timestamp_secs: 1.5,
         });
-        snap.bytes_in = 100_000;
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
@@ -886,8 +888,10 @@ mod tests {
 
     #[test]
     fn test_inputs_snapshot_serialises() {
-        let mut snap = InputsSnapshot::default();
-        snap.button_state = 1;
+        let mut snap = InputsSnapshot {
+            button_state: 1,
+            ..Default::default()
+        };
         snap.recent_events.push_back(InputEventRecord {
             event_type: "KeyDown".to_string(),
             scancode: 0x1E,
@@ -903,8 +907,10 @@ mod tests {
 
     #[test]
     fn test_cursor_snapshot_serialises() {
-        let mut snap = CursorSnapshot::default();
-        snap.cache_entries = 1;
+        let mut snap = CursorSnapshot {
+            cache_entries: 1,
+            ..Default::default()
+        };
         snap.cache_contents.push(CursorCacheEntry {
             cursor_id: 99,
             width: 24,
@@ -929,9 +935,11 @@ mod tests {
 
     #[test]
     fn test_app_snapshot_serialises() {
-        let mut snap = AppSnapshot::default();
-        snap.fps = 59.9;
-        snap.connected = true;
+        let mut snap = AppSnapshot {
+            fps: 59.9,
+            connected: true,
+            ..Default::default()
+        };
         snap.surfaces.push(SurfaceInfo {
             surface_id: 0,
             width: 1920,

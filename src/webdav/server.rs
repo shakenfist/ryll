@@ -124,7 +124,7 @@ mod tests {
     }
 
     /// Extract a header value from a raw HTTP response.
-    fn header_value<'a>(response: &'a [u8], name: &str) -> Option<String> {
+    fn header_value(response: &[u8], name: &str) -> Option<String> {
         let text = String::from_utf8_lossy(response);
         let lower_name = name.to_lowercase();
         for line in text.lines() {
