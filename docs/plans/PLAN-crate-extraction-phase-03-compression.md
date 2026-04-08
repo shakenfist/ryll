@@ -956,10 +956,96 @@ commit remains a pure refactor.)
 
 ### Discoveries during execution
 
-(To be filled in by Claude after Step 2 completes, capturing
-anything surprising that came up during the file moves, the
-feature-gate testing, the `display.rs` integration, or the
-`#[non_exhaustive]` conversion.)
+* **Open Question #4 answered.** The `mod decompression;`
+  declaration was at [ryll/src/main.rs:22](../../ryll/src/main.rs#L22).
+  Ryll is binary-only with no `lib.rs`, so the declaration
+  lived in `main.rs` rather than a library root. Removed
+  cleanly as part of Step 2.
+
+* **The dual-spec idiom does not work when the local crate is
+  at 0.0.0 (unanticipated).** The plan recommended adding the
+  `version = "0.1"` qualifier to ryll's path-dependency on
+  `shakenfist-spice-compression` "as forward preparation",
+  expecting it to be a no-op while the local crate stayed at
+  `0.0.0`. In practice, cargo refuses to resolve `^0.1`
+  against `0.0.0`:
+
+  ```
+  error: failed to select a version for the requirement
+  `shakenfist-spice-compression = "^0.1"`
+  candidate versions found which didn't match: 0.0.0
+  ```
+
+  The dual-spec idiom only becomes usable once the local
+  version reaches `0.1.0`. The fix in Step 2 was to drop the
+  `version` qualifier entirely until the eventual `0.1.0`
+  release; the `Cargo.toml` comment explains why. The plan's
+  recommendation was wrong on this point — added a note to
+  the master plan's Decision #1 in a follow-up commit so
+  future phases (Phases 4, 5) don't repeat the same mistake
+  for the protocol and usbredir crates.
+
+* **All four moved files registered as proper git renames.**
+  Three (`glz.rs`, `lz.rs`, `lz4.rs`) registered at 99%
+  similarity because of the one-line `super::DecompressedImage`
+  → `crate::DecompressedImage` change. `quic.rs` registered at
+  100% because it doesn't reference `DecompressedImage`
+  directly (it returns `Option<Vec<u8>>` and the caller
+  wraps). `git log --follow` walks back through Phase 3 to
+  the original locations cleanly. For `lz4.rs` it walks back
+  through Step 1's move from `ryll/src/channels/display.rs`,
+  which is exactly the rationale for the prerequisite commit
+  structure.
+
+* **`display.rs` had four `DecompressedImage` struct literal
+  sites, not one.** The plan flagged the QUIC handler as the
+  most likely break point under `#[non_exhaustive]`, but the
+  full count was four: the GlzRgb path (line 656), the
+  FromCache path (line 749), the JPEG path (line 776), and
+  the QUIC path (line 803). All four were updated to
+  `DecompressedImage::new(...)` in the same commit. The
+  total `display.rs` diff was ~50 lines because of the
+  per-site reformatting, larger than the plan's "~6 lines"
+  estimate.
+
+* **Rustfmt enforces a strict import-block grouping.** The
+  initial placement of the `use shakenfist_spice_compression::*`
+  import in `display.rs` (between the `use crate::*` lines
+  and the `use crate::protocol::*` lines) tripped rustfmt's
+  group-ordering check, which wants external-crate imports
+  after all `use crate::*` imports in the same block.
+  Re-ordered to put the new import at the end of the block,
+  after `use crate::settings;`.
+
+* **`lz4_flex` stays as a direct ryll dependency** even after
+  the LZ4 decoder moves to the new crate. Ryll's webdav
+  channel ([webdav.rs:482, 585](../../ryll/src/channels/webdav.rs#L482))
+  and usbredir channel
+  ([usbredir.rs:296](../../ryll/src/channels/usbredir.rs#L296))
+  still use `lz4_flex` for general data
+  compression/decompression (not for SPICE images). The
+  Cargo.toml comment was updated to clarify this. The new
+  crate has its own optional `lz4_flex` dep gated behind the
+  `lz4` feature; cargo dedups the two via the lockfile.
+
+* **All five feature-matrix builds succeed.** Verified
+  `--no-default-features` (empty crate, only `tracing`
+  pulled in unconditionally), `--features quic`,
+  `--features glz` (pulls `tokio`), `--features lz`, and
+  `--features lz4` (pulls `lz4_flex`). The
+  `--no-default-features` build of `shakenfist-spice-compression`
+  with all features off compiles a crate that exports only
+  `DecompressedImage` and `DecompressedImage::new` — useful
+  for consumers who want the type but provide their own
+  decoders.
+
+* **Test count is exactly preserved.** Pre-Phase-3 baseline
+  was 99 ryll tests; post-Phase-3 is 97 ryll + 2
+  `shakenfist-spice-compression` (the `test_glz_header_parse`
+  and `test_lz_header_parse` unit tests that travelled with
+  their files). 99 total, no regression. The
+  `cargo test --workspace` output shows them under their new
+  crate.
 
 ### Back brief
 

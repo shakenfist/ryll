@@ -102,6 +102,22 @@ the initial extraction.
    (`{ git = "...", rev = "..." }`), which is what the success
    criteria below already assume for the initial rollout.
 
+   **Caveat (discovered during Phase 3):** the dual-spec
+   idiom only works when the path-resolved version satisfies
+   the version qualifier. While the extracted crates carry
+   `0.0.0` placeholders in their local `Cargo.toml` to match
+   the published Phase-2 reservations, ryll's path-dependency
+   on each must be written **without** the `version =` field:
+
+   ```toml
+   shakenfist-spice-compression = { path = "../shakenfist-spice-compression" }
+   ```
+
+   The version qualifier is added back in the future-work
+   commit that bumps each crate to `0.1.0` and publishes the
+   real release. Phases 4 and 5 (protocol, usbredir) follow
+   the same rule.
+
 2. **GLZ async / tokio dependency: accept it.** The GLZ
    decompressor is currently `async fn` because of the
    cross-channel retry loop (it awaits a tokio sleep), so
@@ -383,7 +399,7 @@ the initial extraction.
 |-------|------|--------|
 | 1. Convert ryll to a Cargo workspace | PLAN-crate-extraction-phase-01-workspace.md | Complete |
 | 2. Reserve crate names on crates.io | PLAN-crate-extraction-phase-02-reserve-names.md | Complete |
-| 3. Extract shakenfist-spice-compression crate | PLAN-crate-extraction-phase-03-compression.md | In progress |
+| 3. Extract shakenfist-spice-compression crate | PLAN-crate-extraction-phase-03-compression.md | Complete |
 | 4. Extract shakenfist-spice-protocol crate | PLAN-crate-extraction-phase-04-protocol.md | Not started |
 | 5. Extract shakenfist-spice-usbredir crate | PLAN-crate-extraction-phase-05-usbredir.md | Not started |
 | 6. Introduce ConnectionConfig and move SpiceClient into protocol crate | PLAN-crate-extraction-phase-06-client.md | Not started |
