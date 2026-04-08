@@ -163,7 +163,7 @@ impl TrafficRingBuffer {
 const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 5;
 
 /// Known channel names.
-const CHANNELS: [&str; 5] = ["main", "display", "inputs", "cursor", "usbredir"];
+const CHANNELS: [&str; 6] = ["main", "display", "inputs", "cursor", "usbredir", "playback"];
 
 /// Holds all four per-channel ring buffers plus a shared session
 /// start timestamp.
@@ -173,6 +173,7 @@ pub struct TrafficBuffers {
     inputs: Mutex<TrafficRingBuffer>,
     cursor: Mutex<TrafficRingBuffer>,
     usbredir: Mutex<TrafficRingBuffer>,
+    playback: Mutex<TrafficRingBuffer>,
     /// Session start time for relative timestamps.
     start: Instant,
 }
@@ -186,6 +187,7 @@ impl TrafficBuffers {
             inputs: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             cursor: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             usbredir: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
+            playback: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             start: Instant::now(),
         }
     }
@@ -203,6 +205,7 @@ impl TrafficBuffers {
             "inputs" => Some(&self.inputs),
             "cursor" => Some(&self.cursor),
             "usbredir" => Some(&self.usbredir),
+            "playback" => Some(&self.playback),
             _ => None,
         }
     }
@@ -224,7 +227,10 @@ impl TrafficBuffers {
         let wire_size = raw_message.len() as u32;
         let payload_size = wire_size.saturating_sub(6);
 
-        let mut guard = buf.lock().unwrap();
+        let mut guard = match buf.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         let pcap_frame = self.build_frame(channel, false, raw_message, &mut guard);
         let entry = TrafficEntry {
             timestamp: elapsed,
