@@ -240,6 +240,7 @@ pub struct RyllApp {
     traffic_filter_cursor: bool,
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
+    traffic_filter_playback: bool,
 }
 
 impl RyllApp {
@@ -399,6 +400,7 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
+            traffic_filter_playback: true,
         }
     }
 
@@ -1102,6 +1104,7 @@ impl eframe::App for RyllApp {
                         ui.checkbox(&mut self.traffic_filter_cursor, "Cursor");
                         ui.checkbox(&mut self.traffic_filter_usbredir, "USB");
                         ui.checkbox(&mut self.traffic_filter_webdav, "WebDAV");
+                        ui.checkbox(&mut self.traffic_filter_playback, "Playback");
                     });
                     ui.separator();
 
@@ -1120,6 +1123,7 @@ impl eframe::App for RyllApp {
                                     "cursor" => self.traffic_filter_cursor,
                                     "usbredir" => self.traffic_filter_usbredir,
                                     "webdav" => self.traffic_filter_webdav,
+                                    "playback" => self.traffic_filter_playback,
                                     _ => true,
                                 };
                                 if !visible {
