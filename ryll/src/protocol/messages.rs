@@ -528,46 +528,59 @@ impl SpiceCursorHeader {
 }
 
 /// Input key modifiers message (client -> server)
-pub struct InputsKeyModifiers;
+#[derive(Debug, Clone, Copy)]
+pub struct InputsKeyModifiers {
+    pub modifiers: u16,
+}
 
 impl InputsKeyModifiers {
-    pub fn write(modifiers: u16, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u16::<LittleEndian>(modifiers)?;
+    pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_u16::<LittleEndian>(self.modifiers)?;
         Ok(())
     }
 }
 
 /// Key down/up message (client -> server)
-pub struct KeyEvent;
+#[derive(Debug, Clone, Copy)]
+pub struct KeyEvent {
+    pub scancode: u32,
+}
 
 impl KeyEvent {
-    pub fn write(scancode: u32, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(scancode)?;
+    pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_u32::<LittleEndian>(self.scancode)?;
         Ok(())
     }
 }
 
 /// Mouse position message (client -> server)
-pub struct MousePosition;
+#[derive(Debug, Clone, Copy)]
+pub struct MousePosition {
+    pub x: u32,
+    pub y: u32,
+    pub buttons: u32,
+    pub display_id: u8,
+}
 
 impl MousePosition {
-    pub fn write(
-        x: u32,
-        y: u32,
-        buttons: u32,
-        display_id: u8,
-        buf: &mut Vec<u8>,
-    ) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(x)?;
-        buf.write_u32::<LittleEndian>(y)?;
-        buf.write_u32::<LittleEndian>(buttons)?;
-        buf.write_u8(display_id)?;
+    pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_u32::<LittleEndian>(self.x)?;
+        buf.write_u32::<LittleEndian>(self.y)?;
+        buf.write_u32::<LittleEndian>(self.buttons)?;
+        buf.write_u8(self.display_id)?;
         Ok(())
     }
 }
 
 /// Mouse button message (client -> server)
-pub struct MouseButton;
+#[derive(Debug, Clone, Copy)]
+pub struct MouseButton {
+    /// Bitmask for the button being pressed/released. Encoded
+    /// to a button id on write via `mask_to_id`.
+    pub button: u32,
+    /// Current state of all buttons.
+    pub buttons_state: u32,
+}
 
 impl MouseButton {
     fn mask_to_id(mask: u32) -> u32 {
@@ -581,9 +594,9 @@ impl MouseButton {
         }
     }
 
-    pub fn write(button: u32, buttons_state: u32, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(Self::mask_to_id(button))?;
-        buf.write_u32::<LittleEndian>(buttons_state)?;
+    pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_u32::<LittleEndian>(Self::mask_to_id(self.button))?;
+        buf.write_u32::<LittleEndian>(self.buttons_state)?;
         Ok(())
     }
 }

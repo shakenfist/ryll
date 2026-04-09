@@ -338,7 +338,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent::write(scancode, &mut payload)?;
+                KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
                 info!("inputs: key down: scancode={:#x}", scancode);
@@ -356,7 +356,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent::write(scancode, &mut payload)?;
+                KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
                 info!("inputs: key up: scancode={:#x}", scancode);
@@ -376,7 +376,13 @@ impl InputsChannel {
                     });
 
                     let mut payload = Vec::new();
-                    MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
+                    MousePosition {
+                        x,
+                        y,
+                        buttons: self.button_state,
+                        display_id: 0,
+                    }
+                    .write(&mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
@@ -387,7 +393,13 @@ impl InputsChannel {
             InputEvent::MouseDown { button, x, y } => {
                 // Send position before button press (as spice-gtk does)
                 let mut pos_payload = Vec::new();
-                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                MousePosition {
+                    x,
+                    y,
+                    buttons: self.button_state,
+                    display_id: 0,
+                }
+                .write(&mut pos_payload)?;
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -404,7 +416,11 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                MouseButton::write(button, self.button_state, &mut payload)?;
+                MouseButton {
+                    button,
+                    buttons_state: self.button_state,
+                }
+                .write(&mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
                 info!(
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
@@ -420,7 +436,13 @@ impl InputsChannel {
                 self.button_state &= !button;
 
                 let mut pos_payload = Vec::new();
-                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                MousePosition {
+                    x,
+                    y,
+                    buttons: self.button_state,
+                    display_id: 0,
+                }
+                .write(&mut pos_payload)?;
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -435,7 +457,11 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                MouseButton::write(button, self.button_state, &mut payload)?;
+                MouseButton {
+                    button,
+                    buttons_state: self.button_state,
+                }
+                .write(&mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
                 debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
                 self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
@@ -467,7 +493,7 @@ impl InputsChannel {
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
         let mut payload = Vec::new();
-        InputsKeyModifiers::write(modifiers, &mut payload)?;
+        InputsKeyModifiers { modifiers }.write(&mut payload)?;
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
         self.send_with_log(inputs_client::KEY_MODIFIERS, &msg).await
     }
