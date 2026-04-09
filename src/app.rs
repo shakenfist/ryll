@@ -1611,6 +1611,21 @@ impl eframe::App for RyllApp {
                                             });
                                         }
                                     }
+
+                                    let scroll_y = i.smooth_scroll_delta.y;
+                                    if scroll_y.abs() > 0.5 {
+                                        let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
+                                        let _ = tx.try_send(InputEvent::MouseDown {
+                                            button: btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        let _ = tx.try_send(InputEvent::MouseUp {
+                                            button: btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                    }
                                 });
                             }
                         } else if self.forwarded_buttons != 0 {
