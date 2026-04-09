@@ -258,6 +258,18 @@ pub mod cursor_client {
     pub const PONG: u16 = 3;
 }
 
+pub mod playback_server {
+    pub const DATA: u16 = 101;
+    pub const MODE: u16 = 102;
+    pub const START: u16 = 103;
+    pub const STOP: u16 = 104;
+    pub const VOLUME: u16 = 105;
+    pub const MUTE: u16 = 106;
+    pub const LATENCY: u16 = 107;
+    pub const SET_ACK: u16 = 3;
+    pub const PING: u16 = 4;
+}
+
 /// SpiceVMC channel message types (server -> client)
 ///
 /// Used by usbredir (type 9), port (type 10), and webdav (type 11) channels.

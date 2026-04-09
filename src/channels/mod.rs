@@ -2,6 +2,7 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
+pub mod playback;
 pub mod usbredir;
 pub mod webdav;
 

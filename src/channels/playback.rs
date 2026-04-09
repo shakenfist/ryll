@@ -1,0 +1,420 @@
+use anyhow::Result;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
+
+use crate::app::ByteCounter;
+use crate::bugreport::TrafficBuffers;
+use crate::protocol::link::SpiceStream;
+use crate::protocol::logging::{self, message_names};
+use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
+use crate::protocol::{playback_server, ChannelType};
+
+use super::ChannelEvent;
+
+const AUDIO_DATA_MODE_RAW: u16 = 1;
+const AUDIO_DATA_MODE_OPUS: u16 = 3;
+
+type AudioBuffer = Arc<Mutex<VecDeque<i16>>>;
+
+pub struct VolumeControl {
+    volume: AtomicU8,
+    muted: AtomicBool,
+}
+
+impl VolumeControl {
+    pub fn new() -> Arc<Self> {
+        Arc::new(VolumeControl {
+            volume: AtomicU8::new(80),
+            muted: AtomicBool::new(false),
+        })
+    }
+
+    pub fn volume(&self) -> u8 {
+        self.volume.load(Ordering::Relaxed)
+    }
+
+    pub fn set_volume(&self, v: u8) {
+        self.volume.store(v.min(100), Ordering::Relaxed);
+    }
+
+    pub fn muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+
+    pub fn set_muted(&self, m: bool) {
+        self.muted.store(m, Ordering::Relaxed);
+    }
+
+    pub fn effective_volume(&self) -> f32 {
+        if self.muted() {
+            0.0
+        } else {
+            self.volume() as f32 / 100.0
+        }
+    }
+}
+
+struct SendStream(cpal::Stream);
+unsafe impl Send for SendStream {}
+
+fn write_samples_i16(
+    data: &mut [i16],
+    buffer: &AudioBuffer,
+    vol: &Arc<VolumeControl>,
+) {
+    let v = vol.effective_volume();
+    let mut buf = buffer.lock().unwrap();
+    for sample in data.iter_mut() {
+        let s = buf.pop_front().unwrap_or(0);
+        *sample = (s as f32 * v) as i16;
+    }
+}
+
+fn write_samples_f32(
+    data: &mut [f32],
+    buffer: &AudioBuffer,
+    vol: &Arc<VolumeControl>,
+) {
+    let v = vol.effective_volume();
+    let mut buf = buffer.lock().unwrap();
+    for sample in data.iter_mut() {
+        let s = buf.pop_front().unwrap_or(0);
+        *sample = s as f32 / 32768.0 * v;
+    }
+}
+
+pub struct PlaybackChannel {
+    stream: SpiceStream,
+    event_tx: mpsc::Sender<ChannelEvent>,
+    buffer: Vec<u8>,
+    byte_counter: Arc<ByteCounter>,
+    traffic: Arc<TrafficBuffers>,
+    ack_generation: u32,
+    ack_window: u32,
+    message_count: u32,
+    last_ack: u32,
+    bytes_in: u64,
+    bytes_out: u64,
+    audio_mode: u16,
+    sample_rate: u32,
+    channels: u32,
+    audio_buffer: AudioBuffer,
+    _cpal_stream: Option<SendStream>,
+    opus_decoder: Option<audiopus::coder::Decoder>,
+    volume_control: Arc<VolumeControl>,
+}
+
+impl PlaybackChannel {
+    pub fn new(
+        stream: SpiceStream,
+        event_tx: mpsc::Sender<ChannelEvent>,
+        byte_counter: Arc<ByteCounter>,
+        traffic: Arc<TrafficBuffers>,
+        volume_control: Arc<VolumeControl>,
+    ) -> Self {
+        PlaybackChannel {
+            stream,
+            event_tx,
+            buffer: Vec::with_capacity(65536),
+            byte_counter,
+            traffic,
+            ack_generation: 0,
+            ack_window: 0,
+            message_count: 0,
+            last_ack: 0,
+            bytes_in: 0,
+            bytes_out: 0,
+            audio_mode: 0,
+            sample_rate: 0,
+            channels: 0,
+            audio_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            _cpal_stream: None,
+            opus_decoder: None,
+            volume_control,
+        }
+    }
+
+    pub async fn run(&mut self) -> Result<()> {
+        info!("playback: channel started");
+        loop {
+            let mut chunk = [0u8; 65536];
+            let n = match &mut self.stream {
+                SpiceStream::Plain(s) => {
+                    use tokio::io::AsyncReadExt;
+                    s.read(&mut chunk).await?
+                }
+                SpiceStream::Tls(s) => {
+                    use tokio::io::AsyncReadExt;
+                    s.read(&mut chunk).await?
+                }
+            };
+            if n == 0 {
+                info!("playback: channel disconnected");
+                self.event_tx
+                    .send(ChannelEvent::Disconnected(ChannelType::Playback))
+                    .await
+                    .ok();
+                break;
+            }
+            self.byte_counter.add(n as u64);
+            self.buffer.extend_from_slice(&chunk[..n]);
+            self.bytes_in += n as u64;
+            self.process_messages().await?;
+        }
+        Ok(())
+    }
+
+    async fn process_messages(&mut self) -> Result<()> {
+        loop {
+            if self.buffer.len() < MessageHeader::SIZE {
+                break;
+            }
+            let header = MessageHeader::read(&self.buffer)?;
+            let total = MessageHeader::SIZE + header.message_size as usize;
+            if self.buffer.len() < total {
+                break;
+            }
+            let payload = self.buffer[MessageHeader::SIZE..total].to_vec();
+            self.buffer.drain(..total);
+            let msg_type = header.message_type;
+
+            logging::log_message(
+                "received",
+                "playback",
+                msg_type,
+                message_names::playback_server(msg_type),
+                header.message_size,
+            );
+
+            self.message_count += 1;
+            if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
+                self.last_ack = self.message_count;
+                let ack = make_message(2, &[]);
+                self.send_with_log(2, &ack).await?;
+            }
+
+            self.traffic.record_received(
+                "playback",
+                msg_type,
+                message_names::playback_server(msg_type),
+                &payload,
+            );
+
+            match msg_type {
+                playback_server::SET_ACK => {
+                    let set_ack = SetAck::read(&payload)?;
+                    self.ack_generation = set_ack.generation;
+                    self.ack_window = set_ack.window;
+                    self.message_count = 0;
+                    self.last_ack = 0;
+                    let mut ack_payload = Vec::new();
+                    SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                    let response = make_message(1, &ack_payload);
+                    self.send_with_log(1, &response).await?;
+                }
+                playback_server::PING => {
+                    let ping = Ping::read(&payload)?;
+                    let mut pong_payload = Vec::new();
+                    ping.write_pong(&mut pong_payload)?;
+                    let response = make_message(3, &pong_payload);
+                    self.send_with_log(3, &response).await?;
+                }
+                playback_server::START => {
+                    if payload.len() >= 14 {
+                        self.channels = u32::from_le_bytes([
+                            payload[0], payload[1], payload[2], payload[3],
+                        ]);
+                        let format = u16::from_le_bytes([payload[4], payload[5]]);
+                        self.sample_rate = u32::from_le_bytes([
+                            payload[6], payload[7], payload[8], payload[9],
+                        ]);
+                        let time = u32::from_le_bytes([
+                            payload[10], payload[11], payload[12], payload[13],
+                        ]);
+                        info!(
+                            "playback: START: {}Hz, {} channels, format={}, time={}",
+                            self.sample_rate, self.channels, format, time
+                        );
+                        self.start_audio_output();
+                        self.opus_decoder = match audiopus::coder::Decoder::new(
+                            audiopus::SampleRate::Hz48000,
+                            audiopus::Channels::Stereo,
+                        ) {
+                            Ok(d) => {
+                                info!("playback: Opus decoder initialized");
+                                Some(d)
+                            }
+                            Err(e) => {
+                                warn!("playback: failed to create Opus decoder: {}", e);
+                                None
+                            }
+                        };
+                    }
+                }
+                playback_server::MODE => {
+                    if payload.len() >= 6 {
+                        self.audio_mode = u16::from_le_bytes([payload[4], payload[5]]);
+                        info!("playback: MODE: {}", self.audio_mode);
+                    }
+                }
+                playback_server::DATA => {
+                    if payload.len() > 4 {
+                        let audio_data = &payload[4..];
+                        if self.audio_mode == AUDIO_DATA_MODE_RAW {
+                            let mut buf = self.audio_buffer.lock().unwrap();
+                            for chunk in audio_data.chunks_exact(2) {
+                                buf.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
+                            }
+                        } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
+                            if let Some(ref mut decoder) = self.opus_decoder {
+                                let mut pcm = vec![0i16; 48000 / 100 * 2];
+                                let packet = audiopus::packet::Packet::try_from(audio_data);
+                                let signals = audiopus::MutSignals::try_from(&mut pcm[..]);
+                                match (packet, signals) {
+                                    (Ok(pkt), Ok(sig)) => {
+                                        match decoder.decode(Some(pkt), sig, false) {
+                                            Ok(samples) => {
+                                                let mut buf = self.audio_buffer.lock().unwrap();
+                                                for &s in &pcm[..samples * 2] {
+                                                    buf.push_back(s);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                debug!("playback: Opus decode error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("playback: invalid Opus packet");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                playback_server::STOP => {
+                    info!("playback: STOP");
+                    self._cpal_stream = None;
+                    self.opus_decoder = None;
+                    self.audio_buffer.lock().unwrap().clear();
+                }
+                playback_server::VOLUME | playback_server::MUTE | playback_server::LATENCY => {
+                    debug!("playback: received opcode {} (ignored)", msg_type);
+                }
+                _ => {
+                    logging::log_unknown(
+                        "playback",
+                        "received",
+                        msg_type,
+                        header.message_size,
+                        &payload,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn start_audio_output(&mut self) {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                warn!("playback: no audio output device found");
+                return;
+            }
+        };
+        let default_config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("playback: failed to get default output config: {}", e);
+                return;
+            }
+        };
+        info!(
+            "playback: device config: {}Hz, {} ch, {:?}",
+            default_config.sample_rate().0,
+            default_config.channels(),
+            default_config.sample_format()
+        );
+        let config = cpal::StreamConfig {
+            channels: default_config.channels(),
+            sample_rate: default_config.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let device_rate = config.sample_rate.0;
+        let device_channels = config.channels as u32;
+        let buffer = self.audio_buffer.clone();
+        let vol = self.volume_control.clone();
+
+        let stream = match default_config.sample_format() {
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                &config,
+                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                    write_samples_i16(data, &buffer, &vol);
+                },
+                |err| warn!("playback: audio stream error: {}", err),
+                None,
+            ),
+            cpal::SampleFormat::F32 => {
+                let vol = self.volume_control.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        write_samples_f32(data, &buffer, &vol);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
+            fmt => {
+                warn!("playback: unsupported sample format: {:?}", fmt);
+                return;
+            }
+        };
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("playback: failed to create audio stream: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = stream.play() {
+            warn!("playback: failed to start audio stream: {}", e);
+            return;
+        }
+        info!(
+            "playback: audio output started (device: {}Hz {} ch)",
+            device_rate, device_channels
+        );
+        self._cpal_stream = Some(SendStream(stream));
+    }
+
+    async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
+        let payload_size = data.len().saturating_sub(MessageHeader::SIZE) as u32;
+        logging::log_message(
+            "sent",
+            "playback",
+            msg_type,
+            message_names::playback_client(msg_type),
+            payload_size,
+        );
+        match &mut self.stream {
+            SpiceStream::Plain(s) => {
+                use tokio::io::AsyncWriteExt;
+                s.write_all(data).await?;
+            }
+            SpiceStream::Tls(s) => {
+                use tokio::io::AsyncWriteExt;
+                s.write_all(data).await?;
+            }
+        }
+        self.bytes_out += data.len() as u64;
+        Ok(())
+    }
+}

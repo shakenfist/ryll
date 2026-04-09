@@ -244,6 +244,30 @@ pub mod message_names {
         common_client(msg_type).unwrap_or("unknown")
     }
 
+    pub fn playback_server(msg_type: u16) -> &'static str {
+        match msg_type {
+            playback_server::DATA => "data",
+            playback_server::MODE => "mode",
+            playback_server::START => "start",
+            playback_server::STOP => "stop",
+            playback_server::VOLUME => "volume",
+            playback_server::MUTE => "mute",
+            playback_server::LATENCY => "latency",
+            playback_server::SET_ACK => "set_ack",
+            playback_server::PING => "ping",
+            _ => "unknown",
+        }
+    }
+
+    pub fn playback_client(msg_type: u16) -> &'static str {
+        match msg_type {
+            main_client::ACK_SYNC => "ack_sync",
+            main_client::ACK => "ack",
+            main_client::PONG => "pong",
+            _ => "unknown",
+        }
+    }
+
     /// Get SpiceVMC/usbredir server message name
     pub fn spicevmc_server(msg_type: u16) -> &'static str {
         match msg_type {

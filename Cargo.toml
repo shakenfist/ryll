@@ -33,6 +33,10 @@ rsa = "0.9"
 sha1 = "0.10"
 rand = "0.8"
 
+# Audio playback
+cpal = "0.15"
+audiopus = "0.3.0-rc.0"
+
 # Logging
 tracing = "0.1"
 tracing-appender = "0.2"
