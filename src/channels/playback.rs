@@ -60,15 +60,52 @@ impl VolumeControl {
 struct SendStream(cpal::Stream);
 unsafe impl Send for SendStream {}
 
+struct Resampler {
+    ratio: f64,
+    pos: f64,
+}
+
+impl Resampler {
+    fn new(from_rate: u32, to_rate: u32) -> Self {
+        Resampler {
+            ratio: from_rate as f64 / to_rate as f64,
+            pos: 0.0,
+        }
+    }
+
+    fn next_sample(&mut self, buffer: &mut VecDeque<i16>) -> i16 {
+        let idx = self.pos as usize;
+        let frac = self.pos - idx as f64;
+
+        while buffer.len() < idx + 2 {
+            buffer.push_back(0);
+        }
+
+        let a = buffer[0] as f64;
+        let b = if buffer.len() > 1 { buffer[1] as f64 } else { a };
+        let sample = a + (b - a) * frac;
+
+        self.pos += self.ratio;
+        let consume = self.pos as usize;
+        for _ in 0..consume {
+            buffer.pop_front();
+        }
+        self.pos -= consume as f64;
+
+        sample as i16
+    }
+}
+
 fn write_samples_i16(
     data: &mut [i16],
     buffer: &AudioBuffer,
     vol: &Arc<VolumeControl>,
+    resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
     let mut buf = buffer.lock().unwrap();
     for sample in data.iter_mut() {
-        let s = buf.pop_front().unwrap_or(0);
+        let s = resampler.next_sample(&mut buf);
         *sample = (s as f32 * v) as i16;
     }
 }
@@ -77,11 +114,12 @@ fn write_samples_f32(
     data: &mut [f32],
     buffer: &AudioBuffer,
     vol: &Arc<VolumeControl>,
+    resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
     let mut buf = buffer.lock().unwrap();
     for sample in data.iter_mut() {
-        let s = buf.pop_front().unwrap_or(0);
+        let s = resampler.next_sample(&mut buf);
         *sample = s as f32 / 32768.0 * v;
     }
 }
@@ -351,22 +389,29 @@ impl PlaybackChannel {
         let device_channels = config.channels as u32;
         let buffer = self.audio_buffer.clone();
         let vol = self.volume_control.clone();
+        let resampler = Arc::new(Mutex::new(Resampler::new(self.sample_rate, device_rate)));
 
         let stream = match default_config.sample_format() {
-            cpal::SampleFormat::I16 => device.build_output_stream(
-                &config,
-                move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                    write_samples_i16(data, &buffer, &vol);
-                },
-                |err| warn!("playback: audio stream error: {}", err),
-                None,
-            ),
+            cpal::SampleFormat::I16 => {
+                let resampler = resampler.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        let mut rs = resampler.lock().unwrap();
+                        write_samples_i16(data, &buffer, &vol, &mut rs);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
             cpal::SampleFormat::F32 => {
                 let vol = self.volume_control.clone();
+                let resampler = resampler.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        write_samples_f32(data, &buffer, &vol);
+                        let mut rs = resampler.lock().unwrap();
+                        write_samples_f32(data, &buffer, &vol, &mut rs);
                     },
                     |err| warn!("playback: audio stream error: {}", err),
                     None,
