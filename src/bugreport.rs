@@ -224,7 +224,10 @@ impl TrafficBuffers {
         let wire_size = raw_message.len() as u32;
         let payload_size = wire_size.saturating_sub(6);
 
-        let mut guard = buf.lock().unwrap();
+        let mut guard = match buf.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         let pcap_frame = self.build_frame(channel, false, raw_message, &mut guard);
         let entry = TrafficEntry {
             timestamp: elapsed,

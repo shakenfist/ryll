@@ -21,9 +21,17 @@ use super::ChannelEvent;
 const VD_AGENT_PROTOCOL: u32 = 1;
 const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 1;
 const VD_AGENT_MONITORS_CONFIG: u32 = 2;
+const VD_AGENT_CLIPBOARD: u32 = 4;
+const VD_AGENT_CLIPBOARD_GRAB: u32 = 7;
+const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8;
+const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9;
+const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1;
+
 const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
 const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1;
 const VD_AGENT_CAP_REPLY: u32 = 2;
+const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5;
+const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6;
 const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 
 pub struct MainChannel {
@@ -34,10 +42,13 @@ pub struct MainChannel {
     agent_connected: bool,
     agent_tokens: u32,
     agent_caps_announced: bool,
+    guest_caps_received: bool,
+    channels_requested: bool,
     monitors: u8,
     monitors_config_rx: mpsc::Receiver<(u32, u32)>,
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
+    last_clipboard_text: Option<String>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -70,6 +81,9 @@ impl MainChannel {
             monitors_config_rx,
             pending_monitors_config: None,
             last_sent_monitors_config: None,
+            guest_caps_received: false,
+            channels_requested: false,
+            last_clipboard_text: None,
             capture,
             byte_counter,
             traffic,
@@ -89,6 +103,10 @@ impl MainChannel {
         info!("main: channel started");
 
         let mut resize_debounce: Option<tokio::time::Instant> = None;
+        let mut clipboard_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+        clipboard_interval.tick().await;
+        let mut last_data_received = tokio::time::Instant::now();
+        let keepalive_timeout = std::time::Duration::from_secs(30);
 
         loop {
             let mut chunk = [0u8; 65536];
@@ -125,6 +143,7 @@ impl MainChannel {
                         break;
                     }
 
+                    last_data_received = tokio::time::Instant::now();
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
                         c.packet_received("main", &chunk[..n]);
@@ -156,6 +175,19 @@ impl MainChannel {
                             .ok();
                         self.maybe_send_agent_monitors_config().await?;
                     }
+                }
+                _ = clipboard_interval.tick() => {
+                    if self.agent_connected && self.agent_caps_announced {
+                        self.poll_host_clipboard().await?;
+                    }
+                }
+                _ = tokio::time::sleep_until(last_data_received + keepalive_timeout) => {
+                    info!("main: no data received for {}s, assuming disconnected", keepalive_timeout.as_secs());
+                    self.event_tx
+                        .send(ChannelEvent::Disconnected(ChannelType::Main))
+                        .await
+                        .ok();
+                    break;
                 }
             }
         }
@@ -297,7 +329,8 @@ impl MainChannel {
                 self.send_with_log(main_client::PONG, &response).await?;
 
                 // Request channel list on first large ping
-                if ping.id > 0 && self.session_id.is_some() {
+                if ping.id > 0 && self.session_id.is_some() && !self.channels_requested {
+                    self.channels_requested = true;
                     self.request_channels_list().await?;
                 }
             }
@@ -362,18 +395,23 @@ impl MainChannel {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
                 self.agent_caps_announced = false;
+                self.guest_caps_received = false;
             }
 
             main_server::AGENT_DATA => {
-                if payload.len() >= 16 {
-                    let agent_type =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    let agent_size =
-                        u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]);
+                if payload.len() >= 20 {
+                    let agent_type = u32::from_le_bytes([
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    let agent_size = u32::from_le_bytes([
+                        payload[16], payload[17], payload[18], payload[19],
+                    ]) as usize;
+                    let agent_payload = &payload[20..20 + agent_size.min(payload.len() - 20)];
                     debug!(
                         "main: agent_data from server: type={}, size={}",
                         agent_type, agent_size
                     );
+                    self.handle_agent_message(agent_type, agent_payload).await?;
                 } else {
                     debug!(
                         "main: agent_data from server: {} bytes: {:02x?}",
@@ -437,7 +475,9 @@ impl MainChannel {
 
         let caps = (1u32 << VD_AGENT_CAP_MOUSE_STATE)
             | (1u32 << VD_AGENT_CAP_MONITORS_CONFIG)
-            | (1u32 << VD_AGENT_CAP_REPLY);
+            | (1u32 << VD_AGENT_CAP_REPLY)
+            | (1u32 << VD_AGENT_CAP_CLIPBOARD_BY_DEMAND)
+            | (1u32 << VD_AGENT_CAP_CLIPBOARD_SELECTION);
         let mut payload = Vec::with_capacity(8);
         payload.write_u32::<LittleEndian>(1)?;
         payload.write_u32::<LittleEndian>(caps)?;
@@ -523,12 +563,6 @@ impl MainChannel {
             active, flags
         );
 
-        debug!(
-            "main: monitors config payload ({} bytes): {:02x?}",
-            payload.len(),
-            payload
-        );
-
         self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await
     }
@@ -538,23 +572,160 @@ impl MainChannel {
             return Ok(false);
         }
 
-        let mut agent = Vec::with_capacity(16 + payload.len());
+        let mut agent = Vec::with_capacity(20 + payload.len());
         agent.write_u32::<LittleEndian>(VD_AGENT_PROTOCOL)?;
         agent.write_u32::<LittleEndian>(ty)?;
         agent.write_u64::<LittleEndian>(0)?;
         agent.write_u32::<LittleEndian>(payload.len() as u32)?;
         agent.extend_from_slice(payload);
 
-        debug!(
-            "main: agent_data wrapper ({} bytes): {:02x?}",
-            agent.len(),
-            agent
-        );
-        let msg = make_message(main_client::AGENT_DATA, &agent);
-        self.send_with_log(main_client::AGENT_DATA, &msg).await?;
-        self.agent_tokens = self.agent_tokens.saturating_sub(1);
+        const MAX_CHUNK: usize = 2048 - 6;
+        let mut offset = 0;
+        while offset < agent.len() {
+            if self.agent_tokens == 0 {
+                return Ok(false);
+            }
+            let end = (offset + MAX_CHUNK).min(agent.len());
+            let msg = make_message(main_client::AGENT_DATA, &agent[offset..end]);
+            self.send_with_log(main_client::AGENT_DATA, &msg).await?;
+            self.agent_tokens = self.agent_tokens.saturating_sub(1);
+            offset = end;
+        }
 
         Ok(true)
+    }
+
+    async fn handle_agent_message(&mut self, agent_type: u32, payload: &[u8]) -> Result<()> {
+        if !self.guest_caps_received {
+            self.guest_caps_received = true;
+            debug!("main: guest agent active");
+        }
+        match agent_type {
+            VD_AGENT_CLIPBOARD_GRAB => {
+                // payload: selection(u32) + format(u32)
+                if payload.len() >= 8 {
+                    let format = u32::from_le_bytes([
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
+                        debug!("main: clipboard grab from guest, requesting data");
+                        self.send_clipboard_request().await?;
+                    }
+                }
+            }
+            VD_AGENT_CLIPBOARD => {
+                // payload: selection(u32) + format(u32) + data
+                let offset = 4;
+                if payload.len() > offset + 4 {
+                    let _format = u32::from_le_bytes([
+                        payload[offset], payload[offset + 1], payload[offset + 2], payload[offset + 3],
+                    ]);
+                    let data = &payload[offset + 4..];
+                    if !data.is_empty() {
+                        let text = String::from_utf8_lossy(data).to_string();
+                        info!(
+                            "main: clipboard from guest ({} bytes): {:?}",
+                            text.len(),
+                            &text.chars().take(16).collect::<String>()
+                        );
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+                            Ok(()) => debug!("main: host clipboard updated"),
+                            Err(e) => debug!("main: clipboard set failed: {}", e),
+                        }
+                    }
+                }
+            }
+            VD_AGENT_CLIPBOARD_REQUEST => {
+                // payload: selection(u32) + format(u32)
+                if payload.len() >= 8 {
+                    let format = u32::from_le_bytes([
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+                    if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
+                        debug!("main: clipboard request from guest");
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+                            Ok(text) => {
+                                self.send_clipboard_data(&text).await?;
+                            }
+                            Err(e) => {
+                                debug!("main: failed to read host clipboard: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+            VD_AGENT_CLIPBOARD_RELEASE => {
+                debug!("main: clipboard release from guest");
+            }
+            VD_AGENT_ANNOUNCE_CAPABILITIES => {
+                self.guest_caps_received = true;
+                debug!("main: received agent capabilities from guest");
+                if payload.len() >= 4 {
+                    let request = u32::from_le_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                    ]);
+                    if request == 1 {
+                        self.agent_caps_announced = false;
+                        self.maybe_send_announce_capabilities().await?;
+                    }
+                }
+            }
+            _ => {
+                debug!("main: unhandled agent message type={}", agent_type);
+            }
+        }
+        Ok(())
+    }
+
+    async fn poll_host_clipboard(&mut self) -> Result<()> {
+        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
+            Ok(t) => t,
+            Err(_) => return Ok(()),
+        };
+
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        let changed = match &self.last_clipboard_text {
+            Some(prev) => prev != &text,
+            None => true,
+        };
+
+        if changed {
+            info!(
+                "main: host clipboard changed ({} bytes): {:?}",
+                text.len(),
+                &text.chars().take(16).collect::<String>()
+            );
+            self.last_clipboard_text = Some(text);
+            self.send_clipboard_grab().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn send_clipboard_grab(&mut self) -> Result<bool> {
+        let mut payload = Vec::with_capacity(8);
+        payload.write_u32::<LittleEndian>(0)?;
+        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload).await
+    }
+
+    async fn send_clipboard_request(&mut self) -> Result<bool> {
+        let mut payload = Vec::with_capacity(8);
+        payload.write_u32::<LittleEndian>(0)?;
+        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload).await
+    }
+
+    async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
+        let text_bytes = text.as_bytes();
+        let mut payload = Vec::with_capacity(8 + text_bytes.len());
+        payload.write_u32::<LittleEndian>(0)?;
+        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
+        payload.extend_from_slice(text_bytes);
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload).await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {

@@ -74,6 +74,9 @@ pub enum ChannelEvent {
         height: u32,
     },
 
+    #[allow(dead_code)]
+    ClipboardReceived { text: String },
+
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]
     Statistics {
