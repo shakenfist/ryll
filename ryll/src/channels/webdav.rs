@@ -16,13 +16,13 @@ use tracing::{debug, error, info, warn};
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::config::ShareDirConfig;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
 use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
 use crate::webdav::server::WebdavServer;
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
+use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType};
 
 use super::{ChannelEvent, WebdavCommand};
 

@@ -10,17 +10,17 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{DecodeResult, DisplaySnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{
-    make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SurfaceCreate,
-};
-use crate::protocol::{display_client, display_server, ChannelType, ImageType};
 use crate::settings;
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
 };
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{
+    make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
+    SurfaceCreate,
+};
+use shakenfist_spice_protocol::{display_client, display_server, ChannelType, ImageType};
 
 use super::ChannelEvent;
 

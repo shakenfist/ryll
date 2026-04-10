@@ -56,6 +56,11 @@ lz4_flex = "0.11"
 # only works once the local version reaches 0.1.0.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression" }
 
+# Extracted SPICE protocol primitives (same dual-spec caveat
+# as above: no `version` qualifier until the local crate
+# reaches 0.1.0).
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol" }
+
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
 

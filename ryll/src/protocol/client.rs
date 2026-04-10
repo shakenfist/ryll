@@ -15,9 +15,8 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
 
 use crate::config::Config;
-
-use super::constants::{ChannelType, SpiceError};
-use super::link::{perform_auth, perform_link, SpiceStream};
+use shakenfist_spice_protocol::link::{perform_auth, perform_link, SpiceStream};
+use shakenfist_spice_protocol::{ChannelType, SpiceError};
 
 /// TLS certificate verifier that trusts a custom CA but skips hostname
 /// verification. SPICE self-signed certificates typically lack SAN

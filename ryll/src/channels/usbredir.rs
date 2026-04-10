@@ -15,10 +15,6 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::config::VirtualDiskConfig;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use crate::protocol::{spicevmc_client, spicevmc_server, ChannelType};
 use crate::settings;
 #[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
@@ -30,6 +26,10 @@ use crate::usbredir::messages::{
     ControlPacketHeader, Hello, InterruptPacketHeader, UsbredirMessage, UsbredirPayload,
 };
 use crate::usbredir::parser::UsbredirParser;
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
+use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType};
 
 use super::{ChannelEvent, UsbCommand};
 

@@ -8,13 +8,13 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{CursorCacheEntry, CursorSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{
+use crate::settings;
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{
     make_message, CursorInit, CursorSet, MessageHeader, Ping, SetAck, SpiceCursorHeader,
 };
-use crate::protocol::{cursor_client, cursor_server, ChannelType};
-use crate::settings;
+use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType};
 
 use super::{ChannelEvent, CursorImage};
 

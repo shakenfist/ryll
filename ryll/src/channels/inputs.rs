@@ -10,14 +10,14 @@ use tracing::{debug, info};
 use crate::app::ByteCounter;
 use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{
+use crate::settings;
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{
     make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MousePosition, Ping,
     SetAck,
 };
-use crate::protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
-use crate::settings;
+use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
 
 use super::{ChannelEvent, InputEvent};
 
@@ -649,10 +649,10 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
 /// Map mouse button to SPICE button flag
 pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
     match button {
-        egui::PointerButton::Primary => crate::protocol::mouse_buttons::LEFT,
-        egui::PointerButton::Secondary => crate::protocol::mouse_buttons::RIGHT,
-        egui::PointerButton::Middle => crate::protocol::mouse_buttons::MIDDLE,
-        egui::PointerButton::Extra1 => crate::protocol::mouse_buttons::UP,
-        egui::PointerButton::Extra2 => crate::protocol::mouse_buttons::DOWN,
+        egui::PointerButton::Primary => shakenfist_spice_protocol::mouse_buttons::LEFT,
+        egui::PointerButton::Secondary => shakenfist_spice_protocol::mouse_buttons::RIGHT,
+        egui::PointerButton::Middle => shakenfist_spice_protocol::mouse_buttons::MIDDLE,
+        egui::PointerButton::Extra1 => shakenfist_spice_protocol::mouse_buttons::UP,
+        egui::PointerButton::Extra2 => shakenfist_spice_protocol::mouse_buttons::DOWN,
     }
 }

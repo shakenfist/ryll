@@ -5,5 +5,15 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Reserved name for an upcoming pure-Rust SPICE protocol library (constants, messages, link handshake, client) extracted from the ryll SPICE client."
+description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, and logging helpers. Extracted from the ryll SPICE client. Reserved crate name; the first published release will follow as 0.1.0 once the API has stabilised."
 readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+byteorder = "1"
+rand = "0.8"
+rsa = "0.9"
+sha1 = "0.10"
+tokio = { version = "1", features = ["io-util", "net"] }
+tokio-rustls = "0.26"
+tracing = "0.1"

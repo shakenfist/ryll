@@ -3968,6 +3968,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "shakenfist-spice-compression",
+ "shakenfist-spice-protocol",
  "socket2",
  "tempfile",
  "thiserror 1.0.69",
@@ -4158,6 +4159,16 @@ dependencies = [
 [[package]]
 name = "shakenfist-spice-protocol"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "rand 0.8.5",
+ "rsa",
+ "sha1",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
 
 [[package]]
 name = "shakenfist-spice-usbredir"

@@ -8,13 +8,13 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{MainSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
-use crate::protocol::link::SpiceStream;
-use crate::protocol::logging::{self, message_names};
-use crate::protocol::messages::{
+use crate::settings;
+use shakenfist_spice_protocol::link::SpiceStream;
+use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::{
     make_message, ChannelsList, MainInit, MessageHeader, Notify, Ping, SetAck,
 };
-use crate::protocol::{main_client, main_server, ChannelType, NotifySeverity};
-use crate::settings;
+use shakenfist_spice_protocol::{main_client, main_server, ChannelType, NotifySeverity};
 
 use super::ChannelEvent;
 

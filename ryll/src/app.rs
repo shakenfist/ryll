@@ -21,8 +21,9 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
-use crate::protocol::{ChannelType, SpiceClient};
+use crate::protocol::SpiceClient;
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
+use shakenfist_spice_protocol::ChannelType;
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
