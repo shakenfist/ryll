@@ -330,7 +330,39 @@ discoveries. Commit.
 
 ### Discoveries during execution
 
-(To be filled in after Step 1 completes.)
+* **Open Question #1 answered: yes, `usb/virtual_msc.rs`
+  imports from `crate::usbredir`.** Same pattern as
+  `usb/mod.rs` and `usb/real.rs`: `Status`, `DeviceConnect`,
+  `EpInfo`, `InterfaceInfo`. Four consumer files total, as the
+  pre-flight grep confirmed.
+
+* **Open Question #2 answered: 17 tests.** 10 in `messages.rs`,
+  7 in `parser.rs`. The research report's summary said "14"
+  but listed 17 names — the test function count was correct at
+  17. Post-extraction: 80 ryll + 2 compression + 17 usbredir +
+  0 protocol = 99 total.
+
+* **Clippy `new_without_default` lint surfaced on
+  `UsbredirParser`.** When the usbredir code was part of ryll,
+  this lint was either suppressed or not triggered (possibly
+  because the crate-level `#![allow(dead_code)]` in
+  `constants.rs` masked it, or because the lint only fires on
+  public items in a standalone crate). Once the code became its
+  own crate, clippy flagged `UsbredirParser::new()` as needing
+  a `Default` impl. Fixed by adding `impl Default for
+  UsbredirParser` that delegates to `Self::new()`.
+
+* **No inline qualified paths beyond the two already known.**
+  The pre-flight grep for `crate::usbredir::` (without `use`)
+  found exactly the two `InterruptReceivingStatus` struct
+  instantiations at `channels/usbredir.rs:595` and `:611`.
+  No surprises beyond what the research pass predicted.
+
+* **All three moved files registered as proper git renames.**
+  `constants.rs` and `messages.rs` at 100%; `parser.rs` at
+  99% because of the added `Default` impl (6 lines). `git log
+  --follow` traces all three files back to their original
+  `ryll/src/usbredir/` locations.
 
 ### Back brief
 
