@@ -144,10 +144,10 @@ pub mod main_server {
     pub const NOTIFY: u16 = 7;
     pub const INIT: u16 = 103;
     pub const CHANNELS_LIST: u16 = 104;
-    pub const AGENT_CONNECTED: u16 = 108;
-    pub const AGENT_DISCONNECTED: u16 = 109;
-    pub const AGENT_DATA: u16 = 110;
-    pub const AGENT_TOKEN: u16 = 111;
+    pub const AGENT_CONNECTED: u16 = 107;
+    pub const AGENT_DISCONNECTED: u16 = 108;
+    pub const AGENT_DATA: u16 = 109;
+    pub const AGENT_TOKEN: u16 = 110;
 }
 
 /// Main channel message types (client -> server)
