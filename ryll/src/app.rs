@@ -154,6 +154,7 @@ pub struct RyllApp {
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
+    last_modifiers: Option<egui::Modifiers>,
 
     // Bitmask of mouse buttons we have forwarded as pressed to the
     // inputs channel.  Used to send synthetic releases when input
@@ -336,6 +337,7 @@ impl RyllApp {
             error_message: None,
             mouse_mode: 0,
             last_mouse_pos: None,
+            last_modifiers: None,
             forwarded_buttons: 0,
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
@@ -754,6 +756,41 @@ impl RyllApp {
                     }
                 }
             }
+
+            // Track modifier key (Ctrl/Shift/Alt) state changes.
+            // egui does not emit Event::Key for modifier keys — they
+            // only appear as i.modifiers state. We compare against
+            // the previous frame and send KeyDown/KeyUp with AT Set 1
+            // scancodes for any changes.
+            let mods = i.modifiers;
+            let prev = self.last_modifiers.unwrap_or_default();
+
+            if mods.ctrl != prev.ctrl {
+                let code = 0x1D; // Left Ctrl
+                if mods.ctrl {
+                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
+                } else {
+                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
+                }
+            }
+            if mods.shift != prev.shift {
+                let code = 0x2A; // Left Shift
+                if mods.shift {
+                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
+                } else {
+                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
+                }
+            }
+            if mods.alt != prev.alt {
+                let code = 0x38; // Left Alt
+                if mods.alt {
+                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
+                } else {
+                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
+                }
+            }
+
+            self.last_modifiers = Some(mods);
         });
     }
 
@@ -1567,6 +1604,24 @@ impl eframe::App for RyllApp {
                                                 y: pos.1,
                                             });
                                         }
+                                    }
+
+                                    // Scroll wheel: send a press+release pair
+                                    // with button 4 (up) or 5 (down), matching
+                                    // spice-html5 handle_mousewheel behaviour.
+                                    let scroll_y = i.smooth_scroll_delta.y;
+                                    if scroll_y.abs() > 0.5 {
+                                        let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
+                                        let _ = tx.try_send(InputEvent::MouseDown {
+                                            button: btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
+                                        let _ = tx.try_send(InputEvent::MouseUp {
+                                            button: btn,
+                                            x: pos.0,
+                                            y: pos.1,
+                                        });
                                     }
                                 });
                             }
