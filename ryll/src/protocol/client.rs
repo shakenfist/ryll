@@ -14,9 +14,8 @@ use tokio_rustls::rustls::{
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
 
-use crate::config::Config;
 use shakenfist_spice_protocol::link::{perform_auth, perform_link, SpiceStream};
-use shakenfist_spice_protocol::{ChannelType, SpiceError};
+use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceError};
 
 /// TLS certificate verifier that trusts a custom CA but skips hostname
 /// verification. SPICE self-signed certificates typically lack SAN
@@ -104,13 +103,13 @@ impl ServerCertVerifier for SpiceCaVerifier {
 
 /// SPICE client for managing connections to channels
 pub struct SpiceClient {
-    config: Config,
+    config: ConnectionConfig,
     tls_connector: Option<TlsConnector>,
 }
 
 impl SpiceClient {
     /// Create a new SPICE client from configuration
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: ConnectionConfig) -> Result<Self> {
         let tls_connector = if config.tls_port.is_some() {
             Some(Self::create_tls_connector(&config)?)
         } else {
@@ -124,7 +123,7 @@ impl SpiceClient {
     }
 
     /// Create TLS connector with optional CA certificate
-    fn create_tls_connector(config: &Config) -> Result<TlsConnector> {
+    fn create_tls_connector(config: &ConnectionConfig) -> Result<TlsConnector> {
         let mut root_store = RootCertStore::empty();
 
         // Add system roots

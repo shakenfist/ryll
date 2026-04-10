@@ -23,7 +23,7 @@ use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::protocol::SpiceClient;
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::ChannelType;
+use shakenfist_spice_protocol::{ChannelType, ConnectionConfig};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -1921,7 +1921,7 @@ async fn run_connection(
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
 ) -> Result<()> {
-    let client = SpiceClient::new(config)?;
+    let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
     // Wait for session initialization
 

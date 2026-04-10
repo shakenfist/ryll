@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use configparser::ini::Ini;
+use shakenfist_spice_protocol::ConnectionConfig;
 
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
@@ -77,6 +78,19 @@ pub struct Config {
     pub ca_cert: Option<String>,
     #[allow(dead_code)]
     pub host_subject: Option<String>,
+}
+
+impl From<&Config> for ConnectionConfig {
+    fn from(c: &Config) -> Self {
+        ConnectionConfig {
+            host: c.host.clone(),
+            port: c.port,
+            tls_port: c.tls_port,
+            password: c.password.clone(),
+            ca_cert: c.ca_cert.clone(),
+            host_subject: c.host_subject.clone(),
+        }
+    }
 }
 
 /// Filter out configparser's literal "None" string for absent values
