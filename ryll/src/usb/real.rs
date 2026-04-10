@@ -18,8 +18,8 @@ use super::{
     usb_ep_to_usbredir, usbredir_ep_to_usb, ControlSetup, DeviceSource, InterruptData,
     TransferResult, UsbDeviceBackend, UsbDeviceInfo,
 };
-use crate::usbredir::constants::Status;
-use crate::usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
+use shakenfist_spice_usbredir::constants::Status;
+use shakenfist_spice_usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
 
 /// Default timeout for control and bulk transfers.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5);

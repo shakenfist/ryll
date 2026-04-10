@@ -13,8 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use super::{ControlSetup, TransferResult, UsbDeviceBackend};
-use crate::usbredir::constants::Status;
-use crate::usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
+use shakenfist_spice_usbredir::constants::Status;
+use shakenfist_spice_usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
 
 // ── Constants ──────────────────────────────────────────
 

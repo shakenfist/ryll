@@ -61,6 +61,9 @@ shakenfist-spice-compression = { path = "../shakenfist-spice-compression" }
 # reaches 0.1.0).
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol" }
 
+# Extracted SPICE USB redirection protocol types (same caveat).
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir" }
+
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
 

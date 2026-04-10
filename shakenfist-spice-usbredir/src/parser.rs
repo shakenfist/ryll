@@ -18,6 +18,12 @@ pub struct UsbredirParser {
     buf: Vec<u8>,
 }
 
+impl Default for UsbredirParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UsbredirParser {
     pub fn new() -> Self {
         UsbredirParser {

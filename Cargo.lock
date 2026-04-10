@@ -3969,6 +3969,7 @@ dependencies = [
  "sha1",
  "shakenfist-spice-compression",
  "shakenfist-spice-protocol",
+ "shakenfist-spice-usbredir",
  "socket2",
  "tempfile",
  "thiserror 1.0.69",
@@ -4173,6 +4174,10 @@ dependencies = [
 [[package]]
 name = "shakenfist-spice-usbredir"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+]
 
 [[package]]
 name = "sharded-slab"

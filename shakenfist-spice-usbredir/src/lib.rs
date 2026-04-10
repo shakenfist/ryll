@@ -1,7 +1,20 @@
-//! Reserved crate name for an upcoming pure-Rust SPICE USB
-//! redirection (usbredir) protocol library extracted from the
-//! [ryll](https://github.com/shakenfist/ryll) SPICE client.
+//! Pure-Rust parser and message types for the SPICE USB
+//! redirection (usbredir) protocol, suitable for clients,
+//! proxies, and protocol analysis tools.
 //!
-//! This crate is currently a name reservation only and
-//! contains no functional code. See the README for details
-//! and a link to the extraction plan.
+//! - [`constants`] — message types, capabilities, status
+//!   codes, USB speed and endpoint-type enums.
+//! - [`messages`] — wire-format struct definitions with
+//!   `read` and `write` methods for every usbredir message
+//!   type, plus `UsbredirMessage` / `UsbredirPayload` for
+//!   parsed message dispatch.
+//! - [`parser`] — `UsbredirParser`, a byte-stream parser
+//!   that accumulates data and yields complete
+//!   `UsbredirMessage` values.
+//!
+//! Extracted from the
+//! [ryll](https://github.com/shakenfist/ryll) SPICE client.
+
+pub mod constants;
+pub mod messages;
+pub mod parser;

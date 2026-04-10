@@ -20,16 +20,16 @@ use crate::settings;
 use crate::usb::real::RealDevice;
 use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
-use crate::usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
-use crate::usbredir::messages::{
-    make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
-    ControlPacketHeader, Hello, InterruptPacketHeader, UsbredirMessage, UsbredirPayload,
-};
-use crate::usbredir::parser::UsbredirParser;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType};
+use shakenfist_spice_usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
+use shakenfist_spice_usbredir::messages::{
+    make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
+    ControlPacketHeader, Hello, InterruptPacketHeader, UsbredirMessage, UsbredirPayload,
+};
+use shakenfist_spice_usbredir::parser::UsbredirParser;
 
 use super::{ChannelEvent, UsbCommand};
 
@@ -592,7 +592,7 @@ impl UsbredirChannel {
                     sir.endpoint, msg.id
                 );
                 let status = self.start_interrupt_poll(sir.endpoint).await;
-                let resp = crate::usbredir::messages::InterruptReceivingStatus {
+                let resp = shakenfist_spice_usbredir::messages::InterruptReceivingStatus {
                     status: status as u8,
                     endpoint: sir.endpoint,
                 };
@@ -608,7 +608,7 @@ impl UsbredirChannel {
                     sir.endpoint, msg.id
                 );
                 self.stop_interrupt_poll(sir.endpoint);
-                let resp = crate::usbredir::messages::InterruptReceivingStatus {
+                let resp = shakenfist_spice_usbredir::messages::InterruptReceivingStatus {
                     status: Status::Success as u8,
                     endpoint: sir.endpoint,
                 };

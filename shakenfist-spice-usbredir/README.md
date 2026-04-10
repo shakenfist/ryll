@@ -1,42 +1,30 @@
 # shakenfist-spice-usbredir
 
-**This crate is a functionally empty crate that exists to
-reserve the crate name for an upcoming pure-Rust SPICE USB
-redirection (usbredir) protocol library extracted from the
-[ryll](https://github.com/shakenfist/ryll) SPICE client. It
-should not be used.**
+Pure-Rust parser and message types for the SPICE USB
+redirection (usbredir) protocol:
+
+- **`constants`** — message types, capabilities, status codes,
+  USB speed and endpoint-type enums.
+- **`messages`** — wire-format struct definitions with `read`
+  and `write` methods for every usbredir message type, plus
+  `UsbredirMessage` / `UsbredirPayload` for parsed message
+  dispatch.
+- **`parser`** — `UsbredirParser`, a byte-stream parser that
+  accumulates data via `feed()` and yields complete
+  `UsbredirMessage` values via `next_message()`.
 
 ## Status
 
-Reserved by the [shakenfist](https://github.com/shakenfist)
-project. The real `0.1.0` release will be published when the
-extraction work in
-[ryll](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md)
-lands. Until then, this `0.0.0` release is intentionally
-empty.
+This crate is **not yet published to crates.io**. The `0.0.0`
+entry there is a Phase 2 name reservation; the real `0.1.0`
+release will follow once API polish is complete.
 
-## What this crate will contain
+Internal consumers (ryll itself and the planned Rust rewrite
+of the shakenfist kerbside SPICE proxy) should depend on this
+crate via a workspace path or a git dependency until `0.1.0`
+ships.
 
-When released, this crate will provide a pure-Rust parser and
-message types for the SPICE USB redirection protocol (the
-SPICE-side of `usbredir`), suitable for clients, proxies, and
-protocol analysis tools.
+## Source
 
-## Why a placeholder?
-
-crates.io has a flat, immutable, first-come namespace. We are
-publishing this empty crate now to prevent the name from being
-claimed by an unrelated party (typosquatter, AI-generated junk
-crate, well-meaning third party) before the real
-implementation is ready. This is consistent with the
-[Rust Forge crate ownership policy](https://forge.rust-lang.org/policies/crate-ownership.html)'s
-guidance on reservation crates: the README clearly states the
-intent, and substantive publishing will follow.
-
-## Project links
-
-- Source repository:
-  <https://github.com/shakenfist/ryll>
-- Extraction plan:
-  <https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md>
-- Issues / contact: file via the ryll repository
+Extracted from the
+[ryll](https://github.com/shakenfist/ryll) SPICE client.

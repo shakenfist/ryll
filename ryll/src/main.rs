@@ -23,7 +23,6 @@ mod display;
 mod protocol;
 mod settings;
 mod usb;
-mod usbredir;
 mod webdav;
 
 use std::sync::atomic::{AtomicBool, Ordering};

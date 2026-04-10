@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::usbredir::constants::Status;
-use crate::usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
+use shakenfist_spice_usbredir::constants::Status;
+use shakenfist_spice_usbredir::messages::{DeviceConnect, EpInfo, InterfaceInfo};
 
 // ── Transfer result ────────────────────────────────────
 

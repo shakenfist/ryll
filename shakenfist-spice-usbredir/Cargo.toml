@@ -5,5 +5,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Reserved name for an upcoming pure-Rust SPICE USB redirection (usbredir) protocol library extracted from the ryll SPICE client."
+description = "Pure-Rust parser and message types for the SPICE USB redirection (usbredir) protocol, extracted from the ryll SPICE client."
 readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+byteorder = "1"
