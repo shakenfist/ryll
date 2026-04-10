@@ -1206,7 +1206,54 @@ commit before Step 2 lands.)
 
 ### Discoveries during execution
 
-(To be filled in by Claude after Step 2 completes.)
+* **Inline fully qualified paths missed by the initial grep.**
+  The import-line grep for `use crate::protocol` found 26
+  import lines across 8 files, but missed 5 inline fully
+  qualified paths in `inputs.rs` (`crate::protocol::mouse_buttons::LEFT`
+  etc.) inside a `match` expression. These surfaced as compile
+  errors after the first build attempt. Fixed by switching
+  them to `shakenfist_spice_protocol::mouse_buttons::*`.
+  Lesson for Phase 5: grep for both `use crate::protocol`
+  *and* `crate::protocol::` (without `use`) to catch inline
+  qualified paths.
+
+* **Rustfmt re-ordered imports in multiple channel files.**
+  After switching `crate::protocol::*` to
+  `shakenfist_spice_protocol::*`, rustfmt moved the new
+  external-crate imports after the `crate::*` imports in the
+  import block (consistent with its group-ordering rule:
+  `std::` first, then external crates, then `crate::*`).
+  This was expected from the Phase 3 experience but affected
+  more files this time (6 channel handlers).
+
+* **All four moved files registered as 100% renames.** Unlike
+  Phase 3 (where `glz.rs`, `lz.rs`, `lz4.rs` were 99% due
+  to the `super::DecompressedImage` → `crate::DecompressedImage`
+  change), the protocol files had no internal import changes
+  needed — `link.rs`'s `use super::constants::*` still
+  resolves correctly because `super` from a lib.rs-declared
+  module is the crate root. This means `git log --follow`
+  works perfectly for all four files.
+
+* **The `mouse_buttons` and `keyboard_modifiers` const
+  modules needed to be in the crate root re-exports.** The
+  lib.rs re-export list had to include these alongside
+  `ChannelType`, `ImageType`, etc. so that ryll consumers
+  could write `shakenfist_spice_protocol::mouse_buttons::LEFT`
+  without going through `constants::`. This matched the
+  existing `pub use constants::*;` pattern that ryll's old
+  `protocol/mod.rs` had.
+
+* **`SpiceLinkMess::new` confirmed fine as-is.** The 5-arg
+  constructor was flagged as "minor" in the master plan's
+  open questions. During execution, all five args have
+  distinct types (`u32`, `ChannelType`, `u8`, `u32`, `u32`)
+  and the callers are all clear about what they're passing.
+  No refactor needed.
+
+* **No tests to migrate.** Confirmed: none of the four
+  extracted files had `#[test]` functions. Test count stayed
+  at 97 ryll + 2 compression + 0 protocol = 99 total.
 
 ### Back brief
 
