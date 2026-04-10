@@ -379,7 +379,7 @@ impl InputsChannel {
                     MousePosition {
                         x,
                         y,
-                        buttons: self.button_state,
+                        buttons: self.button_state as u16,
                         display_id: 0,
                     }
                     .write(&mut payload)?;
@@ -391,12 +391,19 @@ impl InputsChannel {
             }
 
             InputEvent::MouseDown { button, x, y } => {
-                // Send position before button press (as spice-gtk does)
+                // Send position before button press. spice-gtk does the
+                // same: channel-inputs.c:438-439 calls send_motion() +
+                // send_position() immediately before marshalling the
+                // press message. This ensures the server knows the
+                // cursor location at the moment of the click, which
+                // matters when the user clicks without moving first
+                // (e.g. clicking a button that appeared under the
+                // cursor after a dialog opened).
                 let mut pos_payload = Vec::new();
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state,
+                    buttons: self.button_state as u16,
                     display_id: 0,
                 }
                 .write(&mut pos_payload)?;
@@ -417,8 +424,8 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button,
-                    buttons_state: self.button_state,
+                    button: button as u8,
+                    buttons_state: self.button_state as u16,
                 }
                 .write(&mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
@@ -430,16 +437,18 @@ impl InputsChannel {
             }
 
             InputEvent::MouseUp { button, x, y } => {
-                // Clear button state first, then send position with cleared
-                // state before the release — matches spice-gtk ordering
-                // (channel-inputs.c:509-510).
+                // Clear button state first, then send position with
+                // cleared state before the release — matches spice-gtk
+                // ordering (channel-inputs.c:509-510 calls send_motion()
+                // + send_position() before marshalling the release
+                // message, after clearing the button mask at line 502).
                 self.button_state &= !button;
 
                 let mut pos_payload = Vec::new();
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state,
+                    buttons: self.button_state as u16,
                     display_id: 0,
                 }
                 .write(&mut pos_payload)?;
@@ -458,8 +467,8 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button,
-                    buttons_state: self.button_state,
+                    button: button as u8,
+                    buttons_state: self.button_state as u16,
                 }
                 .write(&mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);

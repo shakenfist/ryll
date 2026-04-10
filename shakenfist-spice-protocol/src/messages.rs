@@ -558,7 +558,8 @@ impl KeyEvent {
 pub struct MousePosition {
     pub x: u32,
     pub y: u32,
-    pub buttons: u32,
+    /// `flags16 mouse_button_mask` per spice.proto.
+    pub buttons: u16,
     pub display_id: u8,
 }
 
@@ -566,7 +567,7 @@ impl MousePosition {
     pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
         buf.write_u32::<LittleEndian>(self.x)?;
         buf.write_u32::<LittleEndian>(self.y)?;
-        buf.write_u32::<LittleEndian>(self.buttons)?;
+        buf.write_u16::<LittleEndian>(self.buttons)?;
         buf.write_u8(self.display_id)?;
         Ok(())
     }
@@ -575,15 +576,15 @@ impl MousePosition {
 /// Mouse button message (client -> server)
 #[derive(Debug, Clone, Copy)]
 pub struct MouseButton {
-    /// Bitmask for the button being pressed/released. Encoded
-    /// to a button id on write via `mask_to_id`.
-    pub button: u32,
-    /// Current state of all buttons.
-    pub buttons_state: u32,
+    /// `enum8 mouse_button` per spice.proto. Encoded to a
+    /// button id on write via `mask_to_id`.
+    pub button: u8,
+    /// `flags16 mouse_button_mask` per spice.proto.
+    pub buttons_state: u16,
 }
 
 impl MouseButton {
-    fn mask_to_id(mask: u32) -> u32 {
+    fn mask_to_id(mask: u8) -> u8 {
         match mask {
             0x01 => 1, // LEFT
             0x02 => 2, // MIDDLE
@@ -595,8 +596,8 @@ impl MouseButton {
     }
 
     pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(Self::mask_to_id(self.button))?;
-        buf.write_u32::<LittleEndian>(self.buttons_state)?;
+        buf.write_u8(Self::mask_to_id(self.button))?;
+        buf.write_u16::<LittleEndian>(self.buttons_state)?;
         Ok(())
     }
 }
