@@ -560,7 +560,7 @@ impl MousePosition {
     ) -> io::Result<()> {
         buf.write_u32::<LittleEndian>(x)?;
         buf.write_u32::<LittleEndian>(y)?;
-        buf.write_u32::<LittleEndian>(buttons)?;
+        buf.write_u16::<LittleEndian>(buttons as u16)?;
         buf.write_u8(display_id)?;
         Ok(())
     }
@@ -582,8 +582,8 @@ impl MouseButton {
     }
 
     pub fn write(button: u32, buttons_state: u32, buf: &mut Vec<u8>) -> io::Result<()> {
-        buf.write_u32::<LittleEndian>(Self::mask_to_id(button))?;
-        buf.write_u32::<LittleEndian>(buttons_state)?;
+        buf.write_u8(Self::mask_to_id(button) as u8)?;
+        buf.write_u16::<LittleEndian>(buttons_state as u16)?;
         Ok(())
     }
 }
