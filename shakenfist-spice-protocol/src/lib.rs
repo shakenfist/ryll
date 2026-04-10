@@ -24,10 +24,13 @@
 //! - [`client`] — `SpiceClient` for managing SPICE channel
 //!   connections (TLS/TCP, keepalive, link handshake, auth).
 
+pub mod client;
 pub mod constants;
 pub mod link;
 pub mod logging;
 pub mod messages;
+
+pub use client::SpiceClient;
 
 // Re-export the most commonly used items at the crate root
 // for convenience.

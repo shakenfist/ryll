@@ -20,7 +20,6 @@ mod capture {
 mod channels;
 mod config;
 mod display;
-mod protocol;
 mod settings;
 mod usb;
 mod webdav;

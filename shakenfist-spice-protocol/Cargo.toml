@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, and logging helpers. Extracted from the ryll SPICE client. Reserved crate name; the first published release will follow as 0.1.0 once the API has stabilised."
+description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, SpiceClient, and logging helpers. Extracted from the ryll SPICE client. Reserved crate name; the first published release will follow as 0.1.0 once the API has stabilised."
 readme = "README.md"
 
 [dependencies]
@@ -17,3 +17,6 @@ sha1 = "0.10"
 tokio = { version = "1", features = ["io-util", "net"] }
 tokio-rustls = "0.26"
 tracing = "0.1"
+rustls-pemfile = "2"
+socket2 = { version = "0.6", features = ["all"] }
+webpki-roots = "0.26"

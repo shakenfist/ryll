@@ -4165,10 +4165,13 @@ dependencies = [
  "byteorder",
  "rand 0.8.5",
  "rsa",
+ "rustls-pemfile",
  "sha1",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tracing",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
