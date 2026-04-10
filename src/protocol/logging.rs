@@ -106,7 +106,15 @@ pub fn hex_dump(data: &[u8], max_bytes: usize) {
 pub mod message_names {
     use super::super::constants::*;
 
-    /// Get main channel server message name
+    fn common_client(msg_type: u16) -> Option<&'static str> {
+        match msg_type {
+            main_client::ACK_SYNC => Some("ack_sync"),
+            main_client::ACK => Some("ack"),
+            main_client::PONG => Some("pong"),
+            _ => None,
+        }
+    }
+
     pub fn main_server(msg_type: u16) -> &'static str {
         match msg_type {
             main_server::MIGRATE => "migrate",
@@ -129,9 +137,6 @@ pub mod message_names {
     /// Get main channel client message name
     pub fn main_client(msg_type: u16) -> &'static str {
         match msg_type {
-            main_client::ACK_SYNC => "ack_sync",
-            main_client::ACK => "ack",
-            main_client::PONG => "pong",
             main_client::MIGRATE_FLUSH_MARK => "migrate_flush_mark",
             main_client::MIGRATE_DATA => "migrate_data",
             main_client::DISCONNECTING => "disconnecting",
@@ -139,7 +144,7 @@ pub mod message_names {
             main_client::AGENT_START => "agent_start",
             main_client::AGENT_DATA => "agent_data",
             main_client::AGENT_TOKEN => "agent_token",
-            _ => "unknown",
+            _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -186,10 +191,7 @@ pub mod message_names {
     pub fn display_client(msg_type: u16) -> &'static str {
         match msg_type {
             display_client::INIT => "init",
-            display_client::ACK_SYNC => "ack_sync",
-            display_client::ACK => "ack",
-            display_client::PONG => "pong",
-            _ => "unknown",
+            _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -216,7 +218,7 @@ pub mod message_names {
             inputs_client::MOUSE_POSITION => "mouse_position",
             inputs_client::MOUSE_PRESS => "mouse_press",
             inputs_client::MOUSE_RELEASE => "mouse_release",
-            _ => "unknown",
+            _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -239,12 +241,7 @@ pub mod message_names {
 
     /// Get cursor channel client message name
     pub fn cursor_client(msg_type: u16) -> &'static str {
-        match msg_type {
-            cursor_client::ACK_SYNC => "ack_sync",
-            cursor_client::ACK => "ack",
-            cursor_client::PONG => "pong",
-            _ => "unknown",
-        }
+        common_client(msg_type).unwrap_or("unknown")
     }
 
     /// Get SpiceVMC/usbredir server message name
@@ -263,10 +260,7 @@ pub mod message_names {
         match msg_type {
             spicevmc_client::DATA => "vmc_data",
             spicevmc_client::COMPRESSED_DATA => "vmc_compressed_data",
-            spicevmc_client::ACK_SYNC => "ack_sync",
-            spicevmc_client::ACK => "ack",
-            spicevmc_client::PONG => "pong",
-            _ => "unknown",
+            _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
 }
