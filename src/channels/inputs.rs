@@ -385,6 +385,20 @@ impl InputsChannel {
             }
 
             InputEvent::MouseDown { button, x, y } => {
+                // Send position before button press. spice-gtk does the
+                // same: channel-inputs.c:438-439 calls send_motion() +
+                // send_position() immediately before marshalling the
+                // press message. This ensures the server knows the
+                // cursor location at the moment of the click, which
+                // matters when the user clicks without moving first
+                // (e.g. clicking a button that appeared under the
+                // cursor after a dialog opened).
+                let mut pos_payload = Vec::new();
+                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
+                self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
+                    .await?;
+
                 self.button_state |= button;
 
                 self.record_event(InputEventRecord {
@@ -399,12 +413,26 @@ impl InputsChannel {
                 let mut payload = Vec::new();
                 MouseButton::write(button, self.button_state, &mut payload)?;
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
-                debug!("inputs: mouse down: button={}, pos=({},{})", button, x, y);
+                info!(
+                    "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
+                    button, x, y, self.button_state
+                );
                 self.send_with_log(inputs_client::MOUSE_PRESS, &msg).await?;
             }
 
             InputEvent::MouseUp { button, x, y } => {
+                // Clear button state first, then send position with
+                // cleared state before the release — matches spice-gtk
+                // ordering (channel-inputs.c:509-510 calls send_motion()
+                // + send_position() before marshalling the release
+                // message, after clearing the button mask at line 502).
                 self.button_state &= !button;
+
+                let mut pos_payload = Vec::new();
+                MousePosition::write(x, y, self.button_state, 0, &mut pos_payload)?;
+                let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
+                self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
+                    .await?;
 
                 self.record_event(InputEventRecord {
                     event_type: "MouseUp".to_string(),
