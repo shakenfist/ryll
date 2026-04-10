@@ -602,8 +602,10 @@ impl RyllApp {
                     self.connected = false;
                     if !self.show_disconnect_dialog {
                         self.show_disconnect_dialog = true;
-                        self.disconnect_reason =
-                            Some(format!("Connection lost ({} channel disconnected)", channel.name()));
+                        self.disconnect_reason = Some(format!(
+                            "Connection lost ({} channel disconnected)",
+                            channel.name()
+                        ));
                     }
                     if channel == ChannelType::Usbredir {
                         self.usb_channel_ready = false;

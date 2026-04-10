@@ -79,7 +79,12 @@ fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let pixels = match decoder.decode() {
         Ok(p) => p,
         Err(e) => {
-            warn!("MJPEG decode error: {}, data_len={}, header={:02x?}", e, data.len(), &data[..data.len().min(16)]);
+            warn!(
+                "MJPEG decode error: {}, data_len={}, header={:02x?}",
+                e,
+                data.len(),
+                &data[..data.len().min(16)]
+            );
             return None;
         }
     };
@@ -640,16 +645,24 @@ impl DisplayChannel {
 
             display_server::STREAM_CREATE => {
                 if payload.len() >= 50 {
-                    let surface_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let stream_id = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let surface_id =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     let _flags = payload[8];
                     let codec_type = payload[9];
-                    let stream_w = u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
-                    let stream_h = u32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]);
-                    let dest_top = u32::from_le_bytes([payload[34], payload[35], payload[36], payload[37]]);
-                    let dest_left = u32::from_le_bytes([payload[38], payload[39], payload[40], payload[41]]);
-                    let dest_bottom = u32::from_le_bytes([payload[42], payload[43], payload[44], payload[45]]);
-                    let dest_right = u32::from_le_bytes([payload[46], payload[47], payload[48], payload[49]]);
+                    let stream_w =
+                        u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
+                    let stream_h =
+                        u32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]);
+                    let dest_top =
+                        u32::from_le_bytes([payload[34], payload[35], payload[36], payload[37]]);
+                    let dest_left =
+                        u32::from_le_bytes([payload[38], payload[39], payload[40], payload[41]]);
+                    let dest_bottom =
+                        u32::from_le_bytes([payload[42], payload[43], payload[44], payload[45]]);
+                    let dest_right =
+                        u32::from_le_bytes([payload[46], payload[47], payload[48], payload[49]]);
 
                     info!(
                         "display: stream_create: id={}, surface={}, codec={}, {}x{}, dest=({},{})→({},{})",
@@ -657,37 +670,53 @@ impl DisplayChannel {
                         dest_left, dest_top, dest_right, dest_bottom
                     );
 
-                    self.streams.insert(stream_id, StreamState {
-                        surface_id,
-                        codec_type,
-                        dest_top,
-                        dest_left,
-                        dest_bottom,
-                        dest_right,
-                        cached_dht: None,
-                    });
+                    self.streams.insert(
+                        stream_id,
+                        StreamState {
+                            surface_id,
+                            codec_type,
+                            dest_top,
+                            dest_left,
+                            dest_bottom,
+                            dest_right,
+                            cached_dht: None,
+                        },
+                    );
                 }
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED {
+                let (stream_id, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED
+                {
                     if payload.len() < 36 {
                         return Ok(());
                     }
                     let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let dest_top = u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
-                    let dest_left = u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
-                    let dest_bottom = u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
-                    let dest_right = u32::from_le_bytes([payload[28], payload[29], payload[30], payload[31]]);
-                    let data_size = u32::from_le_bytes([payload[32], payload[33], payload[34], payload[35]]) as usize;
+                    let dest_top =
+                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
+                    let dest_left =
+                        u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
+                    let dest_bottom =
+                        u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
+                    let dest_right =
+                        u32::from_le_bytes([payload[28], payload[29], payload[30], payload[31]]);
+                    let data_size =
+                        u32::from_le_bytes([payload[32], payload[33], payload[34], payload[35]])
+                            as usize;
                     let data = &payload[36..36 + data_size.min(payload.len() - 36)];
-                    (id, Some((dest_top, dest_left, dest_bottom, dest_right)), data)
+                    (
+                        id,
+                        Some((dest_top, dest_left, dest_bottom, dest_right)),
+                        data,
+                    )
                 } else {
                     if payload.len() < 12 {
                         return Ok(());
                     }
                     let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let data_size = u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+                    let data_size =
+                        u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]])
+                            as usize;
                     let data = &payload[12..12 + data_size.min(payload.len() - 12)];
                     (id, None, data)
                 };
@@ -695,8 +724,10 @@ impl DisplayChannel {
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         let (top, left, bottom, right) = dest.unwrap_or((
-                            stream.dest_top, stream.dest_left,
-                            stream.dest_bottom, stream.dest_right,
+                            stream.dest_top,
+                            stream.dest_left,
+                            stream.dest_bottom,
+                            stream.dest_right,
                         ));
                         let w = right.saturating_sub(left);
                         let h = bottom.saturating_sub(top);
@@ -738,21 +769,26 @@ impl DisplayChannel {
                             }
                         }
                     } else {
-                        debug!("display: stream {} unsupported codec {}", stream_id, stream.codec_type);
+                        debug!(
+                            "display: stream {} unsupported codec {}",
+                            stream_id, stream.codec_type
+                        );
                     }
                 }
             }
 
             display_server::STREAM_CLIP => {
                 if payload.len() >= 4 {
-                    let stream_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     debug!("display: stream_clip id={}", stream_id);
                 }
             }
 
             display_server::STREAM_DESTROY => {
                 if payload.len() >= 4 {
-                    let stream_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     info!("display: stream_destroy id={}", stream_id);
                     self.streams.remove(&stream_id);
                 }

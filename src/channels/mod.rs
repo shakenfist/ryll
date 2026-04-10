@@ -75,7 +75,9 @@ pub enum ChannelEvent {
     },
 
     #[allow(dead_code)]
-    ClipboardReceived { text: String },
+    ClipboardReceived {
+        text: String,
+    },
 
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]

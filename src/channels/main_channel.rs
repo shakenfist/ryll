@@ -400,12 +400,11 @@ impl MainChannel {
 
             main_server::AGENT_DATA => {
                 if payload.len() >= 20 {
-                    let agent_type = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
-                    let agent_size = u32::from_le_bytes([
-                        payload[16], payload[17], payload[18], payload[19],
-                    ]) as usize;
+                    let agent_type =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let agent_size =
+                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]])
+                            as usize;
                     let agent_payload = &payload[20..20 + agent_size.min(payload.len() - 20)];
                     debug!(
                         "main: agent_data from server: type={}, size={}",
@@ -604,9 +603,8 @@ impl MainChannel {
             VD_AGENT_CLIPBOARD_GRAB => {
                 // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
-                    let format = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
+                    let format =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard grab from guest, requesting data");
                         self.send_clipboard_request().await?;
@@ -618,7 +616,10 @@ impl MainChannel {
                 let offset = 4;
                 if payload.len() > offset + 4 {
                     let _format = u32::from_le_bytes([
-                        payload[offset], payload[offset + 1], payload[offset + 2], payload[offset + 3],
+                        payload[offset],
+                        payload[offset + 1],
+                        payload[offset + 2],
+                        payload[offset + 3],
                     ]);
                     let data = &payload[offset + 4..];
                     if !data.is_empty() {
@@ -638,9 +639,8 @@ impl MainChannel {
             VD_AGENT_CLIPBOARD_REQUEST => {
                 // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
-                    let format = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
+                    let format =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
                         match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
@@ -661,9 +661,8 @@ impl MainChannel {
                 self.guest_caps_received = true;
                 debug!("main: received agent capabilities from guest");
                 if payload.len() >= 4 {
-                    let request = u32::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3],
-                    ]);
+                    let request =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if request == 1 {
                         self.agent_caps_announced = false;
                         self.maybe_send_announce_capabilities().await?;
@@ -709,14 +708,16 @@ impl MainChannel {
         let mut payload = Vec::with_capacity(8);
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload)
+            .await
     }
 
     async fn send_clipboard_request(&mut self) -> Result<bool> {
         let mut payload = Vec::with_capacity(8);
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload)
+            .await
     }
 
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
@@ -725,7 +726,8 @@ impl MainChannel {
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
         payload.extend_from_slice(text_bytes);
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
+            .await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
