@@ -364,7 +364,35 @@ Update master plan execution table and record discoveries.
 
 ### Discoveries during execution
 
-(To be filled in after Step 2 completes.)
+* **Doc-test added test count from 99 to 100.** The
+  `ConnectionConfig` struct has a doc example in lib.rs with
+  a runnable code block. This becomes a doc-test, adding 1
+  to the total test count: 80 ryll + 2 compression + 17
+  usbredir + 0 protocol lib tests + 1 protocol doc-test =
+  100. This was not predicted by the plan (which said "99")
+  but is correct and expected behaviour.
+
+* **No surprises during the file move.** `client.rs`
+  registered as 98% rename (2% from the `shakenfist_spice_protocol::*`
+  → `crate::*` import change). `git log --follow` traces it
+  back to `ryll/src/protocol/client.rs`.
+
+* **Three new deps added cleanly.** `socket2`, `webpki-roots`,
+  and `rustls-pemfile` were already in ryll's Cargo.toml with
+  compatible versions. Adding them to the protocol crate
+  required no version negotiation.
+
+* **`ryll/src/protocol/` deleted entirely.** After Phase 6,
+  ryll has no `protocol/` module at all. The `mod protocol;`
+  declaration in `main.rs` is gone. `app.rs` imports
+  `SpiceClient` directly from `shakenfist_spice_protocol`.
+
+* **The `From<&Config> for ConnectionConfig` adapter is
+  trivial** — 6 field clones with no logic. This confirms
+  the research finding that ryll's `Config` was already
+  minimal. If `ConnectionConfig` ever diverges from `Config`
+  (e.g. adds a `proxy` field that Config doesn't have), the
+  adapter is the one place to update.
 
 ### Back brief
 

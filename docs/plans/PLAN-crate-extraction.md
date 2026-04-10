@@ -402,7 +402,7 @@ the initial extraction.
 | 3. Extract shakenfist-spice-compression crate | PLAN-crate-extraction-phase-03-compression.md | Complete |
 | 4. Extract shakenfist-spice-protocol crate | PLAN-crate-extraction-phase-04-protocol.md | Complete |
 | 5. Extract shakenfist-spice-usbredir crate | PLAN-crate-extraction-phase-05-usbredir.md | Complete |
-| 6. Introduce ConnectionConfig and move SpiceClient into protocol crate | PLAN-crate-extraction-phase-06-client.md | In progress |
+| 6. Introduce ConnectionConfig and move SpiceClient into protocol crate | PLAN-crate-extraction-phase-06-client.md | Complete |
 
 ### Phase 1: Convert ryll to a Cargo workspace
 
