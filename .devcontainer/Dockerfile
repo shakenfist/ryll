@@ -9,11 +9,14 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 #   - libxkbcommon: Keyboard handling
 # Build tools:
 #   - pkg-config: Finding library paths
-#   - cmake: Some crate build dependencies
+#   - cmake: Some crate build dependencies (audiopus_sys)
+# Audio:
+#   - libasound2-dev: ALSA headers (cpal audio output)
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     cmake \
+    libasound2-dev \
     libxcb-render0-dev \
     libxcb-shape0-dev \
     libxcb-xfixes0-dev \
