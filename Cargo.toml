@@ -33,6 +33,15 @@ rsa = "0.9"
 sha1 = "0.10"
 rand = "0.8"
 
+# Audio playback. Note: audiopus_sys vendors libopus and builds it
+# via cmake. The vendored CMakeLists.txt requires cmake >= 3.1
+# which newer cmake rejects without CMAKE_POLICY_VERSION_MINIMUM.
+# The unsafe impl Send on cpal::Stream is only correct on
+# Linux/ALSA. See PLAN-pr23-followup.md for the plan to make
+# audio properly cross-platform or Linux-only.
+cpal = "0.15"
+audiopus = "0.3.0-rc.0"
+
 # Logging
 tracing = "0.1"
 tracing-appender = "0.2"

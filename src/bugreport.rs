@@ -159,11 +159,13 @@ impl TrafficRingBuffer {
     }
 }
 
-/// Default per-channel ring buffer cap: 10 MB (50 MB / 5 channels).
-const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 5;
+/// Default per-channel ring buffer cap (~8.3 MB, 50 MB / 6 channels).
+const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 6;
 
 /// Known channel names.
-const CHANNELS: [&str; 5] = ["main", "display", "inputs", "cursor", "usbredir"];
+const CHANNELS: [&str; 6] = [
+    "main", "display", "inputs", "cursor", "usbredir", "playback",
+];
 
 /// Holds all four per-channel ring buffers plus a shared session
 /// start timestamp.
@@ -173,6 +175,7 @@ pub struct TrafficBuffers {
     inputs: Mutex<TrafficRingBuffer>,
     cursor: Mutex<TrafficRingBuffer>,
     usbredir: Mutex<TrafficRingBuffer>,
+    playback: Mutex<TrafficRingBuffer>,
     /// Session start time for relative timestamps.
     start: Instant,
 }
@@ -186,6 +189,7 @@ impl TrafficBuffers {
             inputs: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             cursor: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             usbredir: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
+            playback: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
             start: Instant::now(),
         }
     }
@@ -203,6 +207,7 @@ impl TrafficBuffers {
             "inputs" => Some(&self.inputs),
             "cursor" => Some(&self.cursor),
             "usbredir" => Some(&self.usbredir),
+            "playback" => Some(&self.playback),
             _ => None,
         }
     }

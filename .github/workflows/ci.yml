@@ -32,7 +32,8 @@ jobs:
             libxcb-xfixes0-dev libxcb1-dev \
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev
+            libwayland-dev libssl-dev \
+            libasound2-dev
 
       - name: Check formatting
         run: cargo fmt --check
@@ -61,6 +62,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # audiopus_sys vendors libopus with an old CMakeLists.txt
+      # (requires cmake >= 3.1). Newer cmake on macOS rejects this
+      # without the compatibility flag.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
@@ -80,7 +85,8 @@ jobs:
             libxcb-xfixes0-dev libxcb1-dev \
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev
+            libwayland-dev libssl-dev \
+            libasound2-dev
 
       - name: Build
         run: cargo build --release ${{ matrix.features }}
