@@ -159,7 +159,7 @@ pub struct PlaybackChannel {
     channels: u32,
     audio_buffer: AudioBuffer,
     _cpal_stream: Option<SendStream>,
-    opus_decoder: Option<audiopus::coder::Decoder>,
+    opus_decoder: Option<opus_decoder::OpusDecoder>,
     volume_control: Arc<VolumeControl>,
 }
 
@@ -296,19 +296,19 @@ impl PlaybackChannel {
                             self.sample_rate, self.channels, format, time
                         );
                         self.start_audio_output();
-                        self.opus_decoder = match audiopus::coder::Decoder::new(
-                            audiopus::SampleRate::Hz48000,
-                            audiopus::Channels::Stereo,
-                        ) {
-                            Ok(d) => {
-                                info!("playback: Opus decoder initialized");
-                                Some(d)
-                            }
-                            Err(e) => {
-                                warn!("playback: failed to create Opus decoder: {}", e);
-                                None
-                            }
-                        };
+                        // Opus always operates at 48kHz internally; the
+                        // channel count comes from the SPICE START message.
+                        self.opus_decoder =
+                            match opus_decoder::OpusDecoder::new(48000, self.channels as usize) {
+                                Ok(d) => {
+                                    info!("playback: Opus decoder initialized");
+                                    Some(d)
+                                }
+                                Err(e) => {
+                                    warn!("playback: failed to create Opus decoder: {}", e);
+                                    None
+                                }
+                            };
                     }
                 }
                 playback_server::MODE => {
@@ -332,28 +332,21 @@ impl PlaybackChannel {
                             }
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
                             if let Some(ref mut decoder) = self.opus_decoder {
-                                let mut pcm = vec![0i16; 48000 / 100 * 2];
-                                let packet = audiopus::packet::Packet::try_from(audio_data);
-                                let signals = audiopus::MutSignals::try_from(&mut pcm[..]);
-                                match (packet, signals) {
-                                    (Ok(pkt), Ok(sig)) => {
-                                        match decoder.decode(Some(pkt), sig, false) {
-                                            Ok(samples) => {
-                                                let mut buf = self.audio_buffer.lock().unwrap();
-                                                for &s in &pcm[..samples * 2] {
-                                                    buf.push_back(s);
-                                                }
-                                                while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                                                    buf.pop_front();
-                                                }
-                                            }
-                                            Err(e) => {
-                                                debug!("playback: Opus decode error: {}", e);
-                                            }
+                                let ch = self.channels as usize;
+                                let mut pcm =
+                                    vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
+                                match decoder.decode(audio_data, &mut pcm, false) {
+                                    Ok(samples) => {
+                                        let mut buf = self.audio_buffer.lock().unwrap();
+                                        for &s in &pcm[..samples * ch] {
+                                            buf.push_back(s);
+                                        }
+                                        while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
+                                            buf.pop_front();
                                         }
                                     }
-                                    _ => {
-                                        debug!("playback: invalid Opus packet");
+                                    Err(e) => {
+                                        debug!("playback: Opus decode error: {}", e);
                                     }
                                 }
                             }

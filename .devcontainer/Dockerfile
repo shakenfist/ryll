@@ -9,7 +9,7 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 #   - libxkbcommon: Keyboard handling
 # Build tools:
 #   - pkg-config: Finding library paths
-#   - cmake: Some crate build dependencies (audiopus_sys)
+#   - cmake: Build dependency for aws-lc-sys (via reqwest TLS)
 # Audio:
 #   - libasound2-dev: ALSA headers (cpal audio output)
 RUN apt-get update && apt-get install -y \

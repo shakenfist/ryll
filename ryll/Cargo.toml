@@ -33,10 +33,11 @@ rsa = "0.9"
 sha1 = "0.10"
 rand = "0.8"
 
-# Audio playback (see docs/plans/PLAN-pr23-followup.md for
-# known issues with these deps)
+# Audio playback. The unsafe impl Send on cpal::Stream is only
+# correct on Linux/ALSA. See PLAN-pr23-followup.md for the plan
+# to make audio properly cross-platform or Linux-only.
 cpal = "0.15"
-audiopus = "0.3.0-rc.0"
+opus-decoder = "0.1"
 
 # Logging
 tracing = "0.1"
