@@ -151,6 +151,8 @@ pub struct RyllApp {
     connected: bool,
     error_message: Option<String>,
     mouse_mode: u32, // 1=server, 2=client
+    show_disconnect_dialog: bool,
+    disconnect_reason: Option<String>,
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
@@ -336,6 +338,8 @@ impl RyllApp {
             connected: false,
             error_message: None,
             mouse_mode: 0,
+            show_disconnect_dialog: false,
+            disconnect_reason: None,
             last_mouse_pos: None,
             last_modifiers: None,
             forwarded_buttons: 0,
@@ -514,6 +518,14 @@ impl RyllApp {
                     debug!("app: requested monitors config {}x{}", width, height);
                 }
 
+                ChannelEvent::ClipboardReceived { text } => {
+                    info!("app: clipboard from guest ({} bytes)", text.len());
+                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
+                        Ok(()) => {}
+                        Err(e) => debug!("app: failed to set host clipboard: {}", e),
+                    }
+                }
+
                 ChannelEvent::Statistics {
                     bytes_in,
                     bytes_out,
@@ -529,7 +541,8 @@ impl RyllApp {
 
                 ChannelEvent::Error(msg) => {
                     error!("app: channel error: {}", msg);
-                    self.error_message = Some(msg);
+                    self.show_disconnect_dialog = true;
+                    self.disconnect_reason = Some(msg);
                 }
 
                 ChannelEvent::UsbChannelReady => {
@@ -586,8 +599,13 @@ impl RyllApp {
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
-                    if channel == ChannelType::Main {
-                        self.connected = false;
+                    self.connected = false;
+                    if !self.show_disconnect_dialog {
+                        self.show_disconnect_dialog = true;
+                        self.disconnect_reason = Some(format!(
+                            "Connection lost ({} channel disconnected)",
+                            channel.name()
+                        ));
                     }
                     if channel == ChannelType::Usbredir {
                         self.usb_channel_ready = false;
@@ -738,7 +756,6 @@ impl RyllApp {
                     ..
                 } = event
                 {
-                    // F11/F12 are consumed by the traffic viewer / bug report shortcuts
                     if *key == egui::Key::F11 || *key == egui::Key::F12 {
                         continue;
                     }
@@ -748,20 +765,11 @@ impl RyllApp {
                         } else {
                             InputEvent::KeyUp(up_code)
                         };
-                        debug!(
-                            "app: key {:?} pressed={} scancode={:#x}",
-                            key, pressed, down_code
-                        );
                         let _ = input_tx.try_send(ev);
                     }
                 }
             }
 
-            // Track modifier key (Ctrl/Shift/Alt) state changes.
-            // egui does not emit Event::Key for modifier keys — they
-            // only appear as i.modifiers state. We compare against
-            // the previous frame and send KeyDown/KeyUp with AT Set 1
-            // scancodes for any changes.
             let mods = i.modifiers;
             let prev = self.last_modifiers.unwrap_or_default();
 
@@ -1606,9 +1614,6 @@ impl eframe::App for RyllApp {
                                         }
                                     }
 
-                                    // Scroll wheel: send a press+release pair
-                                    // with button 4 (up) or 5 (down), matching
-                                    // spice-html5 handle_mousewheel behaviour.
                                     let scroll_y = i.smooth_scroll_delta.y;
                                     if scroll_y.abs() > 0.5 {
                                         let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
@@ -1900,9 +1905,26 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Repaint at ~60 fps to keep input responsive (clicks, key
-        // presses).  Incoming events also trigger repaints via
-        // request_repaint() from the connection thread.
+        if self.show_disconnect_dialog {
+            let reason = self
+                .disconnect_reason
+                .as_deref()
+                .unwrap_or("Unknown reason");
+            egui::Window::new("Disconnected")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(reason);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            std::process::exit(0);
+                        }
+                    });
+                });
+        }
+
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
@@ -2228,7 +2250,7 @@ pub async fn run_headless(
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = input_tx.try_send(InputEvent::KeyDown(0x39)); // Space
+                let _ = input_tx.try_send(InputEvent::KeyDown(0x39));
                 let _ = input_tx.try_send(InputEvent::KeyUp(0xB9));
             }
         }))

@@ -69,12 +69,16 @@ flate2 = "1"
 
 # JPEG decoding for SPICE JPEG image type
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+jpeg-decoder = "0.3"
 
 # Capture mode (--capture) — optional, disabled on Windows
 pcap-file = { version = "2", optional = true }
 etherparse = { version = "0.16", optional = true }
 openh264 = { version = "0.6", optional = true }
 mp4 = { version = "0.14", optional = true }
+
+# Clipboard access (host <-> guest copy/paste)
+arboard = "3"
 
 # Signal handling (Ctrl+C graceful shutdown, cross-platform)
 ctrlc = "3"
