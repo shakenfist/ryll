@@ -33,26 +33,20 @@ identified during manual review and by the automated reviewer.
    Location: `src/channels/playback.rs:94-96`.
 
 3. **Opus decoder hardcoded to 48kHz stereo
-   (auto-review item 5).** The Opus decoder is always
+   (auto-review item 5).** ~~The Opus decoder is always
    created with `Hz48000` and `Stereo`, ignoring the
-   `self.channels` value from the START message. If the
-   server sends mono audio, the decoder will produce stereo
-   output that doesn't match. Fix: map `self.channels` to
-   the appropriate `audiopus::Channels` variant. The 48kHz
-   sample rate is correct for Opus (it always operates at
-   48kHz internally) but needs a comment explaining why.
-   Location: `src/channels/playback.rs` START handler.
+   `self.channels` value from the START message.~~ **Fixed
+   by PLAN-opus-decoder.md**: migrated to `opus-decoder`
+   crate which accepts `channels` as a constructor parameter,
+   so `self.channels` from the START message is now used.
 
 4. **Opus decode buffer assumes 10ms frames
-   (auto-review item 6).** The buffer `vec![0i16; 48000 /
-   100 * 2]` allocates 960 samples (10ms at 48kHz stereo).
-   Opus supports frame sizes up to 120ms. If the server sends
-   20ms frames (a common default), the buffer is too small
-   and `decoder.decode()` will fail or truncate. Fix:
-   allocate for the maximum frame size (120ms =
-   `48000 / 1000 * 120 * 2`) or use
-   `audiopus::packet::nb_samples()` to size dynamically.
-   Location: `src/channels/playback.rs` DATA handler.
+   (auto-review item 6).** ~~The buffer `vec![0i16; 48000 /
+   100 * 2]` allocates 960 samples (10ms at 48kHz stereo).~~
+   **Fixed by PLAN-opus-decoder.md**: migrated to
+   `opus-decoder` crate and sized the buffer using
+   `OpusDecoder::MAX_FRAME_SIZE_48K * channels`, which
+   covers all valid Opus frame sizes up to 120ms.
 
 5. **I16/F32 closure capture inconsistency
    (auto-review item 7).** In `start_audio_output`, the F32
@@ -68,12 +62,12 @@ identified during manual review and by the automated reviewer.
 6. **Make audio Linux-only (our review + auto-review item 1).**
    The `unsafe impl Send for SendStream` is only correct on
    Linux (ALSA is thread-safe; CoreAudio and WASAPI are not).
-   The macOS build currently works only because of a cmake
-   compatibility flag for audiopus_sys's vendored libopus.
    Long-term fix: gate the entire playback module and its
    deps behind `#[cfg(target_os = "linux")]`, provide a stub
-   on other platforms. This also allows removing the
-   `CMAKE_POLICY_VERSION_MINIMUM` workaround from CI.
+   on other platforms. **Note**: the cmake/audiopus_sys
+   concern is resolved by PLAN-opus-decoder.md (migrated to
+   pure-Rust `opus-decoder`), but the cpal thread-safety
+   issue remains independent of the codec crate.
 
 7. **No graceful shutdown handling (auto-review item 10).**
    The playback channel's `run()` loop doesn't check
@@ -111,25 +105,14 @@ identified during manual review and by the automated reviewer.
     0.17 but migration is typically straightforward. Upgrade
     when convenient.
 
-12. **`audiopus` is effectively abandoned.** The crate is a
-    thin safe wrapper around libopus via `audiopus_sys`.
-    Last commit: April 2021 (5+ years ago). The 0.3.0-rc.0
-    has been an RC for 5 years with no stable release. The
-    vendored libopus C source may be outdated — if upstream
-    libopus has had security fixes since 2021, this crate
-    won't have them. **There is no production-ready pure-Rust
-    Opus decoder as of April 2026.** The closest is
-    `opus-decoder` (0.1.1, 708 downloads) which is immature.
-    Options for the future:
-    - Monitor for a maintained fork of `audiopus`.
-    - Contribute a cmake version fix to `audiopus_sys`
-      upstream (if the maintainer responds).
-    - Switch to `opus` (same author, slightly different API)
-      if it receives updates.
-    - Track the `opus-decoder` pure-Rust crate for maturity.
-    - Consider maintaining a shakenfist fork of `audiopus_sys`
-      with updated vendored libopus if security patches are
-      needed.
+12. **`audiopus` is effectively abandoned.**
+    ~~The crate is a thin safe wrapper around libopus via
+    `audiopus_sys`. Last commit: April 2021 (5+ years ago).~~
+    **Resolved by PLAN-opus-decoder.md**: migrated to
+    `opus-decoder` (pure Rust, `#![forbid(unsafe_code)]`,
+    RFC 8251 conformant, no C/cmake dependency). This
+    eliminates the abandoned crate, the vendored C code, and
+    the cmake compatibility workarounds.
 
 13. **MODE message byte offset verification
     (auto-review item 11).** The MODE handler reads the mode
