@@ -9,6 +9,8 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  issues: write
 
 jobs:
   lint:
@@ -36,10 +38,10 @@ jobs:
             libasound2-dev
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: Build (${{ matrix.name }})
@@ -63,8 +65,6 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       # audiopus_sys vendors libopus with an old CMakeLists.txt
-      # (requires cmake >= 3.1). Newer cmake on macOS rejects this
-      # without the compatibility flag.
       CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
@@ -89,10 +89,10 @@ jobs:
             libasound2-dev
 
       - name: Build
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --release -p ryll ${{ matrix.features }}
 
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }}
 
       - name: Install cargo-deb
         if: runner.os == 'Linux'
@@ -100,7 +100,7 @@ jobs:
 
       - name: Build .deb package
         if: runner.os == 'Linux'
-        run: cargo deb --no-build
+        run: cargo deb --no-build -p ryll
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'
@@ -116,7 +116,7 @@ jobs:
 
       - name: Build .rpm package
         if: runner.os == 'Linux'
-        run: cargo generate-rpm
+        run: cargo generate-rpm -p ryll
 
       - name: Upload .rpm artifact
         if: runner.os == 'Linux'
@@ -155,3 +155,51 @@ jobs:
           name: windows-zip
           path: target/release/ryll-*.zip
           retention-days: 30
+
+  # Check if the last commit was from the bot to prevent infinite loops in
+  # automated fixer jobs. This runs early so other jobs can depend on it.
+  check-bot-commit:
+    name: "Check bot commit"
+    if: github.event_name == 'pull_request'
+    runs-on: [self-hosted, static]
+    outputs:
+      is_bot: ${{ steps.check.outputs.is_bot }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check if last commit was from bot
+        id: check
+        run: |
+          LAST_AUTHOR_EMAIL=$(git log -1 --format='%ae')
+          echo "Last commit author: $LAST_AUTHOR_EMAIL"
+          if [ "$LAST_AUTHOR_EMAIL" = "bot@shakenfist.com" ]; then
+            echo "is_bot=true" >> $GITHUB_OUTPUT
+            echo "Last commit was from bot - automated fixers will be skipped"
+          else
+            echo "is_bot=false" >> $GITHUB_OUTPUT
+          fi
+
+  automated_reviewer:
+    name: "Automated reviewer"
+    runs-on: [self-hosted, claude-code]
+    needs: [check-bot-commit, lint, build]
+    if: >-
+      ${{ github.event_name == 'pull_request' &&
+          needs.check-bot-commit.outputs.is_bot != 'true' }}
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-reviewer
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run automated reviewer
+        uses: shakenfist/actions/review-pr-with-claude@main
+        with:
+          pr-number: ${{ github.event.pull_request.number }}

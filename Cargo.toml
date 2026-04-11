@@ -1,126 +1,14 @@
-[package]
-name = "ryll"
-version = "0.1.3"
+[workspace]
+resolver = "2"
+members = [
+    "ryll",
+    "shakenfist-spice-compression",
+    "shakenfist-spice-protocol",
+    "shakenfist-spice-usbredir",
+]
+
+[workspace.package]
 edition = "2021"
-description = "A Rust SPICE VDI test client"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
 repository = "https://github.com/shakenfist/ryll"
-
-[features]
-default = ["capture"]
-capture = ["dep:pcap-file", "dep:etherparse", "dep:openh264", "dep:mp4"]
-
-[dependencies]
-# GUI framework
-eframe = "0.29"
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-rustls = "0.26"
-rustls-pemfile = "2"
-webpki-roots = "0.26"
-
-# CLI parsing
-clap = { version = "4", features = ["derive"] }
-
-# Binary protocol handling
-bytes = "1"
-byteorder = "1"
-
-# Cryptography for SPICE auth
-rsa = "0.9"
-sha1 = "0.10"
-rand = "0.8"
-
-# Audio playback. Note: audiopus_sys vendors libopus and builds it
-# via cmake. The vendored CMakeLists.txt requires cmake >= 3.1
-# which newer cmake rejects without CMAKE_POLICY_VERSION_MINIMUM.
-# The unsafe impl Send on cpal::Stream is only correct on
-# Linux/ALSA. See PLAN-pr23-followup.md for the plan to make
-# audio properly cross-platform or Linux-only.
-cpal = "0.15"
-audiopus = "0.3.0-rc.0"
-
-# Logging
-tracing = "0.1"
-tracing-appender = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Config file parsing
-configparser = "3"
-
-# HTTP for URL config fetching
-reqwest = { version = "0.12", features = ["blocking"] }
-
-# LZ4 decompression for SPICE image type 109
-lz4_flex = "0.11"
-
-# Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
-flate2 = "1"
-
-# JPEG decoding for SPICE JPEG image type
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
-jpeg-decoder = "0.3"
-
-# Capture mode (--capture) — optional, disabled on Windows
-pcap-file = { version = "2", optional = true }
-etherparse = { version = "0.16", optional = true }
-openh264 = { version = "0.6", optional = true }
-mp4 = { version = "0.14", optional = true }
-
-# Clipboard access (host ↔ guest copy/paste)
-arboard = "3"
-
-# Signal handling (Ctrl+C graceful shutdown, cross-platform)
-ctrlc = "3"
-
-# Serialisation (for bug report snapshots)
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Bug report zip output and PNG screenshots
-zip = "2"
-png = "0.18"
-
-# Error handling
-thiserror = "1"
-anyhow = "1"
-
-# Async channels
-async-channel = "2"
-
-# TCP keepalive configuration (matches spice-gtk behaviour)
-socket2 = { version = "0.6", features = ["all"] }
-
-# USB device access (pure Rust, no libusb)
-nusb = "0.2"
-
-# Native file dialog for USB disk image selection
-rfd = "0.15"
-
-# WebDAV server (RFC 4918 handler with LocalFs backend)
-dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
-
-# HTTP framing for WebDAV byte-stream transport
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http = "1"
-http-body-util = "0.1"
-
-[dev-dependencies]
-tempfile = "3"
-
-[package.metadata.deb]
-maintainer = "Michael Still <mikal@stillhq.com>"
-section = "utils"
-priority = "optional"
-depends = "$auto"
-assets = [
-    ["target/release/ryll", "usr/bin/", "755"],
-]
-
-[package.metadata.generate-rpm]
-assets = [
-    { source = "target/release/ryll", dest = "/usr/bin/ryll", mode = "0755" },
-]

@@ -2,6 +2,20 @@
 
 This document describes the technical architecture of ryll.
 
+## Repository Layout
+
+The repository is a Cargo workspace. Ryll itself lives in
+`ryll/`, with `ryll/src/` containing all the source modules
+described in the rest of this document. Future workspace
+members will be the reusable crates extracted from ryll under
+the `shakenfist-spice-*` prefix; see
+`docs/plans/PLAN-crate-extraction.md` for the extraction plan.
+
+When invoking cargo from the workspace root, use `-p ryll` to
+target the ryll package (e.g. `cargo build -p ryll`,
+`cargo deb --no-build -p ryll`) or `--workspace` to act on
+every member (e.g. `cargo test --workspace`).
+
 ## Overview
 
 Ryll is a SPICE (Simple Protocol for Independent Computing Environments) client
@@ -337,14 +351,14 @@ SPICE SpiceVMC (DATA/COMPRESSED_DATA messages)
 
 ### Device backends
 
-The `UsbDeviceBackend` trait (`src/usb/mod.rs`) abstracts over device
+The `UsbDeviceBackend` trait (`ryll/src/usb/mod.rs`) abstracts over device
 types. The `DeviceBackend` enum provides non-object-safe dispatch:
 
-- **RealDevice** (`src/usb/real.rs`): Physical USB device via the `nusb`
+- **RealDevice** (`ryll/src/usb/real.rs`): Physical USB device via the `nusb`
   crate. Linux only (`#[cfg(target_os = "linux")]`). Detaches kernel drivers,
   claims interfaces, forwards control/bulk/interrupt transfers. On non-Linux
   platforms, only virtual devices are available.
-- **VirtualMsc** (`src/usb/virtual_msc.rs`): Emulated USB mass storage
+- **VirtualMsc** (`ryll/src/usb/virtual_msc.rs`): Emulated USB mass storage
   device backed by a RAW disk image. Implements BOT protocol (CBW/CSW) and
   8 SCSI commands. Reports as a USB 2.0 High Speed removable disk.
 
@@ -446,7 +460,7 @@ data_size:  u16 LE  (2 bytes) — payload size (0 = disconnect)
 data:       [u8]    (data_size bytes) — raw HTTP bytes
 ```
 
-The `MuxDemuxer` (`src/webdav/mux.rs`) accumulates bytes and extracts
+The `MuxDemuxer` (`ryll/src/webdav/mux.rs`) accumulates bytes and extracts
 complete frames, handling frames that span VMC messages or are packed
 together.
 
@@ -479,7 +493,7 @@ interrupt polling tasks.
 
 ### Server lifecycle
 
-The `WebdavServer` (`src/webdav/server.rs`) wraps `dav-server::DavHandler`
+The `WebdavServer` (`ryll/src/webdav/server.rs`) wraps `dav-server::DavHandler`
 with `LocalFs` and is cheaply cloneable (inner `Arc`). It is created when
 a `ShareDirectory` command arrives from the UI or `--share-dir` is
 specified on the CLI, and destroyed on `StopSharing`. Read-only mode uses
@@ -598,7 +612,7 @@ buffer retains the most recent traffic up to a 50 MB total cap
 name, direction, message type ID and human-readable name, wire and
 payload sizes, timestamp) alongside a full pcap frame for export.
 
-The `TrafficBuffers` struct in `src/bugreport.rs` holds all four
+The `TrafficBuffers` struct in `ryll/src/bugreport.rs` holds all four
 per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
 shared via `Arc<TrafficBuffers>` between all channel handler tasks
 and the UI thread. This supports both bug report export
@@ -620,7 +634,7 @@ written to JSON for bug reports.
 | `MainSnapshot` | Main | Session ID, bytes in/out |
 | `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
 
-The `ChannelSnapshots` struct in `src/bugreport.rs` holds the four
+The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside
 `TrafficBuffers` in `run_connection()`. The `AppSnapshot` is
 maintained separately by the `RyllApp` event loop.
@@ -631,7 +645,7 @@ negligible.
 
 ## Bug Report Assembly
 
-`BugReport` in `src/bugreport.rs` assembles a self-contained zip
+`BugReport` in `ryll/src/bugreport.rs` assembles a self-contained zip
 file from the ring buffer, channel snapshots, and app state.  The
 zip contains:
 

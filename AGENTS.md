@@ -128,8 +128,17 @@ Ryll uses:
 
 ## Code Organisation
 
+The repository is a Cargo workspace. Ryll itself lives at
+`ryll/`; future extracted reusable crates (see
+`docs/plans/PLAN-crate-extraction.md`) will sit alongside it as
+additional workspace members. Cargo invocations from the
+workspace root should use `-p ryll` to target the ryll package
+specifically (e.g. `cargo build -p ryll`,
+`cargo deb --no-build -p ryll`), or `--workspace` to act on
+every member (e.g. `cargo test --workspace`).
+
 ```
-src/
+ryll/src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
 │                        #   bandwidth sparkline, bug report dialog,
@@ -186,18 +195,20 @@ src/
 ## Common Tasks
 
 ### Adding a new CLI option
-1. Add to `Args` struct in `src/config.rs`
-2. Pass through to relevant code in `src/main.rs` or `src/app.rs`
+1. Add to `Args` struct in `ryll/src/config.rs`
+2. Pass through to relevant code in `ryll/src/main.rs` or
+   `ryll/src/app.rs`
 
 ### Adding a new statistic
-1. Add variant to `ChannelEvent` enum in `src/channels/mod.rs`
+1. Add variant to `ChannelEvent` enum in
+   `ryll/src/channels/mod.rs`
 2. Send from relevant channel handler
-3. Handle in `process_events()` in `src/app.rs`
+3. Handle in `process_events()` in `ryll/src/app.rs`
 
 ### Modifying protocol handling
-1. Message definitions in `src/protocol/messages.rs`
-2. Constants/enums in `src/protocol/constants.rs`
-3. Channel-specific logic in `src/channels/*.rs`
+1. Message definitions in `ryll/src/protocol/messages.rs`
+2. Constants/enums in `ryll/src/protocol/constants.rs`
+3. Channel-specific logic in `ryll/src/channels/*.rs`
 
 ## Testing
 
