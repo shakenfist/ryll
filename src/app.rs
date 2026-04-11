@@ -964,7 +964,10 @@ impl eframe::App for RyllApp {
                         }
                         let mut v = vol.volume() as f32;
                         let slider = egui::Slider::new(&mut v, 0.0..=100.0).show_value(false);
-                        if ui.add_sized([80.0, ui.available_height()], slider).changed() {
+                        if ui
+                            .add_sized([80.0, ui.available_height()], slider)
+                            .changed()
+                        {
                             vol.set_volume(v as u8);
                         }
                         ui.separator();

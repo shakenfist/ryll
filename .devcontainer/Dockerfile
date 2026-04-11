@@ -7,13 +7,16 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 #   - libgl, libegl: OpenGL rendering
 #   - libwayland: Wayland support
 #   - libxkbcommon: Keyboard handling
+# Audio:
+#   - libasound2-dev: ALSA headers (cpal audio output)
 # Build tools:
 #   - pkg-config: Finding library paths
-#   - cmake: Some crate build dependencies
+#   - cmake: Some crate build dependencies (audiopus_sys)
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     cmake \
+    libasound2-dev \
     libxcb-render0-dev \
     libxcb-shape0-dev \
     libxcb-xfixes0-dev \

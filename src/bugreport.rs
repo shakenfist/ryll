@@ -159,11 +159,13 @@ impl TrafficRingBuffer {
     }
 }
 
-/// Default per-channel ring buffer cap: 10 MB (50 MB / 5 channels).
-const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 5;
+/// Default per-channel ring buffer cap (~8.3 MB, 50 MB / 6 channels).
+const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 6;
 
 /// Known channel names.
-const CHANNELS: [&str; 6] = ["main", "display", "inputs", "cursor", "usbredir", "playback"];
+const CHANNELS: [&str; 6] = [
+    "main", "display", "inputs", "cursor", "usbredir", "playback",
+];
 
 /// Holds all four per-channel ring buffers plus a shared session
 /// start timestamp.

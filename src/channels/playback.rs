@@ -10,12 +10,17 @@ use crate::bugreport::TrafficBuffers;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use crate::protocol::{playback_server, ChannelType};
+use crate::protocol::{main_client, playback_server, ChannelType};
 
 use super::ChannelEvent;
 
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
+
+/// Maximum ring buffer size in samples. At 48kHz stereo this is
+/// ~2 seconds. Prevents unbounded memory growth if audio data
+/// arrives faster than it is consumed.
+const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
 
 type AudioBuffer = Arc<Mutex<VecDeque<i16>>>;
 
@@ -57,7 +62,16 @@ impl VolumeControl {
     }
 }
 
+// The cpal::Stream must be held alive for audio output to
+// continue. The struct is stored as _cpal_stream in
+// PlaybackChannel; dropping it stops playback.
+#[allow(dead_code)]
 struct SendStream(cpal::Stream);
+// SAFETY: cpal::Stream is !Send because some platform audio
+// backends have thread-affinity requirements. On Linux (ALSA)
+// the stream is thread-safe in practice. This is a known
+// limitation — see PLAN-pr23-followup.md for the proper fix
+// (dedicated audio thread).
 unsafe impl Send for SendStream {}
 
 struct Resampler {
@@ -82,7 +96,11 @@ impl Resampler {
         }
 
         let a = buffer[0] as f64;
-        let b = if buffer.len() > 1 { buffer[1] as f64 } else { a };
+        let b = if buffer.len() > 1 {
+            buffer[1] as f64
+        } else {
+            a
+        };
         let sample = a + (b - a) * frac;
 
         self.pos += self.ratio;
@@ -230,8 +248,8 @@ impl PlaybackChannel {
             self.message_count += 1;
             if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
                 self.last_ack = self.message_count;
-                let ack = make_message(2, &[]);
-                self.send_with_log(2, &ack).await?;
+                let ack = make_message(main_client::ACK, &[]);
+                self.send_with_log(main_client::ACK, &ack).await?;
             }
 
             self.traffic.record_received(
@@ -250,27 +268,28 @@ impl PlaybackChannel {
                     self.last_ack = 0;
                     let mut ack_payload = Vec::new();
                     SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
-                    let response = make_message(1, &ack_payload);
-                    self.send_with_log(1, &response).await?;
+                    let response = make_message(main_client::ACK_SYNC, &ack_payload);
+                    self.send_with_log(main_client::ACK_SYNC, &response).await?;
                 }
                 playback_server::PING => {
                     let ping = Ping::read(&payload)?;
                     let mut pong_payload = Vec::new();
                     ping.write_pong(&mut pong_payload)?;
-                    let response = make_message(3, &pong_payload);
-                    self.send_with_log(3, &response).await?;
+                    let response = make_message(main_client::PONG, &pong_payload);
+                    self.send_with_log(main_client::PONG, &response).await?;
                 }
                 playback_server::START => {
                     if payload.len() >= 14 {
-                        self.channels = u32::from_le_bytes([
-                            payload[0], payload[1], payload[2], payload[3],
-                        ]);
+                        self.channels =
+                            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                         let format = u16::from_le_bytes([payload[4], payload[5]]);
-                        self.sample_rate = u32::from_le_bytes([
-                            payload[6], payload[7], payload[8], payload[9],
-                        ]);
+                        self.sample_rate =
+                            u32::from_le_bytes([payload[6], payload[7], payload[8], payload[9]]);
                         let time = u32::from_le_bytes([
-                            payload[10], payload[11], payload[12], payload[13],
+                            payload[10],
+                            payload[11],
+                            payload[12],
+                            payload[13],
                         ]);
                         info!(
                             "playback: START: {}Hz, {} channels, format={}, time={}",
@@ -306,6 +325,11 @@ impl PlaybackChannel {
                             for chunk in audio_data.chunks_exact(2) {
                                 buf.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
                             }
+                            // Cap the buffer to prevent unbounded growth
+                            // if audio arrives faster than it is consumed.
+                            while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
+                                buf.pop_front();
+                            }
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
                             if let Some(ref mut decoder) = self.opus_decoder {
                                 let mut pcm = vec![0i16; 48000 / 100 * 2];
@@ -318,6 +342,9 @@ impl PlaybackChannel {
                                                 let mut buf = self.audio_buffer.lock().unwrap();
                                                 for &s in &pcm[..samples * 2] {
                                                     buf.push_back(s);
+                                                }
+                                                while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
+                                                    buf.pop_front();
                                                 }
                                             }
                                             Err(e) => {
