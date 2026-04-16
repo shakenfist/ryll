@@ -683,11 +683,9 @@ impl MainChannel {
                     let data = &payload[offset + 4..];
                     if !data.is_empty() {
                         let text = String::from_utf8_lossy(data).to_string();
-                        info!(
-                            "main: clipboard from guest ({} bytes): {:?}",
-                            text.len(),
-                            &text.chars().take(16).collect::<String>()
-                        );
+                        // Log byte count only — clipboard content may contain
+                        // passwords or sensitive data.
+                        info!("main: clipboard from guest ({} bytes)", text.len());
                         match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
                             Ok(()) => debug!("main: host clipboard updated"),
                             Err(e) => debug!("main: clipboard set failed: {}", e),
@@ -710,11 +708,9 @@ impl MainChannel {
                             .and_then(|mut cb| cb.get_text())
                             .ok()
                         {
-                            info!(
-                                "main: clipboard to guest ({} bytes): {:?}",
-                                text.len(),
-                                &text.chars().take(16).collect::<String>()
-                            );
+                            // Log byte count only — clipboard content may contain
+                            // passwords or sensitive data.
+                            info!("main: clipboard to guest ({} bytes)", text.len());
                             self.send_clipboard_data(&text).await?;
                         }
                     }
@@ -759,11 +755,9 @@ impl MainChannel {
         };
 
         if changed {
-            info!(
-                "main: host clipboard changed ({} bytes): {:?}",
-                text.len(),
-                &text.chars().take(16).collect::<String>()
-            );
+            // Log byte count only — clipboard content may contain
+            // passwords or sensitive data.
+            info!("main: host clipboard changed ({} bytes)", text.len());
             self.last_clipboard_text = Some(text);
             self.send_clipboard_grab().await?;
         }
