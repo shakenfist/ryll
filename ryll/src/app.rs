@@ -523,14 +523,6 @@ impl RyllApp {
                     debug!("app: requested monitors config {}x{}", width, height);
                 }
 
-                ChannelEvent::ClipboardReceived { text } => {
-                    info!("app: clipboard from guest ({} bytes)", text.len());
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                        Ok(()) => {}
-                        Err(e) => debug!("app: failed to set host clipboard: {}", e),
-                    }
-                }
-
                 ChannelEvent::Statistics {
                     bytes_in,
                     bytes_out,
