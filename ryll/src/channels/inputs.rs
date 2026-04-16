@@ -361,7 +361,7 @@ impl InputsChannel {
                 KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
-                info!("inputs: key down: scancode={:#x}", scancode);
+                debug!("inputs: key down: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
             }
 
@@ -379,7 +379,7 @@ impl InputsChannel {
                 KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
-                info!("inputs: key up: scancode={:#x}", scancode);
+                debug!("inputs: key up: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_UP, &msg).await?;
             }
 

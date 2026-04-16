@@ -496,13 +496,13 @@ impl RyllApp {
                 }
 
                 ChannelEvent::CursorPosition { x, y, visible } => {
-                    info!("app: cursor position: ({},{}) visible={}", x, y, visible);
+                    debug!("app: cursor position: ({},{}) visible={}", x, y, visible);
                     self.cursor_pos = (x, y);
                     self.cursor_visible = visible;
                 }
 
                 ChannelEvent::CursorShape(img) => {
-                    info!(
+                    debug!(
                         "app: cursor shape: {}x{}, hot=({},{})",
                         img.width, img.height, img.hot_spot_x, img.hot_spot_y
                     );

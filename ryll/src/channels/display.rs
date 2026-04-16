@@ -846,7 +846,7 @@ impl DisplayChannel {
 
         let image_data = &payload[image_data_start..];
 
-        info!(
+        debug!(
             "display: draw_copy: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
              flags={}, data_bytes={}",
             base.surface_id,
