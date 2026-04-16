@@ -270,35 +270,26 @@ The playback channel's `run()` loop doesn't check
 - Add shutdown check or use `tokio::select!` with a
   shutdown signal, consistent with other channels.
 
-**4c. Audio Linux-only gate**
-(from PLAN-pr23-followup.md #6)
+**4cd. Dedicated audio thread**
+(from PLAN-pr23-followup.md #6, #10)
 
-`unsafe impl Send for SendStream` is only correct on
-Linux (ALSA is thread-safe; CoreAudio and WASAPI are
-not).
-
-- Gate the playback module behind
-  `#[cfg(target_os = "linux")]`.
-- Provide a stub on other platforms that logs a warning.
-
-**4d. Mutex lock in audio callback**
-(from PLAN-pr23-followup.md #10)
-
-The cpal real-time audio callback locks
-`Mutex<VecDeque<i16>>` and `Mutex<Resampler>`.
-
-- Replace with a lock-free ring buffer (`ringbuf` crate
-  or `crossbeam` channel) to eliminate glitch risk.
+Replaces the originally separate items 4c (Linux-only
+gate) and 4d (mutex in audio callback) with a single
+architectural change. Spawn a dedicated `std::thread`
+for audio output so the cpal stream never crosses
+thread boundaries (removing `unsafe impl Send`), and
+use a lock-free ring buffer (`rtrb`) between the
+tokio task and the audio thread (eliminating mutex
+contention in the real-time callback).
 
 **4e. Silent drop logging**
-(from PLAN-pr20-followup.md #8, #9)
+(from PLAN-pr20-followup.md #8)
 
 - `build_tcp_frame`: add `warn!` when oversized packets
   are silently dropped
   (`src/capture.rs:128-130`).
-- `decode_mjpeg_frame`: add `warn!` for unsupported
-  pixel formats in the catch-all branch
-  (`src/channels/display.rs:102-116`).
+- Note: `decode_mjpeg_frame` warning was added in
+  phase 1 step 1d.
 
 ### Phase 5: Code quality and cleanup
 

@@ -5,15 +5,14 @@ Part of [PLAN-deferred-debt.md](PLAN-deferred-debt.md).
 ## Scope
 
 Address missing error handling, unsafe platform
-assumptions, and ungraceful shutdown paths. Five
+assumptions, and ungraceful shutdown paths. Four
 sub-tasks:
 
 | Step | Description | Source |
 |------|-------------|--------|
 | 4a | Abrupt exit in disconnect dialog | PLAN-pr20-followup.md #6 |
 | 4b | Audio playback shutdown handling | PLAN-pr23-followup.md #7 |
-| 4c | Audio Linux-only gate | PLAN-pr23-followup.md #6 |
-| 4d | Mutex lock in audio callback | PLAN-pr23-followup.md #10 |
+| 4cd | Dedicated audio thread (replaces 4c + 4d) | PLAN-pr23-followup.md #6, #10 |
 | 4e | Silent drop logging in build_tcp_frame | PLAN-pr20-followup.md #8 |
 
 ## 4a. Abrupt exit in disconnect dialog
@@ -144,149 +143,178 @@ used in main_channel.rs:115).
 Low-medium. The `tokio::select!` transformation is
 straightforward but requires care with mutable borrows.
 
-## 4c. Audio Linux-only gate
+## 4cd. Dedicated audio thread
 
-### Bug
+This item replaces the originally separate items 4c
+(Audio Linux-only gate) and 4d (Mutex lock in audio
+callback) with a single architectural change that
+solves both problems.
 
-`unsafe impl Send for SendStream` (playback.rs:75) is
-only sound on Linux where ALSA is thread-safe. On macOS
-(CoreAudio) and Windows (WASAPI), the cpal stream has
-thread-affinity requirements that make this unsafe.
+### Bugs addressed
 
-### Context
+**4c -- Platform safety:** `unsafe impl Send for
+SendStream` (playback.rs:75) is only sound on Linux
+where ALSA is thread-safe. On macOS (CoreAudio) and
+Windows (WASAPI), the cpal stream has thread-affinity
+requirements that make this unsound. Ryll's packaging
+targets include macOS and Windows.
 
-Ryll's packaging targets include macOS and Windows (via
-PLAN-packaging.md). The current code compiles but is
-unsound on those platforms. The existing codebase has
-established `#[cfg(target_os)]` patterns for
-platform-specific code:
+**4d -- Mutex contention in real-time callback:** The
+cpal audio callback locks two mutexes:
+`Arc<Mutex<VecDeque<i16>>>` (audio buffer, shared with
+the network thread) and `Arc<Mutex<Resampler>>` (only
+used by the callback). If the network thread holds the
+buffer lock during a large push, the audio callback
+blocks and glitches.
 
-- `ryll/src/usb/mod.rs:9`:
-  `#[cfg(target_os = "linux")] pub mod real;`
-- `ryll/src/channels/usbredir.rs`: multiple cfg gates
-- `ryll/src/app.rs:1353`: cfg gate on a match arm
+### Root cause
 
-### Fix
+Both bugs stem from the same architectural decision:
+storing the cpal stream inside `PlaybackChannel`, which
+lives in a tokio task. This forces the stream to be
+`Send` (for `tokio::spawn`) and forces inter-thread
+communication to go through mutexes.
 
-Gate the playback module behind
-`#[cfg(target_os = "linux")]` and provide a stub on
-other platforms.
+### Fix: dedicated audio thread
 
-**In `channels/mod.rs`:**
+Spawn a dedicated `std::thread` for audio output. The
+cpal stream is created and lives entirely on that
+thread, so it never needs to be `Send`. Communication
+between the tokio task and the audio thread uses a
+lock-free ring buffer.
 
-```rust
-#[cfg(target_os = "linux")]
-pub mod playback;
+```
+tokio task (network)          audio thread
+┌──────────────────┐         ┌──────────────────┐
+│ SPICE DATA msg   │         │ cpal callback    │
+│ → Opus/PCM decode│──ring──▶│ → Resampler      │
+│ → push samples   │ buffer  │ → volume         │
+│                  │         │ → output device   │
+└──────────────────┘         └──────────────────┘
 ```
 
-**New file `channels/playback_stub.rs`** (or inline
-in mod.rs):
+This is the same architecture that spice-gtk uses
+(dedicated GStreamer pipeline thread) and what the
+existing `PLAN-pr23-followup.md` comment on the unsafe
+impl hints at.
 
-The stub must:
+### Detailed changes
 
-1. Export `VolumeControl` with the same API (used by the
-   GUI volume slider regardless of platform).
-2. Export `PlaybackChannel` with the same constructor
-   signature.
-3. The stub `run()` must still handle SPICE protocol
-   messages (SET_ACK, PING/PONG) to keep the channel
-   alive, but can discard all DATA messages. This
-   prevents the SPICE server from disconnecting the
-   session due to an unresponsive channel.
-4. Log a warning on platforms where audio is not
-   supported.
+**1. Add `rtrb` dependency.**
 
-**In `app.rs`:** The `ChannelType::Playback` match arm
-at line 2217 already constructs `PlaybackChannel` via
-`crate::channels::playback::PlaybackChannel::new(...)`.
-With cfg gating on the module, this will automatically
-use the stub on non-Linux platforms. No conditional
-compilation needed in app.rs itself.
+Add `rtrb = "0.3"` to `ryll/Cargo.toml`. The `rtrb`
+crate provides a single-producer single-consumer
+lock-free ring buffer designed for real-time audio.
+Alternative: `ringbuf = "0.4"`.
 
-**In `Cargo.toml`:** Gate `cpal` and `opus-decoder` deps
-behind `[target.'cfg(target_os = "linux")'.dependencies]`
-to avoid pulling in ALSA dev headers on macOS/Windows
-builds.
+**2. Create the audio thread in `start_audio_output`.**
+
+Instead of building the cpal stream in the tokio task
+and storing it in `PlaybackChannel._cpal_stream`:
+
+- Create an `rtrb::RingBuffer<i16>` and split it into
+  `(producer, consumer)`.
+- Store the `producer` in `PlaybackChannel` (replacing
+  `audio_buffer: AudioBuffer`).
+- Spawn a `std::thread::Builder::new().name("audio")`
+  thread that:
+  - Receives the `consumer`, `VolumeControl` clone,
+    source `sample_rate`, source `channels`, and a
+    shutdown flag (`Arc<AtomicBool>`).
+  - Opens the cpal device and builds the output stream
+    using the source channel count (as per phase 2d).
+  - The `Resampler` is created and owned on this thread
+    (no mutex needed).
+  - The cpal callback reads from the consumer into a
+    small local `VecDeque`, then calls
+    `resampler.next_frame()` as before.
+  - The thread runs until the shutdown flag is set or
+    the consumer is exhausted and the flag is set.
+- Store the `JoinHandle` and shutdown flag in
+  `PlaybackChannel` so `Drop` can signal shutdown and
+  join the thread.
+
+**3. Remove `SendStream` and `unsafe impl Send`.**
+
+The cpal stream now lives on the audio thread and never
+crosses thread boundaries. `SendStream` and its `unsafe
+impl Send` are deleted entirely.
+
+**4. Update the producer side.**
+
+In `process_messages` DATA handler (currently at
+playback.rs:339-373), replace
+`self.audio_buffer.lock().unwrap().push_back(s)` with
+`self.audio_producer.push(s)`. If the ring buffer is
+full, samples are dropped (the existing
+`MAX_AUDIO_BUFFER_SAMPLES` cap has the same effect).
+
+**5. Update `write_samples_i16` / `write_samples_f32`.**
+
+These functions currently take `&AudioBuffer` and lock
+the mutex. Replace with a function that:
+- Drains available samples from `rtrb::Consumer` into a
+  thread-local `VecDeque`.
+- Calls `resampler.next_frame()` on the local
+  `VecDeque` as before.
+- The resampler's `next_frame` API (which uses
+  `VecDeque` random access) is unchanged.
+
+The thread-local `VecDeque` acts as a small lookahead
+buffer. It is topped up at the start of each callback
+invocation and consumed by the resampler. This keeps
+the ring buffer fast path lock-free while preserving
+the resampler's interpolation logic.
+
+**6. Shutdown.**
+
+When `PlaybackChannel` is dropped (or `STOP` is
+received):
+- Set the shutdown `AtomicBool`.
+- Drop the producer (this signals end-of-stream to the
+  consumer).
+- Join the audio thread.
+- The thread drops the cpal stream and the audio device
+  is released cleanly.
+
+### Files to modify
+
+- `ryll/Cargo.toml` -- add `rtrb`
+- `ryll/src/channels/playback.rs` -- major refactor:
+  remove `SendStream` / `unsafe impl Send`, replace
+  `AudioBuffer` with `rtrb::Producer`, add audio thread
+  spawn, update `write_samples_*`, update `Drop`
+- No changes needed in `app.rs` -- the
+  `PlaybackChannel` public API is unchanged
+
+### Testing
+
+- `cargo test --workspace` must pass.
+- Manual test: play audio through a VM session, verify
+  clean playback without glitches.
+- The `unsafe impl Send` removal is the key
+  correctness win -- if it compiles without it, the
+  platform safety issue is resolved.
 
 ### Complexity
 
-Medium. The stub needs to replicate `VolumeControl`'s
-public API and handle basic SPICE protocol messages.
-The cleanest approach is to extract `VolumeControl` into
-its own small module (or into `channels/mod.rs`) so it's
-always available, and only gate the audio-specific code.
+Medium. The audio thread spawn and ring buffer plumbing
+is straightforward. The main subtlety is the
+callback-local `VecDeque` bridge between the ring buffer
+consumer and the resampler's random-access API. The
+public API of `PlaybackChannel` does not change, so
+`app.rs` and other callers are unaffected.
 
-### Alternative: defer
+### Risk
 
-This item provides safety on platforms we aren't
-actively testing on yet. Since ryll is primarily a Linux
-tool (for testing kerbside), this could be deferred
-until macOS/Windows usage is more common. The unsafe
-impl has a clear comment pointing to the plan. I
-recommend implementing only if there is appetite for the
-refactoring effort; otherwise mark as acknowledged.
-
-## 4d. Mutex lock in audio callback
-
-### Bug
-
-The cpal real-time audio callback locks two mutexes:
-
-1. `Arc<Mutex<VecDeque<i16>>>` (the audio buffer) --
-   shared with the network thread that pushes samples.
-2. `Arc<Mutex<Resampler>>` (the resampler) -- only
-   used by the callback, but wrapped in a mutex to
-   satisfy the `Send` bound.
-
-If the network thread holds the buffer lock while
-pushing a large batch of decoded audio, the audio
-callback blocks, causing glitches (underruns).
-
-### Fix
-
-Replace the mutexed `VecDeque` with a lock-free
-single-producer single-consumer ring buffer. The `rtrb`
-crate (real-time ring buffer) is designed specifically
-for this use case.
-
-**Changes:**
-
-1. Add `rtrb = "0.3"` to `Cargo.toml`.
-2. Replace `type AudioBuffer = Arc<Mutex<VecDeque<i16>>>`
-   with `rtrb::RingBuffer<i16>` split into
-   `(rtrb::Producer<i16>, rtrb::Consumer<i16>)`.
-3. The `Producer` goes to `PlaybackChannel` for
-   network-side writes.
-4. The `Consumer` goes into the cpal callback closure.
-5. The `Resampler` can be owned directly by the callback
-   closure (no mutex needed -- it's only accessed from
-   the callback thread).
-
-**Resampler rework:** The current `next_frame()` reads
-from the `VecDeque` by index (`buffer[idx * ch + c]`),
-which is a random-access pattern. A ring buffer consumer
-only supports sequential reads. The fix is to maintain
-a small local `VecDeque` inside the callback that is
-topped up from the ring buffer consumer at the start of
-each callback invocation. The resampler then operates
-on the local buffer as before.
-
-### Complexity
-
-Medium-high. The changes touch the buffer type, producer
-code, consumer code, and the resampler's relationship
-to the buffer. The callback-local `VecDeque` approach
-keeps the resampler's logic unchanged but adds a data
-copy step (ring buffer → local VecDeque).
-
-### Alternative: defer
-
-The mutex contention only causes glitches under heavy
-network activity. The existing code works correctly
-(produces the right samples) -- it's a quality-of-service
-issue rather than a correctness bug. I recommend deferring
-this to a future iteration unless audio glitches are
-observed in practice.
+Low-medium. The architectural change is well-understood
+(dedicated audio thread is the standard pattern for
+real-time audio applications). The ring buffer
+introduces a fixed capacity that could cause sample
+drops under extreme load, but the existing
+`MAX_AUDIO_BUFFER_SAMPLES` cap already does this. The
+main risk is subtle bugs in the shutdown/join sequence
+or in the `VecDeque` bridge logic.
 
 ## 4e. Silent drop logging in build_tcp_frame
 
@@ -332,22 +360,18 @@ Trivial -- adding one `warn!` line.
 ## Commit sequence
 
 1. **4a**: Replace `std::process::exit(0)` with graceful
-   shutdown (standalone, no dependencies).
-2. **4b**: Add shutdown handling to playback's `run()`
-   (standalone).
-3. **4e**: Add warn log to `build_tcp_frame`
-   (standalone).
-4. **4c**: Gate playback behind cfg(target_os = "linux")
-   -- **recommend deferring** unless there is appetite
-   for the refactoring.
-5. **4d**: Lock-free audio buffer -- **recommend
-   deferring** to a future iteration.
+   shutdown (standalone, trivial).
+2. **4e**: Add warn log to `build_tcp_frame`
+   (standalone, trivial).
+3. **4b**: Add shutdown handling to playback's `run()`
+   (standalone, low-medium).
+4. **4cd**: Dedicated audio thread with lock-free ring
+   buffer (medium, depends on 4b being committed first
+   since both modify the playback channel).
 
-Steps 4a, 4b, and 4e are independent and low-risk.
-Steps 4c and 4d are medium-complexity refactors that
-address platform safety and quality-of-service rather
-than correctness bugs. They can be deferred without
-impacting the reliability of the Linux target.
+Steps 4a and 4e are independent. Step 4b should land
+before 4cd since both modify `playback.rs` and 4cd
+will build on the shutdown infrastructure added in 4b.
 
 ## Administration
 
