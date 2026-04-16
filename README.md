@@ -194,8 +194,13 @@ This will:
 
 ## Architecture
 
+The repository is a Cargo workspace. Ryll itself lives in
+[`ryll/`](ryll/); future extracted crates (see
+[docs/plans/PLAN-crate-extraction.md](docs/plans/PLAN-crate-extraction.md))
+will sit alongside it as additional workspace members.
+
 ```
-src/
+ryll/src/
 ├── main.rs              # CLI entry point, Ctrl+C handler
 ├── app.rs               # egui App, bandwidth sparkline
 ├── bugreport.rs         # Traffic ring buffer + channel snapshots

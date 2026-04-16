@@ -34,13 +34,14 @@ jobs:
             libxcb-xfixes0-dev libxcb1-dev \
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev
+            libwayland-dev libssl-dev \
+            libasound2-dev
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Run clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   build:
     name: Build (${{ matrix.name }})
@@ -82,13 +83,14 @@ jobs:
             libxcb-xfixes0-dev libxcb1-dev \
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev
+            libwayland-dev libssl-dev \
+            libasound2-dev
 
       - name: Build
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --release -p ryll ${{ matrix.features }}
 
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }}
 
       - name: Install cargo-deb
         if: runner.os == 'Linux'
@@ -96,7 +98,7 @@ jobs:
 
       - name: Build .deb package
         if: runner.os == 'Linux'
-        run: cargo deb --no-build
+        run: cargo deb --no-build -p ryll
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'
@@ -112,7 +114,7 @@ jobs:
 
       - name: Build .rpm package
         if: runner.os == 'Linux'
-        run: cargo generate-rpm
+        run: cargo generate-rpm -p ryll
 
       - name: Upload .rpm artifact
         if: runner.os == 'Linux'

@@ -1,0 +1,21 @@
+---
+# This file defines the ordering and page titles for the import of
+# this content into `shakenfist/docs/components/ryll/plans/`. Only
+# master plans and the index are listed here; phase-specific plan
+# files are linked from the index and from each master plan's
+# execution table.
+
+- index.md: Plans index
+- PLAN-initial.md: Initial porting plan
+- PLAN-capture.md: Capture mode
+- PLAN-packaging.md: Packaging
+- PLAN-usb-redir.md: USB redirection
+- PLAN-cursor-rendering.md: Cursor rendering
+- PLAN-bug-reports.md: Bug reports
+- PLAN-usb-ui.md: USB UI
+- PLAN-webdav.md: WebDAV
+- PLAN-crate-extraction.md: Crate extraction
+- PLAN-remaining-issues.md: Remaining issues
+- PLAN-display-iteration-followups.md: Display follow-ups
+- PLAN-pr20-followup.md: PR 20 follow-up
+- PLAN-pr23-followup.md: PR 23 follow-up

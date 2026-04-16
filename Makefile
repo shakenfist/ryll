@@ -67,7 +67,7 @@ build: ensure-cache
 		-u $(UID):$(GID) \
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
-		cargo build
+		cargo build -p ryll
 
 # Build release version
 release: ensure-cache
@@ -79,7 +79,7 @@ release: ensure-cache
 		-u $(UID):$(GID) \
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
-		cargo build --release
+		cargo build --release -p ryll
 
 # Run tests
 test: ensure-cache
@@ -91,7 +91,7 @@ test: ensure-cache
 		-u $(UID):$(GID) \
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
-		cargo test
+		cargo test --workspace
 
 # Run linting checks (rustfmt + clippy)
 lint: ensure-cache
@@ -103,7 +103,7 @@ lint: ensure-cache
 		-u $(UID):$(GID) \
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --check && cargo clippy -- -D warnings"
+		sh -c "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
 
 # Run linting with auto-fix
 lint-fix: ensure-cache
@@ -115,7 +115,7 @@ lint-fix: ensure-cache
 		-u $(UID):$(GID) \
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt && cargo clippy --fix --allow-dirty -- -D warnings"
+		sh -c "cargo fmt --all && cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings"
 
 # Clean build artifacts
 clean:

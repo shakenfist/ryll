@@ -57,17 +57,17 @@ echo "=== Checking ryll ==="
 # Run rustfmt
 echo "Running rustfmt..."
 if [ "$MODE" = "fix" ]; then
-    run_in_docker cargo fmt || FAILED=1
+    run_in_docker cargo fmt --all || FAILED=1
 else
-    run_in_docker cargo fmt --check || FAILED=1
+    run_in_docker cargo fmt --all --check || FAILED=1
 fi
 
 # Run clippy
 echo "Running clippy..."
 if [ "$MODE" = "fix" ]; then
-    run_in_docker cargo clippy --fix --allow-dirty -- -D warnings || FAILED=1
+    run_in_docker cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings || FAILED=1
 else
-    run_in_docker cargo clippy -- -D warnings || FAILED=1
+    run_in_docker cargo clippy --workspace --all-targets -- -D warnings || FAILED=1
 fi
 
 echo ""

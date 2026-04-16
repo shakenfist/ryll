@@ -104,6 +104,22 @@ them.
 This section should list any bugs we encounter during
 development that we fixed.
 
+### Documentation index maintenance
+
+When creating a new master plan from this template, update
+the following files in `docs/plans/`:
+
+* **`index.md`** — add a row to the *Master plans* table
+  with the creation date, a link to the plan, a one-line
+  intent summary, the initial status, and links to each
+  phase plan file. Keep the table in chronological order.
+* **`order.yml`** — add an entry for the new master plan
+  so it appears in the documentation navigation bar. Phase
+  files should *not* be added to `order.yml`.
+
+When all phases of a plan are complete, update the status
+column in `index.md` to *Complete*.
+
 ### Back brief
 
 Before executing any step of this plan, please back brief

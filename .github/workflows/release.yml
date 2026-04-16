@@ -22,7 +22,7 @@ jobs:
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           EXPECTED="${TAG_NAME#v}"
-          ACTUAL=$(grep '^version = ' Cargo.toml \
+          ACTUAL=$(grep '^version = ' ryll/Cargo.toml \
             | head -1 | sed 's/version = "//;s/"//')
           echo "Tag: ${TAG_NAME}"
           echo "Expected version: ${EXPECTED}"
@@ -103,13 +103,14 @@ jobs:
             libxcb-xfixes0-dev libxcb1-dev \
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev
+            libwayland-dev libssl-dev \
+            libasound2-dev
 
       - name: Build
-        run: cargo build --release ${{ matrix.features }}
+        run: cargo build --release -p ryll ${{ matrix.features }}
 
       - name: Run tests
-        run: cargo test ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }}
 
       # --- Linux: .deb and .rpm ---
 
@@ -119,7 +120,7 @@ jobs:
 
       - name: Build .deb package
         if: runner.os == 'Linux'
-        run: cargo deb --no-build
+        run: cargo deb --no-build -p ryll
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'
@@ -134,7 +135,7 @@ jobs:
 
       - name: Build .rpm package
         if: runner.os == 'Linux'
-        run: cargo generate-rpm
+        run: cargo generate-rpm -p ryll
 
       - name: Upload .rpm artifact
         if: runner.os == 'Linux'

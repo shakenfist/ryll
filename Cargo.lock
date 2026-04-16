@@ -559,26 +559,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "audiopus"
-version = "0.3.0-rc.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab55eb0e56d7c6de3d59f544e5db122d7725ec33be6a276ee8241f3be6473955"
-dependencies = [
- "audiopus_sys",
-]
-
-[[package]]
-name = "audiopus_sys"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62314a1546a2064e033665d658e88c620a62904be945f8147e6b16c3db9f8651"
-dependencies = [
- "cmake",
- "log",
- "pkg-config",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3653,6 +3633,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "opus-decoder"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15ae32c275dabb0cd2c863460bf349e9abc3568ba2abf0f9eb7b7d2edeeed07e"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.51"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4347,7 +4336,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-channel",
- "audiopus",
  "byteorder",
  "bytes",
  "clap",
@@ -4368,6 +4356,7 @@ dependencies = [
  "mp4",
  "nusb",
  "openh264",
+ "opus-decoder",
  "pcap-file",
  "png",
  "rand 0.8.5",
@@ -4378,6 +4367,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "shakenfist-spice-compression",
+ "shakenfist-spice-protocol",
+ "shakenfist-spice-usbredir",
  "socket2",
  "tempfile",
  "thiserror 1.0.69",
@@ -4552,6 +4544,42 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+]
+
+[[package]]
+name = "shakenfist-spice-compression"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "lz4_flex",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "shakenfist-spice-protocol"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
+ "rand 0.8.5",
+ "rsa",
+ "rustls-pemfile",
+ "sha1",
+ "socket2",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "shakenfist-spice-usbredir"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "byteorder",
 ]
 
 [[package]]
