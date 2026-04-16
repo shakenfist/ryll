@@ -66,9 +66,9 @@ fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&jpeg[..2]);
         i = 2;
     }
-    // skip APP0/APP1 if present
+    // skip APP0/APP1 if present (bounds check matches extract_dht_segments)
     while i + 3 < jpeg.len() && jpeg[i] == 0xFF && (jpeg[i + 1] == 0xE0 || jpeg[i + 1] == 0xE1) {
-        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
+        let seg_len = (u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize).saturating_add(2);
         if i + seg_len > jpeg.len() {
             break;
         }
@@ -119,7 +119,10 @@ fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             }
             out
         }
-        _ => return None,
+        other => {
+            warn!("MJPEG decode: unsupported pixel format {:?}", other);
+            return None;
+        }
     };
 
     Some((rgba, w, h))
