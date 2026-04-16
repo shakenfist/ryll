@@ -436,6 +436,8 @@ impl PlaybackChannel {
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::I16 => {
+                let buffer = buffer.clone();
+                let vol = vol.clone();
                 let resampler = resampler.clone();
                 device.build_output_stream(
                     &config,
@@ -448,7 +450,8 @@ impl PlaybackChannel {
                 )
             }
             cpal::SampleFormat::F32 => {
-                let vol = self.volume_control.clone();
+                let buffer = buffer.clone();
+                let vol = vol.clone();
                 let resampler = resampler.clone();
                 device.build_output_stream(
                     &config,
