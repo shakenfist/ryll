@@ -119,3 +119,4 @@ assets = [
 assets = [
     { source = "target/release/ryll", dest = "/usr/bin/ryll", mode = "0755" },
 ]
+

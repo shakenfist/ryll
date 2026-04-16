@@ -151,7 +151,7 @@ pub struct RyllApp {
     // Session state
     connected: bool,
     error_message: Option<String>,
-    mouse_mode: u32, // 1=server, 2=client
+    mouse_mode: Arc<std::sync::atomic::AtomicU32>,
     show_disconnect_dialog: bool,
     disconnect_reason: Option<String>,
 
@@ -241,6 +241,13 @@ pub struct RyllApp {
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
     traffic_filter_playback: bool,
+
+    // Reconnection state
+    config: Config,
+    monitors: u8,
+    reconnect_virtual_disks: Vec<VirtualDiskConfig>,
+    reconnect_share_dir: Option<ShareDirConfig>,
+    egui_ctx: egui::Context,
 }
 
 impl RyllApp {
@@ -253,7 +260,6 @@ impl RyllApp {
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
     ) -> Self {
-        // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
@@ -262,27 +268,20 @@ impl RyllApp {
         let resize_tx = Arc::new(resize_tx);
         let volume_control = crate::channels::playback::VolumeControl::new();
 
-        // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
-
-        // Traffic ring buffers (always active)
         let traffic = Arc::new(TrafficBuffers::new());
-
-        // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+        let mouse_mode = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-        // Save connection target for bug report metadata
         let target_host = config.host.clone();
         let target_port = config.port;
 
-        // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
             .iter()
             .map(|d| (d.path.clone(), d.read_only))
             .collect();
 
-        // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
@@ -298,6 +297,9 @@ impl RyllApp {
         };
 
         let vol_for_conn = volume_control.clone();
+        let mouse_mode_clone = mouse_mode.clone();
+        let vd_clone = virtual_disks.clone();
+        let sd_clone = share_dir.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
@@ -307,8 +309,8 @@ impl RyllApp {
                     input_rx,
                     usb_rx,
                     webdav_rx,
-                    virtual_disks,
-                    share_dir,
+                    vd_clone,
+                    sd_clone,
                     capture_clone,
                     counter_clone,
                     traffic_clone,
@@ -316,13 +318,13 @@ impl RyllApp {
                     monitors,
                     resize_rx_for_conn,
                     vol_for_conn,
+                    mouse_mode_clone,
                 )
                 .await
                 {
                     error!("app: connection error: {}", e);
                 }
             });
-            // Request repaint when connection changes
             ctx.request_repaint();
         });
 
@@ -343,7 +345,7 @@ impl RyllApp {
             last_cadence_key: Instant::now(),
             connected: false,
             error_message: None,
-            mouse_mode: 0,
+            mouse_mode: mouse_mode.clone(),
             show_disconnect_dialog: false,
             disconnect_reason: None,
             last_mouse_pos: None,
@@ -401,7 +403,116 @@ impl RyllApp {
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
             traffic_filter_playback: true,
+            config,
+            monitors,
+            reconnect_virtual_disks: virtual_disks,
+            reconnect_share_dir: share_dir,
+            egui_ctx: cc.egui_ctx.clone(),
         }
+    }
+
+    fn reconnect(&mut self) {
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+        let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
+        let (usb_tx, usb_rx) = mpsc::channel(16);
+        let (webdav_tx, webdav_rx) = mpsc::channel(16);
+        let (resize_tx, resize_rx) = mpsc::channel(32);
+        let resize_tx = Arc::new(resize_tx);
+
+        let byte_counter = Arc::new(ByteCounter::new());
+        let traffic = Arc::new(TrafficBuffers::new());
+        let channel_snapshots = ChannelSnapshots::new();
+        let volume_control = crate::channels::playback::VolumeControl::new();
+        let mouse_mode = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        self.event_rx = event_rx;
+        self.input_tx = Some(input_tx);
+        self.resize_tx = Some(resize_tx);
+        self.last_sent_resize = None;
+        self.volume_control = volume_control.clone();
+        self.surfaces.clear();
+        self.cursor_pos = (0, 0);
+        self.cursor_visible = true;
+        self.cursor_image = None;
+        self.cursor_texture = None;
+        self.surface_rect = egui::Rect::NOTHING;
+        self.stats = Statistics::default();
+        self.last_cadence_key = Instant::now();
+        self.connected = false;
+        self.error_message = None;
+        self.mouse_mode = mouse_mode.clone();
+        self.show_disconnect_dialog = false;
+        self.disconnect_reason = None;
+        self.last_mouse_pos = None;
+        self.last_modifiers = None;
+        self.forwarded_buttons = 0;
+        self.pending_resize = None;
+        self.bandwidth = BandwidthTracker::new(byte_counter.clone());
+        self.usb_tx = Some(usb_tx);
+        self.webdav_tx = Some(webdav_tx);
+        self.usb_channel_ready = false;
+        self.usb_connecting = false;
+        self.usb_disconnecting = false;
+        self.usb_error_message = None;
+        self.usb_error_time = None;
+        self.usb_device_description = None;
+        self.usb_connected_at = None;
+        self.traffic = traffic.clone();
+        self.channel_snapshots = channel_snapshots;
+        self.webdav_channel_ready = false;
+        self.webdav_shared_dir = None;
+        self.webdav_sharing_active = false;
+        self.webdav_connected_at = None;
+        self.webdav_error_message = None;
+        self.webdav_error_time = None;
+
+        let config_clone = self.config.clone();
+        let event_tx_clone = event_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        let capture_clone = self.capture.clone();
+        let counter_clone = byte_counter;
+        let traffic_clone = traffic;
+        let snaps_for_conn = ChannelSnapshots {
+            display: self.channel_snapshots.display.clone(),
+            inputs: self.channel_snapshots.inputs.clone(),
+            cursor: self.channel_snapshots.cursor.clone(),
+            main: self.channel_snapshots.main.clone(),
+        };
+        let monitors = self.monitors;
+        let virtual_disks = self.reconnect_virtual_disks.clone();
+        let share_dir = self.reconnect_share_dir.clone();
+        let vol_for_conn = volume_control;
+        let mouse_mode_clone = mouse_mode;
+
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                if let Err(e) = run_connection(
+                    config_clone,
+                    event_tx_clone,
+                    input_rx,
+                    usb_rx,
+                    webdav_rx,
+                    virtual_disks,
+                    share_dir,
+                    capture_clone,
+                    counter_clone,
+                    traffic_clone,
+                    snaps_for_conn,
+                    monitors,
+                    resize_rx,
+                    vol_for_conn,
+                    mouse_mode_clone,
+                )
+                .await
+                {
+                    error!("app: connection error: {}", e);
+                }
+            });
+            ctx.request_repaint();
+        });
+
+        info!("app: reconnecting...");
     }
 
     fn process_events(&mut self) {
@@ -518,19 +629,11 @@ impl RyllApp {
                         mode,
                         if mode == 1 { "server" } else { "client" }
                     );
-                    self.mouse_mode = mode;
+                    self.mouse_mode.store(mode, std::sync::atomic::Ordering::Relaxed);
                 }
 
                 ChannelEvent::MonitorsConfig { width, height } => {
                     debug!("app: requested monitors config {}x{}", width, height);
-                }
-
-                ChannelEvent::ClipboardReceived { text } => {
-                    info!("app: clipboard from guest ({} bytes)", text.len());
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                        Ok(()) => {}
-                        Err(e) => debug!("app: failed to set host clipboard: {}", e),
-                    }
                 }
 
                 ChannelEvent::Statistics {
@@ -548,6 +651,10 @@ impl RyllApp {
 
                 ChannelEvent::Error(msg) => {
                     error!("app: channel error: {}", msg);
+                    self.connected = false;
+                    self.surfaces.clear();
+                    self.cursor_image = None;
+                    self.cursor_texture = None;
                     self.show_disconnect_dialog = true;
                     self.disconnect_reason = Some(msg);
                 }
@@ -607,6 +714,9 @@ impl RyllApp {
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
                     self.connected = false;
+                    self.surfaces.clear();
+                    self.cursor_image = None;
+                    self.cursor_texture = None;
                     if !self.show_disconnect_dialog {
                         self.show_disconnect_dialog = true;
                         self.disconnect_reason =
@@ -672,7 +782,7 @@ impl RyllApp {
             .collect();
         snap.cursor_pos = self.cursor_pos;
         snap.cursor_visible = self.cursor_visible;
-        snap.mouse_mode = self.mouse_mode;
+        snap.mouse_mode = self.mouse_mode.load(std::sync::atomic::Ordering::Relaxed);
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
     }
@@ -753,28 +863,6 @@ impl RyllApp {
         // Handle keyboard input — read from the global input state so
         // key events are captured regardless of which widget has focus.
         ctx.input(|i| {
-            for event in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    pressed,
-                    repeat: false,
-                    ..
-                } = event
-                {
-                    if *key == egui::Key::F11 || *key == egui::Key::F12 {
-                        continue;
-                    }
-                    if let Some((down_code, up_code)) = key_to_scancode(*key) {
-                        let ev = if *pressed {
-                            InputEvent::KeyDown(down_code)
-                        } else {
-                            InputEvent::KeyUp(up_code)
-                        };
-                        let _ = input_tx.try_send(ev);
-                    }
-                }
-            }
-
             let mods = i.modifiers;
             let prev = self.last_modifiers.unwrap_or_default();
 
@@ -804,6 +892,29 @@ impl RyllApp {
             }
 
             self.last_modifiers = Some(mods);
+
+            for event in &i.events {
+                if let egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed,
+                    ..
+                } = event
+                {
+                    let lookup_key = physical_key.unwrap_or(*key);
+                    if lookup_key == egui::Key::F11 || lookup_key == egui::Key::F12 {
+                        continue;
+                    }
+                    if let Some((down_code, up_code)) = key_to_scancode(lookup_key) {
+                        let ev = if *pressed {
+                            InputEvent::KeyDown(down_code)
+                        } else {
+                            InputEvent::KeyUp(up_code)
+                        };
+                        let _ = input_tx.try_send(ev);
+                    }
+                }
+            }
         });
     }
 
@@ -835,18 +946,18 @@ impl RyllApp {
                 .unwrap_or_else(|| i.screen_rect().size())
         });
 
+        let is_max = ctx.input(|i| {
+            i.viewport().maximized.unwrap_or(false)
+                || i.viewport().fullscreen.unwrap_or(false)
+        });
+        let bar_height = if is_max { 0.0 } else { STATS_BAR_HEIGHT };
         let mut width = viewport_size.x.max(0.0) as u32;
-        let mut height = (viewport_size.y - STATS_BAR_HEIGHT).max(0.0) as u32;
+        let mut height = (viewport_size.y - bar_height).max(0.0) as u32;
 
         width -= width % 8;
         height -= height % 8;
         width = width.max(8);
         height = height.max(8);
-
-        if self.last_sent_resize.is_none() {
-            self.last_sent_resize = Some((width, height));
-            return;
-        }
 
         if self.last_sent_resize == Some((width, height)) {
             return;
@@ -951,12 +1062,17 @@ impl eframe::App for RyllApp {
 
         // Statistics panel (bottom) — rendered before CentralPanel
         // so egui reserves its space correctly.
+        let is_maximized = ctx.input(|i| {
+            i.viewport().maximized.unwrap_or(false)
+                || i.viewport().fullscreen.unwrap_or(false)
+        });
+
         let stats_frame = egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(4.0, 2.0))
             .fill(ctx.style().visuals.panel_fill);
         egui::TopBottomPanel::bottom("stats")
             .frame(stats_frame)
-            .show(ctx, |ui| {
+            .show_animated(ctx, !is_maximized, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(latency) = self.stats.last_latency {
                         ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
@@ -975,7 +1091,7 @@ impl eframe::App for RyllApp {
                     }
 
                     ui.separator();
-                    if self.mouse_mode == 1 {
+                    if self.mouse_mode.load(std::sync::atomic::Ordering::Relaxed) == 1 {
                         ui.label("Cursor: server mode");
                     } else {
                         ui.label(format!(
@@ -1586,14 +1702,6 @@ impl eframe::App for RyllApp {
 
                         self.surface_rect = response.rect;
 
-                        if response.hovered()
-                            && !self.region_select_active
-                            && self.cursor_image.is_some()
-                        {
-                            ui.ctx()
-                                .output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
-                        }
-
                         let input_suppressed = self.show_bug_dialog || self.region_select_active;
                         if !input_suppressed {
                             if let Some(tx) = &self.input_tx {
@@ -1905,10 +2013,20 @@ impl eframe::App for RyllApp {
             && self.surface_rect != egui::Rect::NOTHING
         {
             if let (Some(ref tex), Some(ref img)) = (&self.cursor_texture, &self.cursor_image) {
-                let (cx, cy) = self
-                    .last_mouse_pos
-                    .map(|(x, y)| (x as f32, y as f32))
-                    .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32));
+                // In client mode (2) the host controls cursor position, so
+                // use last_mouse_pos for immediate feedback.  In server mode
+                // (1) the guest is the authority — use cursor_pos reported by
+                // the cursor channel to stay in sync with the guest.
+                let mode = self.mouse_mode.load(std::sync::atomic::Ordering::Relaxed);
+                let (cx, cy) = if mode == 1 {
+                    // Server mode: guest-reported position is authoritative
+                    (self.cursor_pos.0 as f32, self.cursor_pos.1 as f32)
+                } else {
+                    // Client mode: use host-tracked position for responsiveness
+                    self.last_mouse_pos
+                        .map(|(x, y)| (x as f32, y as f32))
+                        .unwrap_or((self.cursor_pos.0 as f32, self.cursor_pos.1 as f32))
+                };
 
                 let x = self.surface_rect.min.x + cx - img.hot_spot_x as f32;
                 let y = self.surface_rect.min.y + cy - img.hot_spot_y as f32;
@@ -1924,6 +2042,7 @@ impl eframe::App for RyllApp {
             }
         }
 
+        let mut wants_reconnect = false;
         if self.show_disconnect_dialog {
             let reason = self
                 .disconnect_reason
@@ -1937,11 +2056,29 @@ impl eframe::App for RyllApp {
                     ui.label(reason);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
+                        if ui.button("Reconnect").clicked() {
+                            wants_reconnect = true;
+                        }
                         if ui.button("Close").clicked() {
                             std::process::exit(0);
                         }
                     });
                 });
+        }
+        if wants_reconnect {
+            self.reconnect();
+        }
+
+        if self.cursor_image.is_some()
+            && !self.region_select_active
+            && self.surface_rect != egui::Rect::NOTHING
+            && ctx.input(|i| {
+                i.pointer
+                    .hover_pos()
+                    .is_some_and(|p| self.surface_rect.contains(p))
+            })
+        {
+            ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
         }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -2016,6 +2153,7 @@ async fn run_connection(
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<crate::channels::playback::VolumeControl>,
+    mouse_mode: Arc<std::sync::atomic::AtomicU32>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -2026,6 +2164,9 @@ async fn run_connection(
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
+    let clipboard_provider: Arc<dyn crate::clipboard::ClipboardProvider> =
+        Arc::new(crate::clipboard::ArboardProvider);
+
     let mut main_channel = MainChannel::new(
         main_stream,
         event_tx_clone,
@@ -2035,6 +2176,7 @@ async fn run_connection(
         snapshots.main,
         resize_rx,
         monitors,
+        clipboard_provider,
     );
 
     // Spawn main channel task
@@ -2136,6 +2278,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.inputs.clone(),
+                    mouse_mode.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -2274,10 +2417,10 @@ pub async fn run_headless(
             monitors,
             resize_rx,
             crate::channels::playback::VolumeControl::new(),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
         )
         .await
     });
-    // Pin the handle so it can be polled multiple times in the select loop
     tokio::pin!(connection_handle);
 
     // Cadence task if enabled

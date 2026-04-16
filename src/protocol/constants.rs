@@ -144,6 +144,8 @@ pub mod main_server {
     pub const NOTIFY: u16 = 7;
     pub const INIT: u16 = 103;
     pub const CHANNELS_LIST: u16 = 104;
+    pub const MOUSE_MODE: u16 = 105;
+    pub const MULTI_MEDIA_TIME: u16 = 106;
     pub const AGENT_CONNECTED: u16 = 107;
     pub const AGENT_DISCONNECTED: u16 = 108;
     pub const AGENT_DATA: u16 = 109;
@@ -159,6 +161,7 @@ pub mod main_client {
     pub const MIGRATE_DATA: u16 = 5;
     pub const DISCONNECTING: u16 = 6;
     pub const ATTACH_CHANNELS: u16 = 104;
+    pub const MOUSE_MODE_REQUEST: u16 = 105;
     pub const AGENT_START: u16 = 106;
     pub const AGENT_DATA: u16 = 107;
     pub const AGENT_TOKEN: u16 = 108;

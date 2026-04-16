@@ -566,6 +566,18 @@ impl MousePosition {
     }
 }
 
+/// Mouse motion message - relative movement (client -> server, for server mouse mode)
+pub struct MouseMotion;
+
+impl MouseMotion {
+    pub fn write(dx: i32, dy: i32, buttons_state: u32, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_i32::<LittleEndian>(dx)?;
+        buf.write_i32::<LittleEndian>(dy)?;
+        buf.write_u16::<LittleEndian>(buttons_state as u16)?;
+        Ok(())
+    }
+}
+
 /// Mouse button message (client -> server)
 pub struct MouseButton;
 

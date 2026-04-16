@@ -1,5 +1,6 @@
 mod app;
 mod bugreport;
+mod clipboard;
 #[cfg(feature = "capture")]
 mod capture;
 #[cfg(not(feature = "capture"))]

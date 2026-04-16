@@ -57,7 +57,7 @@ impl VolumeControl {
     }
 }
 
-struct SendStream(cpal::Stream);
+struct SendStream(#[allow(dead_code)] cpal::Stream);
 unsafe impl Send for SendStream {}
 
 struct Resampler {

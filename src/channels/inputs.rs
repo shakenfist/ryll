@@ -13,8 +13,8 @@ use crate::capture::CaptureSession;
 use crate::protocol::link::SpiceStream;
 use crate::protocol::logging::{self, message_names};
 use crate::protocol::messages::{
-    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MousePosition, Ping,
-    SetAck,
+    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
+    MousePosition, Ping, SetAck,
 };
 use crate::protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
 use crate::settings;
@@ -42,6 +42,8 @@ pub struct InputsChannel {
     recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
+    mouse_mode: Arc<std::sync::atomic::AtomicU32>,
+    last_mouse_pos: Option<(u32, u32)>,
 }
 
 impl InputsChannel {
@@ -53,6 +55,7 @@ impl InputsChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
+        mouse_mode: Arc<std::sync::atomic::AtomicU32>,
     ) -> Self {
         InputsChannel {
             stream,
@@ -69,6 +72,8 @@ impl InputsChannel {
             recent_events: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
+            mouse_mode,
+            last_mouse_pos: None,
         }
     }
 
@@ -364,7 +369,6 @@ impl InputsChannel {
             }
 
             InputEvent::MouseMove { x, y } => {
-                // Throttle: don't exceed MOTION_ACK_BUNCH * 2 pending
                 if self.motion_count < MOTION_ACK_BUNCH * 2 {
                     self.record_event(InputEventRecord {
                         event_type: "MouseMove".to_string(),
@@ -375,16 +379,35 @@ impl InputsChannel {
                         timestamp_secs: ts,
                     });
 
-                    let mut payload = Vec::new();
-                    MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
-                    let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
-                    self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
-                        .await?;
+                    let mode = self
+                        .mouse_mode
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if mode == 1 {
+                        let (dx, dy) = match self.last_mouse_pos {
+                            Some((px, py)) => (x as i32 - px as i32, y as i32 - py as i32),
+                            None => (0, 0),
+                        };
+                        debug!("inputs: motion delta=({},{}) from {:?} to ({},{})",
+                               dx, dy, self.last_mouse_pos, x, y);
+                        let mut payload = Vec::new();
+                        MouseMotion::write(dx, dy, self.button_state, &mut payload)?;
+                        let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
+                        self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
+                            .await?;
+                    } else {
+                        let mut payload = Vec::new();
+                        MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
+                        let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
+                        self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
+                            .await?;
+                    }
+                    self.last_mouse_pos = Some((x, y));
                     self.motion_count += 1;
                 }
             }
 
             InputEvent::MouseDown { button, x, y } => {
+                self.send_position_update(x, y).await?;
                 self.button_state |= button;
 
                 self.record_event(InputEventRecord {
@@ -424,6 +447,31 @@ impl InputsChannel {
             }
         }
 
+        Ok(())
+    }
+
+    async fn send_position_update(&mut self, x: u32, y: u32) -> Result<()> {
+        let mode = self.mouse_mode.load(std::sync::atomic::Ordering::Relaxed);
+        if mode == 1 {
+            let (dx, dy) = match self.last_mouse_pos {
+                Some((px, py)) => (x as i32 - px as i32, y as i32 - py as i32),
+                None => (0, 0),
+            };
+            debug!("inputs: position_update: ({},{}) -> ({},{}) delta=({},{})",
+                   self.last_mouse_pos.map(|p| p.0).unwrap_or(0),
+                   self.last_mouse_pos.map(|p| p.1).unwrap_or(0),
+                   x, y, dx, dy);
+            let mut payload = Vec::new();
+            MouseMotion::write(dx, dy, self.button_state, &mut payload)?;
+            let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
+            self.send_with_log(inputs_client::MOUSE_MOTION, &msg).await?;
+        } else {
+            let mut payload = Vec::new();
+            MousePosition::write(x, y, self.button_state, 0, &mut payload)?;
+            let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
+            self.send_with_log(inputs_client::MOUSE_POSITION, &msg).await?;
+        }
+        self.last_mouse_pos = Some((x, y));
         Ok(())
     }
 

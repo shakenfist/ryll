@@ -19,12 +19,22 @@ use crate::settings;
 use super::ChannelEvent;
 
 const VD_AGENT_PROTOCOL: u32 = 1;
-const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 1;
+
+// VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
+#[allow(dead_code)]
+const VD_AGENT_MOUSE_STATE: u32 = 1;
 const VD_AGENT_MONITORS_CONFIG: u32 = 2;
+#[allow(dead_code)]
+const VD_AGENT_REPLY: u32 = 3;
 const VD_AGENT_CLIPBOARD: u32 = 4;
+#[allow(dead_code)]
+const VD_AGENT_DISPLAY_CONFIG: u32 = 5;
+const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 6;
 const VD_AGENT_CLIPBOARD_GRAB: u32 = 7;
 const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8;
 const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9;
+
+// Clipboard format types
 const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1;
 
 const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
@@ -49,6 +59,7 @@ pub struct MainChannel {
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_text: Option<String>,
+    clipboard_provider: Arc<dyn crate::clipboard::ClipboardProvider>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -68,6 +79,7 @@ impl MainChannel {
         snapshot: Arc<Mutex<MainSnapshot>>,
         monitors_config_rx: mpsc::Receiver<(u32, u32)>,
         monitors: u8,
+        clipboard_provider: Arc<dyn crate::clipboard::ClipboardProvider>,
     ) -> Self {
         MainChannel {
             stream,
@@ -84,6 +96,7 @@ impl MainChannel {
             guest_caps_received: false,
             channels_requested: false,
             last_clipboard_text: None,
+            clipboard_provider,
             capture,
             byte_counter,
             traffic,
@@ -273,10 +286,10 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
-                self.event_tx
-                    .send(ChannelEvent::MouseMode(init.current_mouse_mode))
-                    .await
-                    .ok();
+                self.set_mouse_mode(
+                    init.supported_mouse_modes,
+                    init.current_mouse_mode,
+                ).await?;
             }
 
             main_server::CHANNELS_LIST => {
@@ -385,6 +398,31 @@ impl MainChannel {
                     .ok();
             }
 
+            main_server::MOUSE_MODE => {
+                // SPICE_MSG_MAIN_MOUSE_MODE: wire format uses u16 per field
+                // (the C struct uses u32 but the marshaller shrinks to u16)
+                if payload.len() >= 4 {
+                    let supported = u16::from_le_bytes([payload[0], payload[1]]) as u32;
+                    let current = u16::from_le_bytes([payload[2], payload[3]]) as u32;
+                    info!(
+                        "main: mouse mode changed: supported={}, current={} ({})",
+                        supported,
+                        current,
+                        if current == 1 { "server" } else { "client" }
+                    );
+                    self.set_mouse_mode(supported, current).await?;
+                }
+            }
+
+            main_server::MULTI_MEDIA_TIME => {
+                if payload.len() >= 4 {
+                    let time = u32::from_le_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                    ]);
+                    debug!("main: multi_media_time={}", time);
+                }
+            }
+
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
@@ -449,6 +487,35 @@ impl MainChannel {
         snap.session_id = self.session_id;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
+    }
+
+    /// Mirror of spice-gtk's set_mouse_mode(): broadcast the current mode
+    /// and, if client mode is supported but not yet active, request it.
+    async fn set_mouse_mode(&mut self, supported: u32, current: u32) -> Result<()> {
+        self.event_tx
+            .send(ChannelEvent::MouseMode(current))
+            .await
+            .ok();
+
+        const MOUSE_MODE_CLIENT: u32 = 2;
+        if current != MOUSE_MODE_CLIENT && (supported & MOUSE_MODE_CLIENT) != 0 {
+            info!(
+                "main: requesting client mouse mode (current={}, supported={})",
+                current, supported
+            );
+            self.request_mouse_mode(MOUSE_MODE_CLIENT).await?;
+        }
+        Ok(())
+    }
+
+    /// Send SPICE_MSGC_MAIN_MOUSE_MODE_REQUEST to ask the server
+    /// to switch to the given mouse mode.
+    async fn request_mouse_mode(&mut self, mode: u32) -> Result<()> {
+        let mut payload = Vec::with_capacity(4);
+        payload.write_u32::<LittleEndian>(mode)?;
+        let msg = make_message(main_client::MOUSE_MODE_REQUEST, &payload);
+        self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
+            .await
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -602,13 +669,12 @@ impl MainChannel {
         }
         match agent_type {
             VD_AGENT_CLIPBOARD_GRAB => {
-                // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
                     let format = u32::from_le_bytes([
                         payload[4], payload[5], payload[6], payload[7],
                     ]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
-                        debug!("main: clipboard grab from guest, requesting data");
+                        debug!("main: guest clipboard grab, requesting data");
                         self.send_clipboard_request().await?;
                     }
                 }
@@ -617,9 +683,6 @@ impl MainChannel {
                 // payload: selection(u32) + format(u32) + data
                 let offset = 4;
                 if payload.len() > offset + 4 {
-                    let _format = u32::from_le_bytes([
-                        payload[offset], payload[offset + 1], payload[offset + 2], payload[offset + 3],
-                    ]);
                     let data = &payload[offset + 4..];
                     if !data.is_empty() {
                         let text = String::from_utf8_lossy(data).to_string();
@@ -628,28 +691,28 @@ impl MainChannel {
                             text.len(),
                             &text.chars().take(16).collect::<String>()
                         );
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                            Ok(()) => debug!("main: host clipboard updated"),
-                            Err(e) => debug!("main: clipboard set failed: {}", e),
-                        }
+                        self.clipboard_provider.set_text(&text);
+                        // Record so poll_host_clipboard won't re-grab what we just set
+                        self.last_clipboard_text = Some(text);
                     }
                 }
             }
             VD_AGENT_CLIPBOARD_REQUEST => {
+                info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
                 // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
                     let format = u32::from_le_bytes([
                         payload[4], payload[5], payload[6], payload[7],
                     ]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
-                        debug!("main: clipboard request from guest");
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                            Ok(text) => {
-                                self.send_clipboard_data(&text).await?;
-                            }
-                            Err(e) => {
-                                debug!("main: failed to read host clipboard: {}", e);
-                            }
+                        info!("main: getting text from clipboard provider");
+                        if let Some(text) = self.clipboard_provider.get_text() {
+                            info!(
+                                "main: clipboard to guest ({} bytes): {:?}",
+                                text.len(),
+                                &text.chars().take(16).collect::<String>()
+                            );
+                            self.send_clipboard_data(&text).await?;
                         }
                     }
                 }
@@ -678,9 +741,9 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(t) => t,
-            Err(_) => return Ok(()),
+        let text = match self.clipboard_provider.get_text() {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
         if text.is_empty() {
