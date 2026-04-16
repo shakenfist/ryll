@@ -77,40 +77,51 @@ unsafe impl Send for SendStream {}
 struct Resampler {
     ratio: f64,
     pos: f64,
+    channels: usize,
 }
 
 impl Resampler {
-    fn new(from_rate: u32, to_rate: u32) -> Self {
+    fn new(from_rate: u32, to_rate: u32, channels: u32) -> Self {
         Resampler {
             ratio: from_rate as f64 / to_rate as f64,
             pos: 0.0,
+            channels: channels.max(1) as usize,
         }
     }
 
-    fn next_sample(&mut self, buffer: &mut VecDeque<i16>) -> i16 {
+    /// Produce one output frame (one sample per channel) by
+    /// linearly interpolating between adjacent input frames.
+    /// Returns silence without modifying the buffer on underrun.
+    fn next_frame(&mut self, buffer: &mut VecDeque<i16>, out: &mut [i16]) {
+        let ch = self.channels;
         let idx = self.pos as usize;
         let frac = self.pos - idx as f64;
 
-        while buffer.len() < idx + 2 {
-            buffer.push_back(0);
+        // Need two full frames at positions idx and idx+1.
+        let needed = (idx + 2) * ch;
+        if buffer.len() < needed {
+            // Underrun: return silence without polluting the buffer.
+            for s in out.iter_mut().take(ch) {
+                *s = 0;
+            }
+            return;
         }
 
-        let a = buffer[0] as f64;
-        let b = if buffer.len() > 1 {
-            buffer[1] as f64
-        } else {
-            a
-        };
-        let sample = a + (b - a) * frac;
+        // Interpolate each channel independently.
+        for c in 0..ch {
+            let a = buffer[idx * ch + c] as f64;
+            let b = buffer[(idx + 1) * ch + c] as f64;
+            out[c] = (a + (b - a) * frac) as i16;
+        }
 
+        // Advance position and consume whole frames.
         self.pos += self.ratio;
-        let consume = self.pos as usize;
-        for _ in 0..consume {
+        let consume_frames = self.pos as usize;
+        let consume_samples = consume_frames * ch;
+        for _ in 0..consume_samples {
             buffer.pop_front();
         }
-        self.pos -= consume as f64;
-
-        sample as i16
+        self.pos -= consume_frames as f64;
     }
 }
 
@@ -121,10 +132,14 @@ fn write_samples_i16(
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
+    let ch = resampler.channels;
+    let mut frame = vec![0i16; ch];
     let mut buf = buffer.lock().unwrap();
-    for sample in data.iter_mut() {
-        let s = resampler.next_sample(&mut buf);
-        *sample = (s as f32 * v) as i16;
+    for chunk in data.chunks_mut(ch) {
+        resampler.next_frame(&mut buf, &mut frame);
+        for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
+            *out = (s as f32 * v) as i16;
+        }
     }
 }
 
@@ -135,10 +150,14 @@ fn write_samples_f32(
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
+    let ch = resampler.channels;
+    let mut frame = vec![0i16; ch];
     let mut buf = buffer.lock().unwrap();
-    for sample in data.iter_mut() {
-        let s = resampler.next_sample(&mut buf);
-        *sample = s as f32 / 32768.0 * v;
+    for chunk in data.chunks_mut(ch) {
+        resampler.next_frame(&mut buf, &mut frame);
+        for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
+            *out = s as f32 / 32768.0 * v;
+        }
     }
 }
 
@@ -409,7 +428,11 @@ impl PlaybackChannel {
         let device_channels = config.channels as u32;
         let buffer = self.audio_buffer.clone();
         let vol = self.volume_control.clone();
-        let resampler = Arc::new(Mutex::new(Resampler::new(self.sample_rate, device_rate)));
+        let resampler = Arc::new(Mutex::new(Resampler::new(
+            self.sample_rate,
+            device_rate,
+            self.channels,
+        )));
 
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::I16 => {
