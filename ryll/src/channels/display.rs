@@ -13,6 +13,7 @@ use crate::capture::CaptureSession;
 use crate::settings;
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
+    GlzDictionary,
 };
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -138,7 +139,7 @@ struct StreamState {
 const MAX_RECENT_DECODES: usize = 20;
 
 /// GLZ dictionary shared across all display channels.
-pub type SharedGlzDictionary = Arc<Mutex<HashMap<u64, Vec<u8>>>>;
+pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
 pub struct DisplayChannel {
     channel_id: u8,
@@ -163,7 +164,7 @@ pub struct DisplayChannel {
 
 impl DisplayChannel {
     pub fn new_shared_glz_dictionary() -> SharedGlzDictionary {
-        Arc::new(Mutex::new(HashMap::new()))
+        Arc::new(GlzDictionary::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -486,7 +487,6 @@ impl DisplayChannel {
                     let entry_size = 9; // u8 type + u64 id
                     let mut removed = 0usize;
                     let mut glz_removed = 0usize;
-                    let mut glz_dict = self.glz_dictionary.lock().unwrap();
                     for i in 0..count {
                         let offset = 2 + i * entry_size + 1; // skip type byte
                         if offset + 8 > payload.len() {
@@ -505,7 +505,7 @@ impl DisplayChannel {
                         if self.image_cache.remove(&id).is_some() {
                             removed += 1;
                         }
-                        if glz_dict.remove(&id).is_some() {
+                        if self.glz_dictionary.remove(&id) {
                             glz_removed += 1;
                         }
                     }
@@ -517,26 +517,26 @@ impl DisplayChannel {
                         glz_removed,
                         count,
                         self.image_cache.len(),
-                        glz_dict.len()
+                        self.glz_dictionary.len()
                     );
                 }
             }
 
             display_server::INVAL_ALL_PIXMAPS => {
-                let glz_len = self.glz_dictionary.lock().unwrap().len();
+                let glz_len = self.glz_dictionary.len();
                 debug!(
                     "display: inval_all_pixmaps: clearing {} cached images + {} glz entries",
                     self.image_cache.len(),
                     glz_len
                 );
                 self.image_cache.clear();
-                self.glz_dictionary.lock().unwrap().clear();
+                self.glz_dictionary.clear();
             }
 
             display_server::RESET => {
                 info!("display: reset");
                 self.image_cache.clear();
-                self.glz_dictionary.lock().unwrap().clear();
+                self.glz_dictionary.clear();
             }
 
             display_server::STREAM_CREATE => {
@@ -1136,17 +1136,16 @@ impl DisplayChannel {
             if is_glz {
                 // GLZ images are always cached -- they form the shared
                 // dictionary that cross-frame references depend on.
-                let mut dict = self.glz_dictionary.lock().unwrap();
-                dict.insert(img.image_id, img.pixels.clone());
+                // insert() also notifies any waiters blocked on a
+                // cross-frame reference.
+                self.glz_dictionary.insert(img.image_id, img.pixels.clone());
 
                 // Evict images outside the sliding window. The server
                 // only generates cross-frame references to images
                 // within win_head_dist of the current image_id.
                 if img.win_head_dist > 0 {
                     let oldest_valid = img.image_id.saturating_sub(img.win_head_dist as u64);
-                    let before = dict.len();
-                    dict.retain(|&id, _| id >= oldest_valid);
-                    let evicted = before - dict.len();
+                    let evicted = self.glz_dictionary.evict_older_than(oldest_valid);
                     if evicted > 0 {
                         debug!(
                             "display: glz eviction: removed {} entries older than id {} \
@@ -1154,7 +1153,7 @@ impl DisplayChannel {
                             evicted,
                             oldest_valid,
                             img.win_head_dist,
-                            dict.len()
+                            self.glz_dictionary.len()
                         );
                     }
                 }
@@ -1276,17 +1275,14 @@ impl DisplayChannel {
         snap.last_ack = self.last_ack;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
-        let glz_dict = self.glz_dictionary.lock().unwrap();
-        snap.image_cache_entries = self.image_cache.len() + glz_dict.len();
-        snap.image_cache_bytes = self.image_cache.values().map(|v| v.len()).sum::<usize>()
-            + glz_dict.values().map(|v| v.len()).sum::<usize>();
+        let glz_len = self.glz_dictionary.len();
+        let glz_bytes = self.glz_dictionary.total_bytes();
+        let glz_ids = self.glz_dictionary.image_ids();
+        snap.image_cache_entries = self.image_cache.len() + glz_len;
+        snap.image_cache_bytes =
+            self.image_cache.values().map(|v| v.len()).sum::<usize>() + glz_bytes;
         snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self
-                .image_cache
-                .keys()
-                .chain(glz_dict.keys())
-                .copied()
-                .collect();
+            let mut ids: Vec<u64> = self.image_cache.keys().copied().chain(glz_ids).collect();
             ids.sort_unstable();
             ids
         };

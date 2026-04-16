@@ -31,7 +31,7 @@ pub mod lz4;
 pub mod quic;
 
 #[cfg(feature = "glz")]
-pub use glz::decompress_glz;
+pub use glz::{decompress_glz, GlzDictionary};
 
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;
