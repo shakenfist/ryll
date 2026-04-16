@@ -22,7 +22,7 @@ use crate::channels::{
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
+use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient, MOUSE_MODE_SERVER};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -1619,8 +1619,18 @@ impl eframe::App for RyllApp {
                                     let x = (pos.x - response.rect.min.x).max(0.0) as u32;
                                     let y = (pos.y - response.rect.min.y).max(0.0) as u32;
                                     if self.last_mouse_pos != Some((x, y)) {
+                                        if self.mouse_mode == MOUSE_MODE_SERVER {
+                                            // Server mode: send relative deltas.
+                                            let (prev_x, prev_y) =
+                                                self.last_mouse_pos.unwrap_or((x, y));
+                                            let dx = x as i32 - prev_x as i32;
+                                            let dy = y as i32 - prev_y as i32;
+                                            let _ = tx.try_send(InputEvent::MouseMotion { dx, dy });
+                                        } else {
+                                            // Client mode: send absolute position.
+                                            let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                                        }
                                         self.last_mouse_pos = Some((x, y));
-                                        let _ = tx.try_send(InputEvent::MouseMove { x, y });
                                     }
                                 }
 

@@ -14,8 +14,8 @@ use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MousePosition, Ping,
-    SetAck,
+    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
+    MousePosition, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
 
@@ -165,6 +165,26 @@ impl InputsChannel {
                             // Send only the final position from the run.
                             self.handle_input_event(batch[last_move].clone()).await?;
                             i = last_move + 1;
+                        } else if matches!(batch[i], InputEvent::MouseMotion { .. }) {
+                            // Accumulate consecutive relative motions into one.
+                            let mut total_dx = 0i32;
+                            let mut total_dy = 0i32;
+                            let mut last_motion = i;
+                            while last_motion < batch.len() {
+                                if let InputEvent::MouseMotion { dx, dy } = batch[last_motion] {
+                                    total_dx += dx;
+                                    total_dy += dy;
+                                    last_motion += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.handle_input_event(InputEvent::MouseMotion {
+                                dx: total_dx,
+                                dy: total_dy,
+                            })
+                            .await?;
+                            i = last_motion;
                         } else {
                             self.handle_input_event(batch[i].clone()).await?;
                             i += 1;
@@ -385,6 +405,32 @@ impl InputsChannel {
                     .write(&mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
+                        .await?;
+                    self.motion_count += 1;
+                }
+            }
+
+            InputEvent::MouseMotion { dx, dy } => {
+                // Server mouse mode: send relative deltas.
+                if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                    self.record_event(InputEventRecord {
+                        event_type: "MouseMotion".to_string(),
+                        scancode: 0,
+                        x: dx as u32,
+                        y: dy as u32,
+                        button_mask: self.button_state,
+                        timestamp_secs: ts,
+                    });
+
+                    let mut payload = Vec::new();
+                    MouseMotion {
+                        dx,
+                        dy,
+                        buttons: self.button_state as u16,
+                    }
+                    .write(&mut payload)?;
+                    let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
+                    self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
                     self.motion_count += 1;
                 }

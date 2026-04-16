@@ -553,6 +553,24 @@ impl KeyEvent {
     }
 }
 
+/// Mouse motion message (client -> server, relative deltas)
+#[derive(Debug, Clone, Copy)]
+pub struct MouseMotion {
+    pub dx: i32,
+    pub dy: i32,
+    /// `flags16 mouse_button_mask` per spice.proto.
+    pub buttons: u16,
+}
+
+impl MouseMotion {
+    pub fn write(&self, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_i32::<LittleEndian>(self.dx)?;
+        buf.write_i32::<LittleEndian>(self.dy)?;
+        buf.write_u16::<LittleEndian>(self.buttons)?;
+        Ok(())
+    }
+}
+
 /// Mouse position message (client -> server)
 #[derive(Debug, Clone, Copy)]
 pub struct MousePosition {
