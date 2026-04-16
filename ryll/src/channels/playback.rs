@@ -419,13 +419,17 @@ impl PlaybackChannel {
             default_config.channels(),
             default_config.sample_format()
         );
+        // Use the source channel count (from the SPICE START message)
+        // rather than the device default. Most devices support stereo
+        // even if they default to a higher channel count. If the
+        // device does not support the requested count, cpal will
+        // return an error from build_output_stream.
         let config = cpal::StreamConfig {
-            channels: default_config.channels(),
+            channels: self.channels as u16,
             sample_rate: default_config.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
         let device_rate = config.sample_rate.0;
-        let device_channels = config.channels as u32;
         let buffer = self.audio_buffer.clone();
         let vol = self.volume_control.clone();
         let resampler = Arc::new(Mutex::new(Resampler::new(
@@ -480,8 +484,8 @@ impl PlaybackChannel {
             return;
         }
         info!(
-            "playback: audio output started (device: {}Hz {} ch)",
-            device_rate, device_channels
+            "playback: audio output started ({}Hz {} ch)",
+            device_rate, self.channels
         );
         self._cpal_stream = Some(SendStream(stream));
     }
