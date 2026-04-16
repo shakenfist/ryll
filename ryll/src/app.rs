@@ -1966,7 +1966,10 @@ impl eframe::App for RyllApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
-                            std::process::exit(0);
+                            if let Some(ref capture) = self.capture {
+                                capture.close();
+                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
                 });
