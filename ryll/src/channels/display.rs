@@ -1100,11 +1100,38 @@ impl DisplayChannel {
                     }
                 }
             }
-            _ => {
+            Some(ImageType::LzPalette) => {
                 warn!(
-                    "display: unsupported image type: {:?} (raw byte={})",
-                    image_type, img_desc.image_type
+                    "display: LzPalette images require palette data (not yet implemented), \
+                     id={}",
+                    img_desc.image_id
                 );
+                None
+            }
+            Some(ImageType::Surface) => {
+                warn!(
+                    "display: Surface-to-surface copy (not yet implemented), id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            Some(ImageType::FromCacheLossless) => {
+                warn!(
+                    "display: FromCacheLossless (not yet implemented), id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            Some(ImageType::JpegAlpha) => {
+                warn!(
+                    "display: JpegAlpha requires separate alpha plane (not yet implemented), \
+                     id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            None => {
+                warn!("display: unknown image type byte: {}", img_desc.image_type);
                 None
             }
         };
