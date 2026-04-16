@@ -218,6 +218,15 @@ pub async fn decompress_glz(
                     }
                     let dict = previous_images.lock().unwrap();
                     if let Some(prev_img) = dict.get(&source_id) {
+                        tracing::debug!(
+                            "glz: cross-ref hit: source_id={}, pixel_offset={}, length={}, \
+                             dict_size={}, prev_img_len={}",
+                            source_id,
+                            pixel_offset,
+                            length,
+                            dict.len(),
+                            prev_img.len()
+                        );
                         let mut pi_idx = pixel_offset * 4;
                         for _ in 0..length {
                             if out_idx + 4 > output_size || pi_idx + 4 > prev_img.len() {
@@ -233,6 +242,13 @@ pub async fn decompress_glz(
                         found = true;
                         break;
                     }
+                    tracing::debug!(
+                        "glz: cross-ref miss: source_id={}, attempt={}/{}, dict_size={}",
+                        source_id,
+                        attempt,
+                        CROSS_REF_MAX_RETRIES,
+                        dict.len()
+                    );
                 }
                 if !found {
                     tracing::warn!(
@@ -260,12 +276,13 @@ pub async fn decompress_glz(
         output = flipped;
     }
 
-    Ok(DecompressedImage {
+    Ok(DecompressedImage::new_glz(
         width,
         height,
-        pixels: output,
+        output,
         image_id,
-    })
+        win_head_dist,
+    ))
 }
 
 #[cfg(test)]

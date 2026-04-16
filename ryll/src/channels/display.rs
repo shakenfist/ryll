@@ -20,7 +20,9 @@ use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
     SurfaceCreate,
 };
-use shakenfist_spice_protocol::{display_client, display_server, ChannelType, ImageType};
+use shakenfist_spice_protocol::{
+    display_client, display_server, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
+};
 
 use super::ChannelEvent;
 
@@ -483,6 +485,8 @@ impl DisplayChannel {
                     let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
                     let entry_size = 9; // u8 type + u64 id
                     let mut removed = 0usize;
+                    let mut glz_removed = 0usize;
+                    let mut glz_dict = self.glz_dictionary.lock().unwrap();
                     for i in 0..count {
                         let offset = 2 + i * entry_size + 1; // skip type byte
                         if offset + 8 > payload.len() {
@@ -501,22 +505,32 @@ impl DisplayChannel {
                         if self.image_cache.remove(&id).is_some() {
                             removed += 1;
                         }
+                        if glz_dict.remove(&id).is_some() {
+                            glz_removed += 1;
+                        }
                     }
                     debug!(
-                        "display: inval_list: removed {}/{} entries (cache now {})",
+                        "display: inval_list: removed {}/{} from image_cache, \
+                         {}/{} from glz_dict (cache now {}, glz now {})",
                         removed,
                         count,
-                        self.image_cache.len()
+                        glz_removed,
+                        count,
+                        self.image_cache.len(),
+                        glz_dict.len()
                     );
                 }
             }
 
             display_server::INVAL_ALL_PIXMAPS => {
+                let glz_len = self.glz_dictionary.lock().unwrap().len();
                 debug!(
-                    "display: inval_all_pixmaps: clearing {} cached images",
-                    self.image_cache.len()
+                    "display: inval_all_pixmaps: clearing {} cached images + {} glz entries",
+                    self.image_cache.len(),
+                    glz_len
                 );
                 self.image_cache.clear();
+                self.glz_dictionary.lock().unwrap().clear();
             }
 
             display_server::RESET => {
@@ -1120,11 +1134,32 @@ impl DisplayChannel {
                 Some(ImageType::GlzRgb) | Some(ImageType::ZlibGlzRgb)
             );
             if is_glz {
-                self.glz_dictionary
-                    .lock()
-                    .unwrap()
-                    .insert(img.image_id, img.pixels.clone());
-            } else {
+                // GLZ images are always cached -- they form the shared
+                // dictionary that cross-frame references depend on.
+                let mut dict = self.glz_dictionary.lock().unwrap();
+                dict.insert(img.image_id, img.pixels.clone());
+
+                // Evict images outside the sliding window. The server
+                // only generates cross-frame references to images
+                // within win_head_dist of the current image_id.
+                if img.win_head_dist > 0 {
+                    let oldest_valid = img.image_id.saturating_sub(img.win_head_dist as u64);
+                    let before = dict.len();
+                    dict.retain(|&id, _| id >= oldest_valid);
+                    let evicted = before - dict.len();
+                    if evicted > 0 {
+                        debug!(
+                            "display: glz eviction: removed {} entries older than id {} \
+                             (win_head_dist={}, dict now {})",
+                            evicted,
+                            oldest_valid,
+                            img.win_head_dist,
+                            dict.len()
+                        );
+                    }
+                }
+            } else if (img_desc.flags & IMAGE_FLAGS_CACHE_ME) != 0 {
+                // Only cache non-GLZ images when the server requests it.
                 self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 

@@ -57,17 +57,40 @@ pub struct DecompressedImage {
     pub height: u32,
     pub pixels: Vec<u8>,
     pub image_id: u64,
+    /// GLZ sliding-window distance: images older than
+    /// `image_id - win_head_dist` may be evicted from the
+    /// shared dictionary. Zero for non-GLZ images.
+    pub win_head_dist: u32,
 }
 
 impl DecompressedImage {
-    /// Construct a new [`DecompressedImage`] from its four
-    /// core fields.
+    /// Construct a new [`DecompressedImage`] from its core
+    /// fields. Sets `win_head_dist` to 0 (non-GLZ default).
     pub fn new(width: u32, height: u32, pixels: Vec<u8>, image_id: u64) -> Self {
         Self {
             width,
             height,
             pixels,
             image_id,
+            win_head_dist: 0,
+        }
+    }
+
+    /// Construct a GLZ [`DecompressedImage`] with a
+    /// `win_head_dist` for dictionary eviction.
+    pub fn new_glz(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        image_id: u64,
+        win_head_dist: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+            image_id,
+            win_head_dist,
         }
     }
 }
