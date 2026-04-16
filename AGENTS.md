@@ -265,8 +265,9 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | etherparse | Fake TCP/IP header construction for pcap (optional, `capture` feature) |
 | openh264 | H.264 video encoding for --capture mode (optional, `capture` feature) |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
-| cpal | Cross-platform audio output (ALSA on Linux) |
+| cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
+| rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |
 | image | JPEG decoding (with `jpeg` feature only) |
 | serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
 | zip | Zip file output for bug reports |
