@@ -88,7 +88,7 @@ The following plans contain deferred items addressed here:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Display correctness | PLAN-deferred-debt-phase-01-display.md | Not started |
+| 1. Display correctness | [PLAN-deferred-debt-phase-01-display.md](PLAN-deferred-debt-phase-01-display.md) | Complete |
 | 2. Audio correctness | PLAN-deferred-debt-phase-02-audio.md | Not started |
 | 3. Input and session correctness | PLAN-deferred-debt-phase-03-session.md | Not started |
 | 4. Robustness and safety | PLAN-deferred-debt-phase-04-robustness.md | Not started |

@@ -189,12 +189,18 @@ of decompressed images keyed by `image_id`. Cross-frame references
 use `image_dist` to compute the source image ID. Each GLZ header
 includes a `win_head_dist` field that defines the reference window
 size; after decompressing an image, the display channel evicts all
-cached images whose id falls below `image_id - win_head_dist`. This
-replaced an earlier fixed-size cache that could evict images still
-needed by subsequent frames. In multi-monitor configurations, the
-GLZ dictionary is shared across all display channels via an
-`Arc<Mutex<HashMap>>` so that cross-frame references resolve
-correctly regardless of which display channel produced them.
+cached images whose id falls below `image_id - win_head_dist`. In
+multi-monitor configurations, the GLZ dictionary is shared across
+all display channels via a `GlzDictionary` struct (in the
+`shakenfist-spice-compression` crate) that wraps the image HashMap
+with a `tokio::sync::Notify`. When one channel inserts a decoded
+image, any other channel waiting on a cross-frame reference to
+that image is woken immediately instead of polling. Non-GLZ images
+are only cached when the server sets `IMAGE_FLAGS_CACHE_ME` in the
+image descriptor; GLZ images are always cached since they form the
+cross-frame reference dictionary. Server-initiated invalidation
+(`INVALIDATE_LIST`, `INVAL_ALL_PIXMAPS`) clears both the per-channel
+image cache and the shared GLZ dictionary.
 
 **LZ** — Simpler variant that only references pixels within the
 current image. No cross-frame dependencies.

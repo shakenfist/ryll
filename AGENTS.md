@@ -122,8 +122,9 @@ Ryll uses:
 13. **Multi-monitor via agent infrastructure** - Multiple display channels
     are opened (one per `--monitors N`) and the main channel sends
     `VDAgentMonitorsConfig` to the guest via the VDI port agent protocol.
-    The GLZ dictionary is shared across display channels via
-    `Arc<Mutex<HashMap>>`. Surfaces are keyed by `(display_channel_id,
+    The GLZ dictionary is shared across display channels via a
+    `GlzDictionary` struct (with notify-based cross-frame reference
+    resolution). Surfaces are keyed by `(display_channel_id,
     surface_id)` to prevent cross-channel collisions.
 
 ## Code Organisation
