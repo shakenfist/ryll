@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -216,24 +217,43 @@ impl PlaybackChannel {
         info!("playback: channel started");
         loop {
             let mut chunk = [0u8; 65536];
-            let n = match &mut self.stream {
-                SpiceStream::Plain(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
-                }
-                SpiceStream::Tls(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
+            let stream = &mut self.stream;
+            let read_result = tokio::select! {
+                result = async {
+                    match stream {
+                        SpiceStream::Plain(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                        SpiceStream::Tls(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                    }
+                } => Some(result),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if crate::SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                        info!("playback: shutdown requested");
+                        break;
+                    }
+                    None
                 }
             };
-            if n == 0 {
-                info!("playback: channel disconnected");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Playback))
-                    .await
-                    .ok();
-                break;
-            }
+
+            let n = match read_result {
+                Some(Ok(0)) => {
+                    info!("playback: channel disconnected");
+                    self.event_tx
+                        .send(ChannelEvent::Disconnected(ChannelType::Playback))
+                        .await
+                        .ok();
+                    break;
+                }
+                Some(Ok(n)) => n,
+                Some(Err(e)) => return Err(e.into()),
+                None => continue, // timeout, no data yet
+            };
+
             self.byte_counter.add(n as u64);
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
