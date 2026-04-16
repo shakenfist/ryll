@@ -301,10 +301,8 @@ impl VideoWriter {
                                 frame_data = full[nal_start..end].to_vec();
                             }
                         }
-                        1 => {
-                            if frame_data.is_empty() {
-                                frame_data = full[nal_start..end].to_vec();
-                            }
+                        1 if frame_data.is_empty() => {
+                            frame_data = full[nal_start..end].to_vec();
                         }
                         _ => {}
                     }
