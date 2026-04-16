@@ -1,7 +1,8 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -18,12 +19,10 @@ use super::ChannelEvent;
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
 
-/// Maximum ring buffer size in samples. At 48kHz stereo this is
+/// Maximum ring buffer capacity in samples. At 48kHz stereo this is
 /// ~2 seconds. Prevents unbounded memory growth if audio data
 /// arrives faster than it is consumed.
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
-
-type AudioBuffer = Arc<Mutex<VecDeque<i16>>>;
 
 pub struct VolumeControl {
     volume: AtomicU8,
@@ -62,18 +61,6 @@ impl VolumeControl {
         }
     }
 }
-
-// The cpal::Stream must be held alive for audio output to
-// continue. The struct is stored as _cpal_stream in
-// PlaybackChannel; dropping it stops playback.
-#[allow(dead_code)]
-struct SendStream(cpal::Stream);
-// SAFETY: cpal::Stream is !Send because some platform audio
-// backends have thread-affinity requirements. On Linux (ALSA)
-// the stream is thread-safe in practice. This is a known
-// limitation — see PLAN-pr23-followup.md for the proper fix
-// (dedicated audio thread).
-unsafe impl Send for SendStream {}
 
 struct Resampler {
     ratio: f64,
@@ -126,39 +113,185 @@ impl Resampler {
     }
 }
 
+/// Fill the output buffer with resampled i16 samples.
 fn write_samples_i16(
     data: &mut [i16],
-    buffer: &AudioBuffer,
+    local_buf: &mut VecDeque<i16>,
     vol: &Arc<VolumeControl>,
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
     let ch = resampler.channels;
     let mut frame = vec![0i16; ch];
-    let mut buf = buffer.lock().unwrap();
     for chunk in data.chunks_mut(ch) {
-        resampler.next_frame(&mut buf, &mut frame);
+        resampler.next_frame(local_buf, &mut frame);
         for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
             *out = (s as f32 * v) as i16;
         }
     }
 }
 
+/// Fill the output buffer with resampled f32 samples.
 fn write_samples_f32(
     data: &mut [f32],
-    buffer: &AudioBuffer,
+    local_buf: &mut VecDeque<i16>,
     vol: &Arc<VolumeControl>,
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
     let ch = resampler.channels;
     let mut frame = vec![0i16; ch];
-    let mut buf = buffer.lock().unwrap();
     for chunk in data.chunks_mut(ch) {
-        resampler.next_frame(&mut buf, &mut frame);
+        resampler.next_frame(local_buf, &mut frame);
         for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
             *out = s as f32 / 32768.0 * v;
         }
+    }
+}
+
+/// State for the dedicated audio output thread.
+struct AudioThread {
+    handle: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl AudioThread {
+    /// Spawn a dedicated OS thread that owns the cpal stream.
+    /// Samples are read from `consumer` via a lock-free ring buffer.
+    fn spawn(
+        consumer: rtrb::Consumer<i16>,
+        vol: Arc<VolumeControl>,
+        source_rate: u32,
+        source_channels: u32,
+    ) -> Option<Self> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = shutdown.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("audio".into())
+            .spawn(move || {
+                Self::run_audio(consumer, vol, source_rate, source_channels, shutdown_flag);
+            })
+            .ok()?;
+
+        Some(AudioThread { handle, shutdown })
+    }
+
+    fn run_audio(
+        mut consumer: rtrb::Consumer<i16>,
+        vol: Arc<VolumeControl>,
+        source_rate: u32,
+        source_channels: u32,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                warn!("playback: no audio output device found");
+                return;
+            }
+        };
+        let default_config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("playback: failed to get default output config: {}", e);
+                return;
+            }
+        };
+        info!(
+            "playback: device config: {}Hz, {} ch, {:?}",
+            default_config.sample_rate().0,
+            default_config.channels(),
+            default_config.sample_format()
+        );
+        let config = cpal::StreamConfig {
+            channels: source_channels as u16,
+            sample_rate: default_config.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let device_rate = config.sample_rate.0;
+
+        // Build the callback state. The resampler and local buffer
+        // live in the callback closure -- no mutex needed since the
+        // cpal callback is the sole consumer.
+        let mut resampler = Resampler::new(source_rate, device_rate, source_channels);
+        let mut local_buf: VecDeque<i16> = VecDeque::with_capacity(8192);
+
+        // Drain available samples from the ring buffer into the
+        // local VecDeque so the resampler can use random access.
+        let drain_ring = move |consumer: &mut rtrb::Consumer<i16>, local: &mut VecDeque<i16>| {
+            let available = consumer.slots();
+            if available > 0 {
+                let chunk = consumer.read_chunk(available).unwrap();
+                let (first, second) = chunk.as_slices();
+                local.extend(first.iter().copied());
+                local.extend(second.iter().copied());
+                chunk.commit_all();
+            }
+        };
+
+        let stream = match default_config.sample_format() {
+            cpal::SampleFormat::I16 => {
+                let vol = vol.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        drain_ring(&mut consumer, &mut local_buf);
+                        write_samples_i16(data, &mut local_buf, &vol, &mut resampler);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
+            cpal::SampleFormat::F32 => {
+                let vol = vol.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        drain_ring(&mut consumer, &mut local_buf);
+                        write_samples_f32(data, &mut local_buf, &vol, &mut resampler);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
+            fmt => {
+                warn!("playback: unsupported sample format: {:?}", fmt);
+                return;
+            }
+        };
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("playback: failed to create audio stream: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = stream.play() {
+            warn!("playback: failed to start audio stream: {}", e);
+            return;
+        }
+        info!(
+            "playback: audio output started ({}Hz {} ch)",
+            device_rate, source_channels
+        );
+
+        // Keep the stream alive until shutdown is requested.
+        while !shutdown.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // stream is dropped here, releasing the audio device.
+        info!("playback: audio thread shutting down");
+    }
+
+    /// Signal the audio thread to stop and wait for it to finish.
+    fn stop(self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
     }
 }
 
@@ -177,8 +310,8 @@ pub struct PlaybackChannel {
     audio_mode: u16,
     sample_rate: u32,
     channels: u32,
-    audio_buffer: AudioBuffer,
-    _cpal_stream: Option<SendStream>,
+    audio_producer: Option<rtrb::Producer<i16>>,
+    audio_thread: Option<AudioThread>,
     opus_decoder: Option<opus_decoder::OpusDecoder>,
     volume_control: Arc<VolumeControl>,
 }
@@ -206,8 +339,8 @@ impl PlaybackChannel {
             audio_mode: 0,
             sample_rate: 0,
             channels: 0,
-            audio_buffer: Arc::new(Mutex::new(VecDeque::new())),
-            _cpal_stream: None,
+            audio_producer: None,
+            audio_thread: None,
             opus_decoder: None,
             volume_control,
         }
@@ -259,6 +392,9 @@ impl PlaybackChannel {
             self.bytes_in += n as u64;
             self.process_messages().await?;
         }
+
+        // Clean shutdown: stop the audio thread.
+        self.stop_audio();
         Ok(())
     }
 
@@ -360,43 +496,16 @@ impl PlaybackChannel {
                     if payload.len() > 4 {
                         let audio_data = &payload[4..];
                         if self.audio_mode == AUDIO_DATA_MODE_RAW {
-                            let mut buf = self.audio_buffer.lock().unwrap();
-                            for chunk in audio_data.chunks_exact(2) {
-                                buf.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
-                            }
-                            // Cap the buffer to prevent unbounded growth
-                            // if audio arrives faster than it is consumed.
-                            while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                                buf.pop_front();
-                            }
+                            self.push_samples_raw(audio_data);
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
-                            if let Some(ref mut decoder) = self.opus_decoder {
-                                let ch = self.channels as usize;
-                                let mut pcm =
-                                    vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
-                                match decoder.decode(audio_data, &mut pcm, false) {
-                                    Ok(samples) => {
-                                        let mut buf = self.audio_buffer.lock().unwrap();
-                                        for &s in &pcm[..samples * ch] {
-                                            buf.push_back(s);
-                                        }
-                                        while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                                            buf.pop_front();
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("playback: Opus decode error: {}", e);
-                                    }
-                                }
-                            }
+                            self.push_samples_opus(audio_data);
                         }
                     }
                 }
                 playback_server::STOP => {
                     info!("playback: STOP");
-                    self._cpal_stream = None;
+                    self.stop_audio();
                     self.opus_decoder = None;
-                    self.audio_buffer.lock().unwrap().clear();
                 }
                 playback_server::VOLUME | playback_server::MUTE | playback_server::LATENCY => {
                     debug!("playback: received opcode {} (ignored)", msg_type);
@@ -415,99 +524,67 @@ impl PlaybackChannel {
         Ok(())
     }
 
-    fn start_audio_output(&mut self) {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
-        let host = cpal::default_host();
-        let device = match host.default_output_device() {
-            Some(d) => d,
-            None => {
-                warn!("playback: no audio output device found");
-                return;
+    /// Push raw PCM samples into the ring buffer.
+    fn push_samples_raw(&mut self, audio_data: &[u8]) {
+        if let Some(ref mut producer) = self.audio_producer {
+            for chunk in audio_data.chunks_exact(2) {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                // Drop samples if the ring buffer is full (back-pressure).
+                let _ = producer.push(sample);
             }
-        };
-        let default_config = match device.default_output_config() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("playback: failed to get default output config: {}", e);
-                return;
-            }
-        };
-        info!(
-            "playback: device config: {}Hz, {} ch, {:?}",
-            default_config.sample_rate().0,
-            default_config.channels(),
-            default_config.sample_format()
-        );
-        // Use the source channel count (from the SPICE START message)
-        // rather than the device default. Most devices support stereo
-        // even if they default to a higher channel count. If the
-        // device does not support the requested count, cpal will
-        // return an error from build_output_stream.
-        let config = cpal::StreamConfig {
-            channels: self.channels as u16,
-            sample_rate: default_config.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
-        };
-        let device_rate = config.sample_rate.0;
-        let buffer = self.audio_buffer.clone();
-        let vol = self.volume_control.clone();
-        let resampler = Arc::new(Mutex::new(Resampler::new(
-            self.sample_rate,
-            device_rate,
-            self.channels,
-        )));
-
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::I16 => {
-                let buffer = buffer.clone();
-                let vol = vol.clone();
-                let resampler = resampler.clone();
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                        let mut rs = resampler.lock().unwrap();
-                        write_samples_i16(data, &buffer, &vol, &mut rs);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
-            cpal::SampleFormat::F32 => {
-                let buffer = buffer.clone();
-                let vol = vol.clone();
-                let resampler = resampler.clone();
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        let mut rs = resampler.lock().unwrap();
-                        write_samples_f32(data, &buffer, &vol, &mut rs);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
-            fmt => {
-                warn!("playback: unsupported sample format: {:?}", fmt);
-                return;
-            }
-        };
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("playback: failed to create audio stream: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = stream.play() {
-            warn!("playback: failed to start audio stream: {}", e);
-            return;
         }
-        info!(
-            "playback: audio output started ({}Hz {} ch)",
-            device_rate, self.channels
-        );
-        self._cpal_stream = Some(SendStream(stream));
+    }
+
+    /// Decode Opus audio and push PCM samples into the ring buffer.
+    fn push_samples_opus(&mut self, audio_data: &[u8]) {
+        if let Some(ref mut decoder) = self.opus_decoder {
+            let ch = self.channels as usize;
+            let mut pcm = vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
+            match decoder.decode(audio_data, &mut pcm, false) {
+                Ok(samples) => {
+                    if let Some(ref mut producer) = self.audio_producer {
+                        for &s in &pcm[..samples * ch] {
+                            let _ = producer.push(s);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("playback: Opus decode error: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Create the ring buffer and spawn the audio thread.
+    fn start_audio_output(&mut self) {
+        // Stop any existing audio thread first.
+        self.stop_audio();
+
+        let (producer, consumer) = rtrb::RingBuffer::new(MAX_AUDIO_BUFFER_SAMPLES);
+        self.audio_producer = Some(producer);
+
+        match AudioThread::spawn(
+            consumer,
+            self.volume_control.clone(),
+            self.sample_rate,
+            self.channels,
+        ) {
+            Some(thread) => {
+                self.audio_thread = Some(thread);
+            }
+            None => {
+                warn!("playback: failed to spawn audio thread");
+                self.audio_producer = None;
+            }
+        }
+    }
+
+    /// Stop the audio thread and drop the producer.
+    fn stop_audio(&mut self) {
+        self.audio_producer = None;
+        if let Some(thread) = self.audio_thread.take() {
+            thread.stop();
+        }
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {

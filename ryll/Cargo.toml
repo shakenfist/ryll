@@ -33,11 +33,12 @@ rsa = "0.9"
 sha1 = "0.10"
 rand = "0.8"
 
-# Audio playback. The unsafe impl Send on cpal::Stream is only
-# correct on Linux/ALSA. See PLAN-pr23-followup.md for the plan
-# to make audio properly cross-platform or Linux-only.
+# Audio playback. A dedicated audio thread owns the cpal stream
+# so it never needs to be Send. The rtrb ring buffer provides
+# lock-free sample transfer from the tokio network task.
 cpal = "0.15"
 opus-decoder = "0.1"
+rtrb = "0.3"
 
 # Logging
 tracing = "0.1"
