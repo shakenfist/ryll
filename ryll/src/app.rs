@@ -604,14 +604,8 @@ impl RyllApp {
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
-                    self.connected = false;
-                    if !self.show_disconnect_dialog {
-                        self.show_disconnect_dialog = true;
-                        self.disconnect_reason = Some(format!(
-                            "Connection lost ({} channel disconnected)",
-                            channel.name()
-                        ));
-                    }
+
+                    // Channel-specific cleanup
                     if channel == ChannelType::Usbredir {
                         self.usb_channel_ready = false;
                         self.usb_device_description = None;
@@ -623,6 +617,29 @@ impl RyllApp {
                         self.webdav_shared_dir = None;
                         self.webdav_sharing_active = false;
                         self.webdav_connected_at = None;
+                    }
+
+                    // Only show disconnect dialog for critical channels.
+                    // Non-critical channels (USB, WebDAV, Cursor, Playback)
+                    // have independent lifecycles and their disconnect does
+                    // not mean the session is over.
+                    match channel {
+                        ChannelType::Main | ChannelType::Display | ChannelType::Inputs => {
+                            self.connected = false;
+                            if !self.show_disconnect_dialog {
+                                self.show_disconnect_dialog = true;
+                                self.disconnect_reason = Some(format!(
+                                    "Connection lost ({} channel disconnected)",
+                                    channel.name()
+                                ));
+                            }
+                        }
+                        _ => {
+                            debug!(
+                                "app: non-critical channel {} disconnected, session continues",
+                                channel.name()
+                            );
+                        }
                     }
                 }
 
