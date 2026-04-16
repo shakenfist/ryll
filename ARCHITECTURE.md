@@ -90,9 +90,14 @@ communication between tasks.
   to the UI thread
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
   inputs channel handler. The channel is bounded (256 slots). The consumer
-  coalesces consecutive MouseMove events into a single position update to
-  prevent the channel from filling during network stalls, which would cause
-  the producer's `try_send` to silently drop critical button events
+  coalesces consecutive MouseMove events into a single position update (or
+  accumulates MouseMotion deltas) to prevent the channel from filling
+  during network stalls, which would cause the producer's `try_send` to
+  silently drop critical button events. Mouse events are dispatched based
+  on the server's mouse mode: client mode (2) sends absolute
+  MOUSE_POSITION, server mode (1) sends relative MOUSE_MOTION. At session
+  startup, ryll requests client mode via MOUSE_MODE_REQUEST if the server
+  supports it
 
 ### TCP Keepalive
 
@@ -137,7 +142,7 @@ All SPICE messages use a 6-byte mini-header:
 |---------|---------|------------------|
 | Main (1) | Session control | init, channels_list, ping/pong |
 | Display (2) | Graphics | surface_create, draw_copy, mark |
-| Inputs (3) | User input | key_down, key_up, mouse_position |
+| Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
 | Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 | WebDAV (11) | Folder sharing | vmc_data, vmc_compressed_data (SpiceVMC transport) |
