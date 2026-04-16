@@ -14,7 +14,9 @@ use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, ChannelsList, MainInit, MessageHeader, Notify, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{main_client, main_server, ChannelType, NotifySeverity};
+use shakenfist_spice_protocol::{
+    main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
+};
 
 use super::ChannelEvent;
 
@@ -289,6 +291,39 @@ impl MainChannel {
                     .send(ChannelEvent::MouseMode(init.current_mouse_mode))
                     .await
                     .ok();
+
+                // Request client mouse mode (absolute positioning) if
+                // the server supports it. Client mode allows absolute
+                // MOUSE_POSITION messages; without it the server
+                // expects relative MOUSE_MOTION which ryll does not
+                // yet implement.
+                if init.supported_mouse_modes & MOUSE_MODE_CLIENT != 0
+                    && init.current_mouse_mode != MOUSE_MODE_CLIENT
+                {
+                    info!("main: requesting client mouse mode");
+                    let mut mode_payload = Vec::new();
+                    mode_payload
+                        .write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)
+                        .unwrap();
+                    let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
+                    self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
+                        .await?;
+                }
+            }
+
+            main_server::MOUSE_MODE => {
+                // Server notifies us of a mouse mode change (may be
+                // in response to our MOUSE_MODE_REQUEST).
+                if payload.len() >= 4 {
+                    let mode = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let mode_name = match mode {
+                        1 => "server (relative)",
+                        2 => "client (absolute)",
+                        _ => "unknown",
+                    };
+                    info!("main: mouse mode changed to {} ({})", mode, mode_name);
+                    self.event_tx.send(ChannelEvent::MouseMode(mode)).await.ok();
+                }
             }
 
             main_server::CHANNELS_LIST => {
