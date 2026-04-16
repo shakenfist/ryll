@@ -273,6 +273,18 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                let mode_name = match init.current_mouse_mode {
+                    1 => "server (relative)",
+                    2 => "client (absolute)",
+                    other => {
+                        warn!("main: unknown mouse mode {}", other);
+                        "unknown"
+                    }
+                };
+                info!(
+                    "main: mouse mode={} ({}), supported_modes={}",
+                    init.current_mouse_mode, mode_name, init.supported_mouse_modes
+                );
                 self.event_tx
                     .send(ChannelEvent::MouseMode(init.current_mouse_mode))
                     .await
