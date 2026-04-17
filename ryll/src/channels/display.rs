@@ -30,7 +30,7 @@ use super::ChannelEvent;
 
 const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 
-fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
+pub(crate) fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
     let mut dht = Vec::new();
     let mut i = 0;
     while i + 3 < jpeg.len() {
@@ -59,7 +59,7 @@ fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
     dht
 }
 
-fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
+pub(crate) fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(jpeg.len() + dht.len());
     let mut i = 0;
     // SOI marker
@@ -81,7 +81,7 @@ fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
     out
 }
 
-fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = jpeg_decoder::Decoder::new(data);
     let pixels = match decoder.decode() {
         Ok(p) => p,
@@ -1209,5 +1209,174 @@ impl DisplayChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // extract_dht_segments tests
+    // -------------------------------------------------------------------------
+
+    /// Build a minimal JPEG byte sequence:
+    ///   SOI (FF D8) + one segment (marker + 2-byte BE length + payload) + EOI (FF D9)
+    ///
+    /// `length` in the JPEG encoding is `payload.len() + 2` (includes the 2 length bytes).
+    fn make_jpeg_with_marker(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let seg_len = (payload.len() + 2) as u16;
+        let mut jpeg = vec![0xFF, 0xD8]; // SOI
+        jpeg.push(0xFF);
+        jpeg.push(marker);
+        jpeg.extend_from_slice(&seg_len.to_be_bytes());
+        jpeg.extend_from_slice(payload);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpeg
+    }
+
+    #[test]
+    fn extract_dht_segments_finds_dht_marker() {
+        // Build a JPEG with a DHT segment (marker 0xC4).
+        let payload = vec![0x01, 0x02, 0x03, 0x04];
+        let jpeg = make_jpeg_with_marker(0xC4, &payload);
+
+        let dht = extract_dht_segments(&jpeg);
+
+        // The returned data should start with the FF C4 marker.
+        assert!(!dht.is_empty(), "expected non-empty DHT output");
+        assert_eq!(dht[0], 0xFF);
+        assert_eq!(dht[1], 0xC4);
+        // Length field (big-endian) = payload.len() + 2
+        let encoded_len = u16::from_be_bytes([dht[2], dht[3]]) as usize;
+        assert_eq!(encoded_len, payload.len() + 2);
+        // Payload bytes are present.
+        assert_eq!(&dht[4..], payload.as_slice());
+    }
+
+    #[test]
+    fn extract_dht_segments_no_dht_returns_empty() {
+        // Build a JPEG with a comment segment (0xFE) — not a DHT.
+        let jpeg = make_jpeg_with_marker(0xFE, b"hello");
+        let dht = extract_dht_segments(&jpeg);
+        assert!(dht.is_empty(), "expected empty Vec when no DHT present");
+    }
+
+    #[test]
+    fn extract_dht_segments_empty_input_returns_empty() {
+        let dht = extract_dht_segments(&[]);
+        assert!(dht.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // inject_dht tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn inject_dht_inserts_after_soi_when_no_app_markers() {
+        // Plain JPEG: SOI + some non-APP data + EOI
+        let jpeg = vec![0xFF, 0xD8, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9];
+        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // Output should start with SOI.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+        // Immediately followed by the injected DHT.
+        assert_eq!(&out[2..2 + dht.len()], dht.as_slice());
+        // Then the remaining data (everything after SOI in the original).
+        assert_eq!(&out[2 + dht.len()..], &jpeg[2..]);
+    }
+
+    #[test]
+    fn inject_dht_inserts_after_app0_segment() {
+        // Build a JPEG: SOI + APP0 (0xE0) segment + remaining data.
+        let app0_payload = vec![0x4A, 0x46, 0x49, 0x46, 0x00]; // "JFIF\0"
+        let app0_seg_len = (app0_payload.len() + 2) as u16;
+        let mut jpeg = vec![0xFF, 0xD8]; // SOI
+        jpeg.push(0xFF);
+        jpeg.push(0xE0); // APP0
+        jpeg.extend_from_slice(&app0_seg_len.to_be_bytes());
+        jpeg.extend_from_slice(&app0_payload);
+        // Some remaining data
+        jpeg.extend_from_slice(&[0xDE, 0xAD]);
+
+        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // Output should start with SOI.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+
+        // Next: APP0 segment (marker + length bytes + payload).
+        let app0_total = 2 + 2 + app0_payload.len(); // FF E0 + len_bytes + payload
+        let app0_in_out = &out[2..2 + app0_total];
+        assert_eq!(app0_in_out[0], 0xFF);
+        assert_eq!(app0_in_out[1], 0xE0);
+
+        // After APP0: injected DHT.
+        let dht_start = 2 + app0_total;
+        assert_eq!(&out[dht_start..dht_start + dht.len()], dht.as_slice());
+
+        // After DHT: the remaining bytes from the original JPEG.
+        let remaining_start = dht_start + dht.len();
+        assert_eq!(&out[remaining_start..], &[0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn inject_dht_output_structure_soi_app_dht_rest() {
+        // Quick structural check: SOI, then optional APP markers, then DHT, then rest.
+        let jpeg = vec![0xFF, 0xD8, 0x01, 0x02, 0x03];
+        let dht = vec![0xFF, 0xC4, 0x00, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // SOI must be first.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+        // DHT must appear before the original trailing bytes.
+        let dht_pos = out.windows(dht.len()).position(|w| w == dht.as_slice());
+        assert!(dht_pos.is_some(), "DHT not found in output");
+        let dht_end = dht_pos.unwrap() + dht.len();
+        // The remaining original data (after SOI) should follow the DHT.
+        assert_eq!(&out[dht_end..], &jpeg[2..]);
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_mjpeg_frame tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn decode_mjpeg_frame_valid_jpeg_returns_rgba() {
+        use image::{DynamicImage, RgbImage};
+        use std::io::Cursor;
+
+        // Create a tiny 2×2 solid-red image and encode it as JPEG.
+        let rgb = RgbImage::from_fn(2, 2, |_x, _y| image::Rgb([255u8, 0, 0]));
+        let img = DynamicImage::ImageRgb8(rgb);
+        let mut jpeg_data = Vec::new();
+        img.write_to(&mut Cursor::new(&mut jpeg_data), image::ImageFormat::Jpeg)
+            .expect("failed to encode test JPEG");
+
+        let result = decode_mjpeg_frame(&jpeg_data);
+        assert!(result.is_some(), "expected Some for valid JPEG");
+
+        let (rgba, w, h) = result.unwrap();
+        assert_eq!(w, 2, "width should be 2");
+        assert_eq!(h, 2, "height should be 2");
+        // RGBA: 4 bytes per pixel.
+        assert_eq!(rgba.len(), 2 * 2 * 4, "expected 16 bytes of RGBA data");
+    }
+
+    #[test]
+    fn decode_mjpeg_frame_empty_input_returns_none() {
+        let result = decode_mjpeg_frame(&[]);
+        assert!(result.is_none(), "expected None for empty input");
+    }
+
+    #[test]
+    fn decode_mjpeg_frame_truncated_input_returns_none() {
+        // A few bytes that look like a JPEG start but are truncated.
+        let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        assert!(result.is_none(), "expected None for truncated JPEG");
     }
 }
