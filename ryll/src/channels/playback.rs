@@ -487,12 +487,16 @@ impl PlaybackChannel {
                     }
                 }
                 playback_server::MODE => {
+                    // SpiceMsgPlaybackMode: time(u32) + mode(u16).
+                    // Skip the 4-byte multimedia timestamp.
                     if payload.len() >= 6 {
                         self.audio_mode = u16::from_le_bytes([payload[4], payload[5]]);
                         info!("playback: MODE: {}", self.audio_mode);
                     }
                 }
                 playback_server::DATA => {
+                    // SpiceMsgPlaybackPacket: time(u32) + data.
+                    // Skip the 4-byte multimedia timestamp.
                     if payload.len() > 4 {
                         let audio_data = &payload[4..];
                         if self.audio_mode == AUDIO_DATA_MODE_RAW {

@@ -10,6 +10,7 @@ pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
+pub use playback::{PlaybackChannel, VolumeControl};
 pub use usbredir::UsbredirChannel;
 pub use webdav::WebdavChannel;
 

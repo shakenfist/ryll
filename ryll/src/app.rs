@@ -17,7 +17,8 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, UsbCommand, UsbredirChannel, WebdavChannel, WebdavCommand,
+    MainChannel, PlaybackChannel, UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel,
+    WebdavCommand,
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
@@ -127,7 +128,7 @@ pub struct RyllApp {
     input_tx: Option<mpsc::Sender<InputEvent>>,
     resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
     last_sent_resize: Option<(u32, u32)>,
-    volume_control: Arc<crate::channels::playback::VolumeControl>,
+    volume_control: Arc<VolumeControl>,
 
     // Display state
     surfaces: HashMap<(u8, u32), DisplaySurface>,
@@ -259,7 +260,7 @@ impl RyllApp {
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
         let (resize_tx, resize_rx) = mpsc::channel(32);
         let resize_tx = Arc::new(resize_tx);
-        let volume_control = crate::channels::playback::VolumeControl::new();
+        let volume_control = VolumeControl::new();
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -2038,7 +2039,7 @@ async fn run_connection(
     snapshots: ChannelSnapshots,
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
-    volume_control: Arc<crate::channels::playback::VolumeControl>,
+    volume_control: Arc<VolumeControl>,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2213,7 +2214,7 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = crate::channels::playback::PlaybackChannel::new(
+                let mut channel = PlaybackChannel::new(
                     stream,
                     event_tx.clone(),
                     byte_counter.clone(),
@@ -2296,7 +2297,7 @@ pub async fn run_headless(
             snapshots,
             monitors,
             resize_rx,
-            crate::channels::playback::VolumeControl::new(),
+            VolumeControl::new(),
         )
         .await
     });
