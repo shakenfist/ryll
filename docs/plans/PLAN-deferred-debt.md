@@ -94,7 +94,7 @@ The following plans contain deferred items addressed here:
 | 4. Robustness and safety | [PLAN-deferred-debt-phase-04-robustness.md](PLAN-deferred-debt-phase-04-robustness.md) | Complete |
 | 5. Code quality and cleanup | [PLAN-deferred-debt-phase-05-cleanup.md](PLAN-deferred-debt-phase-05-cleanup.md) | Complete |
 | 6. Test coverage | [PLAN-deferred-debt-phase-06-tests.md](PLAN-deferred-debt-phase-06-tests.md) | Complete |
-| 7. Documentation | PLAN-deferred-debt-phase-07-docs.md | Not started |
+| 7. Documentation | (inline — README.md, ARCHITECTURE.md) | Complete |
 
 ### Phase 1: Display correctness
 

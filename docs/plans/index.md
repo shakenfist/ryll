@@ -38,4 +38,4 @@ a single execution sequence.
 
 | Date | Plan | Intent | Status | Phases |
 |------|------|--------|--------|--------|
-| 2026-04-16 | [Deferred debt](PLAN-deferred-debt.md) | Pay down correctness bugs, robustness gaps, code quality, tests, and docs across all completed plans | Not started | [1. Display](PLAN-deferred-debt-phase-01-display.md), [2. Audio](PLAN-deferred-debt-phase-02-audio.md), [3. Session](PLAN-deferred-debt-phase-03-session.md), [4. Robustness](PLAN-deferred-debt-phase-04-robustness.md), [5. Cleanup](PLAN-deferred-debt-phase-05-cleanup.md), [6. Tests](PLAN-deferred-debt-phase-06-tests.md), [7. Docs](PLAN-deferred-debt-phase-07-docs.md) |
+| 2026-04-16 | [Deferred debt](PLAN-deferred-debt.md) | Pay down correctness bugs, robustness gaps, code quality, tests, and docs across all completed plans | Complete | [1. Display](PLAN-deferred-debt-phase-01-display.md), [2. Audio](PLAN-deferred-debt-phase-02-audio.md), [3. Session](PLAN-deferred-debt-phase-03-session.md), [4. Robustness](PLAN-deferred-debt-phase-04-robustness.md), [5. Cleanup](PLAN-deferred-debt-phase-05-cleanup.md), [6. Tests](PLAN-deferred-debt-phase-06-tests.md), 7. Docs (inline) |
