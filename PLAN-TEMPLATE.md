@@ -146,6 +146,14 @@ that require holding many files in context simultaneously
 may need opus for that reason alone, even if the
 reasoning itself is straightforward.
 
+**When in doubt, skew to the more capable model.**
+Saving money only matters if the outcome is still
+acceptable. A failed or low-quality implementation
+wastes more time (and therefore more money) than using
+a heavier model would have cost. Only recommend a
+lighter model when you are confident the brief is
+detailed enough for it to succeed.
+
 **Brief for sub-agent:** This is the key field. Write it
 as if briefing a colleague who has never seen the
 codebase. Include: what to change, which files to touch,
