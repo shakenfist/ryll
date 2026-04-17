@@ -112,11 +112,46 @@ Each phase plan should include a table like this:
 - **low** — Purely mechanical changes (rename, reformat,
   add a log line). The brief is a complete instruction.
 
+**Model choice:** The planner should recommend which
+model is best suited for each step. This is a judgment
+call, not a rigid rule — the right model depends on what
+the step requires, not on whether it's "planning" or
+"implementation".
+
+- **opus** — Best for steps that require deep reasoning,
+  cross-file architectural understanding, subtle
+  correctness judgment, or complex protocol research.
+  Also appropriate for intricate implementation where
+  getting it wrong would be costly to debug.
+- **sonnet** — Good default for well-briefed
+  implementation work. Faster and cheaper than opus.
+  Works well when the plan front-loads the research
+  and the brief is detailed enough that the agent
+  doesn't need to make broad judgment calls.
+- **haiku** — Suitable for purely mechanical tasks:
+  search-and-replace, adding log lines, running
+  commands. The brief must be a near-complete
+  instruction.
+
+The model choice interacts with effort level and brief
+quality. A detailed brief compensates for a lighter
+model — sonnet at medium effort with a thorough brief
+often matches opus at medium effort with a vague brief.
+The planner's job is to write briefs good enough that
+the recommended model can succeed.
+
+Note: the model also determines the context window
+(opus has 1M tokens, sonnet and haiku have 200K). Steps
+that require holding many files in context simultaneously
+may need opus for that reason alone, even if the
+reasoning itself is straightforward.
+
 **Brief for sub-agent:** This is the key field. Write it
 as if briefing a colleague who has never seen the
 codebase. Include: what to change, which files to touch,
 what patterns to follow, and any non-obvious constraints.
-The better the brief, the lower the effort level needed.
+The better the brief, the lower the effort level needed
+and the lighter the model that can succeed.
 
 A good brief front-loads the research the planner already
 did, so the implementing agent doesn't repeat it. For

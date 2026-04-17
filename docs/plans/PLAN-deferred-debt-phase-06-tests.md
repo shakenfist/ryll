@@ -32,11 +32,11 @@ to repeat the research.
 
 | Step | Effort | Model | Isolation | Brief summary |
 |------|--------|-------|-----------|---------------|
-| 6a | high | any | none | Requires understanding QUIC codec well enough to produce or locate valid test vectors |
-| 6b | medium | any | none | JPEG format is well-known; test construction is mechanical. Functions must be made pub(crate) first. |
-| 6c | medium | any | none | Protocol structs have pub read() methods; construct byte arrays matching the wire format |
-| 6d | medium | any | none | VolumeControl is trivial; Resampler must be made pub(crate) first, then test with known input/output |
-| 6e | medium | any | none | key_to_scancode is pub and pure; test a representative sample of the 50+ key mappings |
+| 6a | high | opus | none | Requires understanding the 1500-line QUIC codec to construct meaningful error-case tests; the file is too large for sonnet's 200K context alongside the brief |
+| 6b | medium | sonnet | none | JPEG format is well-known; test construction is mechanical. Functions must be made pub(crate) first. Brief provides all needed context. |
+| 6c | medium | sonnet | none | Protocol structs have pub read() methods; construct byte arrays matching the wire format. Brief specifies exact byte layouts. |
+| 6d | medium | sonnet | none | VolumeControl is trivial; Resampler must be made pub(crate) first, then test with known input/output. Brief explains the API. |
+| 6e | medium | sonnet | none | key_to_scancode is pub and pure; test a representative sample of the 50+ key mappings. Brief lists expected scancodes. |
 
 ## 6a. QUIC decoder tests
 
