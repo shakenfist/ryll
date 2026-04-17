@@ -10,6 +10,7 @@ pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
+pub use playback::{PlaybackChannel, VolumeControl};
 pub use usbredir::UsbredirChannel;
 pub use webdav::WebdavChannel;
 
@@ -75,11 +76,6 @@ pub enum ChannelEvent {
         height: u32,
     },
 
-    #[allow(dead_code)]
-    ClipboardReceived {
-        text: String,
-    },
-
     /// Statistics update (reserved for future use)
     #[allow(dead_code)]
     Statistics {
@@ -141,8 +137,11 @@ pub enum InputEvent {
     /// Key released
     KeyUp(u32), // Scancode
 
-    /// Mouse moved
+    /// Mouse moved (absolute position, client mode)
     MouseMove { x: u32, y: u32 },
+
+    /// Mouse moved (relative delta, server mode)
+    MouseMotion { dx: i32, dy: i32 },
 
     /// Mouse button pressed
     MouseDown { button: u32, x: u32, y: u32 },

@@ -14,8 +14,8 @@ use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MousePosition, Ping,
-    SetAck,
+    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
+    MousePosition, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
 
@@ -165,6 +165,26 @@ impl InputsChannel {
                             // Send only the final position from the run.
                             self.handle_input_event(batch[last_move].clone()).await?;
                             i = last_move + 1;
+                        } else if matches!(batch[i], InputEvent::MouseMotion { .. }) {
+                            // Accumulate consecutive relative motions into one.
+                            let mut total_dx = 0i32;
+                            let mut total_dy = 0i32;
+                            let mut last_motion = i;
+                            while last_motion < batch.len() {
+                                if let InputEvent::MouseMotion { dx, dy } = batch[last_motion] {
+                                    total_dx += dx;
+                                    total_dy += dy;
+                                    last_motion += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                            self.handle_input_event(InputEvent::MouseMotion {
+                                dx: total_dx,
+                                dy: total_dy,
+                            })
+                            .await?;
+                            i = last_motion;
                         } else {
                             self.handle_input_event(batch[i].clone()).await?;
                             i += 1;
@@ -341,7 +361,7 @@ impl InputsChannel {
                 KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
-                info!("inputs: key down: scancode={:#x}", scancode);
+                debug!("inputs: key down: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
             }
 
@@ -359,7 +379,7 @@ impl InputsChannel {
                 KeyEvent { scancode }.write(&mut payload)?;
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
-                info!("inputs: key up: scancode={:#x}", scancode);
+                debug!("inputs: key up: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_UP, &msg).await?;
             }
 
@@ -385,6 +405,32 @@ impl InputsChannel {
                     .write(&mut payload)?;
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
+                        .await?;
+                    self.motion_count += 1;
+                }
+            }
+
+            InputEvent::MouseMotion { dx, dy } => {
+                // Server mouse mode: send relative deltas.
+                if self.motion_count < MOTION_ACK_BUNCH * 2 {
+                    self.record_event(InputEventRecord {
+                        event_type: "MouseMotion".to_string(),
+                        scancode: 0,
+                        x: dx as u32,
+                        y: dy as u32,
+                        button_mask: self.button_state,
+                        timestamp_secs: ts,
+                    });
+
+                    let mut payload = Vec::new();
+                    MouseMotion {
+                        dx,
+                        dy,
+                        buttons: self.button_state as u16,
+                    }
+                    .write(&mut payload)?;
+                    let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
+                    self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
                     self.motion_count += 1;
                 }
@@ -663,5 +709,74 @@ pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
         egui::PointerButton::Middle => shakenfist_spice_protocol::mouse_buttons::MIDDLE,
         egui::PointerButton::Extra1 => shakenfist_spice_protocol::mouse_buttons::UP,
         egui::PointerButton::Extra2 => shakenfist_spice_protocol::mouse_buttons::DOWN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_to_scancode;
+    use eframe::egui;
+
+    // make_scancode logic for reference:
+    //   normal key:   press = base,            release = base | 0x80
+    //   extended key: press = (base & 0xFF) << 8 | 0xE0,
+    //                 release = ((base | 0x80) & 0xFF) << 8 | 0xE0
+
+    #[test]
+    fn test_key_a_letter() {
+        // Key::A → base 0x1E (normal key)
+        let result = key_to_scancode(egui::Key::A);
+        assert_eq!(result, Some((0x1E, 0x9E)));
+    }
+
+    #[test]
+    fn test_key_num0_digit() {
+        // Key::Num0 → base 0x0B (normal key)
+        let result = key_to_scancode(egui::Key::Num0);
+        assert_eq!(result, Some((0x0B, 0x8B)));
+    }
+
+    #[test]
+    fn test_key_f1_function() {
+        // Key::F1 → base 0x3B (normal key)
+        let result = key_to_scancode(egui::Key::F1);
+        assert_eq!(result, Some((0x3B, 0xBB)));
+    }
+
+    #[test]
+    fn test_key_arrow_up_extended() {
+        // Key::ArrowUp → base 0x148 (extended, E0-prefixed)
+        // press:   (0x48 << 8) | 0xE0 = 0x48E0
+        // release: (0xC8 << 8) | 0xE0 = 0xC8E0
+        let result = key_to_scancode(egui::Key::ArrowUp);
+        assert_eq!(result, Some((0x48E0, 0xC8E0)));
+    }
+
+    #[test]
+    fn test_key_space() {
+        // Key::Space → base 0x39 (normal key)
+        let result = key_to_scancode(egui::Key::Space);
+        assert_eq!(result, Some((0x39, 0xB9)));
+    }
+
+    #[test]
+    fn test_key_enter() {
+        // Key::Enter → base 0x1C (normal key)
+        let result = key_to_scancode(egui::Key::Enter);
+        assert_eq!(result, Some((0x1C, 0x9C)));
+    }
+
+    #[test]
+    fn test_key_escape() {
+        // Key::Escape → base 0x01 (normal key)
+        let result = key_to_scancode(egui::Key::Escape);
+        assert_eq!(result, Some((0x01, 0x81)));
+    }
+
+    #[test]
+    fn test_unmapped_key_returns_none() {
+        // Key::F13 is not in SCANCODE_MAP (only F1–F12 are mapped)
+        let result = key_to_scancode(egui::Key::F13);
+        assert_eq!(result, None);
     }
 }

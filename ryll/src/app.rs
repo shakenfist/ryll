@@ -17,12 +17,13 @@ use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, UsbCommand, UsbredirChannel, WebdavChannel, WebdavCommand,
+    MainChannel, PlaybackChannel, UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel,
+    WebdavCommand,
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
+use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient, MOUSE_MODE_SERVER};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -127,7 +128,7 @@ pub struct RyllApp {
     input_tx: Option<mpsc::Sender<InputEvent>>,
     resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
     last_sent_resize: Option<(u32, u32)>,
-    volume_control: Arc<crate::channels::playback::VolumeControl>,
+    volume_control: Arc<VolumeControl>,
 
     // Display state
     surfaces: HashMap<(u8, u32), DisplaySurface>,
@@ -259,7 +260,7 @@ impl RyllApp {
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
         let (resize_tx, resize_rx) = mpsc::channel(32);
         let resize_tx = Arc::new(resize_tx);
-        let volume_control = crate::channels::playback::VolumeControl::new();
+        let volume_control = VolumeControl::new();
 
         // Shared byte counter for bandwidth tracking
         let byte_counter = Arc::new(ByteCounter::new());
@@ -496,13 +497,13 @@ impl RyllApp {
                 }
 
                 ChannelEvent::CursorPosition { x, y, visible } => {
-                    info!("app: cursor position: ({},{}) visible={}", x, y, visible);
+                    debug!("app: cursor position: ({},{}) visible={}", x, y, visible);
                     self.cursor_pos = (x, y);
                     self.cursor_visible = visible;
                 }
 
                 ChannelEvent::CursorShape(img) => {
-                    info!(
+                    debug!(
                         "app: cursor shape: {}x{}, hot=({},{})",
                         img.width, img.height, img.hot_spot_x, img.hot_spot_y
                     );
@@ -521,14 +522,6 @@ impl RyllApp {
 
                 ChannelEvent::MonitorsConfig { width, height } => {
                     debug!("app: requested monitors config {}x{}", width, height);
-                }
-
-                ChannelEvent::ClipboardReceived { text } => {
-                    info!("app: clipboard from guest ({} bytes)", text.len());
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                        Ok(()) => {}
-                        Err(e) => debug!("app: failed to set host clipboard: {}", e),
-                    }
                 }
 
                 ChannelEvent::Statistics {
@@ -604,14 +597,8 @@ impl RyllApp {
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
-                    self.connected = false;
-                    if !self.show_disconnect_dialog {
-                        self.show_disconnect_dialog = true;
-                        self.disconnect_reason = Some(format!(
-                            "Connection lost ({} channel disconnected)",
-                            channel.name()
-                        ));
-                    }
+
+                    // Channel-specific cleanup
                     if channel == ChannelType::Usbredir {
                         self.usb_channel_ready = false;
                         self.usb_device_description = None;
@@ -623,6 +610,29 @@ impl RyllApp {
                         self.webdav_shared_dir = None;
                         self.webdav_sharing_active = false;
                         self.webdav_connected_at = None;
+                    }
+
+                    // Only show disconnect dialog for critical channels.
+                    // Non-critical channels (USB, WebDAV, Cursor, Playback)
+                    // have independent lifecycles and their disconnect does
+                    // not mean the session is over.
+                    match channel {
+                        ChannelType::Main | ChannelType::Display | ChannelType::Inputs => {
+                            self.connected = false;
+                            if !self.show_disconnect_dialog {
+                                self.show_disconnect_dialog = true;
+                                self.disconnect_reason = Some(format!(
+                                    "Connection lost ({} channel disconnected)",
+                                    channel.name()
+                                ));
+                            }
+                        }
+                        _ => {
+                            debug!(
+                                "app: non-critical channel {} disconnected, session continues",
+                                channel.name()
+                            );
+                        }
                     }
                 }
 
@@ -1602,8 +1612,18 @@ impl eframe::App for RyllApp {
                                     let x = (pos.x - response.rect.min.x).max(0.0) as u32;
                                     let y = (pos.y - response.rect.min.y).max(0.0) as u32;
                                     if self.last_mouse_pos != Some((x, y)) {
+                                        if self.mouse_mode == MOUSE_MODE_SERVER {
+                                            // Server mode: send relative deltas.
+                                            let (prev_x, prev_y) =
+                                                self.last_mouse_pos.unwrap_or((x, y));
+                                            let dx = x as i32 - prev_x as i32;
+                                            let dy = y as i32 - prev_y as i32;
+                                            let _ = tx.try_send(InputEvent::MouseMotion { dx, dy });
+                                        } else {
+                                            // Client mode: send absolute position.
+                                            let _ = tx.try_send(InputEvent::MouseMove { x, y });
+                                        }
                                         self.last_mouse_pos = Some((x, y));
-                                        let _ = tx.try_send(InputEvent::MouseMove { x, y });
                                     }
                                 }
 
@@ -1939,7 +1959,10 @@ impl eframe::App for RyllApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Close").clicked() {
-                            std::process::exit(0);
+                            if let Some(ref capture) = self.capture {
+                                capture.close();
+                            }
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     });
                 });
@@ -2016,7 +2039,7 @@ async fn run_connection(
     snapshots: ChannelSnapshots,
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
-    volume_control: Arc<crate::channels::playback::VolumeControl>,
+    volume_control: Arc<VolumeControl>,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2191,7 +2214,7 @@ async fn run_connection(
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
                     .await?;
-                let mut channel = crate::channels::playback::PlaybackChannel::new(
+                let mut channel = PlaybackChannel::new(
                     stream,
                     event_tx.clone(),
                     byte_counter.clone(),
@@ -2274,7 +2297,7 @@ pub async fn run_headless(
             snapshots,
             monitors,
             resize_rx,
-            crate::channels::playback::VolumeControl::new(),
+            VolumeControl::new(),
         )
         .await
     });

@@ -13,6 +13,7 @@ use crate::capture::CaptureSession;
 use crate::settings;
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
+    GlzDictionary,
 };
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -20,13 +21,16 @@ use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
     SurfaceCreate,
 };
-use shakenfist_spice_protocol::{display_client, display_server, ChannelType, ImageType};
+use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
+use shakenfist_spice_protocol::{
+    display_client, display_server, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
+};
 
 use super::ChannelEvent;
 
 const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 
-fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
+pub(crate) fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
     let mut dht = Vec::new();
     let mut i = 0;
     while i + 3 < jpeg.len() {
@@ -55,7 +59,7 @@ fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
     dht
 }
 
-fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
+pub(crate) fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(jpeg.len() + dht.len());
     let mut i = 0;
     // SOI marker
@@ -63,9 +67,9 @@ fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&jpeg[..2]);
         i = 2;
     }
-    // skip APP0/APP1 if present
+    // skip APP0/APP1 if present (bounds check matches extract_dht_segments)
     while i + 3 < jpeg.len() && jpeg[i] == 0xFF && (jpeg[i + 1] == 0xE0 || jpeg[i + 1] == 0xE1) {
-        let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
+        let seg_len = (u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize).saturating_add(2);
         if i + seg_len > jpeg.len() {
             break;
         }
@@ -77,7 +81,7 @@ fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
     out
 }
 
-fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+pub(crate) fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     let mut decoder = jpeg_decoder::Decoder::new(data);
     let pixels = match decoder.decode() {
         Ok(p) => p,
@@ -116,7 +120,10 @@ fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             }
             out
         }
-        _ => return None,
+        other => {
+            warn!("MJPEG decode: unsupported pixel format {:?}", other);
+            return None;
+        }
     };
 
     Some((rgba, w, h))
@@ -136,7 +143,7 @@ struct StreamState {
 const MAX_RECENT_DECODES: usize = 20;
 
 /// GLZ dictionary shared across all display channels.
-pub type SharedGlzDictionary = Arc<Mutex<HashMap<u64, Vec<u8>>>>;
+pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
 pub struct DisplayChannel {
     channel_id: u8,
@@ -161,7 +168,7 @@ pub struct DisplayChannel {
 
 impl DisplayChannel {
     pub fn new_shared_glz_dictionary() -> SharedGlzDictionary {
-        Arc::new(Mutex::new(HashMap::new()))
+        Arc::new(GlzDictionary::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -345,8 +352,7 @@ impl DisplayChannel {
 
             display_server::SURFACE_DESTROY => {
                 if payload.len() >= 4 {
-                    let surface_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let surface_id = read_u32_le(payload, 0);
                     info!("display: surface destroyed: id={}", surface_id);
 
                     if settings::is_verbose() {
@@ -373,8 +379,8 @@ impl DisplayChannel {
 
             display_server::MONITORS_CONFIG => {
                 if payload.len() >= 8 {
-                    let count = u16::from_le_bytes([payload[0], payload[1]]);
-                    let max_allowed = u16::from_le_bytes([payload[2], payload[3]]);
+                    let count = read_u16_le(payload, 0);
+                    let max_allowed = read_u16_le(payload, 2);
                     info!(
                         "display: monitors_config: count={}, max_allowed={}, channel_id={}",
                         count, max_allowed, self.channel_id
@@ -384,48 +390,13 @@ impl DisplayChannel {
                         if offset + 28 > payload.len() {
                             break;
                         }
-                        let head_id = u32::from_le_bytes([
-                            payload[offset],
-                            payload[offset + 1],
-                            payload[offset + 2],
-                            payload[offset + 3],
-                        ]);
-                        let surface_id = u32::from_le_bytes([
-                            payload[offset + 4],
-                            payload[offset + 5],
-                            payload[offset + 6],
-                            payload[offset + 7],
-                        ]);
-                        let width = u32::from_le_bytes([
-                            payload[offset + 8],
-                            payload[offset + 9],
-                            payload[offset + 10],
-                            payload[offset + 11],
-                        ]);
-                        let height = u32::from_le_bytes([
-                            payload[offset + 12],
-                            payload[offset + 13],
-                            payload[offset + 14],
-                            payload[offset + 15],
-                        ]);
-                        let x = u32::from_le_bytes([
-                            payload[offset + 16],
-                            payload[offset + 17],
-                            payload[offset + 18],
-                            payload[offset + 19],
-                        ]);
-                        let y = u32::from_le_bytes([
-                            payload[offset + 20],
-                            payload[offset + 21],
-                            payload[offset + 22],
-                            payload[offset + 23],
-                        ]);
-                        let flags = u32::from_le_bytes([
-                            payload[offset + 24],
-                            payload[offset + 25],
-                            payload[offset + 26],
-                            payload[offset + 27],
-                        ]);
+                        let head_id = read_u32_le(payload, offset);
+                        let surface_id = read_u32_le(payload, offset + 4);
+                        let width = read_u32_le(payload, offset + 8);
+                        let height = read_u32_le(payload, offset + 12);
+                        let x = read_u32_le(payload, offset + 16);
+                        let y = read_u32_le(payload, offset + 20);
+                        let flags = read_u32_le(payload, offset + 24);
                         info!(
                             "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
                             i, head_id, surface_id, width, height, x, y, flags
@@ -480,71 +451,65 @@ impl DisplayChannel {
             display_server::INVALIDATE_LIST => {
                 // Wire: u16 count + (u8 type + u64 id) per entry
                 if payload.len() >= 2 {
-                    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+                    let count = read_u16_le(payload, 0) as usize;
                     let entry_size = 9; // u8 type + u64 id
                     let mut removed = 0usize;
+                    let mut glz_removed = 0usize;
                     for i in 0..count {
                         let offset = 2 + i * entry_size + 1; // skip type byte
                         if offset + 8 > payload.len() {
                             break;
                         }
-                        let id = u64::from_le_bytes([
-                            payload[offset],
-                            payload[offset + 1],
-                            payload[offset + 2],
-                            payload[offset + 3],
-                            payload[offset + 4],
-                            payload[offset + 5],
-                            payload[offset + 6],
-                            payload[offset + 7],
-                        ]);
+                        let id = read_u64_le(payload, offset);
                         if self.image_cache.remove(&id).is_some() {
                             removed += 1;
                         }
+                        if self.glz_dictionary.remove(&id) {
+                            glz_removed += 1;
+                        }
                     }
                     debug!(
-                        "display: inval_list: removed {}/{} entries (cache now {})",
+                        "display: inval_list: removed {}/{} from image_cache, \
+                         {}/{} from glz_dict (cache now {}, glz now {})",
                         removed,
                         count,
-                        self.image_cache.len()
+                        glz_removed,
+                        count,
+                        self.image_cache.len(),
+                        self.glz_dictionary.len()
                     );
                 }
             }
 
             display_server::INVAL_ALL_PIXMAPS => {
+                let glz_len = self.glz_dictionary.len();
                 debug!(
-                    "display: inval_all_pixmaps: clearing {} cached images",
-                    self.image_cache.len()
+                    "display: inval_all_pixmaps: clearing {} cached images + {} glz entries",
+                    self.image_cache.len(),
+                    glz_len
                 );
                 self.image_cache.clear();
+                self.glz_dictionary.clear();
             }
 
             display_server::RESET => {
                 info!("display: reset");
                 self.image_cache.clear();
-                self.glz_dictionary.lock().unwrap().clear();
+                self.glz_dictionary.clear();
             }
 
             display_server::STREAM_CREATE => {
                 if payload.len() >= 50 {
-                    let surface_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let stream_id =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let surface_id = read_u32_le(payload, 0);
+                    let stream_id = read_u32_le(payload, 4);
                     let _flags = payload[8];
                     let codec_type = payload[9];
-                    let stream_w =
-                        u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
-                    let stream_h =
-                        u32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]);
-                    let dest_top =
-                        u32::from_le_bytes([payload[34], payload[35], payload[36], payload[37]]);
-                    let dest_left =
-                        u32::from_le_bytes([payload[38], payload[39], payload[40], payload[41]]);
-                    let dest_bottom =
-                        u32::from_le_bytes([payload[42], payload[43], payload[44], payload[45]]);
-                    let dest_right =
-                        u32::from_le_bytes([payload[46], payload[47], payload[48], payload[49]]);
+                    let stream_w = read_u32_le(payload, 18);
+                    let stream_h = read_u32_le(payload, 22);
+                    let dest_top = read_u32_le(payload, 34);
+                    let dest_left = read_u32_le(payload, 38);
+                    let dest_bottom = read_u32_le(payload, 42);
+                    let dest_right = read_u32_le(payload, 46);
 
                     info!(
                         "display: stream_create: id={}, surface={}, codec={}, {}x{}, \
@@ -581,18 +546,12 @@ impl DisplayChannel {
                     if payload.len() < 36 {
                         return Ok(());
                     }
-                    let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let dest_top =
-                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
-                    let dest_left =
-                        u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
-                    let dest_bottom =
-                        u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
-                    let dest_right =
-                        u32::from_le_bytes([payload[28], payload[29], payload[30], payload[31]]);
-                    let data_size =
-                        u32::from_le_bytes([payload[32], payload[33], payload[34], payload[35]])
-                            as usize;
+                    let id = read_u32_le(payload, 0);
+                    let dest_top = read_u32_le(payload, 16);
+                    let dest_left = read_u32_le(payload, 20);
+                    let dest_bottom = read_u32_le(payload, 24);
+                    let dest_right = read_u32_le(payload, 28);
+                    let data_size = read_u32_le(payload, 32) as usize;
                     let data = &payload[36..36 + data_size.min(payload.len() - 36)];
                     (
                         id,
@@ -603,10 +562,8 @@ impl DisplayChannel {
                     if payload.len() < 12 {
                         return Ok(());
                     }
-                    let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let data_size =
-                        u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]])
-                            as usize;
+                    let id = read_u32_le(payload, 0);
+                    let data_size = read_u32_le(payload, 8) as usize;
                     let data = &payload[12..12 + data_size.min(payload.len() - 12)];
                     (id, None, data)
                 };
@@ -669,16 +626,14 @@ impl DisplayChannel {
 
             display_server::STREAM_CLIP => {
                 if payload.len() >= 4 {
-                    let stream_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id = read_u32_le(payload, 0);
                     debug!("display: stream_clip id={}", stream_id);
                 }
             }
 
             display_server::STREAM_DESTROY => {
                 if payload.len() >= 4 {
-                    let stream_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id = read_u32_le(payload, 0);
                     info!("display: stream_destroy id={}", stream_id);
                     self.streams.remove(&stream_id);
                 }
@@ -727,64 +682,23 @@ impl DisplayChannel {
             return Ok(());
         }
 
-        let src_bitmap_offset = u32::from_le_bytes([
-            payload[copy_start],
-            payload[copy_start + 1],
-            payload[copy_start + 2],
-            payload[copy_start + 3],
-        ]) as usize;
+        let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
 
         if payload.len() < copy_start + 36 {
             warn!("display: draw_copy: payload too short for SpiceCopy header");
             return Ok(());
         }
 
-        let src_top = u32::from_le_bytes([
-            payload[copy_start + 4],
-            payload[copy_start + 5],
-            payload[copy_start + 6],
-            payload[copy_start + 7],
-        ]);
-        let src_left = u32::from_le_bytes([
-            payload[copy_start + 8],
-            payload[copy_start + 9],
-            payload[copy_start + 10],
-            payload[copy_start + 11],
-        ]);
-        let src_bottom = u32::from_le_bytes([
-            payload[copy_start + 12],
-            payload[copy_start + 13],
-            payload[copy_start + 14],
-            payload[copy_start + 15],
-        ]);
-        let src_right = u32::from_le_bytes([
-            payload[copy_start + 16],
-            payload[copy_start + 17],
-            payload[copy_start + 18],
-            payload[copy_start + 19],
-        ]);
-        let rop_descriptor =
-            u16::from_le_bytes([payload[copy_start + 20], payload[copy_start + 21]]);
+        let src_top = read_u32_le(payload, copy_start + 4);
+        let src_left = read_u32_le(payload, copy_start + 8);
+        let src_bottom = read_u32_le(payload, copy_start + 12);
+        let src_right = read_u32_le(payload, copy_start + 16);
+        let rop_descriptor = read_u16_le(payload, copy_start + 20);
         let scale_mode = payload[copy_start + 22];
         let mask_flags = payload[copy_start + 23];
-        let mask_pos_x = i32::from_le_bytes([
-            payload[copy_start + 24],
-            payload[copy_start + 25],
-            payload[copy_start + 26],
-            payload[copy_start + 27],
-        ]);
-        let mask_pos_y = i32::from_le_bytes([
-            payload[copy_start + 28],
-            payload[copy_start + 29],
-            payload[copy_start + 30],
-            payload[copy_start + 31],
-        ]);
-        let mask_bitmap_offset = u32::from_le_bytes([
-            payload[copy_start + 32],
-            payload[copy_start + 33],
-            payload[copy_start + 34],
-            payload[copy_start + 35],
-        ]) as usize;
+        let mask_pos_x = read_i32_le(payload, copy_start + 24);
+        let mask_pos_y = read_i32_le(payload, copy_start + 28);
+        let mask_bitmap_offset = read_u32_le(payload, copy_start + 32) as usize;
 
         if settings::is_verbose() {
             debug!(
@@ -829,7 +743,7 @@ impl DisplayChannel {
 
         let image_data = &payload[image_data_start..];
 
-        info!(
+        debug!(
             "display: draw_copy: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
              flags={}, data_bytes={}",
             base.surface_id,
@@ -855,24 +769,9 @@ impl DisplayChannel {
                 } else {
                     let bmp_fmt = image_data[0];
                     let bmp_flags = image_data[1];
-                    let bmp_width = u32::from_le_bytes([
-                        image_data[2],
-                        image_data[3],
-                        image_data[4],
-                        image_data[5],
-                    ]);
-                    let bmp_height = u32::from_le_bytes([
-                        image_data[6],
-                        image_data[7],
-                        image_data[8],
-                        image_data[9],
-                    ]);
-                    let bmp_stride = u32::from_le_bytes([
-                        image_data[10],
-                        image_data[11],
-                        image_data[12],
-                        image_data[13],
-                    ]);
+                    let bmp_width = read_u32_le(image_data, 2);
+                    let bmp_height = read_u32_le(image_data, 6);
+                    let bmp_stride = read_u32_le(image_data, 10);
                     let top_down = (bmp_flags & 0x04) != 0;
                     // palette_addr at offset 14..18 (ignored for 32-bit)
                     let pixel_data = &image_data[18..];
@@ -972,18 +871,8 @@ impl DisplayChannel {
                     warn!("display: ZLIB_GLZ_RGB data too short");
                     None
                 } else {
-                    let _glz_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
-                    let zlib_size = u32::from_le_bytes([
-                        image_data[4],
-                        image_data[5],
-                        image_data[6],
-                        image_data[7],
-                    ]) as usize;
+                    let _glz_size = read_u32_le(image_data, 0) as usize;
+                    let zlib_size = read_u32_le(image_data, 4) as usize;
 
                     let zlib_data = &image_data[8..8 + zlib_size.min(image_data.len() - 8)];
                     let mut decoder = ZlibDecoder::new(zlib_data);
@@ -1036,12 +925,7 @@ impl DisplayChannel {
                     warn!("display: JPEG data too short");
                     None
                 } else {
-                    let data_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
+                    let data_size = read_u32_le(image_data, 0) as usize;
                     let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
                         Ok(img) => {
@@ -1065,12 +949,7 @@ impl DisplayChannel {
                     warn!("display: QUIC data too short");
                     None
                 } else {
-                    let data_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
+                    let data_size = read_u32_le(image_data, 0) as usize;
                     let quic_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match quic_decode(quic_data, img_desc.width, img_desc.height) {
                         Some(rgba) => Some(DecompressedImage::new(
@@ -1086,11 +965,38 @@ impl DisplayChannel {
                     }
                 }
             }
-            _ => {
+            Some(ImageType::LzPalette) => {
                 warn!(
-                    "display: unsupported image type: {:?} (raw byte={})",
-                    image_type, img_desc.image_type
+                    "display: LzPalette images require palette data (not yet implemented), \
+                     id={}",
+                    img_desc.image_id
                 );
+                None
+            }
+            Some(ImageType::Surface) => {
+                warn!(
+                    "display: Surface-to-surface copy (not yet implemented), id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            Some(ImageType::FromCacheLossless) => {
+                warn!(
+                    "display: FromCacheLossless (not yet implemented), id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            Some(ImageType::JpegAlpha) => {
+                warn!(
+                    "display: JpegAlpha requires separate alpha plane (not yet implemented), \
+                     id={}",
+                    img_desc.image_id
+                );
+                None
+            }
+            None => {
+                warn!("display: unknown image type byte: {}", img_desc.image_type);
                 None
             }
         };
@@ -1120,11 +1026,31 @@ impl DisplayChannel {
                 Some(ImageType::GlzRgb) | Some(ImageType::ZlibGlzRgb)
             );
             if is_glz {
-                self.glz_dictionary
-                    .lock()
-                    .unwrap()
-                    .insert(img.image_id, img.pixels.clone());
-            } else {
+                // GLZ images are always cached -- they form the shared
+                // dictionary that cross-frame references depend on.
+                // insert() also notifies any waiters blocked on a
+                // cross-frame reference.
+                self.glz_dictionary.insert(img.image_id, img.pixels.clone());
+
+                // Evict images outside the sliding window. The server
+                // only generates cross-frame references to images
+                // within win_head_dist of the current image_id.
+                if img.win_head_dist > 0 {
+                    let oldest_valid = img.image_id.saturating_sub(img.win_head_dist as u64);
+                    let evicted = self.glz_dictionary.evict_older_than(oldest_valid);
+                    if evicted > 0 {
+                        debug!(
+                            "display: glz eviction: removed {} entries older than id {} \
+                             (win_head_dist={}, dict now {})",
+                            evicted,
+                            oldest_valid,
+                            img.win_head_dist,
+                            self.glz_dictionary.len()
+                        );
+                    }
+                }
+            } else if (img_desc.flags & IMAGE_FLAGS_CACHE_ME) != 0 {
+                // Only cache non-GLZ images when the server requests it.
                 self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 
@@ -1241,17 +1167,14 @@ impl DisplayChannel {
         snap.last_ack = self.last_ack;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
-        let glz_dict = self.glz_dictionary.lock().unwrap();
-        snap.image_cache_entries = self.image_cache.len() + glz_dict.len();
-        snap.image_cache_bytes = self.image_cache.values().map(|v| v.len()).sum::<usize>()
-            + glz_dict.values().map(|v| v.len()).sum::<usize>();
+        let glz_len = self.glz_dictionary.len();
+        let glz_bytes = self.glz_dictionary.total_bytes();
+        let glz_ids = self.glz_dictionary.image_ids();
+        snap.image_cache_entries = self.image_cache.len() + glz_len;
+        snap.image_cache_bytes =
+            self.image_cache.values().map(|v| v.len()).sum::<usize>() + glz_bytes;
         snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self
-                .image_cache
-                .keys()
-                .chain(glz_dict.keys())
-                .copied()
-                .collect();
+            let mut ids: Vec<u64> = self.image_cache.keys().copied().chain(glz_ids).collect();
             ids.sort_unstable();
             ids
         };
@@ -1286,5 +1209,174 @@ impl DisplayChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // extract_dht_segments tests
+    // -------------------------------------------------------------------------
+
+    /// Build a minimal JPEG byte sequence:
+    ///   SOI (FF D8) + one segment (marker + 2-byte BE length + payload) + EOI (FF D9)
+    ///
+    /// `length` in the JPEG encoding is `payload.len() + 2` (includes the 2 length bytes).
+    fn make_jpeg_with_marker(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let seg_len = (payload.len() + 2) as u16;
+        let mut jpeg = vec![0xFF, 0xD8]; // SOI
+        jpeg.push(0xFF);
+        jpeg.push(marker);
+        jpeg.extend_from_slice(&seg_len.to_be_bytes());
+        jpeg.extend_from_slice(payload);
+        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        jpeg
+    }
+
+    #[test]
+    fn extract_dht_segments_finds_dht_marker() {
+        // Build a JPEG with a DHT segment (marker 0xC4).
+        let payload = vec![0x01, 0x02, 0x03, 0x04];
+        let jpeg = make_jpeg_with_marker(0xC4, &payload);
+
+        let dht = extract_dht_segments(&jpeg);
+
+        // The returned data should start with the FF C4 marker.
+        assert!(!dht.is_empty(), "expected non-empty DHT output");
+        assert_eq!(dht[0], 0xFF);
+        assert_eq!(dht[1], 0xC4);
+        // Length field (big-endian) = payload.len() + 2
+        let encoded_len = u16::from_be_bytes([dht[2], dht[3]]) as usize;
+        assert_eq!(encoded_len, payload.len() + 2);
+        // Payload bytes are present.
+        assert_eq!(&dht[4..], payload.as_slice());
+    }
+
+    #[test]
+    fn extract_dht_segments_no_dht_returns_empty() {
+        // Build a JPEG with a comment segment (0xFE) — not a DHT.
+        let jpeg = make_jpeg_with_marker(0xFE, b"hello");
+        let dht = extract_dht_segments(&jpeg);
+        assert!(dht.is_empty(), "expected empty Vec when no DHT present");
+    }
+
+    #[test]
+    fn extract_dht_segments_empty_input_returns_empty() {
+        let dht = extract_dht_segments(&[]);
+        assert!(dht.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // inject_dht tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn inject_dht_inserts_after_soi_when_no_app_markers() {
+        // Plain JPEG: SOI + some non-APP data + EOI
+        let jpeg = vec![0xFF, 0xD8, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9];
+        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // Output should start with SOI.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+        // Immediately followed by the injected DHT.
+        assert_eq!(&out[2..2 + dht.len()], dht.as_slice());
+        // Then the remaining data (everything after SOI in the original).
+        assert_eq!(&out[2 + dht.len()..], &jpeg[2..]);
+    }
+
+    #[test]
+    fn inject_dht_inserts_after_app0_segment() {
+        // Build a JPEG: SOI + APP0 (0xE0) segment + remaining data.
+        let app0_payload = vec![0x4A, 0x46, 0x49, 0x46, 0x00]; // "JFIF\0"
+        let app0_seg_len = (app0_payload.len() + 2) as u16;
+        let mut jpeg = vec![0xFF, 0xD8]; // SOI
+        jpeg.push(0xFF);
+        jpeg.push(0xE0); // APP0
+        jpeg.extend_from_slice(&app0_seg_len.to_be_bytes());
+        jpeg.extend_from_slice(&app0_payload);
+        // Some remaining data
+        jpeg.extend_from_slice(&[0xDE, 0xAD]);
+
+        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // Output should start with SOI.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+
+        // Next: APP0 segment (marker + length bytes + payload).
+        let app0_total = 2 + 2 + app0_payload.len(); // FF E0 + len_bytes + payload
+        let app0_in_out = &out[2..2 + app0_total];
+        assert_eq!(app0_in_out[0], 0xFF);
+        assert_eq!(app0_in_out[1], 0xE0);
+
+        // After APP0: injected DHT.
+        let dht_start = 2 + app0_total;
+        assert_eq!(&out[dht_start..dht_start + dht.len()], dht.as_slice());
+
+        // After DHT: the remaining bytes from the original JPEG.
+        let remaining_start = dht_start + dht.len();
+        assert_eq!(&out[remaining_start..], &[0xDE, 0xAD]);
+    }
+
+    #[test]
+    fn inject_dht_output_structure_soi_app_dht_rest() {
+        // Quick structural check: SOI, then optional APP markers, then DHT, then rest.
+        let jpeg = vec![0xFF, 0xD8, 0x01, 0x02, 0x03];
+        let dht = vec![0xFF, 0xC4, 0x00, 0x02];
+
+        let out = inject_dht(&jpeg, &dht);
+
+        // SOI must be first.
+        assert_eq!(&out[..2], &[0xFF, 0xD8]);
+        // DHT must appear before the original trailing bytes.
+        let dht_pos = out.windows(dht.len()).position(|w| w == dht.as_slice());
+        assert!(dht_pos.is_some(), "DHT not found in output");
+        let dht_end = dht_pos.unwrap() + dht.len();
+        // The remaining original data (after SOI) should follow the DHT.
+        assert_eq!(&out[dht_end..], &jpeg[2..]);
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_mjpeg_frame tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn decode_mjpeg_frame_valid_jpeg_returns_rgba() {
+        use image::{DynamicImage, RgbImage};
+        use std::io::Cursor;
+
+        // Create a tiny 2×2 solid-red image and encode it as JPEG.
+        let rgb = RgbImage::from_fn(2, 2, |_x, _y| image::Rgb([255u8, 0, 0]));
+        let img = DynamicImage::ImageRgb8(rgb);
+        let mut jpeg_data = Vec::new();
+        img.write_to(&mut Cursor::new(&mut jpeg_data), image::ImageFormat::Jpeg)
+            .expect("failed to encode test JPEG");
+
+        let result = decode_mjpeg_frame(&jpeg_data);
+        assert!(result.is_some(), "expected Some for valid JPEG");
+
+        let (rgba, w, h) = result.unwrap();
+        assert_eq!(w, 2, "width should be 2");
+        assert_eq!(h, 2, "height should be 2");
+        // RGBA: 4 bytes per pixel.
+        assert_eq!(rgba.len(), 2 * 2 * 4, "expected 16 bytes of RGBA data");
+    }
+
+    #[test]
+    fn decode_mjpeg_frame_empty_input_returns_none() {
+        let result = decode_mjpeg_frame(&[]);
+        assert!(result.is_none(), "expected None for empty input");
+    }
+
+    #[test]
+    fn decode_mjpeg_frame_truncated_input_returns_none() {
+        // A few bytes that look like a JPEG start but are truncated.
+        let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        assert!(result.is_none(), "expected None for truncated JPEG");
     }
 }

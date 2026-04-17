@@ -127,6 +127,10 @@ pub(crate) fn build_tcp_frame(
 
     let ip_payload_len = tcp.header_len() + tcp_payload_len;
     if ip_payload_len > 65515 {
+        warn!(
+            "build_tcp_frame: payload too large for IPv4 ({} bytes), dropping",
+            ip_payload_len
+        );
         return Vec::new();
     }
     let mut ipv4 =
@@ -297,10 +301,8 @@ impl VideoWriter {
                                 frame_data = full[nal_start..end].to_vec();
                             }
                         }
-                        1 => {
-                            if frame_data.is_empty() {
-                                frame_data = full[nal_start..end].to_vec();
-                            }
+                        1 if frame_data.is_empty() => {
+                            frame_data = full[nal_start..end].to_vec();
                         }
                         _ => {}
                     }

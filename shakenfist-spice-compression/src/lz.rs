@@ -174,12 +174,7 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         output = flipped;
     }
 
-    Ok(DecompressedImage {
-        width,
-        height,
-        pixels: output,
-        image_id: 0,
-    })
+    Ok(DecompressedImage::new(width, height, output, 0))
 }
 
 #[cfg(test)]

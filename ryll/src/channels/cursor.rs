@@ -154,7 +154,7 @@ impl CursorChannel {
         match msg_type {
             cursor_server::INIT => {
                 let init = CursorInit::read(payload)?;
-                info!(
+                debug!(
                     "cursor: init: pos=({},{}), visible={}, payload_size={}",
                     init.x,
                     init.y,
@@ -178,7 +178,7 @@ impl CursorChannel {
 
             cursor_server::SET => {
                 let set = CursorSet::read(payload)?;
-                info!(
+                debug!(
                     "cursor: set: pos=({},{}), visible={}, payload_size={}",
                     set.x,
                     set.y,
@@ -204,7 +204,7 @@ impl CursorChannel {
                 if payload.len() >= 4 {
                     let x = u16::from_le_bytes([payload[0], payload[1]]);
                     let y = u16::from_le_bytes([payload[2], payload[3]]);
-                    info!("cursor: move: ({},{})", x, y);
+                    debug!("cursor: move: ({},{})", x, y);
 
                     self.event_tx
                         .send(ChannelEvent::CursorPosition {
@@ -247,7 +247,7 @@ impl CursorChannel {
                         payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
                         payload[6], payload[7],
                     ]);
-                    info!("cursor: invalidate_one: id={}", id);
+                    debug!("cursor: invalidate_one: id={}", id);
                     self.cursor_cache.remove(&id);
                 }
             }
@@ -333,7 +333,7 @@ impl CursorChannel {
         let from_cache = (header.flags & SpiceCursorHeader::FLAG_FROM_CACHE) != 0;
         let cache_me = (header.flags & SpiceCursorHeader::FLAG_CACHE_ME) != 0;
 
-        info!(
+        debug!(
             "cursor: shape: type={}, {}x{}, hot=({},{}), id={}, flags={:#x} (cache_me={}, from_cache={})",
             header.cursor_type,
             header.width,
@@ -348,7 +348,7 @@ impl CursorChannel {
 
         if from_cache {
             if let Some(img) = self.cursor_cache.get(&header.unique_id) {
-                info!("cursor: using cached cursor id={}", header.unique_id);
+                debug!("cursor: using cached cursor id={}", header.unique_id);
                 self.event_tx
                     .send(ChannelEvent::CursorShape(img.clone()))
                     .await
@@ -368,7 +368,7 @@ impl CursorChannel {
 
         if let Some(img) = image {
             if cache_me {
-                info!("cursor: caching cursor id={}", header.unique_id);
+                debug!("cursor: caching cursor id={}", header.unique_id);
                 self.cursor_cache.insert(header.unique_id, img.clone());
             }
             self.event_tx

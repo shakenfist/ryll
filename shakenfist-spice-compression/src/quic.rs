@@ -1604,3 +1604,66 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
 
     Some(rgba)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_input_returns_none() {
+        assert_eq!(quic_decode(&[], 8, 8), None);
+    }
+
+    #[test]
+    fn truncated_magic_returns_none() {
+        // Just the QUIC magic bytes (LE for 0x4349_5551), no header fields.
+        let data = [0x51, 0x55, 0x49, 0x43];
+        assert_eq!(quic_decode(&data, 8, 8), None);
+    }
+
+    #[test]
+    fn garbage_data_returns_none() {
+        // 100 bytes of 0xFF -- wrong magic, should be rejected immediately.
+        let data = [0xFF; 100];
+        assert_eq!(quic_decode(&data, 8, 8), None);
+    }
+
+    #[test]
+    fn zero_dimensions_returns_none() {
+        assert_eq!(quic_decode(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn valid_header_truncated_data_returns_none() {
+        // Build a syntactically valid QUIC header (6 LE 32-bit words = 24 bytes)
+        // but provide no compressed pixel data after it.
+        //
+        // Header layout (each field is a LE u32):
+        //   word 0: magic    = 0x4349_5551
+        //   word 1: version  = 0x0000_0000
+        //   word 2: type     = QUIC_IMAGE_TYPE_RGB32 (4)
+        //   word 3: width    = 8
+        //   word 4: height   = 8
+        //
+        // The decoder reads one word ahead, so the 6th word (bytes 20..24)
+        // is consumed during the height field's decode_eat32bits call.
+        // We pad with zeros for that trailing read.
+        let mut data = Vec::new();
+        // Magic
+        data.extend_from_slice(&0x4349_5551u32.to_le_bytes());
+        // Version
+        data.extend_from_slice(&0u32.to_le_bytes());
+        // Image type: RGB32 = 4
+        data.extend_from_slice(&4u32.to_le_bytes());
+        // Width
+        data.extend_from_slice(&8u32.to_le_bytes());
+        // Height
+        data.extend_from_slice(&8u32.to_le_bytes());
+        // Padding word consumed by the look-ahead read during decode_eat32bits
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // The header is valid but there is no compressed data, so decoding
+        // the first row should fail and return None.
+        assert_eq!(quic_decode(&data, 8, 8), None);
+    }
+}

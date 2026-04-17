@@ -14,7 +14,9 @@ use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, ChannelsList, MainInit, MessageHeader, Notify, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{main_client, main_server, ChannelType, NotifySeverity};
+use shakenfist_spice_protocol::{
+    main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
+};
 
 use super::ChannelEvent;
 
@@ -49,6 +51,7 @@ pub struct MainChannel {
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_text: Option<String>,
+    cached_clipboard: Option<arboard::Clipboard>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -84,6 +87,7 @@ impl MainChannel {
             guest_caps_received: false,
             channels_requested: false,
             last_clipboard_text: None,
+            cached_clipboard: None,
             capture,
             byte_counter,
             traffic,
@@ -99,6 +103,21 @@ impl MainChannel {
     }
 
     /// Run the main channel event loop
+    /// Get or create the cached clipboard instance. Returns None
+    /// if the clipboard cannot be opened (e.g. no display server).
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.cached_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.cached_clipboard = Some(cb),
+                Err(e) => {
+                    debug!("main: failed to open clipboard: {}", e);
+                    return None;
+                }
+            }
+        }
+        self.cached_clipboard.as_mut()
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         info!("main: channel started");
 
@@ -273,10 +292,55 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                let mode_name = match init.current_mouse_mode {
+                    1 => "server (relative)",
+                    2 => "client (absolute)",
+                    other => {
+                        warn!("main: unknown mouse mode {}", other);
+                        "unknown"
+                    }
+                };
+                info!(
+                    "main: mouse mode={} ({}), supported_modes={}",
+                    init.current_mouse_mode, mode_name, init.supported_mouse_modes
+                );
                 self.event_tx
                     .send(ChannelEvent::MouseMode(init.current_mouse_mode))
                     .await
                     .ok();
+
+                // Request client mouse mode (absolute positioning) if
+                // the server supports it. Client mode allows absolute
+                // MOUSE_POSITION messages; without it the server
+                // expects relative MOUSE_MOTION which ryll does not
+                // yet implement.
+                if init.supported_mouse_modes & MOUSE_MODE_CLIENT != 0
+                    && init.current_mouse_mode != MOUSE_MODE_CLIENT
+                {
+                    info!("main: requesting client mouse mode");
+                    let mut mode_payload = Vec::new();
+                    mode_payload
+                        .write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)
+                        .unwrap();
+                    let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
+                    self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
+                        .await?;
+                }
+            }
+
+            main_server::MOUSE_MODE => {
+                // Server notifies us of a mouse mode change (may be
+                // in response to our MOUSE_MODE_REQUEST).
+                if payload.len() >= 4 {
+                    let mode = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let mode_name = match mode {
+                        1 => "server (relative)",
+                        2 => "client (absolute)",
+                        _ => "unknown",
+                    };
+                    info!("main: mouse mode changed to {} ({})", mode, mode_name);
+                    self.event_tx.send(ChannelEvent::MouseMode(mode)).await.ok();
+                }
             }
 
             main_server::CHANNELS_LIST => {
@@ -627,9 +691,14 @@ impl MainChannel {
                         // Log byte count only — clipboard content may
                         // contain passwords or sensitive data.
                         info!("main: clipboard from guest ({} bytes)", text.len());
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                            Ok(()) => debug!("main: host clipboard updated"),
-                            Err(e) => debug!("main: clipboard set failed: {}", e),
+                        if let Some(cb) = self.clipboard() {
+                            match cb.set_text(&text) {
+                                Ok(()) => debug!("main: host clipboard updated"),
+                                Err(e) => {
+                                    debug!("main: clipboard set failed: {}", e);
+                                    self.cached_clipboard = None;
+                                }
+                            }
                         }
                     }
                 }
@@ -641,13 +710,9 @@ impl MainChannel {
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                            Ok(text) => {
-                                self.send_clipboard_data(&text).await?;
-                            }
-                            Err(e) => {
-                                debug!("main: failed to read host clipboard: {}", e);
-                            }
+                        let text = self.clipboard().and_then(|cb| cb.get_text().ok());
+                        if let Some(text) = text {
+                            self.send_clipboard_data(&text).await?;
                         }
                     }
                 }
@@ -675,9 +740,9 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(t) => t,
-            Err(_) => return Ok(()),
+        let text = match self.clipboard().and_then(|cb| cb.get_text().ok()) {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
         if text.is_empty() {

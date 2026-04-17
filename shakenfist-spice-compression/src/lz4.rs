@@ -116,10 +116,5 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     }
 
-    Some(DecompressedImage {
-        width: width as u32,
-        height: height as u32,
-        pixels: rgba,
-        image_id: 0,
-    })
+    Some(DecompressedImage::new(width as u32, height as u32, rgba, 0))
 }

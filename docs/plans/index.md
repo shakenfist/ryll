@@ -30,3 +30,12 @@ execution.
 | 2026-04-08 | [Display iteration follow-ups](PLAN-display-iteration-followups.md) | Deferred work from display rendering, QUIC decode, and multi-monitor PRs |
 | 2026-04-11 | [PR #20 follow-up](PLAN-pr20-followup.md) | Follow-up fixes from clipboard, MJPEG, and disconnect handling |
 | 2026-04-11 | [PR #23 follow-up](PLAN-pr23-followup.md) | Follow-up fixes from audio playback channel integration |
+
+## Consolidation plans
+
+These plans collate deferred work from multiple sources into
+a single execution sequence.
+
+| Date | Plan | Intent | Status | Phases |
+|------|------|--------|--------|--------|
+| 2026-04-16 | [Deferred debt](PLAN-deferred-debt.md) | Pay down correctness bugs, robustness gaps, code quality, tests, and docs across all completed plans | Complete | [1. Display](PLAN-deferred-debt-phase-01-display.md), [2. Audio](PLAN-deferred-debt-phase-02-audio.md), [3. Session](PLAN-deferred-debt-phase-03-session.md), [4. Robustness](PLAN-deferred-debt-phase-04-robustness.md), [5. Cleanup](PLAN-deferred-debt-phase-05-cleanup.md), [6. Tests](PLAN-deferred-debt-phase-06-tests.md), 7. Docs (inline) |
