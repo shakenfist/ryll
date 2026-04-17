@@ -260,9 +260,52 @@ ryll/src/
 Run `pre-commit install` after cloning. The hooks check:
 - Code formatting (rustfmt)
 - Linting (clippy with `-D warnings`)
-- Shell script quality (shellcheck)
+- Shell script quality (shellcheck, applied to `scripts/` and `tools/`)
+- Committed credentials (gitleaks)
+- Bidi and zero-width Unicode control characters
+  (`tools/check-bidi.sh`, guards against Trojan Source —
+  CVE-2021-42574)
 
 Use `./scripts/check-rust.sh fix` to auto-fix issues.
+
+All five pre-commit hooks are also enforced in CI (rustfmt
+and clippy via `ci.yml`, the remaining three via
+`supply-chain.yml`). Skipping pre-commit locally therefore
+does not bypass enforcement — it only defers the failure to
+CI.
+
+## Security scanners
+
+ryll runs four deterministic scanners on every PR in
+addition to the LLM-driven automated reviewer. They are
+defined in `.github/workflows/supply-chain.yml` and run on
+the `[self-hosted, static]` runner.
+
+| Scanner | What it checks | Policy location |
+|---------|----------------|-----------------|
+| `cargo audit` | RustSec advisories against `Cargo.lock` (plus a weekly cron on `develop` to catch drift) | `.cargo/audit.toml` — ignore list mirrors `deny.toml` |
+| `cargo deny` | License allowlist, dependency sources, version bans, advisory ignores | `deny.toml` at repo root |
+| `gitleaks` | Credential-like patterns in the diff | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
+| `tools/check-bidi.sh` | Bidi and zero-width Unicode codepoints (CVE-2021-42574 Trojan Source) | The script itself; PCRE character class at the top |
+
+Policy maintenance:
+
+- **Adding a new license** to `deny.toml` requires
+  confirming the licence is permissive and listing it in
+  the `allow` array. Only add `[[licenses.exceptions]]`
+  for crates that declare non-SPDX identifiers (see the
+  `epaint_default_fonts` / UFL-1.0 entry as the canonical
+  example).
+- **Ignoring a new advisory** requires adding the RustSec
+  ID to *both* `deny.toml` and `.cargo/audit.toml`, with
+  an inline comment on each entry linking to a rationale
+  section in `docs/plans/PLAN-supply-chain-followups.md`.
+  The two ignore lists must stay in sync — CI runs both
+  scanners and both must pass. Ignores are debt and should
+  not accumulate silently.
+- **Suppressing a gitleaks false positive** goes in a
+  `.gitleaksignore` file with a comment explaining the
+  pattern and why it is safe.
 
 ## Dependencies to Know
 
