@@ -92,7 +92,7 @@ The following plans contain deferred items addressed here:
 | 2. Audio correctness | [PLAN-deferred-debt-phase-02-audio.md](PLAN-deferred-debt-phase-02-audio.md) | Complete |
 | 3. Input and session correctness | [PLAN-deferred-debt-phase-03-session.md](PLAN-deferred-debt-phase-03-session.md) | Complete |
 | 4. Robustness and safety | [PLAN-deferred-debt-phase-04-robustness.md](PLAN-deferred-debt-phase-04-robustness.md) | Complete |
-| 5. Code quality and cleanup | PLAN-deferred-debt-phase-05-cleanup.md | Not started |
+| 5. Code quality and cleanup | [PLAN-deferred-debt-phase-05-cleanup.md](PLAN-deferred-debt-phase-05-cleanup.md) | Complete |
 | 6. Test coverage | PLAN-deferred-debt-phase-06-tests.md | Not started |
 | 7. Documentation | PLAN-deferred-debt-phase-07-docs.md | Not started |
 
