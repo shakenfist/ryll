@@ -67,21 +67,48 @@ explaining what changed and why.
 
 ## Agent guidance
 
-When planning phases and steps, assess the effort level
-and context that a sub-agent would need to implement each
-one. This section helps the operator choose the right
-agent configuration (effort level, model, isolation) for
-each piece of work without having to re-read the full
-plan.
+### Execution model
 
-### Master plan effort
+All implementation work is done by sub-agents, never
+in the management session. The management session (this
+conversation) is reserved for planning, review, and
+decision-making. This keeps the management context lean
+and avoids drowning it in implementation diffs.
 
-The master plan itself should always be created at **high
-effort** — it requires broad codebase understanding,
-cross-referencing multiple source files, and making
-judgment calls about scope and sequencing.
+The workflow is:
 
-### Phase plan effort
+1. **Plan** at high effort in the management session.
+2. **Spawn a sub-agent** for each implementation step
+   with the brief from the plan, at the recommended
+   effort level and model.
+3. **Review** the sub-agent's output in the management
+   session. Check the actual files — the sub-agent's
+   summary describes what it intended, not necessarily
+   what it did.
+4. **Fix or retry** if the output is wrong. Diagnose
+   whether the brief was insufficient (improve it) or
+   the model was too light (upgrade it), then re-run.
+5. **Commit** once the management session is satisfied
+   with the result.
+
+This applies to all steps, including high-effort ones.
+If a sub-agent can't succeed even with a detailed brief
+and the right model, that's a signal the brief needs
+improving, not that the management session should do
+the implementation itself.
+
+Use `isolation: "worktree"` for sub-agents when the
+change is risky or experimental. The worktree is
+discarded if the output is unsatisfactory. For safe,
+well-understood changes, sub-agents can work directly
+in the main tree.
+
+### Planning effort
+
+The master plan itself should always be created at
+**high effort** — it requires broad codebase
+understanding, cross-referencing multiple source files,
+and making judgment calls about scope and sequencing.
 
 Each phase plan should specify the recommended effort
 level for planning that phase. Phases involving deep
@@ -97,8 +124,8 @@ Each phase plan should include a table like this:
 ```
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 1a   | medium | any   | none      | One-sentence summary of what to do and which files to touch |
-| 1b   | high   | any   | worktree  | Why this needs high effort: requires understanding X to do Y |
+| 1a   | medium | sonnet | none     | One-sentence summary of what to do and which files to touch |
+| 1b   | high   | opus   | worktree | Why this needs high effort: requires understanding X to do Y |
 ```
 
 **Effort levels:**
@@ -170,6 +197,24 @@ a 2x2 RGBA image encoded with the reference C encoder at
 `/srv/src-reference/spice/spice-common/...`. The function
 takes `(data, width, height)` and returns
 `Option<Vec<u8>>` of RGBA pixels."
+
+### Management session review checklist
+
+After a sub-agent completes, the management session
+should verify:
+
+- [ ] The files that were supposed to change actually
+      changed (read them, don't trust the summary).
+- [ ] No unrelated files were modified.
+- [ ] The code builds (`pre-commit run --all-files` or
+      equivalent).
+- [ ] Tests pass (`cargo test --workspace` or
+      equivalent).
+- [ ] The changes match the intent of the brief — not
+      just syntactically correct but semantically right.
+- [ ] Commit message follows project conventions
+      (including the Co-Authored-By line with model,
+      context window, effort level, and other settings).
 
 ## Administration and logistics
 

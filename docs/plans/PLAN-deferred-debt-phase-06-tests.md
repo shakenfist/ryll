@@ -28,6 +28,28 @@ mostly **medium effort** -- the briefs below provide
 enough context that the implementing agent doesn't need
 to repeat the research.
 
+### Execution model
+
+All implementation is done by sub-agents. The management
+session spawns each sub-agent with the brief from this
+plan, reviews the output, then commits if satisfied.
+
+### Build and test commands
+
+Sub-agents should know:
+- Build and lint: `./scripts/check-rust.sh check`
+  (runs rustfmt and clippy via Docker).
+- Run tests: use Docker directly:
+  `docker run --rm -v "$(pwd)":/workspace
+  -v "$(pwd)/.cargo-cache/registry":/build/.cargo/registry
+  -v "$(pwd)/.cargo-cache/git":/build/.cargo/git
+  -w /workspace -u "$(id -u):$(id -g)" -e HOME=/build
+  ryll-dev cargo test --workspace`
+- Pre-commit: `pre-commit run --all-files`
+- Cargo is NOT available on the host -- all Rust
+  commands must go through the Docker container or the
+  check-rust.sh script.
+
 ### Step-level guidance
 
 | Step | Effort | Model | Isolation | Brief summary |
