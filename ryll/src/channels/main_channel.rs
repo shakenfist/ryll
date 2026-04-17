@@ -51,6 +51,7 @@ pub struct MainChannel {
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_text: Option<String>,
+    cached_clipboard: Option<arboard::Clipboard>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -86,6 +87,7 @@ impl MainChannel {
             guest_caps_received: false,
             channels_requested: false,
             last_clipboard_text: None,
+            cached_clipboard: None,
             capture,
             byte_counter,
             traffic,
@@ -101,6 +103,21 @@ impl MainChannel {
     }
 
     /// Run the main channel event loop
+    /// Get or create the cached clipboard instance. Returns None
+    /// if the clipboard cannot be opened (e.g. no display server).
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.cached_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.cached_clipboard = Some(cb),
+                Err(e) => {
+                    debug!("main: failed to open clipboard: {}", e);
+                    return None;
+                }
+            }
+        }
+        self.cached_clipboard.as_mut()
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         info!("main: channel started");
 
@@ -674,9 +691,14 @@ impl MainChannel {
                         // Log byte count only — clipboard content may
                         // contain passwords or sensitive data.
                         info!("main: clipboard from guest ({} bytes)", text.len());
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                            Ok(()) => debug!("main: host clipboard updated"),
-                            Err(e) => debug!("main: clipboard set failed: {}", e),
+                        if let Some(cb) = self.clipboard() {
+                            match cb.set_text(&text) {
+                                Ok(()) => debug!("main: host clipboard updated"),
+                                Err(e) => {
+                                    debug!("main: clipboard set failed: {}", e);
+                                    self.cached_clipboard = None;
+                                }
+                            }
                         }
                     }
                 }
@@ -688,13 +710,9 @@ impl MainChannel {
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-                            Ok(text) => {
-                                self.send_clipboard_data(&text).await?;
-                            }
-                            Err(e) => {
-                                debug!("main: failed to read host clipboard: {}", e);
-                            }
+                        let text = self.clipboard().and_then(|cb| cb.get_text().ok());
+                        if let Some(text) = text {
+                            self.send_clipboard_data(&text).await?;
                         }
                     }
                 }
@@ -722,9 +740,9 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(t) => t,
-            Err(_) => return Ok(()),
+        let text = match self.clipboard().and_then(|cb| cb.get_text().ok()) {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
         if text.is_empty() {
