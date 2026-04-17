@@ -711,3 +711,72 @@ pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
         egui::PointerButton::Extra2 => shakenfist_spice_protocol::mouse_buttons::DOWN,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::key_to_scancode;
+    use eframe::egui;
+
+    // make_scancode logic for reference:
+    //   normal key:   press = base,            release = base | 0x80
+    //   extended key: press = (base & 0xFF) << 8 | 0xE0,
+    //                 release = ((base | 0x80) & 0xFF) << 8 | 0xE0
+
+    #[test]
+    fn test_key_a_letter() {
+        // Key::A → base 0x1E (normal key)
+        let result = key_to_scancode(egui::Key::A);
+        assert_eq!(result, Some((0x1E, 0x9E)));
+    }
+
+    #[test]
+    fn test_key_num0_digit() {
+        // Key::Num0 → base 0x0B (normal key)
+        let result = key_to_scancode(egui::Key::Num0);
+        assert_eq!(result, Some((0x0B, 0x8B)));
+    }
+
+    #[test]
+    fn test_key_f1_function() {
+        // Key::F1 → base 0x3B (normal key)
+        let result = key_to_scancode(egui::Key::F1);
+        assert_eq!(result, Some((0x3B, 0xBB)));
+    }
+
+    #[test]
+    fn test_key_arrow_up_extended() {
+        // Key::ArrowUp → base 0x148 (extended, E0-prefixed)
+        // press:   (0x48 << 8) | 0xE0 = 0x48E0
+        // release: (0xC8 << 8) | 0xE0 = 0xC8E0
+        let result = key_to_scancode(egui::Key::ArrowUp);
+        assert_eq!(result, Some((0x48E0, 0xC8E0)));
+    }
+
+    #[test]
+    fn test_key_space() {
+        // Key::Space → base 0x39 (normal key)
+        let result = key_to_scancode(egui::Key::Space);
+        assert_eq!(result, Some((0x39, 0xB9)));
+    }
+
+    #[test]
+    fn test_key_enter() {
+        // Key::Enter → base 0x1C (normal key)
+        let result = key_to_scancode(egui::Key::Enter);
+        assert_eq!(result, Some((0x1C, 0x9C)));
+    }
+
+    #[test]
+    fn test_key_escape() {
+        // Key::Escape → base 0x01 (normal key)
+        let result = key_to_scancode(egui::Key::Escape);
+        assert_eq!(result, Some((0x01, 0x81)));
+    }
+
+    #[test]
+    fn test_unmapped_key_returns_none() {
+        // Key::F13 is not in SCANCODE_MAP (only F1–F12 are mapped)
+        let result = key_to_scancode(egui::Key::F13);
+        assert_eq!(result, None);
+    }
+}
