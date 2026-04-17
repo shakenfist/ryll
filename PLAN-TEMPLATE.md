@@ -65,6 +65,69 @@ explaining what changed and why.
 
 ...
 
+## Agent guidance
+
+When planning phases and steps, assess the effort level
+and context that a sub-agent would need to implement each
+one. This section helps the operator choose the right
+agent configuration (effort level, model, isolation) for
+each piece of work without having to re-read the full
+plan.
+
+### Master plan effort
+
+The master plan itself should always be created at **high
+effort** — it requires broad codebase understanding,
+cross-referencing multiple source files, and making
+judgment calls about scope and sequencing.
+
+### Phase plan effort
+
+Each phase plan should specify the recommended effort
+level for planning that phase. Phases involving deep
+protocol research, algorithm understanding, or
+architectural decisions should be planned at high effort.
+Phases that are mechanical or follow well-established
+patterns can be planned at medium effort.
+
+### Step-level guidance
+
+Each phase plan should include a table like this:
+
+```
+| Step | Effort | Model | Isolation | Brief for sub-agent |
+|------|--------|-------|-----------|---------------------|
+| 1a   | medium | any   | none      | One-sentence summary of what to do and which files to touch |
+| 1b   | high   | any   | worktree  | Why this needs high effort: requires understanding X to do Y |
+```
+
+**Effort levels:**
+- **high** — Requires reading multiple files, making
+  judgment calls, understanding non-obvious invariants,
+  or researching external references. The sub-agent
+  needs to think carefully about edge cases.
+- **medium** — The plan provides enough context that the
+  sub-agent can follow a clear brief. May need to read
+  a few files but the approach is well-defined.
+- **low** — Purely mechanical changes (rename, reformat,
+  add a log line). The brief is a complete instruction.
+
+**Brief for sub-agent:** This is the key field. Write it
+as if briefing a colleague who has never seen the
+codebase. Include: what to change, which files to touch,
+what patterns to follow, and any non-obvious constraints.
+The better the brief, the lower the effort level needed.
+
+A good brief front-loads the research the planner already
+did, so the implementing agent doesn't repeat it. For
+example, instead of "add tests for the QUIC decoder",
+write "add tests for `quic_decode()` in
+`shakenfist-spice-compression/src/quic.rs`. Test vectors:
+a 2x2 RGBA image encoded with the reference C encoder at
+`/srv/src-reference/spice/spice-common/...`. The function
+takes `(data, width, height)` and returns
+`Option<Vec<u8>>` of RGBA pixels."
+
 ## Administration and logistics
 
 ### Success criteria
