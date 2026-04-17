@@ -29,6 +29,7 @@ pub mod constants;
 pub mod link;
 pub mod logging;
 pub mod messages;
+pub mod parse;
 
 pub use client::SpiceClient;
 

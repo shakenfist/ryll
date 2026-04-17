@@ -21,6 +21,7 @@ use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
     SurfaceCreate,
 };
+use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
     display_client, display_server, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
 };
@@ -351,8 +352,7 @@ impl DisplayChannel {
 
             display_server::SURFACE_DESTROY => {
                 if payload.len() >= 4 {
-                    let surface_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let surface_id = read_u32_le(payload, 0);
                     info!("display: surface destroyed: id={}", surface_id);
 
                     if settings::is_verbose() {
@@ -379,8 +379,8 @@ impl DisplayChannel {
 
             display_server::MONITORS_CONFIG => {
                 if payload.len() >= 8 {
-                    let count = u16::from_le_bytes([payload[0], payload[1]]);
-                    let max_allowed = u16::from_le_bytes([payload[2], payload[3]]);
+                    let count = read_u16_le(payload, 0);
+                    let max_allowed = read_u16_le(payload, 2);
                     info!(
                         "display: monitors_config: count={}, max_allowed={}, channel_id={}",
                         count, max_allowed, self.channel_id
@@ -390,48 +390,13 @@ impl DisplayChannel {
                         if offset + 28 > payload.len() {
                             break;
                         }
-                        let head_id = u32::from_le_bytes([
-                            payload[offset],
-                            payload[offset + 1],
-                            payload[offset + 2],
-                            payload[offset + 3],
-                        ]);
-                        let surface_id = u32::from_le_bytes([
-                            payload[offset + 4],
-                            payload[offset + 5],
-                            payload[offset + 6],
-                            payload[offset + 7],
-                        ]);
-                        let width = u32::from_le_bytes([
-                            payload[offset + 8],
-                            payload[offset + 9],
-                            payload[offset + 10],
-                            payload[offset + 11],
-                        ]);
-                        let height = u32::from_le_bytes([
-                            payload[offset + 12],
-                            payload[offset + 13],
-                            payload[offset + 14],
-                            payload[offset + 15],
-                        ]);
-                        let x = u32::from_le_bytes([
-                            payload[offset + 16],
-                            payload[offset + 17],
-                            payload[offset + 18],
-                            payload[offset + 19],
-                        ]);
-                        let y = u32::from_le_bytes([
-                            payload[offset + 20],
-                            payload[offset + 21],
-                            payload[offset + 22],
-                            payload[offset + 23],
-                        ]);
-                        let flags = u32::from_le_bytes([
-                            payload[offset + 24],
-                            payload[offset + 25],
-                            payload[offset + 26],
-                            payload[offset + 27],
-                        ]);
+                        let head_id = read_u32_le(payload, offset);
+                        let surface_id = read_u32_le(payload, offset + 4);
+                        let width = read_u32_le(payload, offset + 8);
+                        let height = read_u32_le(payload, offset + 12);
+                        let x = read_u32_le(payload, offset + 16);
+                        let y = read_u32_le(payload, offset + 20);
+                        let flags = read_u32_le(payload, offset + 24);
                         info!(
                             "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
                             i, head_id, surface_id, width, height, x, y, flags
@@ -486,7 +451,7 @@ impl DisplayChannel {
             display_server::INVALIDATE_LIST => {
                 // Wire: u16 count + (u8 type + u64 id) per entry
                 if payload.len() >= 2 {
-                    let count = u16::from_le_bytes([payload[0], payload[1]]) as usize;
+                    let count = read_u16_le(payload, 0) as usize;
                     let entry_size = 9; // u8 type + u64 id
                     let mut removed = 0usize;
                     let mut glz_removed = 0usize;
@@ -495,16 +460,7 @@ impl DisplayChannel {
                         if offset + 8 > payload.len() {
                             break;
                         }
-                        let id = u64::from_le_bytes([
-                            payload[offset],
-                            payload[offset + 1],
-                            payload[offset + 2],
-                            payload[offset + 3],
-                            payload[offset + 4],
-                            payload[offset + 5],
-                            payload[offset + 6],
-                            payload[offset + 7],
-                        ]);
+                        let id = read_u64_le(payload, offset);
                         if self.image_cache.remove(&id).is_some() {
                             removed += 1;
                         }
@@ -544,24 +500,16 @@ impl DisplayChannel {
 
             display_server::STREAM_CREATE => {
                 if payload.len() >= 50 {
-                    let surface_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let stream_id =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let surface_id = read_u32_le(payload, 0);
+                    let stream_id = read_u32_le(payload, 4);
                     let _flags = payload[8];
                     let codec_type = payload[9];
-                    let stream_w =
-                        u32::from_le_bytes([payload[18], payload[19], payload[20], payload[21]]);
-                    let stream_h =
-                        u32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]);
-                    let dest_top =
-                        u32::from_le_bytes([payload[34], payload[35], payload[36], payload[37]]);
-                    let dest_left =
-                        u32::from_le_bytes([payload[38], payload[39], payload[40], payload[41]]);
-                    let dest_bottom =
-                        u32::from_le_bytes([payload[42], payload[43], payload[44], payload[45]]);
-                    let dest_right =
-                        u32::from_le_bytes([payload[46], payload[47], payload[48], payload[49]]);
+                    let stream_w = read_u32_le(payload, 18);
+                    let stream_h = read_u32_le(payload, 22);
+                    let dest_top = read_u32_le(payload, 34);
+                    let dest_left = read_u32_le(payload, 38);
+                    let dest_bottom = read_u32_le(payload, 42);
+                    let dest_right = read_u32_le(payload, 46);
 
                     info!(
                         "display: stream_create: id={}, surface={}, codec={}, {}x{}, \
@@ -598,18 +546,12 @@ impl DisplayChannel {
                     if payload.len() < 36 {
                         return Ok(());
                     }
-                    let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let dest_top =
-                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]]);
-                    let dest_left =
-                        u32::from_le_bytes([payload[20], payload[21], payload[22], payload[23]]);
-                    let dest_bottom =
-                        u32::from_le_bytes([payload[24], payload[25], payload[26], payload[27]]);
-                    let dest_right =
-                        u32::from_le_bytes([payload[28], payload[29], payload[30], payload[31]]);
-                    let data_size =
-                        u32::from_le_bytes([payload[32], payload[33], payload[34], payload[35]])
-                            as usize;
+                    let id = read_u32_le(payload, 0);
+                    let dest_top = read_u32_le(payload, 16);
+                    let dest_left = read_u32_le(payload, 20);
+                    let dest_bottom = read_u32_le(payload, 24);
+                    let dest_right = read_u32_le(payload, 28);
+                    let data_size = read_u32_le(payload, 32) as usize;
                     let data = &payload[36..36 + data_size.min(payload.len() - 36)];
                     (
                         id,
@@ -620,10 +562,8 @@ impl DisplayChannel {
                     if payload.len() < 12 {
                         return Ok(());
                     }
-                    let id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let data_size =
-                        u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]])
-                            as usize;
+                    let id = read_u32_le(payload, 0);
+                    let data_size = read_u32_le(payload, 8) as usize;
                     let data = &payload[12..12 + data_size.min(payload.len() - 12)];
                     (id, None, data)
                 };
@@ -686,16 +626,14 @@ impl DisplayChannel {
 
             display_server::STREAM_CLIP => {
                 if payload.len() >= 4 {
-                    let stream_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id = read_u32_le(payload, 0);
                     debug!("display: stream_clip id={}", stream_id);
                 }
             }
 
             display_server::STREAM_DESTROY => {
                 if payload.len() >= 4 {
-                    let stream_id =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let stream_id = read_u32_le(payload, 0);
                     info!("display: stream_destroy id={}", stream_id);
                     self.streams.remove(&stream_id);
                 }
@@ -744,64 +682,23 @@ impl DisplayChannel {
             return Ok(());
         }
 
-        let src_bitmap_offset = u32::from_le_bytes([
-            payload[copy_start],
-            payload[copy_start + 1],
-            payload[copy_start + 2],
-            payload[copy_start + 3],
-        ]) as usize;
+        let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
 
         if payload.len() < copy_start + 36 {
             warn!("display: draw_copy: payload too short for SpiceCopy header");
             return Ok(());
         }
 
-        let src_top = u32::from_le_bytes([
-            payload[copy_start + 4],
-            payload[copy_start + 5],
-            payload[copy_start + 6],
-            payload[copy_start + 7],
-        ]);
-        let src_left = u32::from_le_bytes([
-            payload[copy_start + 8],
-            payload[copy_start + 9],
-            payload[copy_start + 10],
-            payload[copy_start + 11],
-        ]);
-        let src_bottom = u32::from_le_bytes([
-            payload[copy_start + 12],
-            payload[copy_start + 13],
-            payload[copy_start + 14],
-            payload[copy_start + 15],
-        ]);
-        let src_right = u32::from_le_bytes([
-            payload[copy_start + 16],
-            payload[copy_start + 17],
-            payload[copy_start + 18],
-            payload[copy_start + 19],
-        ]);
-        let rop_descriptor =
-            u16::from_le_bytes([payload[copy_start + 20], payload[copy_start + 21]]);
+        let src_top = read_u32_le(payload, copy_start + 4);
+        let src_left = read_u32_le(payload, copy_start + 8);
+        let src_bottom = read_u32_le(payload, copy_start + 12);
+        let src_right = read_u32_le(payload, copy_start + 16);
+        let rop_descriptor = read_u16_le(payload, copy_start + 20);
         let scale_mode = payload[copy_start + 22];
         let mask_flags = payload[copy_start + 23];
-        let mask_pos_x = i32::from_le_bytes([
-            payload[copy_start + 24],
-            payload[copy_start + 25],
-            payload[copy_start + 26],
-            payload[copy_start + 27],
-        ]);
-        let mask_pos_y = i32::from_le_bytes([
-            payload[copy_start + 28],
-            payload[copy_start + 29],
-            payload[copy_start + 30],
-            payload[copy_start + 31],
-        ]);
-        let mask_bitmap_offset = u32::from_le_bytes([
-            payload[copy_start + 32],
-            payload[copy_start + 33],
-            payload[copy_start + 34],
-            payload[copy_start + 35],
-        ]) as usize;
+        let mask_pos_x = read_i32_le(payload, copy_start + 24);
+        let mask_pos_y = read_i32_le(payload, copy_start + 28);
+        let mask_bitmap_offset = read_u32_le(payload, copy_start + 32) as usize;
 
         if settings::is_verbose() {
             debug!(
@@ -872,24 +769,9 @@ impl DisplayChannel {
                 } else {
                     let bmp_fmt = image_data[0];
                     let bmp_flags = image_data[1];
-                    let bmp_width = u32::from_le_bytes([
-                        image_data[2],
-                        image_data[3],
-                        image_data[4],
-                        image_data[5],
-                    ]);
-                    let bmp_height = u32::from_le_bytes([
-                        image_data[6],
-                        image_data[7],
-                        image_data[8],
-                        image_data[9],
-                    ]);
-                    let bmp_stride = u32::from_le_bytes([
-                        image_data[10],
-                        image_data[11],
-                        image_data[12],
-                        image_data[13],
-                    ]);
+                    let bmp_width = read_u32_le(image_data, 2);
+                    let bmp_height = read_u32_le(image_data, 6);
+                    let bmp_stride = read_u32_le(image_data, 10);
                     let top_down = (bmp_flags & 0x04) != 0;
                     // palette_addr at offset 14..18 (ignored for 32-bit)
                     let pixel_data = &image_data[18..];
@@ -989,18 +871,8 @@ impl DisplayChannel {
                     warn!("display: ZLIB_GLZ_RGB data too short");
                     None
                 } else {
-                    let _glz_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
-                    let zlib_size = u32::from_le_bytes([
-                        image_data[4],
-                        image_data[5],
-                        image_data[6],
-                        image_data[7],
-                    ]) as usize;
+                    let _glz_size = read_u32_le(image_data, 0) as usize;
+                    let zlib_size = read_u32_le(image_data, 4) as usize;
 
                     let zlib_data = &image_data[8..8 + zlib_size.min(image_data.len() - 8)];
                     let mut decoder = ZlibDecoder::new(zlib_data);
@@ -1053,12 +925,7 @@ impl DisplayChannel {
                     warn!("display: JPEG data too short");
                     None
                 } else {
-                    let data_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
+                    let data_size = read_u32_le(image_data, 0) as usize;
                     let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
                         Ok(img) => {
@@ -1082,12 +949,7 @@ impl DisplayChannel {
                     warn!("display: QUIC data too short");
                     None
                 } else {
-                    let data_size = u32::from_le_bytes([
-                        image_data[0],
-                        image_data[1],
-                        image_data[2],
-                        image_data[3],
-                    ]) as usize;
+                    let data_size = read_u32_le(image_data, 0) as usize;
                     let quic_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
                     match quic_decode(quic_data, img_desc.width, img_desc.height) {
                         Some(rgba) => Some(DecompressedImage::new(
