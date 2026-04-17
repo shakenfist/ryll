@@ -631,3 +631,127 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
     buf.extend_from_slice(payload);
     buf
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- DrawCopyBase tests ---
+
+    fn draw_copy_base_minimal() -> Vec<u8> {
+        let mut data = Vec::new();
+        // surface_id = 1 (u32 LE, offset 0)
+        data.extend_from_slice(&1u32.to_le_bytes());
+        // top = 10 (u32 LE, offset 4)
+        data.extend_from_slice(&10u32.to_le_bytes());
+        // left = 20 (u32 LE, offset 8)
+        data.extend_from_slice(&20u32.to_le_bytes());
+        // bottom = 30 (u32 LE, offset 12)
+        data.extend_from_slice(&30u32.to_le_bytes());
+        // right = 40 (u32 LE, offset 16)
+        data.extend_from_slice(&40u32.to_le_bytes());
+        // clip_type = 0 (u8, offset 20)
+        data.push(0u8);
+        data
+    }
+
+    #[test]
+    fn test_draw_copy_base_minimal_clip_type_zero() {
+        let data = draw_copy_base_minimal();
+        assert_eq!(data.len(), 21);
+
+        let msg = DrawCopyBase::read(&data).expect("DrawCopyBase minimal read failed");
+        assert_eq!(msg.surface_id, 1);
+        assert_eq!(msg.top, 10);
+        assert_eq!(msg.left, 20);
+        assert_eq!(msg.bottom, 30);
+        assert_eq!(msg.right, 40);
+        assert_eq!(msg.clip_type, 0);
+        assert!(msg.clip_rects.is_empty());
+        assert_eq!(msg.end_offset, 21);
+    }
+
+    #[test]
+    fn test_draw_copy_base_with_clip_rects() {
+        let mut data = Vec::new();
+        // surface_id = 5
+        data.extend_from_slice(&5u32.to_le_bytes());
+        // top = 0, left = 0, bottom = 100, right = 200
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&100u32.to_le_bytes());
+        data.extend_from_slice(&200u32.to_le_bytes());
+        // clip_type = 1
+        data.push(1u8);
+        // num_rects = 2 (u32 LE)
+        data.extend_from_slice(&2u32.to_le_bytes());
+        // rect 0: top=1, left=2, bottom=3, right=4
+        data.extend_from_slice(&1u32.to_le_bytes()); // top
+        data.extend_from_slice(&2u32.to_le_bytes()); // left
+        data.extend_from_slice(&3u32.to_le_bytes()); // bottom
+        data.extend_from_slice(&4u32.to_le_bytes()); // right
+                                                     // rect 1: top=5, left=6, bottom=7, right=8
+        data.extend_from_slice(&5u32.to_le_bytes()); // top
+        data.extend_from_slice(&6u32.to_le_bytes()); // left
+        data.extend_from_slice(&7u32.to_le_bytes()); // bottom
+        data.extend_from_slice(&8u32.to_le_bytes()); // right
+
+        // Expected: 21 (header) + 4 (count) + 2*16 (rects) = 57 bytes
+        assert_eq!(data.len(), 57);
+
+        let msg = DrawCopyBase::read(&data).expect("DrawCopyBase with clip rects failed");
+        assert_eq!(msg.surface_id, 5);
+        assert_eq!(msg.clip_type, 1);
+        assert_eq!(msg.clip_rects.len(), 2);
+        // clip_rects are stored as (left, top, right, bottom)
+        assert_eq!(msg.clip_rects[0], (2, 1, 4, 3));
+        assert_eq!(msg.clip_rects[1], (6, 5, 8, 7));
+        assert_eq!(msg.end_offset, 57);
+    }
+
+    #[test]
+    fn test_draw_copy_base_too_short() {
+        let data = vec![0u8; 20]; // one byte short of the 21-byte minimum
+        let result = DrawCopyBase::read(&data);
+        assert!(
+            result.is_err(),
+            "Expected error for too-short DrawCopyBase input"
+        );
+    }
+
+    // --- ImageDescriptor tests ---
+
+    #[test]
+    fn test_image_descriptor_valid() {
+        let mut data = Vec::new();
+        // image_id = 0xDEADBEEFCAFEBABE (u64 LE, offset 0)
+        data.extend_from_slice(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes());
+        // image_type = 3 (u8, offset 8)
+        data.push(3u8);
+        // flags = 7 (u8, offset 9)
+        data.push(7u8);
+        // width = 1920 (u32 LE, offset 10)
+        data.extend_from_slice(&1920u32.to_le_bytes());
+        // height = 1080 (u32 LE, offset 14)
+        data.extend_from_slice(&1080u32.to_le_bytes());
+
+        assert_eq!(data.len(), 18);
+
+        let desc = ImageDescriptor::read(&data).expect("ImageDescriptor valid read failed");
+        assert_eq!(desc.image_id, 0xDEAD_BEEF_CAFE_BABE);
+        assert_eq!(desc.image_type, 3);
+        assert_eq!(desc.flags, 7);
+        assert_eq!(desc.width, 1920);
+        assert_eq!(desc.height, 1080);
+    }
+
+    #[test]
+    fn test_image_descriptor_too_short() {
+        let data = vec![0u8; 17]; // one byte short of the 18-byte minimum
+        let result = ImageDescriptor::read(&data);
+        assert!(
+            result.is_err(),
+            "Expected error for too-short ImageDescriptor input"
+        );
+    }
+}
