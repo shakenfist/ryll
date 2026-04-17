@@ -1,0 +1,35 @@
+# cargo-audit policy for ryll.
+#
+# This file mirrors the [advisories].ignore list in deny.toml so that
+# `cargo audit` and `cargo deny check advisories` agree about which
+# advisories we have explicitly accepted. Each entry in either file
+# must have a matching rationale section in
+# docs/plans/PLAN-supply-chain-followups.md.
+#
+# When you change one, update the other. The CI workflow runs both
+# scanners and both must pass.
+
+[advisories]
+ignore = [
+    # openh264-sys2 heap overflow. Fix is in >=0.8.0 (semver-breaking
+    # upgrade). See PLAN-supply-chain-followups.md item 1.
+    "RUSTSEC-2025-0008",
+
+    # paste crate unmaintained. Drop-in `pastey` exists. See
+    # PLAN-supply-chain-followups.md item 2.
+    "RUSTSEC-2024-0436",
+
+    # rand 0.8.5 / 0.9.2 unsound with a custom logger that calls
+    # rand::rng() in its log path. We have no such logger. See
+    # PLAN-supply-chain-followups.md item 3.
+    "RUSTSEC-2026-0097",
+
+    # rsa Marvin timing attack. No fixed version in the ecosystem.
+    # See PLAN-supply-chain-followups.md item 4.
+    "RUSTSEC-2023-0071",
+
+    # rustls-pemfile unmaintained (upstream archived). Migration to
+    # rustls-pki-types PemObject required. See
+    # PLAN-supply-chain-followups.md item 5.
+    "RUSTSEC-2025-0134",
+]
