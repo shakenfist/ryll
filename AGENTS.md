@@ -127,6 +127,21 @@ Ryll uses:
     resolution). Surfaces are keyed by `(display_channel_id,
     surface_id)` to prevent cross-channel collisions.
 
+14. **Dedicated audio thread with lock-free ring buffer** - The cpal audio
+    output stream runs on a dedicated `std::thread`, not in the tokio
+    runtime. This avoids the `unsafe impl Send` that was previously needed
+    (cpal streams are `!Send` on macOS/Windows). The tokio network task
+    pushes decoded PCM samples into an `rtrb` single-producer
+    single-consumer ring buffer; the audio thread drains it into a local
+    `VecDeque` for the resampler. This eliminates mutex contention in the
+    real-time cpal callback.
+
+15. **Mouse mode negotiation** - On session init, ryll requests client mouse
+    mode (absolute positioning) via `MOUSE_MODE_REQUEST` if the server
+    supports it. If the server remains in server mode (e.g. no SPICE agent),
+    ryll sends relative `MOUSE_MOTION` messages instead of absolute
+    `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
+
 ## Code Organisation
 
 The repository is a Cargo workspace. Ryll itself lives at
@@ -168,8 +183,9 @@ ryll/src/
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
 │   ├── inputs.rs        # Keyboard scancodes (with E0 extended
-│                        #   prefix for nav cluster), mouse events,
-│                        #   motion coalescing to prevent channel backpressure
+│   │                    #   prefix for nav cluster), mouse events,
+│   │                    #   motion coalescing to prevent channel backpressure
+│   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
 │   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser

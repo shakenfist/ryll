@@ -146,6 +146,7 @@ All SPICE messages use a 6-byte mini-header:
 | Display (2) | Graphics | surface_create, draw_copy, mark |
 | Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
+| Playback (5) | Audio playback | playback_start, playback_data, playback_mode, playback_stop |
 | Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 | WebDAV (11) | Folder sharing | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 
