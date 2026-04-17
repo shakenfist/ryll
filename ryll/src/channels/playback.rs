@@ -62,14 +62,14 @@ impl VolumeControl {
     }
 }
 
-struct Resampler {
+pub(crate) struct Resampler {
     ratio: f64,
     pos: f64,
     channels: usize,
 }
 
 impl Resampler {
-    fn new(from_rate: u32, to_rate: u32, channels: u32) -> Self {
+    pub(crate) fn new(from_rate: u32, to_rate: u32, channels: u32) -> Self {
         Resampler {
             ratio: from_rate as f64 / to_rate as f64,
             pos: 0.0,
@@ -80,7 +80,7 @@ impl Resampler {
     /// Produce one output frame (one sample per channel) by
     /// linearly interpolating between adjacent input frames.
     /// Returns silence without modifying the buffer on underrun.
-    fn next_frame(&mut self, buffer: &mut VecDeque<i16>, out: &mut [i16]) {
+    pub(crate) fn next_frame(&mut self, buffer: &mut VecDeque<i16>, out: &mut [i16]) {
         let ch = self.channels;
         let idx = self.pos as usize;
         let frac = self.pos - idx as f64;
@@ -612,5 +612,133 @@ impl PlaybackChannel {
         }
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Resampler, VolumeControl};
+    use std::collections::VecDeque;
+
+    // --- VolumeControl tests ---
+
+    #[test]
+    fn volume_control_new_defaults() {
+        let vc = VolumeControl::new();
+        assert_eq!(vc.volume(), 80);
+        assert!(!vc.muted());
+    }
+
+    #[test]
+    fn volume_control_set_volume_clamps_to_100() {
+        let vc = VolumeControl::new();
+        vc.set_volume(150);
+        assert_eq!(vc.volume(), 100);
+    }
+
+    #[test]
+    fn volume_control_effective_volume_when_muted_is_zero() {
+        let vc = VolumeControl::new();
+        vc.set_muted(true);
+        assert_eq!(vc.effective_volume(), 0.0);
+    }
+
+    #[test]
+    fn volume_control_effective_volume_default() {
+        let vc = VolumeControl::new();
+        let ev = vc.effective_volume();
+        assert!((ev - 0.8).abs() < 1e-6, "expected 0.8, got {}", ev);
+    }
+
+    #[test]
+    fn volume_control_mute_unmute_preserves_volume() {
+        let vc = VolumeControl::new();
+        vc.set_volume(65);
+        vc.set_muted(true);
+        assert_eq!(vc.effective_volume(), 0.0);
+        vc.set_muted(false);
+        assert_eq!(vc.volume(), 65);
+        let ev = vc.effective_volume();
+        assert!((ev - 0.65).abs() < 1e-6, "expected 0.65, got {}", ev);
+    }
+
+    // --- Resampler tests ---
+
+    /// Helper: fill a VecDeque from a slice.
+    fn make_buf(samples: &[i16]) -> VecDeque<i16> {
+        samples.iter().copied().collect()
+    }
+
+    #[test]
+    fn resampler_1to1_mono_produces_correct_samples() {
+        let mut r = Resampler::new(48000, 48000, 1);
+        // With ratio=1.0 and pos starting at 0.0, idx=0, frac=0.0.
+        // We need (0+2)*1 = 2 samples minimum.  Push more to test iteration.
+        let samples: &[i16] = &[100, 200, 300, 400];
+        let mut buf = make_buf(samples);
+
+        // First call: interpolates between samples[0]=100 and samples[1]=200,
+        // frac=0.0 → output should be 100.
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 100, "first frame should be 100");
+
+        // After first call, pos advances by ratio=1.0 → consume_frames=1,
+        // one sample popped.  buf is now [200, 300, 400], pos=0.0.
+        // Second call: output should be 200.
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 200, "second frame should be 200");
+    }
+
+    #[test]
+    fn resampler_1to1_stereo_separates_channels() {
+        let mut r = Resampler::new(48000, 48000, 2);
+        // Interleaved L/R: [100, -100, 200, -200, 300, -300, 400, -400]
+        // Need (0+2)*2 = 4 samples minimum.
+        let samples: &[i16] = &[100, -100, 200, -200, 300, -300, 400, -400];
+        let mut buf = make_buf(samples);
+
+        let mut out = [0i16; 2];
+        r.next_frame(&mut buf, &mut out);
+        // frac=0.0 → output = frame[0] = [100, -100]
+        assert_eq!(out[0], 100, "L channel should be 100");
+        assert_eq!(out[1], -100, "R channel should be -100");
+    }
+
+    #[test]
+    fn resampler_underrun_returns_silence_and_leaves_buffer_empty() {
+        let mut r = Resampler::new(48000, 48000, 1);
+        let mut buf: VecDeque<i16> = VecDeque::new();
+
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+
+        assert_eq!(out[0], 0, "underrun should produce silence");
+        assert!(buf.is_empty(), "buffer should remain empty after underrun");
+    }
+
+    #[test]
+    fn resampler_2to1_upsampling_interpolates() {
+        // source=24000, device=48000 → ratio=0.5
+        // Each output frame advances pos by 0.5; every two output frames
+        // consume one input frame.
+        let mut r = Resampler::new(24000, 48000, 1);
+        // Need at least (0+2)*1=2 input samples so lookahead is satisfied.
+        let samples: &[i16] = &[0, 1000, 2000];
+        let mut buf = make_buf(samples);
+
+        // Output frame 0: pos=0.0, idx=0, frac=0.0 → lerp(0, 1000, 0.0)=0
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 0, "upsampled frame 0 should be 0");
+
+        // Output frame 1: pos=0.5, idx=0, frac=0.5 → lerp(0, 1000, 0.5)=500
+        // After this call pos=1.0, consume_frames=1, pop 1 sample, pos=0.0.
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 500, "upsampled frame 1 should be ~500");
+
+        // Output frame 2: pos=0.0, buf=[1000,2000], idx=0 → lerp(1000,2000,0.0)=1000
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 1000, "upsampled frame 2 should be 1000");
     }
 }
