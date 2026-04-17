@@ -59,6 +59,8 @@ communication between tasks.
 | Cursor channel | Track cursor position and visibility |
 | Inputs channel | Send keyboard/mouse events to server |
 | Usbredir channel | USB redirection via SpiceVMC data transport |
+| Playback channel | Decode audio, push samples to ring buffer |
+| Audio thread | Consume ring buffer, resample, write to cpal device |
 | UI thread | egui rendering, input capture (GUI mode only) |
 
 ### Channel Communication
@@ -168,6 +170,11 @@ Values from `spice-protocol/spice/enums.h`:
 |  108 | JpegAlpha        | Not implemented |
 |  109 | LZ4              | Supported (per-row compressed) |
 
+MJPEG is handled separately: it is not an `ImageType` but a streaming video
+codec delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages. The codec
+type byte in the stream header selects MJPEG (value 1). Frames are decoded
+inline in `display.rs` using the same JPEG path as `ImageType::Jpeg`.
+
 ### Wire format differences
 
 - **LZ_RGB and GLZ_RGB**: preceded by a 4-byte `data_size` (u32 LE),
@@ -274,6 +281,50 @@ tuple so that draw operations from different display channels
 target the correct surface even when surface IDs overlap across
 channels. This prevents cross-channel surface corruption in
 multi-head configurations.
+
+## Audio Playback Pipeline
+
+SPICE audio data arrives on the **Playback channel** (type 5) as
+`PLAYBACK_DATA` messages containing a 4-byte multimedia timestamp
+followed by encoded audio. The codec is negotiated via `PLAYBACK_MODE`
+(raw PCM = 1, Opus = 3).
+
+```
+SPICE PLAYBACK_DATA message (tokio network task)
+  │
+  ├── raw PCM: i16 LE samples pushed directly
+  └── Opus: decoded via `opus-decoder` crate → i16 samples
+                │
+                ▼
+        rtrb::RingBuffer<i16>  (lock-free, ~2 s capacity at 48kHz stereo)
+                │
+                ▼
+      dedicated std::thread ("audio")
+                │
+                ├── drains ring buffer into local VecDeque
+                ├── Resampler: linear interpolation from source rate
+                │   to device rate (ratio = source_rate / device_rate)
+                └── cpal output stream callback → audio device
+```
+
+The tokio network task is the **producer**: it decodes incoming audio
+and pushes i16 samples into the ring buffer via `rtrb::Producer<i16>`.
+Back-pressure is applied by dropping samples when the ring buffer is
+full (the server is sending faster than the device can consume).
+
+The audio thread is the **consumer**: it owns the `cpal` output stream
+and the `Resampler`. The cpal callback drains the ring buffer into a
+local `VecDeque` and calls `Resampler::next_frame()` to produce
+resampled output at the device's native sample rate. The resampler
+uses linear interpolation and handles underruns silently (outputs
+silence).
+
+Volume control (`VolumeControl`) is shared between the UI thread and
+the audio thread via `Arc<VolumeControl>`, using atomic operations to
+avoid locking in the cpal real-time callback.
+
+The audio thread is spawned on `PLAYBACK_START` and stopped (joined)
+on `PLAYBACK_STOP` or channel disconnect.
 
 ## Display Rendering
 
