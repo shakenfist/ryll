@@ -49,9 +49,15 @@ jobs:
 
   cargo-deny:
     name: cargo deny
-    runs-on: [self-hosted, vm, s]
+    runs-on: [self-hosted, vm, debian-12, s]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install docker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y docker.io
+          sudo chmod ugo+rw /var/run/docker.sock
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
