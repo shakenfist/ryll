@@ -279,12 +279,16 @@ CI.
 ryll runs five deterministic scanners on every PR in
 addition to the LLM-driven automated reviewer. They are
 defined in `.github/workflows/supply-chain.yml`. All jobs
-run on self-hosted runners: `cargo-deny` and `bidi-check`
-on `[self-hosted, static]` because their dependencies are
-self-contained, and `cargo-audit`, `gitleaks`, and
-`shellcheck` on `[self-hosted, debian-12]` where they can
-apt-install or toolchain-install the tooling the minimal
-static runner lacks.
+run on self-hosted VM runners with the `s` size label
+(2 vCPU / 4 GB RAM; the scanners are I/O-bound):
+`cargo-deny` and `bidi-check` on
+`[self-hosted, vm, static, s]` because their dependencies
+are self-contained, and `cargo-audit`, `gitleaks`, and
+`shellcheck` on `[self-hosted, vm, debian-12, s]` where
+they can apt-install or toolchain-install the tooling the
+minimal static runner lacks. The `vm` label matters —
+bare-metal runners have different OSes and no
+passwordless sudo.
 
 | Scanner | What it checks | Policy location |
 |---------|----------------|-----------------|

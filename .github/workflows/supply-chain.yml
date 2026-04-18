@@ -1,13 +1,16 @@
 # Supply-chain and prompt-injection scanners.
 #
 # Runs on every PR to develop and on pushes to develop, plus a weekly
-# cron to catch advisory drift. All jobs run on self-hosted runners.
-# Jobs that need extra tooling (cargo, gitleaks, shellcheck) target
-# [self-hosted, debian-12] so they can apt-install or toolchain-install
-# what they need; [self-hosted, static] is reserved for jobs whose
-# dependencies are self-contained. See docs/plans/PLAN-supply-chain-
-# scanning.md for the design rationale, and deny.toml for the policy
-# enforced by cargo-deny.
+# cron to catch advisory drift. All jobs run on self-hosted VM runners
+# (the `vm` label excludes bare-metal runners which have different
+# OSes and no passwordless sudo). Jobs that need extra tooling (cargo,
+# gitleaks, shellcheck) target `debian-12` so they can apt-install or
+# toolchain-install what they need; `static` is reserved for jobs
+# whose dependencies are self-contained. Every job carries the `s`
+# size label (2 vCPU, 4 GB RAM) — these scanners are all I/O-bound
+# and do not benefit from a larger runner. See docs/plans/PLAN-supply-
+# chain-scanning.md for the design rationale, and deny.toml for the
+# policy enforced by cargo-deny.
 
 name: Supply chain
 
@@ -34,7 +37,7 @@ jobs:
   # for the toolchain itself).
   cargo-audit:
     name: cargo audit
-    runs-on: [self-hosted, debian-12]
+    runs-on: [self-hosted, vm, debian-12, s]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +51,7 @@ jobs:
   # the static runner without a rust toolchain.
   cargo-deny:
     name: cargo deny
-    runs-on: [self-hosted, static]
+    runs-on: [self-hosted, vm, static, s]
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +66,7 @@ jobs:
   # gitleaks is packaged in Debian 12, so apt-install it.
   gitleaks:
     name: gitleaks
-    runs-on: [self-hosted, debian-12]
+    runs-on: [self-hosted, vm, debian-12, s]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,7 +81,7 @@ jobs:
   # shellcheck is packaged in Debian 12, so apt-install and run.
   shellcheck:
     name: shellcheck
-    runs-on: [self-hosted, debian-12]
+    runs-on: [self-hosted, vm, debian-12, s]
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +93,7 @@ jobs:
 
   bidi-check:
     name: bidi and zero-width
-    runs-on: [self-hosted, static]
+    runs-on: [self-hosted, vm, static, s]
     steps:
       - uses: actions/checkout@v4
 
