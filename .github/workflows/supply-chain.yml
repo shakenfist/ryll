@@ -1,11 +1,13 @@
 # Supply-chain and prompt-injection scanners.
 #
 # Runs on every PR to develop and on pushes to develop, plus a weekly
-# cron to catch advisory drift. Jobs prefer our self-hosted static
-# runner and fall back to ubuntu-latest when they need tooling the
-# static runner does not provide (cargo, gitleaks, shellcheck). See
-# docs/plans/PLAN-supply-chain-scanning.md for the design rationale,
-# and deny.toml for the policy enforced by cargo-deny.
+# cron to catch advisory drift. All jobs run on self-hosted runners.
+# Jobs that need extra tooling (cargo, gitleaks, shellcheck) target
+# [self-hosted, debian-12] so they can apt-install or toolchain-install
+# what they need; [self-hosted, static] is reserved for jobs whose
+# dependencies are self-contained. See docs/plans/PLAN-supply-chain-
+# scanning.md for the design rationale, and deny.toml for the policy
+# enforced by cargo-deny.
 
 name: Supply chain
 
@@ -26,13 +28,13 @@ permissions:
   pull-requests: write
 
 jobs:
-  # cargo-audit needs cargo on PATH. Our [self-hosted, static]
-  # runner is minimal (git only), so this job runs on
-  # GitHub-hosted ubuntu-latest where the rust toolchain is
-  # installed explicitly by dtolnay/rust-toolchain.
+  # cargo-audit needs cargo on PATH. The static runner is minimal
+  # (git only), so we run on debian-12 and install the stable rust
+  # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
+  # for the toolchain itself).
   cargo-audit:
     name: cargo audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, debian-12]
     steps:
       - uses: actions/checkout@v4
 
@@ -43,7 +45,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # cargo-deny-action downloads its own binary, so it works on
-  # the bare self-hosted runner without a rust toolchain.
+  # the static runner without a rust toolchain.
   cargo-deny:
     name: cargo deny
     runs-on: [self-hosted, static]
@@ -58,31 +60,25 @@ jobs:
   # gitleaks-action@v2 refuses to run on organization repos
   # without a paid licence. We invoke the upstream gitleaks
   # binary directly instead, which has no such restriction.
-  # Runs on ubuntu-latest so apt provides the binary.
+  # gitleaks is packaged in Debian 12, so apt-install it.
   gitleaks:
     name: gitleaks
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, debian-12]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Install gitleaks
-        run: |
-          GITLEAKS_VERSION=8.21.2
-          curl -sSL \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin gitleaks
-          gitleaks version
+        run: sudo apt-get update && sudo apt-get install -y gitleaks
 
       - name: Run gitleaks
         run: gitleaks detect --source . --redact --verbose --no-banner
 
-  # shellcheck is not installed on the self-hosted runner, so
-  # this job runs on ubuntu-latest where apt has it.
+  # shellcheck is packaged in Debian 12, so apt-install and run.
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, debian-12]
     steps:
       - uses: actions/checkout@v4
 
