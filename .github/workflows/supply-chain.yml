@@ -63,10 +63,12 @@ jobs:
   # gitleaks-action@v2 refuses to run on organization repos
   # without a paid licence. We invoke the upstream gitleaks
   # binary directly instead, which has no such restriction.
-  # gitleaks is packaged in Debian 12, so apt-install it.
+  # gitleaks is only packaged from Debian 13 (trixie) onward
+  # — bookworm has no gitleaks package — so this job runs on
+  # debian-13.
   gitleaks:
     name: gitleaks
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-13, s]
     steps:
       - uses: actions/checkout@v4
         with:
