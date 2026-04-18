@@ -227,6 +227,26 @@ ryll/src/
 2. Constants/enums in `ryll/src/protocol/constants.rs`
 3. Channel-specific logic in `ryll/src/channels/*.rs`
 
+## Process templates
+
+Three templates at the repo root capture the workflows we
+use repeatedly. Read the template before starting one of
+these activities so the resulting plan/PR follows the
+established structure.
+
+- **`PLAN-TEMPLATE.md`** — used as the starting point for
+  new plan files in `docs/plans/`. Defines the prompt
+  preamble, situation/mission/execution sections, and the
+  sub-agent execution model.
+- **`PUSH-TEMPLATE.md`** — pre-push audit for our own
+  branches. Two-wave parallel sub-agent review (build /
+  style, then code quality / tests / docs / security).
+- **`MERGE-TEMPLATE.md`** — review and merge process for
+  external contributor PRs. Adds deterministic-scanner
+  Wave 0, prompt-injection sub-agent, and a mandatory
+  follow-up plan that lands as our own PR immediately
+  after the contributor's merge.
+
 ## Testing
 
 - Unit tests exist for decompression algorithms
