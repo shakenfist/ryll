@@ -111,7 +111,7 @@ jobs:
 
   bidi-check:
     name: bidi and zero-width
-    runs-on: [self-hosted, vm, s]
+    runs-on: [self-hosted, vm, debian-12, s]
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
       cancel-in-progress: true
