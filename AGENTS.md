@@ -122,9 +122,25 @@ Ryll uses:
 13. **Multi-monitor via agent infrastructure** - Multiple display channels
     are opened (one per `--monitors N`) and the main channel sends
     `VDAgentMonitorsConfig` to the guest via the VDI port agent protocol.
-    The GLZ dictionary is shared across display channels via
-    `Arc<Mutex<HashMap>>`. Surfaces are keyed by `(display_channel_id,
+    The GLZ dictionary is shared across display channels via a
+    `GlzDictionary` struct (with notify-based cross-frame reference
+    resolution). Surfaces are keyed by `(display_channel_id,
     surface_id)` to prevent cross-channel collisions.
+
+14. **Dedicated audio thread with lock-free ring buffer** - The cpal audio
+    output stream runs on a dedicated `std::thread`, not in the tokio
+    runtime. This avoids the `unsafe impl Send` that was previously needed
+    (cpal streams are `!Send` on macOS/Windows). The tokio network task
+    pushes decoded PCM samples into an `rtrb` single-producer
+    single-consumer ring buffer; the audio thread drains it into a local
+    `VecDeque` for the resampler. This eliminates mutex contention in the
+    real-time cpal callback.
+
+15. **Mouse mode negotiation** - On session init, ryll requests client mouse
+    mode (absolute positioning) via `MOUSE_MODE_REQUEST` if the server
+    supports it. If the server remains in server mode (e.g. no SPICE agent),
+    ryll sends relative `MOUSE_MOTION` messages instead of absolute
+    `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
 
 ## Code Organisation
 
@@ -167,8 +183,9 @@ ryll/src/
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
 │   ├── inputs.rs        # Keyboard scancodes (with E0 extended
-│                        #   prefix for nav cluster), mouse events,
-│                        #   motion coalescing to prevent channel backpressure
+│   │                    #   prefix for nav cluster), mouse events,
+│   │                    #   motion coalescing to prevent channel backpressure
+│   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
 │   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
 ├── usbredir/            # usbredir protocol parser
@@ -264,8 +281,9 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | etherparse | Fake TCP/IP header construction for pcap (optional, `capture` feature) |
 | openh264 | H.264 video encoding for --capture mode (optional, `capture` feature) |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
-| cpal | Cross-platform audio output (ALSA on Linux) |
+| cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
+| rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |
 | image | JPEG decoding (with `jpeg` feature only) |
 | serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
 | zip | Zip file output for bug reports |

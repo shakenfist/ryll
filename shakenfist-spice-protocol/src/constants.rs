@@ -167,6 +167,10 @@ pub mod main_client {
     pub const AGENT_TOKEN: u16 = 108;
 }
 
+/// Mouse mode constants
+pub const MOUSE_MODE_SERVER: u32 = 1;
+pub const MOUSE_MODE_CLIENT: u32 = 2;
+
 /// Display channel message types (server -> client)
 ///
 /// Values from spice-protocol/spice/enums.h SPICE_MSG_DISPLAY_*

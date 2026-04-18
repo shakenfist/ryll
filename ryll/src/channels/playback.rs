@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -17,12 +19,10 @@ use super::ChannelEvent;
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
 
-/// Maximum ring buffer size in samples. At 48kHz stereo this is
+/// Maximum ring buffer capacity in samples. At 48kHz stereo this is
 /// ~2 seconds. Prevents unbounded memory growth if audio data
 /// arrives faster than it is consumed.
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
-
-type AudioBuffer = Arc<Mutex<VecDeque<i16>>>;
 
 pub struct VolumeControl {
     volume: AtomicU8,
@@ -62,83 +62,236 @@ impl VolumeControl {
     }
 }
 
-// The cpal::Stream must be held alive for audio output to
-// continue. The struct is stored as _cpal_stream in
-// PlaybackChannel; dropping it stops playback.
-#[allow(dead_code)]
-struct SendStream(cpal::Stream);
-// SAFETY: cpal::Stream is !Send because some platform audio
-// backends have thread-affinity requirements. On Linux (ALSA)
-// the stream is thread-safe in practice. This is a known
-// limitation — see PLAN-pr23-followup.md for the proper fix
-// (dedicated audio thread).
-unsafe impl Send for SendStream {}
-
-struct Resampler {
+pub(crate) struct Resampler {
     ratio: f64,
     pos: f64,
+    channels: usize,
 }
 
 impl Resampler {
-    fn new(from_rate: u32, to_rate: u32) -> Self {
+    pub(crate) fn new(from_rate: u32, to_rate: u32, channels: u32) -> Self {
         Resampler {
             ratio: from_rate as f64 / to_rate as f64,
             pos: 0.0,
+            channels: channels.max(1) as usize,
         }
     }
 
-    fn next_sample(&mut self, buffer: &mut VecDeque<i16>) -> i16 {
+    /// Produce one output frame (one sample per channel) by
+    /// linearly interpolating between adjacent input frames.
+    /// Returns silence without modifying the buffer on underrun.
+    pub(crate) fn next_frame(&mut self, buffer: &mut VecDeque<i16>, out: &mut [i16]) {
+        let ch = self.channels;
         let idx = self.pos as usize;
         let frac = self.pos - idx as f64;
 
-        while buffer.len() < idx + 2 {
-            buffer.push_back(0);
+        // Need two full frames at positions idx and idx+1.
+        let needed = (idx + 2) * ch;
+        if buffer.len() < needed {
+            // Underrun: return silence without polluting the buffer.
+            for s in out.iter_mut().take(ch) {
+                *s = 0;
+            }
+            return;
         }
 
-        let a = buffer[0] as f64;
-        let b = if buffer.len() > 1 {
-            buffer[1] as f64
-        } else {
-            a
-        };
-        let sample = a + (b - a) * frac;
+        // Interpolate each channel independently.
+        for c in 0..ch {
+            let a = buffer[idx * ch + c] as f64;
+            let b = buffer[(idx + 1) * ch + c] as f64;
+            out[c] = (a + (b - a) * frac) as i16;
+        }
 
+        // Advance position and consume whole frames.
         self.pos += self.ratio;
-        let consume = self.pos as usize;
-        for _ in 0..consume {
+        let consume_frames = self.pos as usize;
+        let consume_samples = consume_frames * ch;
+        for _ in 0..consume_samples {
             buffer.pop_front();
         }
-        self.pos -= consume as f64;
-
-        sample as i16
+        self.pos -= consume_frames as f64;
     }
 }
 
+/// Fill the output buffer with resampled i16 samples.
 fn write_samples_i16(
     data: &mut [i16],
-    buffer: &AudioBuffer,
+    local_buf: &mut VecDeque<i16>,
     vol: &Arc<VolumeControl>,
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
-    let mut buf = buffer.lock().unwrap();
-    for sample in data.iter_mut() {
-        let s = resampler.next_sample(&mut buf);
-        *sample = (s as f32 * v) as i16;
+    let ch = resampler.channels;
+    let mut frame = vec![0i16; ch];
+    for chunk in data.chunks_mut(ch) {
+        resampler.next_frame(local_buf, &mut frame);
+        for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
+            *out = (s as f32 * v) as i16;
+        }
     }
 }
 
+/// Fill the output buffer with resampled f32 samples.
 fn write_samples_f32(
     data: &mut [f32],
-    buffer: &AudioBuffer,
+    local_buf: &mut VecDeque<i16>,
     vol: &Arc<VolumeControl>,
     resampler: &mut Resampler,
 ) {
     let v = vol.effective_volume();
-    let mut buf = buffer.lock().unwrap();
-    for sample in data.iter_mut() {
-        let s = resampler.next_sample(&mut buf);
-        *sample = s as f32 / 32768.0 * v;
+    let ch = resampler.channels;
+    let mut frame = vec![0i16; ch];
+    for chunk in data.chunks_mut(ch) {
+        resampler.next_frame(local_buf, &mut frame);
+        for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
+            *out = s as f32 / 32768.0 * v;
+        }
+    }
+}
+
+/// State for the dedicated audio output thread.
+struct AudioThread {
+    handle: JoinHandle<()>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl AudioThread {
+    /// Spawn a dedicated OS thread that owns the cpal stream.
+    /// Samples are read from `consumer` via a lock-free ring buffer.
+    fn spawn(
+        consumer: rtrb::Consumer<i16>,
+        vol: Arc<VolumeControl>,
+        source_rate: u32,
+        source_channels: u32,
+    ) -> Option<Self> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_flag = shutdown.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("audio".into())
+            .spawn(move || {
+                Self::run_audio(consumer, vol, source_rate, source_channels, shutdown_flag);
+            })
+            .ok()?;
+
+        Some(AudioThread { handle, shutdown })
+    }
+
+    fn run_audio(
+        mut consumer: rtrb::Consumer<i16>,
+        vol: Arc<VolumeControl>,
+        source_rate: u32,
+        source_channels: u32,
+        shutdown: Arc<AtomicBool>,
+    ) {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => {
+                warn!("playback: no audio output device found");
+                return;
+            }
+        };
+        let default_config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("playback: failed to get default output config: {}", e);
+                return;
+            }
+        };
+        info!(
+            "playback: device config: {}Hz, {} ch, {:?}",
+            default_config.sample_rate().0,
+            default_config.channels(),
+            default_config.sample_format()
+        );
+        let config = cpal::StreamConfig {
+            channels: source_channels as u16,
+            sample_rate: default_config.sample_rate(),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        let device_rate = config.sample_rate.0;
+
+        // Build the callback state. The resampler and local buffer
+        // live in the callback closure -- no mutex needed since the
+        // cpal callback is the sole consumer.
+        let mut resampler = Resampler::new(source_rate, device_rate, source_channels);
+        let mut local_buf: VecDeque<i16> = VecDeque::with_capacity(8192);
+
+        // Drain available samples from the ring buffer into the
+        // local VecDeque so the resampler can use random access.
+        let drain_ring = move |consumer: &mut rtrb::Consumer<i16>, local: &mut VecDeque<i16>| {
+            let available = consumer.slots();
+            if available > 0 {
+                let chunk = consumer.read_chunk(available).unwrap();
+                let (first, second) = chunk.as_slices();
+                local.extend(first.iter().copied());
+                local.extend(second.iter().copied());
+                chunk.commit_all();
+            }
+        };
+
+        let stream = match default_config.sample_format() {
+            cpal::SampleFormat::I16 => {
+                let vol = vol.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        drain_ring(&mut consumer, &mut local_buf);
+                        write_samples_i16(data, &mut local_buf, &vol, &mut resampler);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
+            cpal::SampleFormat::F32 => {
+                let vol = vol.clone();
+                device.build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        drain_ring(&mut consumer, &mut local_buf);
+                        write_samples_f32(data, &mut local_buf, &vol, &mut resampler);
+                    },
+                    |err| warn!("playback: audio stream error: {}", err),
+                    None,
+                )
+            }
+            fmt => {
+                warn!("playback: unsupported sample format: {:?}", fmt);
+                return;
+            }
+        };
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("playback: failed to create audio stream: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = stream.play() {
+            warn!("playback: failed to start audio stream: {}", e);
+            return;
+        }
+        info!(
+            "playback: audio output started ({}Hz {} ch)",
+            device_rate, source_channels
+        );
+
+        // Keep the stream alive until shutdown is requested.
+        while !shutdown.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // stream is dropped here, releasing the audio device.
+        info!("playback: audio thread shutting down");
+    }
+
+    /// Signal the audio thread to stop and wait for it to finish.
+    fn stop(self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.handle.join();
     }
 }
 
@@ -157,8 +310,8 @@ pub struct PlaybackChannel {
     audio_mode: u16,
     sample_rate: u32,
     channels: u32,
-    audio_buffer: AudioBuffer,
-    _cpal_stream: Option<SendStream>,
+    audio_producer: Option<rtrb::Producer<i16>>,
+    audio_thread: Option<AudioThread>,
     opus_decoder: Option<opus_decoder::OpusDecoder>,
     volume_control: Arc<VolumeControl>,
 }
@@ -186,8 +339,8 @@ impl PlaybackChannel {
             audio_mode: 0,
             sample_rate: 0,
             channels: 0,
-            audio_buffer: Arc::new(Mutex::new(VecDeque::new())),
-            _cpal_stream: None,
+            audio_producer: None,
+            audio_thread: None,
             opus_decoder: None,
             volume_control,
         }
@@ -197,29 +350,51 @@ impl PlaybackChannel {
         info!("playback: channel started");
         loop {
             let mut chunk = [0u8; 65536];
-            let n = match &mut self.stream {
-                SpiceStream::Plain(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
-                }
-                SpiceStream::Tls(s) => {
-                    use tokio::io::AsyncReadExt;
-                    s.read(&mut chunk).await?
+            let stream = &mut self.stream;
+            let read_result = tokio::select! {
+                result = async {
+                    match stream {
+                        SpiceStream::Plain(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                        SpiceStream::Tls(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
+                    }
+                } => Some(result),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if crate::SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                        info!("playback: shutdown requested");
+                        break;
+                    }
+                    None
                 }
             };
-            if n == 0 {
-                info!("playback: channel disconnected");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Playback))
-                    .await
-                    .ok();
-                break;
-            }
+
+            let n = match read_result {
+                Some(Ok(0)) => {
+                    info!("playback: channel disconnected");
+                    self.event_tx
+                        .send(ChannelEvent::Disconnected(ChannelType::Playback))
+                        .await
+                        .ok();
+                    break;
+                }
+                Some(Ok(n)) => n,
+                Some(Err(e)) => return Err(e.into()),
+                None => continue, // timeout, no data yet
+            };
+
             self.byte_counter.add(n as u64);
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
             self.process_messages().await?;
         }
+
+        // Clean shutdown: stop the audio thread.
+        self.stop_audio();
         Ok(())
     }
 
@@ -312,52 +487,29 @@ impl PlaybackChannel {
                     }
                 }
                 playback_server::MODE => {
+                    // SpiceMsgPlaybackMode: time(u32) + mode(u16).
+                    // Skip the 4-byte multimedia timestamp.
                     if payload.len() >= 6 {
                         self.audio_mode = u16::from_le_bytes([payload[4], payload[5]]);
                         info!("playback: MODE: {}", self.audio_mode);
                     }
                 }
                 playback_server::DATA => {
+                    // SpiceMsgPlaybackPacket: time(u32) + data.
+                    // Skip the 4-byte multimedia timestamp.
                     if payload.len() > 4 {
                         let audio_data = &payload[4..];
                         if self.audio_mode == AUDIO_DATA_MODE_RAW {
-                            let mut buf = self.audio_buffer.lock().unwrap();
-                            for chunk in audio_data.chunks_exact(2) {
-                                buf.push_back(i16::from_le_bytes([chunk[0], chunk[1]]));
-                            }
-                            // Cap the buffer to prevent unbounded growth
-                            // if audio arrives faster than it is consumed.
-                            while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                                buf.pop_front();
-                            }
+                            self.push_samples_raw(audio_data);
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
-                            if let Some(ref mut decoder) = self.opus_decoder {
-                                let ch = self.channels as usize;
-                                let mut pcm =
-                                    vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
-                                match decoder.decode(audio_data, &mut pcm, false) {
-                                    Ok(samples) => {
-                                        let mut buf = self.audio_buffer.lock().unwrap();
-                                        for &s in &pcm[..samples * ch] {
-                                            buf.push_back(s);
-                                        }
-                                        while buf.len() > MAX_AUDIO_BUFFER_SAMPLES {
-                                            buf.pop_front();
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!("playback: Opus decode error: {}", e);
-                                    }
-                                }
-                            }
+                            self.push_samples_opus(audio_data);
                         }
                     }
                 }
                 playback_server::STOP => {
                     info!("playback: STOP");
-                    self._cpal_stream = None;
+                    self.stop_audio();
                     self.opus_decoder = None;
-                    self.audio_buffer.lock().unwrap().clear();
                 }
                 playback_server::VOLUME | playback_server::MUTE | playback_server::LATENCY => {
                     debug!("playback: received opcode {} (ignored)", msg_type);
@@ -376,88 +528,67 @@ impl PlaybackChannel {
         Ok(())
     }
 
-    fn start_audio_output(&mut self) {
-        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-
-        let host = cpal::default_host();
-        let device = match host.default_output_device() {
-            Some(d) => d,
-            None => {
-                warn!("playback: no audio output device found");
-                return;
+    /// Push raw PCM samples into the ring buffer.
+    fn push_samples_raw(&mut self, audio_data: &[u8]) {
+        if let Some(ref mut producer) = self.audio_producer {
+            for chunk in audio_data.chunks_exact(2) {
+                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+                // Drop samples if the ring buffer is full (back-pressure).
+                let _ = producer.push(sample);
             }
-        };
-        let default_config = match device.default_output_config() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("playback: failed to get default output config: {}", e);
-                return;
-            }
-        };
-        info!(
-            "playback: device config: {}Hz, {} ch, {:?}",
-            default_config.sample_rate().0,
-            default_config.channels(),
-            default_config.sample_format()
-        );
-        let config = cpal::StreamConfig {
-            channels: default_config.channels(),
-            sample_rate: default_config.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
-        };
-        let device_rate = config.sample_rate.0;
-        let device_channels = config.channels as u32;
-        let buffer = self.audio_buffer.clone();
-        let vol = self.volume_control.clone();
-        let resampler = Arc::new(Mutex::new(Resampler::new(self.sample_rate, device_rate)));
-
-        let stream = match default_config.sample_format() {
-            cpal::SampleFormat::I16 => {
-                let resampler = resampler.clone();
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                        let mut rs = resampler.lock().unwrap();
-                        write_samples_i16(data, &buffer, &vol, &mut rs);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
-            cpal::SampleFormat::F32 => {
-                let vol = self.volume_control.clone();
-                let resampler = resampler.clone();
-                device.build_output_stream(
-                    &config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        let mut rs = resampler.lock().unwrap();
-                        write_samples_f32(data, &buffer, &vol, &mut rs);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
-            fmt => {
-                warn!("playback: unsupported sample format: {:?}", fmt);
-                return;
-            }
-        };
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("playback: failed to create audio stream: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = stream.play() {
-            warn!("playback: failed to start audio stream: {}", e);
-            return;
         }
-        info!(
-            "playback: audio output started (device: {}Hz {} ch)",
-            device_rate, device_channels
-        );
-        self._cpal_stream = Some(SendStream(stream));
+    }
+
+    /// Decode Opus audio and push PCM samples into the ring buffer.
+    fn push_samples_opus(&mut self, audio_data: &[u8]) {
+        if let Some(ref mut decoder) = self.opus_decoder {
+            let ch = self.channels as usize;
+            let mut pcm = vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
+            match decoder.decode(audio_data, &mut pcm, false) {
+                Ok(samples) => {
+                    if let Some(ref mut producer) = self.audio_producer {
+                        for &s in &pcm[..samples * ch] {
+                            let _ = producer.push(s);
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("playback: Opus decode error: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Create the ring buffer and spawn the audio thread.
+    fn start_audio_output(&mut self) {
+        // Stop any existing audio thread first.
+        self.stop_audio();
+
+        let (producer, consumer) = rtrb::RingBuffer::new(MAX_AUDIO_BUFFER_SAMPLES);
+        self.audio_producer = Some(producer);
+
+        match AudioThread::spawn(
+            consumer,
+            self.volume_control.clone(),
+            self.sample_rate,
+            self.channels,
+        ) {
+            Some(thread) => {
+                self.audio_thread = Some(thread);
+            }
+            None => {
+                warn!("playback: failed to spawn audio thread");
+                self.audio_producer = None;
+            }
+        }
+    }
+
+    /// Stop the audio thread and drop the producer.
+    fn stop_audio(&mut self) {
+        self.audio_producer = None;
+        if let Some(thread) = self.audio_thread.take() {
+            thread.stop();
+        }
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
@@ -481,5 +612,133 @@ impl PlaybackChannel {
         }
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Resampler, VolumeControl};
+    use std::collections::VecDeque;
+
+    // --- VolumeControl tests ---
+
+    #[test]
+    fn volume_control_new_defaults() {
+        let vc = VolumeControl::new();
+        assert_eq!(vc.volume(), 80);
+        assert!(!vc.muted());
+    }
+
+    #[test]
+    fn volume_control_set_volume_clamps_to_100() {
+        let vc = VolumeControl::new();
+        vc.set_volume(150);
+        assert_eq!(vc.volume(), 100);
+    }
+
+    #[test]
+    fn volume_control_effective_volume_when_muted_is_zero() {
+        let vc = VolumeControl::new();
+        vc.set_muted(true);
+        assert_eq!(vc.effective_volume(), 0.0);
+    }
+
+    #[test]
+    fn volume_control_effective_volume_default() {
+        let vc = VolumeControl::new();
+        let ev = vc.effective_volume();
+        assert!((ev - 0.8).abs() < 1e-6, "expected 0.8, got {}", ev);
+    }
+
+    #[test]
+    fn volume_control_mute_unmute_preserves_volume() {
+        let vc = VolumeControl::new();
+        vc.set_volume(65);
+        vc.set_muted(true);
+        assert_eq!(vc.effective_volume(), 0.0);
+        vc.set_muted(false);
+        assert_eq!(vc.volume(), 65);
+        let ev = vc.effective_volume();
+        assert!((ev - 0.65).abs() < 1e-6, "expected 0.65, got {}", ev);
+    }
+
+    // --- Resampler tests ---
+
+    /// Helper: fill a VecDeque from a slice.
+    fn make_buf(samples: &[i16]) -> VecDeque<i16> {
+        samples.iter().copied().collect()
+    }
+
+    #[test]
+    fn resampler_1to1_mono_produces_correct_samples() {
+        let mut r = Resampler::new(48000, 48000, 1);
+        // With ratio=1.0 and pos starting at 0.0, idx=0, frac=0.0.
+        // We need (0+2)*1 = 2 samples minimum.  Push more to test iteration.
+        let samples: &[i16] = &[100, 200, 300, 400];
+        let mut buf = make_buf(samples);
+
+        // First call: interpolates between samples[0]=100 and samples[1]=200,
+        // frac=0.0 → output should be 100.
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 100, "first frame should be 100");
+
+        // After first call, pos advances by ratio=1.0 → consume_frames=1,
+        // one sample popped.  buf is now [200, 300, 400], pos=0.0.
+        // Second call: output should be 200.
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 200, "second frame should be 200");
+    }
+
+    #[test]
+    fn resampler_1to1_stereo_separates_channels() {
+        let mut r = Resampler::new(48000, 48000, 2);
+        // Interleaved L/R: [100, -100, 200, -200, 300, -300, 400, -400]
+        // Need (0+2)*2 = 4 samples minimum.
+        let samples: &[i16] = &[100, -100, 200, -200, 300, -300, 400, -400];
+        let mut buf = make_buf(samples);
+
+        let mut out = [0i16; 2];
+        r.next_frame(&mut buf, &mut out);
+        // frac=0.0 → output = frame[0] = [100, -100]
+        assert_eq!(out[0], 100, "L channel should be 100");
+        assert_eq!(out[1], -100, "R channel should be -100");
+    }
+
+    #[test]
+    fn resampler_underrun_returns_silence_and_leaves_buffer_empty() {
+        let mut r = Resampler::new(48000, 48000, 1);
+        let mut buf: VecDeque<i16> = VecDeque::new();
+
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+
+        assert_eq!(out[0], 0, "underrun should produce silence");
+        assert!(buf.is_empty(), "buffer should remain empty after underrun");
+    }
+
+    #[test]
+    fn resampler_2to1_upsampling_interpolates() {
+        // source=24000, device=48000 → ratio=0.5
+        // Each output frame advances pos by 0.5; every two output frames
+        // consume one input frame.
+        let mut r = Resampler::new(24000, 48000, 1);
+        // Need at least (0+2)*1=2 input samples so lookahead is satisfied.
+        let samples: &[i16] = &[0, 1000, 2000];
+        let mut buf = make_buf(samples);
+
+        // Output frame 0: pos=0.0, idx=0, frac=0.0 → lerp(0, 1000, 0.0)=0
+        let mut out = [0i16; 1];
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 0, "upsampled frame 0 should be 0");
+
+        // Output frame 1: pos=0.5, idx=0, frac=0.5 → lerp(0, 1000, 0.5)=500
+        // After this call pos=1.0, consume_frames=1, pop 1 sample, pos=0.0.
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 500, "upsampled frame 1 should be ~500");
+
+        // Output frame 2: pos=0.0, buf=[1000,2000], idx=0 → lerp(1000,2000,0.0)=1000
+        r.next_frame(&mut buf, &mut out);
+        assert_eq!(out[0], 1000, "upsampled frame 2 should be 1000");
     }
 }

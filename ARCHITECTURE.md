@@ -59,6 +59,8 @@ communication between tasks.
 | Cursor channel | Track cursor position and visibility |
 | Inputs channel | Send keyboard/mouse events to server |
 | Usbredir channel | USB redirection via SpiceVMC data transport |
+| Playback channel | Decode audio, push samples to ring buffer |
+| Audio thread | Consume ring buffer, resample, write to cpal device |
 | UI thread | egui rendering, input capture (GUI mode only) |
 
 ### Channel Communication
@@ -90,9 +92,14 @@ communication between tasks.
   to the UI thread
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
   inputs channel handler. The channel is bounded (256 slots). The consumer
-  coalesces consecutive MouseMove events into a single position update to
-  prevent the channel from filling during network stalls, which would cause
-  the producer's `try_send` to silently drop critical button events
+  coalesces consecutive MouseMove events into a single position update (or
+  accumulates MouseMotion deltas) to prevent the channel from filling
+  during network stalls, which would cause the producer's `try_send` to
+  silently drop critical button events. Mouse events are dispatched based
+  on the server's mouse mode: client mode (2) sends absolute
+  MOUSE_POSITION, server mode (1) sends relative MOUSE_MOTION. At session
+  startup, ryll requests client mode via MOUSE_MODE_REQUEST if the server
+  supports it
 
 ### TCP Keepalive
 
@@ -137,8 +144,9 @@ All SPICE messages use a 6-byte mini-header:
 |---------|---------|------------------|
 | Main (1) | Session control | init, channels_list, ping/pong |
 | Display (2) | Graphics | surface_create, draw_copy, mark |
-| Inputs (3) | User input | key_down, key_up, mouse_position |
+| Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
+| Playback (5) | Audio playback | playback_start, playback_data, playback_mode, playback_stop |
 | Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 | WebDAV (11) | Folder sharing | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 
@@ -162,6 +170,11 @@ Values from `spice-protocol/spice/enums.h`:
 |  107 | ZlibGlzRgb      | Supported (zlib-wrapped GLZ) |
 |  108 | JpegAlpha        | Not implemented |
 |  109 | LZ4              | Supported (per-row compressed) |
+
+MJPEG is handled separately: it is not an `ImageType` but a streaming video
+codec delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages. The codec
+type byte in the stream header selects MJPEG (value 1). Frames are decoded
+inline in `display.rs` using the same JPEG path as `ImageType::Jpeg`.
 
 ### Wire format differences
 
@@ -189,12 +202,18 @@ of decompressed images keyed by `image_id`. Cross-frame references
 use `image_dist` to compute the source image ID. Each GLZ header
 includes a `win_head_dist` field that defines the reference window
 size; after decompressing an image, the display channel evicts all
-cached images whose id falls below `image_id - win_head_dist`. This
-replaced an earlier fixed-size cache that could evict images still
-needed by subsequent frames. In multi-monitor configurations, the
-GLZ dictionary is shared across all display channels via an
-`Arc<Mutex<HashMap>>` so that cross-frame references resolve
-correctly regardless of which display channel produced them.
+cached images whose id falls below `image_id - win_head_dist`. In
+multi-monitor configurations, the GLZ dictionary is shared across
+all display channels via a `GlzDictionary` struct (in the
+`shakenfist-spice-compression` crate) that wraps the image HashMap
+with a `tokio::sync::Notify`. When one channel inserts a decoded
+image, any other channel waiting on a cross-frame reference to
+that image is woken immediately instead of polling. Non-GLZ images
+are only cached when the server sets `IMAGE_FLAGS_CACHE_ME` in the
+image descriptor; GLZ images are always cached since they form the
+cross-frame reference dictionary. Server-initiated invalidation
+(`INVALIDATE_LIST`, `INVAL_ALL_PIXMAPS`) clears both the per-channel
+image cache and the shared GLZ dictionary.
 
 **LZ** — Simpler variant that only references pixels within the
 current image. No cross-frame dependencies.
@@ -263,6 +282,50 @@ tuple so that draw operations from different display channels
 target the correct surface even when surface IDs overlap across
 channels. This prevents cross-channel surface corruption in
 multi-head configurations.
+
+## Audio Playback Pipeline
+
+SPICE audio data arrives on the **Playback channel** (type 5) as
+`PLAYBACK_DATA` messages containing a 4-byte multimedia timestamp
+followed by encoded audio. The codec is negotiated via `PLAYBACK_MODE`
+(raw PCM = 1, Opus = 3).
+
+```
+SPICE PLAYBACK_DATA message (tokio network task)
+  │
+  ├── raw PCM: i16 LE samples pushed directly
+  └── Opus: decoded via `opus-decoder` crate → i16 samples
+                │
+                ▼
+        rtrb::RingBuffer<i16>  (lock-free, ~2 s capacity at 48kHz stereo)
+                │
+                ▼
+      dedicated std::thread ("audio")
+                │
+                ├── drains ring buffer into local VecDeque
+                ├── Resampler: linear interpolation from source rate
+                │   to device rate (ratio = source_rate / device_rate)
+                └── cpal output stream callback → audio device
+```
+
+The tokio network task is the **producer**: it decodes incoming audio
+and pushes i16 samples into the ring buffer via `rtrb::Producer<i16>`.
+Back-pressure is applied by dropping samples when the ring buffer is
+full (the server is sending faster than the device can consume).
+
+The audio thread is the **consumer**: it owns the `cpal` output stream
+and the `Resampler`. The cpal callback drains the ring buffer into a
+local `VecDeque` and calls `Resampler::next_frame()` to produce
+resampled output at the device's native sample rate. The resampler
+uses linear interpolation and handles underruns silently (outputs
+silence).
+
+Volume control (`VolumeControl`) is shared between the UI thread and
+the audio thread via `Arc<VolumeControl>`, using atomic operations to
+avoid locking in the cpal real-time callback.
+
+The audio thread is spawned on `PLAYBACK_START` and stopped (joined)
+on `PLAYBACK_STOP` or channel disconnect.
 
 ## Display Rendering
 

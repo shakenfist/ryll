@@ -8,13 +8,15 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{MainSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, ChannelsList, MainInit, MessageHeader, Notify, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{main_client, main_server, ChannelType, NotifySeverity};
-use crate::settings;
+use shakenfist_spice_protocol::{
+    main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
+};
 
 use super::ChannelEvent;
 
@@ -59,6 +61,7 @@ pub struct MainChannel {
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_text: Option<String>,
+    cached_clipboard: Option<arboard::Clipboard>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -94,6 +97,7 @@ impl MainChannel {
             guest_caps_received: false,
             channels_requested: false,
             last_clipboard_text: None,
+            cached_clipboard: None,
             capture,
             byte_counter,
             traffic,
@@ -109,6 +113,21 @@ impl MainChannel {
     }
 
     /// Run the main channel event loop
+    /// Get or create the cached clipboard instance. Returns None
+    /// if the clipboard cannot be opened (e.g. no display server).
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.cached_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.cached_clipboard = Some(cb),
+                Err(e) => {
+                    debug!("main: failed to open clipboard: {}", e);
+                    return None;
+                }
+            }
+        }
+        self.cached_clipboard.as_mut()
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         info!("main: channel started");
 
@@ -283,10 +302,8 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
-                self.set_mouse_mode(
-                    init.supported_mouse_modes,
-                    init.current_mouse_mode,
-                ).await?;
+                self.set_mouse_mode(init.supported_mouse_modes, init.current_mouse_mode)
+                    .await?;
             }
 
             main_server::CHANNELS_LIST => {
@@ -413,9 +430,7 @@ impl MainChannel {
 
             main_server::MULTI_MEDIA_TIME => {
                 if payload.len() >= 4 {
-                    let time = u32::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3],
-                    ]);
+                    let time = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     debug!("main: multi_media_time={}", time);
                 }
             }
@@ -435,12 +450,11 @@ impl MainChannel {
 
             main_server::AGENT_DATA => {
                 if payload.len() >= 20 {
-                    let agent_type = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
-                    let agent_size = u32::from_le_bytes([
-                        payload[16], payload[17], payload[18], payload[19],
-                    ]) as usize;
+                    let agent_type =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    let agent_size =
+                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]])
+                            as usize;
                     let agent_payload = &payload[20..20 + agent_size.min(payload.len() - 20)];
                     debug!(
                         "main: agent_data from server: type={}, size={}",
@@ -494,7 +508,6 @@ impl MainChannel {
             .await
             .ok();
 
-        const MOUSE_MODE_CLIENT: u32 = 2;
         if current != MOUSE_MODE_CLIENT && (supported & MOUSE_MODE_CLIENT) != 0 {
             info!(
                 "main: requesting client mouse mode (current={}, supported={})",
@@ -667,9 +680,8 @@ impl MainChannel {
         match agent_type {
             VD_AGENT_CLIPBOARD_GRAB => {
                 if payload.len() >= 8 {
-                    let format = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
+                    let format =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: guest clipboard grab, requesting data");
                         self.send_clipboard_request().await?;
@@ -686,9 +698,14 @@ impl MainChannel {
                         // Log byte count only — clipboard content may contain
                         // passwords or sensitive data.
                         info!("main: clipboard from guest ({} bytes)", text.len());
-                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&text)) {
-                            Ok(()) => debug!("main: host clipboard updated"),
-                            Err(e) => debug!("main: clipboard set failed: {}", e),
+                        if let Some(cb) = self.clipboard() {
+                            match cb.set_text(&text) {
+                                Ok(()) => debug!("main: host clipboard updated"),
+                                Err(e) => {
+                                    debug!("main: clipboard set failed: {}", e);
+                                    self.cached_clipboard = None;
+                                }
+                            }
                         }
                         // Record so poll_host_clipboard won't re-grab what we just set
                         self.last_clipboard_text = Some(text);
@@ -699,15 +716,12 @@ impl MainChannel {
                 info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
                 // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
-                    let format = u32::from_le_bytes([
-                        payload[4], payload[5], payload[6], payload[7],
-                    ]);
+                    let format =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        if let Some(text) = arboard::Clipboard::new()
-                            .and_then(|mut cb| cb.get_text())
-                            .ok()
-                        {
+                        let text = self.clipboard().and_then(|cb| cb.get_text().ok());
+                        if let Some(text) = text {
                             // Log byte count only — clipboard content may contain
                             // passwords or sensitive data.
                             info!("main: clipboard to guest ({} bytes)", text.len());
@@ -723,9 +737,8 @@ impl MainChannel {
                 self.guest_caps_received = true;
                 debug!("main: received agent capabilities from guest");
                 if payload.len() >= 4 {
-                    let request = u32::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3],
-                    ]);
+                    let request =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     if request == 1 {
                         self.agent_caps_announced = false;
                         self.maybe_send_announce_capabilities().await?;
@@ -740,9 +753,9 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match arboard::Clipboard::new().and_then(|mut cb| cb.get_text()) {
-            Ok(t) => t,
-            Err(_) => return Ok(()),
+        let text = match self.clipboard().and_then(|cb| cb.get_text().ok()) {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
         if text.is_empty() {
@@ -769,14 +782,16 @@ impl MainChannel {
         let mut payload = Vec::with_capacity(8);
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload)
+            .await
     }
 
     async fn send_clipboard_request(&mut self) -> Result<bool> {
         let mut payload = Vec::with_capacity(8);
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload)
+            .await
     }
 
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
@@ -785,7 +800,8 @@ impl MainChannel {
         payload.write_u32::<LittleEndian>(0)?;
         payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
         payload.extend_from_slice(text_bytes);
-        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload).await
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
+            .await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {

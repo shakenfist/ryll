@@ -5,9 +5,10 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 ## Features
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
-- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming
+- **Audio playback** - SPICE playback channel with raw PCM and Opus codec support; lock-free ring buffer to dedicated audio thread via cpal
 - **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
-- **Multi-channel support** - Handles main, display, cursor, inputs, usbredir, and webdav channels
+- **Multi-channel support** - Handles main, display, cursor, inputs, playback, usbredir, and webdav channels
 - **USB device redirection** - Forward physical USB devices (Linux only) or present RAW disk images as virtual USB mass storage devices on all platforms. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
 - **WebDAV folder sharing** - Share a local directory with the guest VM via the SPICE WebDAV channel. The guest mounts the share via `spice-webdavd` + `davfs2`. Supports read-write and read-only modes. Interactive "Folders" panel in the GUI for directory selection and share management. CLI flags (`--share-dir`, `--share-dir-ro`) for headless/scripted use
 - **TLS support** - Secure connections with inline CA certificates from .vv files
@@ -216,6 +217,7 @@ ryll/src/
 │   ├── display.rs       # Display rendering, GLZ dictionary
 │   ├── cursor.rs        # Cursor tracking
 │   ├── inputs.rs        # Keyboard/mouse input
+│   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
 │   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
 ├── usbredir/
@@ -245,6 +247,9 @@ ryll/src/
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
 - **image** - JPEG decoding (via the `image` crate with jpeg feature)
+- **cpal** - Cross-platform audio output
+- **rtrb** - Lock-free ring buffer for audio sample passing
+- **opus-decoder** - Pure-Rust Opus audio decoding
 - **nusb** - USB device access (pure Rust, no libusb)
 - **dav-server** - WebDAV server (RFC 4918, LocalFs backend)
 - **hyper** - HTTP/1.1 framing for WebDAV byte-stream transport

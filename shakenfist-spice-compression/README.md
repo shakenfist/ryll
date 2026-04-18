@@ -6,19 +6,21 @@ decompression algorithms:
 - **QUIC** — the SPICE wavelet/arithmetic codec (not the QUIC
   transport protocol). Feature `quic` (default).
 - **GLZ** — dictionary-based cross-frame LZ with a shared
-  previous-images dictionary. Async because of a cross-channel
-  retry loop. Feature `glz` (default), pulls in `tokio`.
+  `GlzDictionary` and notify-based cross-frame reference
+  resolution. Feature `glz` (default), pulls in `tokio`.
 - **LZ** — single-frame LZ. Feature `lz` (default).
 - **LZ4** — SPICE's per-row LZ4 image format (each row is
   independently compressed with `lz4_flex` and a 4-byte length
   prefix). Feature `lz4` (default), pulls in `lz4_flex`.
 
 All four decoders return a `DecompressedImage { width, height,
-pixels: Vec<u8>, image_id }` on success (with the historical
-exception of `quic_decode`, which returns `Option<Vec<u8>>` and
-leaves the wrapping to the caller — this asymmetry will be
-smoothed out before the first published release). The struct
-is `#[non_exhaustive]`; construct via `DecompressedImage::new(...)`.
+pixels: Vec<u8>, image_id, win_head_dist }` on success (with
+the historical exception of `quic_decode`, which returns
+`Option<Vec<u8>>` and leaves the wrapping to the caller — this
+asymmetry will be smoothed out before the first published
+release). The struct is `#[non_exhaustive]`; construct via
+`DecompressedImage::new(...)` (sets `win_head_dist` to 0) or
+`DecompressedImage::new_glz(...)` for GLZ images.
 
 ## Status
 
@@ -44,17 +46,20 @@ git dependency until `0.1.0` ships.
 ## Usage
 
 ```rust,ignore
-use shakenfist_spice_compression::{decompress_glz, DecompressedImage};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use shakenfist_spice_compression::{
+    decompress_glz, DecompressedImage, GlzDictionary,
+};
 
 // Shared GLZ dictionary across all display channels.
-let dict: Arc<Mutex<HashMap<u64, Vec<u8>>>> =
-    Arc::new(Mutex::new(HashMap::new()));
+let dict = GlzDictionary::new();
 
 // Decompress a GLZ image from wire bytes.
 let image: DecompressedImage =
     decompress_glz(glz_bytes, &dict).await?;
+
+// Insert into dictionary for cross-frame references.
+// This also notifies any waiters blocked on this image.
+dict.insert(image.image_id, image.pixels.clone());
 # Ok::<(), anyhow::Error>(())
 ```
 

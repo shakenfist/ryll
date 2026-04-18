@@ -10,13 +10,14 @@ pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 pub use inputs::InputsChannel;
 pub use main_channel::MainChannel;
+pub use playback::{PlaybackChannel, VolumeControl};
 pub use usbredir::UsbredirChannel;
 pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
-use shakenfist_spice_protocol::ChannelType;
 use crate::usb::UsbDeviceInfo;
+use shakenfist_spice_protocol::ChannelType;
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
@@ -136,8 +137,11 @@ pub enum InputEvent {
     /// Key released
     KeyUp(u32), // Scancode
 
-    /// Mouse moved
+    /// Mouse moved (absolute position, client mode)
     MouseMove { x: u32, y: u32 },
+
+    /// Mouse moved (relative delta, server mode)
+    MouseMotion { dx: i32, dy: i32 },
 
     /// Mouse button pressed
     MouseDown { button: u32, x: u32, y: u32 },
