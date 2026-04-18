@@ -276,16 +276,21 @@ CI.
 
 ## Security scanners
 
-ryll runs four deterministic scanners on every PR in
+ryll runs five deterministic scanners on every PR in
 addition to the LLM-driven automated reviewer. They are
-defined in `.github/workflows/supply-chain.yml` and run on
-the `[self-hosted, static]` runner.
+defined in `.github/workflows/supply-chain.yml`.
+`cargo-deny` and `bidi-check` run on the
+`[self-hosted, static]` runner; `cargo-audit`, `gitleaks`,
+and `shellcheck` run on `ubuntu-latest` because they need
+tooling (cargo, gitleaks, shellcheck) that the minimal
+static runner does not provide.
 
 | Scanner | What it checks | Policy location |
 |---------|----------------|-----------------|
 | `cargo audit` | RustSec advisories against `Cargo.lock` (plus a weekly cron on `develop` to catch drift) | `.cargo/audit.toml` — ignore list mirrors `deny.toml` |
 | `cargo deny` | License allowlist, dependency sources, version bans, advisory ignores | `deny.toml` at repo root |
-| `gitleaks` | Credential-like patterns in the diff | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
+| `gitleaks` | Credential-like patterns in the diff (upstream binary invoked directly; the `gitleaks-action` wrapper requires a paid licence for org repos) | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
+| `shellcheck` | Shell-script lint across `scripts/` and `tools/` (invoked via `tools/run-shellcheck.sh`) | Per-script `# shellcheck` directives as needed |
 | `tools/check-bidi.sh` | Bidi and zero-width Unicode codepoints (CVE-2021-42574 Trojan Source) | The script itself; PCRE character class at the top |
 
 Policy maintenance:

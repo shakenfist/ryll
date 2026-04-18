@@ -54,9 +54,11 @@ fi
 FOUND=0
 # We run grep once per file so the error output names the file and
 # line. grep exits 1 on no match, 0 on match, 2 on error — we treat
-# match as a failure, no-match as success.
+# match as a failure, no-match as success. -I skips binary files to
+# avoid false positives on fixture assets whose bytes happen to
+# encode a bidi codepoint.
 for f in "${EXISTING[@]}"; do
-    if LC_ALL=C.UTF-8 grep -nP "$PATTERN" -- "$f" 2>/dev/null; then
+    if LC_ALL=C.UTF-8 grep -nPI "$PATTERN" -- "$f" 2>/dev/null; then
         echo "check-bidi: suspicious Unicode codepoint in $f" >&2
         FOUND=1
     fi

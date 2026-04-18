@@ -45,6 +45,7 @@ Workflows in `.github/workflows/`:
 | `ci.yml` | Lint, build, test (multi-platform), automated PR review |
 | `release.yml` | Build and publish release artifacts |
 | `codeql-analysis.yml` | CodeQL security scanning |
+| `supply-chain.yml` | Dependency advisories, license policy, secret scanning, bidi/unicode checks |
 | `renovate.yml` | Automated dependency updates (hourly) |
 | `export-repo-config.yml` | Daily repository configuration export |
 | `pr-re-review.yml` | Bot-triggered PR re-review (`@shakenfist-bot please re-review`) |
