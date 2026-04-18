@@ -3,14 +3,14 @@
 # Runs on every PR to develop and on pushes to develop, plus a weekly
 # cron to catch advisory drift. All jobs run on self-hosted VM runners
 # (the `vm` label excludes bare-metal runners which have different
-# OSes and no passwordless sudo). Jobs that need extra tooling (cargo,
-# gitleaks, shellcheck) target `debian-12` so they can apt-install or
-# toolchain-install what they need; `static` is reserved for jobs
-# whose dependencies are self-contained. Every job carries the `s`
-# size label (2 vCPU, 4 GB RAM) — these scanners are all I/O-bound
-# and do not benefit from a larger runner. See docs/plans/PLAN-supply-
-# chain-scanning.md for the design rationale, and deny.toml for the
-# policy enforced by cargo-deny.
+# OSes and no passwordless sudo). Most jobs target `debian-12` with
+# size `s` (2 vCPU, 4 GB RAM) — these scanners are I/O-bound and do
+# not benefit from a larger runner. The gitleaks job targets
+# `debian-13` because gitleaks is not packaged in bookworm, and the
+# cargo-deny job targets `debian-12-docker` because
+# cargo-deny-action runs its check inside a Docker container. See
+# docs/plans/PLAN-supply-chain-scanning.md for the design rationale,
+# and deny.toml for the policy enforced by cargo-deny.
 
 name: Supply chain
 
@@ -50,20 +50,17 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # cargo-deny-action runs cargo-deny inside a Docker
+  # container, so this job needs the debian-12-docker image
+  # which ships with docker.io preinstalled.
   cargo-deny:
     name: cargo deny
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-12-docker, s]
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install docker
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y docker.io
-          sudo chmod ugo+rw /var/run/docker.sock
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:

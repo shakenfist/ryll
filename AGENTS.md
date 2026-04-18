@@ -280,18 +280,17 @@ ryll runs five deterministic scanners on every PR in
 addition to the LLM-driven automated reviewer. They are
 defined in `.github/workflows/supply-chain.yml`. All jobs
 run on self-hosted VM runners with the `s` size label
-(2 vCPU / 4 GB RAM; the scanners are I/O-bound):
-`cargo-deny` and `bidi-check` on
-`[self-hosted, vm, static, s]` because their dependencies
-are self-contained; `cargo-audit` and `shellcheck` on
-`[self-hosted, vm, debian-12, s]` where they can
-apt-install or toolchain-install the tooling the minimal
-static runner lacks; and `gitleaks` on
+(2 vCPU / 4 GB RAM; the scanners are I/O-bound).
+`cargo-audit`, `shellcheck`, and `bidi-check` run on
+`[self-hosted, vm, debian-12, s]`; `gitleaks` runs on
 `[self-hosted, vm, debian-13, s]` because gitleaks is
 only packaged from Debian 13 (trixie) onward — bookworm
-has no gitleaks package. The `vm` label matters —
-bare-metal runners have different OSes and no
-passwordless sudo.
+has no gitleaks package; `cargo-deny` runs on
+`[self-hosted, vm, debian-12-docker, s]` because the
+`cargo-deny-action` wrapper runs cargo-deny inside a
+Docker container and needs a runner image with docker
+preinstalled. The `vm` label matters — bare-metal runners
+have different OSes and no passwordless sudo.
 
 | Scanner | What it checks | Policy location |
 |---------|----------------|-----------------|
