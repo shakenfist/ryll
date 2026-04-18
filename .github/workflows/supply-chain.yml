@@ -38,6 +38,9 @@ jobs:
   cargo-audit:
     name: cargo audit
     runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-audit
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +53,9 @@ jobs:
   cargo-deny:
     name: cargo deny
     runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +79,9 @@ jobs:
   gitleaks:
     name: gitleaks
     runs-on: [self-hosted, vm, debian-13, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,6 +97,9 @@ jobs:
   shellcheck:
     name: shellcheck
     runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-shellcheck
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -100,6 +112,9 @@ jobs:
   bidi-check:
     name: bidi and zero-width
     runs-on: [self-hosted, vm, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 

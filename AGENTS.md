@@ -320,6 +320,41 @@ Policy maintenance:
   `.gitleaksignore` file with a comment explaining the
   pattern and why it is safe.
 
+## CI workflow conventions
+
+Every job in a workflow that can be triggered by a pull
+request or PR comment MUST declare a `concurrency:` block
+that cancels superseded runs. Without it, pushing a fixup
+commit (or re-commenting `@shakenfist-bot please retest`)
+leaves the old run consuming a self-hosted runner slot
+while the new run waits behind it. With `MAX_WORKERS = 6`
+on the runner fleet, a handful of stale runs can starve
+the queue for every other repo.
+
+Use the job-level form (not workflow-level) so unrelated
+jobs in the same workflow do not cancel each other:
+
+```yaml
+jobs:
+  my-job:
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-my-job
+      cancel-in-progress: true
+```
+
+For comment-triggered workflows (`pr-retest`,
+`pr-re-review`, etc.) use
+`group: <workflow-name>-${{ github.event.issue.number }}`
+instead so the PR number — not `github.ref`, which points
+at the default branch for `issue_comment` events — scopes
+the group.
+
+Scheduled, push-to-default, and release workflows should
+**not** enable `cancel-in-progress`. Cancelling a release
+mid-publish or a renovate run mid-PR-creation leaves
+partial state.
+
 ## Dependencies to Know
 
 | Crate | Purpose |
