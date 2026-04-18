@@ -47,11 +47,9 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # cargo-deny-action downloads its own binary, so it works on
-  # the static runner without a rust toolchain.
   cargo-deny:
     name: cargo deny
-    runs-on: [self-hosted, vm, static, s]
+    runs-on: [self-hosted, vm, s]
     steps:
       - uses: actions/checkout@v4
 
@@ -95,7 +93,7 @@ jobs:
 
   bidi-check:
     name: bidi and zero-width
-    runs-on: [self-hosted, vm, static, s]
+    runs-on: [self-hosted, vm, s]
     steps:
       - uses: actions/checkout@v4
 
