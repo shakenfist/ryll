@@ -229,7 +229,7 @@ ryll/src/
 
 ## Process templates
 
-Three templates at the repo root capture the workflows we
+Four templates at the repo root capture the workflows we
 use repeatedly. Read the template before starting one of
 these activities so the resulting plan/PR follows the
 established structure.
@@ -246,6 +246,12 @@ established structure.
   Wave 0, prompt-injection sub-agent, and a mandatory
   follow-up plan that lands as our own PR immediately
   after the contributor's merge.
+- **`REVIEW-STATE-TEMPLATE.md`** — skeleton for the local-
+  only `REVIEW-STATE.md` file that lives in each
+  external-PR review's worktree. Captures findings,
+  branch state, contributor history, plan B, and a
+  "How to resume" entry point for picking the work back
+  up after a pause. Never committed.
 
 ## Testing
 
