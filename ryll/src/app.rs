@@ -1010,11 +1010,13 @@ impl RyllApp {
                             paths.iter().map(|p| p.display().to_string()).collect();
                         format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
                     };
+                    info!("app: {}", msg);
                     self.bug_status_message = Some((msg, Instant::now()));
                 }
                 Err(e) => {
-                    self.bug_status_message =
-                        Some((format!("Screenshot failed: {}", e), Instant::now()));
+                    let msg = format!("Screenshot failed: {}", e);
+                    error!("app: {}", msg);
+                    self.bug_status_message = Some((msg, Instant::now()));
                 }
             }
         }
