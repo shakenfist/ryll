@@ -52,11 +52,25 @@ The guiding principles for merging external PRs:
    findings as PR comments and giving them a round. Where
    history shows they don't iterate, land and follow up.
    This is a per-PR operator call (see Step 0).
+6. **Preserve state across pauses.** External-PR reviews
+   often involve waiting — for CI, for the contributor to
+   respond, for our own bandwidth. Each review maintains a
+   local-only `REVIEW-STATE.md` in its worktree (copied
+   from `REVIEW-STATE-TEMPLATE.md`) so that returning to
+   the work after a pause does not require reconstructing
+   findings, branch layout, or next actions from scratch.
+   The state file is never committed; it is for our future
+   selves only. A state file that is not kept up to date
+   becomes misleading archaeology — worse than no file at
+   all — so update it whenever the situation changes.
 
 ## Process overview
 
 ```
 Step 0: Operator sets the teachy level for this PR
+        Assistant copies REVIEW-STATE-TEMPLATE.md into
+        the worktree as REVIEW-STATE.md and starts
+        filling it in
    │
    ▼
 Step 1: Operator does a first-pass read (already done
@@ -87,9 +101,13 @@ Step 7: Operator runs CI on the PR
    ▼
 Step 8: Operator merges, then our follow-up PR goes in
         immediately after
+
+Throughout: REVIEW-STATE.md is updated whenever a step
+            completes, an action is taken on the PR, the
+            contributor responds, or CI returns a result.
 ```
 
-## Step 0: Teachy level
+## Step 0: Teachy level and state file
 
 Before doing any review work, the assistant asks the
 operator which teaching posture to adopt for this PR. The
@@ -102,10 +120,13 @@ Options:
   follow-up plan. Default when the contributor has
   repeatedly declined to iterate.
 - **Light** — post findings as a single PR comment, give
-  the contributor one iteration round with a short timebox
-  (e.g. one week). If they don't respond or their response
-  is partial, proceed with land-and-follow-up for the
-  remainder. Default for a new contributor.
+  the contributor a chance to address the blocking items.
+  Prefer vague urgency ("take whatever time you need")
+  over hard deadlines — vague urgency tends to produce
+  better engagement than ultimatums. If the contributor
+  doesn't engage in a reasonable time (operator judgment),
+  fall back to land-and-follow-up for the remainder.
+  Default for a new contributor.
 - **Full** — iterate as long as the contributor engages.
   Only appropriate when the contributor has demonstrated
   they will respond to feedback and make changes. Rare.
@@ -113,6 +134,15 @@ Options:
 The assistant should ask once at the start, record the
 answer, and default to "none" only when the operator
 confirms that's appropriate for this contributor.
+
+Also at Step 0, the assistant copies
+`REVIEW-STATE-TEMPLATE.md` from the repo root into the
+review's worktree as `REVIEW-STATE.md` and starts filling
+in the PR identity, teachy mode, and contributor history
+sections. The state file is a living document that gets
+updated through the rest of the review (see "Throughout"
+in the process overview). It must not be staged or
+committed — it is for our future selves only.
 
 ## Step 2: Wave 0 — deterministic scanners
 
@@ -435,17 +465,51 @@ Once CI passes and triage is complete:
 3. Assistant is available for CI babysitting if needed
    (see `/loop` skill) but does not open the PR.
 
+## Step 9: Maintain `REVIEW-STATE.md`
+
+Not really a single step — `REVIEW-STATE.md` is a living
+document that gets updated throughout the review. Specific
+moments where it must be updated:
+
+- **At Step 0**, after the teachy mode is decided and the
+  template is copied in.
+- **After each Wave** (0, 1, 2) finishes, with the
+  findings classified.
+- **After the triage decision in Step 5**, with the final
+  blocking / should / nice / informational lists.
+- **After any action on the PR** — pre-merge fixes pushed,
+  PR comments posted, force-pushes, etc.
+- **After CI returns** — pass or fail, with what failed
+  if relevant.
+- **When the contributor responds** — what they said and
+  what we plan to do.
+- **When picking the work back up** after time away — to
+  capture what changed while we were gone.
+
+The "How to resume" section at the top of the state file
+is the entry point for future-you (or future-assistant).
+Keep it accurate — if the resume steps would be different
+now, update them.
+
+The state file is local-only, never staged. Treat it like
+a working notebook: high churn, low ceremony, only useful
+if kept current.
+
 ## Management session checklist
 
 Before declaring the merge process complete:
 
 - [ ] Step 0: teachy level recorded.
+- [ ] Step 0: `REVIEW-STATE.md` created in the worktree
+      from the template.
 - [ ] Wave 0 deterministic scanners run and results
       triaged.
 - [ ] Wave 1 LLM safety review complete.
 - [ ] Wave 2 LLM quality review complete.
 - [ ] All findings classified (blocking / follow-up /
       teach / ignore).
+- [ ] `REVIEW-STATE.md` reflects the current findings,
+      branch state, and next actions.
 - [ ] Blocking findings fixed on the contributor's branch
       with the smallest possible patch.
 - [ ] Teach findings posted as a PR comment (if teachy
@@ -458,3 +522,6 @@ Before declaring the merge process complete:
 - [ ] Our follow-up PR opened immediately after.
 - [ ] PR 23 → PR 28 pattern preserved: one PR for theirs,
       one immediately after for ours.
+- [ ] `REVIEW-STATE.md` either deleted (if the worktree
+      is being torn down) or updated to a "complete"
+      state (if the worktree is staying for a while).
