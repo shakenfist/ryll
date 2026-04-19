@@ -35,6 +35,10 @@ const STATS_BAR_HEIGHT: f32 = 20.0;
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
+/// Number of latency samples to keep for the sparkline.
+#[allow(dead_code)]
+const LATENCY_HISTORY_LEN: usize = 60;
+
 /// Number of recent frame timestamps kept for the FPS sliding window.
 const FPS_WINDOW_SIZE: usize = 120;
 
@@ -117,6 +121,40 @@ impl BandwidthTracker {
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
             None => String::from("-- B/s"),
+        }
+    }
+}
+
+/// Rolling latency tracker — samples arrive when
+/// `ChannelEvent::Latency` fires.  Values are stored in
+/// milliseconds for intuitive sparkline scaling.
+#[allow(dead_code)]
+struct LatencyTracker {
+    /// History of latency samples in ms (most recent last).
+    history: Vec<f32>,
+}
+
+#[allow(dead_code)]
+impl LatencyTracker {
+    fn new() -> Self {
+        LatencyTracker {
+            history: Vec::with_capacity(LATENCY_HISTORY_LEN),
+        }
+    }
+
+    /// Record a new latency sample in milliseconds.
+    fn record(&mut self, sample_ms: f32) {
+        self.history.push(sample_ms);
+        if self.history.len() > LATENCY_HISTORY_LEN {
+            self.history.remove(0);
+        }
+    }
+
+    /// Format the most recent latency value for display.
+    fn label(&self) -> String {
+        match self.history.last() {
+            Some(&v) => format!("{:.1}ms", v),
+            None => String::from("--ms"),
         }
     }
 }
@@ -2572,5 +2610,31 @@ mod tests {
                 PathBuf::from("foo.bar-2.png"),
             ]
         );
+    }
+
+    #[test]
+    fn latency_tracker_label_empty() {
+        let tracker = LatencyTracker::new();
+        assert_eq!(tracker.label(), "--ms");
+    }
+
+    #[test]
+    fn latency_tracker_label_non_empty() {
+        let mut tracker = LatencyTracker::new();
+        tracker.record(12.34);
+        assert_eq!(tracker.label(), "12.3ms");
+    }
+
+    #[test]
+    fn latency_tracker_record_trims_to_capacity() {
+        let mut tracker = LatencyTracker::new();
+        // Push 65 values: 0.0, 1.0, ..., 64.0
+        for i in 0..65 {
+            tracker.record(i as f32);
+        }
+        // Should be capped at LATENCY_HISTORY_LEN (60)
+        assert_eq!(tracker.history.len(), LATENCY_HISTORY_LEN);
+        // The first kept value should be the 6th original (index 5)
+        assert_eq!(tracker.history[0], 5.0);
     }
 }
