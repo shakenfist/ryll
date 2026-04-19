@@ -1195,22 +1195,6 @@ impl eframe::App for RyllApp {
                         }
                     }
 
-                    ui.separator();
-                    if self.mouse_mode == 1 {
-                        ui.label("Cursor: server mode");
-                    } else {
-                        ui.label(format!(
-                            "Cursor: ({}, {}) {}",
-                            self.cursor_pos.0,
-                            self.cursor_pos.1,
-                            if self.cursor_visible {
-                                "visible"
-                            } else {
-                                "hidden"
-                            }
-                        ));
-                    }
-
                     if self.cadence_enabled {
                         ui.separator();
                         ui.label("Cadence: ON");
