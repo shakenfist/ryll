@@ -243,6 +243,47 @@ pub struct RyllApp {
     traffic_filter_webdav: bool,
 }
 
+// ── Screenshot path helpers ─────────────────────────────────────────────────
+
+/// Derive per-surface output paths from a user-chosen base path.
+///
+/// * If `count == 1`, returns `vec![base.to_path_buf()]` unchanged.
+/// * If `count > 1`, strips the last extension from `base` (if any) and
+///   appends `-1.png`, `-2.png`, … `-{count}.png`.
+///
+/// Examples:
+/// ```text
+/// ("foo.png",     1) → ["foo.png"]
+/// ("foo.png",     3) → ["foo-1.png", "foo-2.png", "foo-3.png"]
+/// ("foo",         2) → ["foo-1.png", "foo-2.png"]
+/// ("foo.bar.png", 2) → ["foo.bar-1.png", "foo.bar-2.png"]
+/// ```
+fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
+    if count <= 1 {
+        return vec![base.to_path_buf()];
+    }
+
+    // Strip only the last extension.
+    let stem: std::path::PathBuf = if base.extension().is_some() {
+        base.with_extension("")
+    } else {
+        base.to_path_buf()
+    };
+
+    (1..=count)
+        .map(|n| {
+            let mut name = stem
+                .file_name()
+                .map(|s| s.to_os_string())
+                .unwrap_or_default();
+            name.push(format!("-{}.png", n));
+            stem.with_file_name(name)
+        })
+        .collect()
+}
+
+// ── End screenshot path helpers ─────────────────────────────────────────────
+
 impl RyllApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -866,6 +907,78 @@ impl RyllApp {
             self.last_sent_resize = Some((width, height));
         }
     }
+
+    /// Save the current display surface(s) as PNG file(s).
+    ///
+    /// If there is exactly one surface, the file is written directly to
+    /// `base_path`.  With multiple surfaces the last extension is stripped
+    /// from `base_path` and each surface gets its own file with a `-N.png`
+    /// suffix (e.g. `foo-1.png`, `foo-2.png`).  Surfaces are visited in
+    /// deterministic order (sorted by their `(channel_id, surface_id)` key).
+    ///
+    /// Returns the list of paths that were successfully written.
+    fn save_screenshots(&self, base_path: PathBuf) -> anyhow::Result<Vec<PathBuf>> {
+        if self.surfaces.is_empty() {
+            anyhow::bail!("No display surfaces to capture");
+        }
+
+        let mut sorted: Vec<_> = self.surfaces.iter().collect();
+        sorted.sort_by_key(|(k, _)| *k);
+
+        let paths = screenshot_paths(&base_path, sorted.len());
+
+        let mut written = Vec::new();
+        for ((_, surface), path) in sorted.into_iter().zip(paths) {
+            let png_bytes =
+                crate::bugreport::encode_png(surface.pixels(), surface.width, surface.height)?;
+            std::fs::write(&path, &png_bytes)?;
+            written.push(path);
+        }
+
+        Ok(written)
+    }
+
+    /// Open a native save dialog and write the current surface(s) as PNG(s).
+    ///
+    /// Sets `self.bug_status_message` with a success or failure message.
+    /// If the dialog is cancelled, nothing happens.
+    fn open_screenshot_dialog(&mut self) {
+        if self.surfaces.is_empty() {
+            self.bug_status_message = Some((
+                "No display surface to capture yet".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+
+        let default_name = format!(
+            "ryll-screenshot-{}.png",
+            crate::bugreport::filename_timestamp()
+        );
+
+        let picked = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .save_file();
+
+        if let Some(path) = picked {
+            match self.save_screenshots(path) {
+                Ok(paths) => {
+                    let msg = if paths.len() == 1 {
+                        format!("Saved screenshot to {}", paths[0].display())
+                    } else {
+                        let names: Vec<String> =
+                            paths.iter().map(|p| p.display().to_string()).collect();
+                        format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
+                    };
+                    self.bug_status_message = Some((msg, Instant::now()));
+                }
+                Err(e) => {
+                    self.bug_status_message =
+                        Some((format!("Screenshot failed: {}", e), Instant::now()));
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for RyllApp {
@@ -931,6 +1044,14 @@ impl eframe::App for RyllApp {
             let f11_pressed = ctx.input(|i| i.key_pressed(egui::Key::F11));
             if f11_pressed {
                 self.show_traffic_viewer = !self.show_traffic_viewer;
+            }
+        }
+
+        // F8 opens screenshot save dialog (not during region selection)
+        if !self.region_select_active {
+            let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
+            if f8_pressed {
+                self.open_screenshot_dialog();
             }
         }
 
@@ -2402,4 +2523,51 @@ pub async fn run_headless(
 
     info!("Headless mode finished");
     Ok(())
+}
+
+// ── Unit tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_paths_single() {
+        let paths = screenshot_paths(std::path::Path::new("foo.png"), 1);
+        assert_eq!(paths, vec![PathBuf::from("foo.png")]);
+    }
+
+    #[test]
+    fn screenshot_paths_multi() {
+        let paths = screenshot_paths(std::path::Path::new("foo.png"), 3);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("foo-1.png"),
+                PathBuf::from("foo-2.png"),
+                PathBuf::from("foo-3.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_no_extension() {
+        let paths = screenshot_paths(std::path::Path::new("foo"), 2);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("foo-1.png"), PathBuf::from("foo-2.png"),]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_multi_extension() {
+        let paths = screenshot_paths(std::path::Path::new("foo.bar.png"), 2);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("foo.bar-1.png"),
+                PathBuf::from("foo.bar-2.png"),
+            ]
+        );
+    }
 }
