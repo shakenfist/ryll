@@ -36,7 +36,6 @@ const STATS_BAR_HEIGHT: f32 = 20.0;
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
 /// Number of latency samples to keep for the sparkline.
-#[allow(dead_code)]
 const LATENCY_HISTORY_LEN: usize = 60;
 
 /// Number of recent frame timestamps kept for the FPS sliding window.
@@ -128,13 +127,11 @@ impl BandwidthTracker {
 /// Rolling latency tracker — samples arrive when
 /// `ChannelEvent::Latency` fires.  Values are stored in
 /// milliseconds for intuitive sparkline scaling.
-#[allow(dead_code)]
 struct LatencyTracker {
     /// History of latency samples in ms (most recent last).
     history: Vec<f32>,
 }
 
-#[allow(dead_code)]
 impl LatencyTracker {
     fn new() -> Self {
         LatencyTracker {
@@ -208,6 +205,9 @@ pub struct RyllApp {
 
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
+
+    // Latency tracking for the status bar sparkline
+    latency: LatencyTracker,
 
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
@@ -430,6 +430,7 @@ impl RyllApp {
             forwarded_buttons: 0,
             pending_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
+            latency: LatencyTracker::new(),
             capture,
             usb_tx: Some(usb_tx),
             webdav_tx: Some(webdav_tx),
@@ -614,6 +615,7 @@ impl RyllApp {
 
                 ChannelEvent::Latency { key_timestamp } => {
                     self.stats.last_latency = Some(key_timestamp);
+                    self.latency.record((key_timestamp * 1000.0) as f32);
                 }
 
                 ChannelEvent::Error(msg) => {
@@ -1127,8 +1129,31 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(latency) = self.stats.last_latency {
-                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+                    if self.stats.last_latency.is_some() {
+                        ui.label(format!("Latency: {}", self.latency.label()));
+                    }
+                    if self.latency.history.len() >= 2 {
+                        let max_val = self.latency.history.iter().cloned().fold(1.0f32, f32::max);
+                        let sparkline_w = 80.0;
+                        let sparkline_h = 12.0;
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(sparkline_w, sparkline_h),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter_at(rect);
+                        let n = self.latency.history.len();
+                        let bar_w = sparkline_w / n as f32;
+                        for (i, &val) in self.latency.history.iter().enumerate() {
+                            let h = (val / max_val) * sparkline_h;
+                            let x = rect.min.x + i as f32 * bar_w;
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(x, rect.max.y - h),
+                                egui::pos2(x + bar_w - 0.5, rect.max.y),
+                            );
+                            painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(180, 140, 80));
+                        }
+                    }
+                    if self.stats.last_latency.is_some() || self.latency.history.len() >= 2 {
                         ui.separator();
                     }
 
