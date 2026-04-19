@@ -203,6 +203,12 @@ pub struct RyllApp {
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
 
+    // Whether the window has been auto-sized to the remote
+    // surface yet.  We do this once on first connection; after
+    // that the user drives window sizing and the guest follows
+    // via VDAgentMonitorsConfig.
+    initial_resize_done: bool,
+
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
 
@@ -429,6 +435,7 @@ impl RyllApp {
             last_modifiers: None,
             forwarded_buttons: 0,
             pending_resize: None,
+            initial_resize_done: false,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
@@ -1040,8 +1047,26 @@ impl eframe::App for RyllApp {
         self.process_events();
 
         // Resize viewport to match the remote surface (plus stats bar)
-        if let Some((_w, _h)) = self.pending_resize.take() {
-            debug!("app: surface resize {}x{} (not resizing window)", _w, _h);
+        // on first connection only.  After that, window sizing is
+        // user-driven and the guest follows via VDAgentMonitorsConfig.
+        if let Some((w, h)) = self.pending_resize.take() {
+            if !self.initial_resize_done {
+                let total_h = h + STATS_BAR_HEIGHT;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+                // Seed last_sent_resize so maybe_send_monitors_resize
+                // doesn't echo our own resize back to the guest as a
+                // VDAgentMonitorsConfig change.  Mirror the alignment
+                // and minimum-size logic from that function.
+                let mut aw = w as u32;
+                let mut ah = h as u32;
+                aw -= aw % 8;
+                ah -= ah % 8;
+                self.last_sent_resize = Some((aw.max(8), ah.max(8)));
+                self.initial_resize_done = true;
+                info!("app: initial window resize to {}x{}", w as u32, h as u32);
+            } else {
+                debug!("app: surface resize {}x{} (window already sized)", w, h);
+            }
         }
 
         self.maybe_send_monitors_resize(ctx);
