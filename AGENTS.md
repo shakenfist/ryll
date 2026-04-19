@@ -280,9 +280,99 @@ established structure.
 Run `pre-commit install` after cloning. The hooks check:
 - Code formatting (rustfmt)
 - Linting (clippy with `-D warnings`)
-- Shell script quality (shellcheck)
+- Shell script quality (shellcheck, applied to `scripts/` and `tools/`)
+- Committed credentials (gitleaks)
+- Bidi and zero-width Unicode control characters
+  (`tools/check-bidi.sh`, guards against Trojan Source —
+  CVE-2021-42574)
 
 Use `./scripts/check-rust.sh fix` to auto-fix issues.
+
+All five pre-commit hooks are also enforced in CI (rustfmt
+and clippy via `ci.yml`, the remaining three via
+`supply-chain.yml`). Skipping pre-commit locally therefore
+does not bypass enforcement — it only defers the failure to
+CI.
+
+## Security scanners
+
+ryll runs five deterministic scanners on every PR in
+addition to the LLM-driven automated reviewer. They are
+defined in `.github/workflows/supply-chain.yml`. All jobs
+run on self-hosted VM runners with the `s` size label
+(2 vCPU / 4 GB RAM; the scanners are I/O-bound).
+`cargo-audit`, `shellcheck`, and `bidi-check` run on
+`[self-hosted, vm, debian-12, s]`; `gitleaks` runs on
+`[self-hosted, vm, debian-13, s]` because gitleaks is
+only packaged from Debian 13 (trixie) onward — bookworm
+has no gitleaks package; `cargo-deny` runs on
+`[self-hosted, vm, debian-12-docker, s]` because the
+`cargo-deny-action` wrapper runs cargo-deny inside a
+Docker container and needs a runner image with docker
+preinstalled. The `vm` label matters — bare-metal runners
+have different OSes and no passwordless sudo.
+
+| Scanner | What it checks | Policy location |
+|---------|----------------|-----------------|
+| `cargo audit` | RustSec advisories against `Cargo.lock` (plus a weekly cron on `develop` to catch drift) | `.cargo/audit.toml` — ignore list mirrors `deny.toml` |
+| `cargo deny` | License allowlist, dependency sources, version bans, advisory ignores | `deny.toml` at repo root |
+| `gitleaks` | Credential-like patterns in the diff (upstream binary invoked directly; the `gitleaks-action` wrapper requires a paid licence for org repos) | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
+| `shellcheck` | Shell-script lint across `scripts/` and `tools/` (invoked via `tools/run-shellcheck.sh`) | Per-script `# shellcheck` directives as needed |
+| `tools/check-bidi.sh` | Bidi and zero-width Unicode codepoints (CVE-2021-42574 Trojan Source) | The script itself; PCRE character class at the top |
+
+Policy maintenance:
+
+- **Adding a new license** to `deny.toml` requires
+  confirming the licence is permissive and listing it in
+  the `allow` array. Only add `[[licenses.exceptions]]`
+  for crates that declare non-SPDX identifiers (see the
+  `epaint_default_fonts` / UFL-1.0 entry as the canonical
+  example).
+- **Ignoring a new advisory** requires adding the RustSec
+  ID to *both* `deny.toml` and `.cargo/audit.toml`, with
+  an inline comment on each entry linking to a rationale
+  section in `docs/plans/PLAN-supply-chain-followups.md`.
+  The two ignore lists must stay in sync — CI runs both
+  scanners and both must pass. Ignores are debt and should
+  not accumulate silently.
+- **Suppressing a gitleaks false positive** goes in a
+  `.gitleaksignore` file with a comment explaining the
+  pattern and why it is safe.
+
+## CI workflow conventions
+
+Every job in a workflow that can be triggered by a pull
+request or PR comment MUST declare a `concurrency:` block
+that cancels superseded runs. Without it, pushing a fixup
+commit (or re-commenting `@shakenfist-bot please retest`)
+leaves the old run consuming a self-hosted runner slot
+while the new run waits behind it. With `MAX_WORKERS = 6`
+on the runner fleet, a handful of stale runs can starve
+the queue for every other repo.
+
+Use the job-level form (not workflow-level) so unrelated
+jobs in the same workflow do not cancel each other:
+
+```yaml
+jobs:
+  my-job:
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-my-job
+      cancel-in-progress: true
+```
+
+For comment-triggered workflows (`pr-retest`,
+`pr-re-review`, etc.) use
+`group: <workflow-name>-${{ github.event.issue.number }}`
+instead so the PR number — not `github.ref`, which points
+at the default branch for `issue_comment` events — scopes
+the group.
+
+Scheduled, push-to-default, and release workflows should
+**not** enable `cancel-in-progress`. Cancelling a release
+mid-publish or a renovate run mid-PR-creation leaves
+partial state.
 
 ## Dependencies to Know
 
