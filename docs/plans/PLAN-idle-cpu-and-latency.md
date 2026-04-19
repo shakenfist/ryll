@@ -194,15 +194,28 @@ guest). Out of scope for this plan.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Profile idle CPU | PLAN-idle-cpu-and-latency-phase-01-profile.md | Not started |
+| 1. Profile idle CPU | PLAN-idle-cpu-and-latency-phase-01-profile.md | Complete |
 | 2. Repaint cadence fix | PLAN-idle-cpu-and-latency-phase-02-repaint.md | Not started |
 | 3. Demote protocol logging | PLAN-idle-cpu-and-latency-phase-03-logging.md | Not started |
 | 4. Real latency from PING/PONG | PLAN-idle-cpu-and-latency-phase-04-latency.md | Not started |
+| 5. Capture runtime metrics in bug reports | PLAN-idle-cpu-and-latency-phase-05-metrics.md | Not started |
 
 Phase 1 informs phase 2: if profiling shows logging is the
-dominant cost, swap their order. Phase 4 is independent of
-1-3 but should land last so its sparkline data is visible
-once the other CPU-eating problems are fixed.
+dominant cost, swap their order.  *Profiling result: the
+unconditional 60 Hz repaint at app.rs:2169 drives ~6 of
+the 6.24 idle cores via llvmpipe rasteriser threads;
+logging is a rounding error.  Phase 2 is the only fix that
+moves the CPU needle.  Phase 3 is still worth doing for log
+readability and a missing is_verbose() guard on the
+playback channel.*  Phase 4 is independent of 1-3 but
+should land last so its sparkline data is visible once the
+other CPU-eating problems are fixed.
+
+Phase 5 was added after the original incident: had ryll
+captured its own per-thread CPU into bug reports, the user
+report would have included the llvmpipe breakdown directly
+and the profiling phase would have been unnecessary.  This
+phase makes future incidents self-debugging.
 
 ## Agent guidance
 
@@ -257,6 +270,11 @@ After each phase:
   changes.
 * `ARCHITECTURE.md` "Statistics and Instrumentation"
   section mentions the PING-based latency source.
+* Bug-report ZIPs include a `runtime-metrics.json` (or
+  fields in `metadata.json`) with process CPU%, per-thread
+  CPU and thread names, and RSS, sampled over a short
+  window.  Linux-first; non-Linux platforms can omit
+  gracefully.
 
 ### Future work
 
