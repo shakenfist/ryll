@@ -1192,6 +1192,9 @@ impl eframe::App for RyllApp {
                         if ui.small_button("Folders").clicked() {
                             self.show_webdav_panel = !self.show_webdav_panel;
                         }
+                        if ui.small_button("Screenshot").clicked() {
+                            self.open_screenshot_dialog();
+                        }
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
