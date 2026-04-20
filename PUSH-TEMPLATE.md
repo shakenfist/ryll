@@ -3,91 +3,117 @@ checks before I push.
 
 ## How to use this template
 
-This pre-push audit is designed to run as parallel
-sub-agents at different effort levels. The management
-session spawns the agents, collects their findings, and
-makes the final push decision.
+The pre-push audit splits into two waves:
 
-Run the agents in two waves:
+**Wave 1 — mechanical.** Build verification, lint,
+test suite, and the parts of style conformance that grep
+can answer.  Wrapped in a single shell script so it runs
+as one tool approval.  Always run wave 1 first; wave 2 is
+only worth spending on if wave 1 passes.
 
-**Wave 1 (parallel, low cost):** Build verification and
-style conformance. These are fast and mechanical -- run
-them first to catch obvious issues before spending on
-deeper review.
-
-**Wave 2 (parallel, after wave 1 passes):** Code quality,
-test review, documentation review, and security review.
-These are more expensive but independent of each other.
+**Wave 2 — judgment.** Code-quality, test-coverage,
+documentation, and security review.  Some of this is
+mechanical (TODO/FIXME/dead-code grep, unsafe block list)
+and is wrapped in a second script; the rest needs sub-
+agents to read code and apply judgment.  The four
+judgment agents are independent and can be spawned in
+parallel.
 
 The management session reviews all findings, fixes any
 issues, and confirms the push.
 
 ## Wave 1: Mechanical checks
 
-### 1a. Build verification
+Run the consolidated script (one approval):
 
-| Setting | Value |
-|---------|-------|
-| Model | haiku |
-| Effort | low |
+```
+tools/audit/wave1.sh
+```
 
-**Brief for sub-agent:**
+It performs (and exits non-zero on any failure):
 
-Run these commands in order and report pass/fail for
-each. Stop at the first failure.
+- `pre-commit run --all-files`
+- `./scripts/check-rust.sh check` (rustfmt + clippy via
+  Docker)
+- `cargo test --workspace` via Docker
+- mechanical style checks: no raw `println!`/`eprintln!`
+  in non-test source, advisory long-line check on Rust
+  files in the diff vs `develop`, advisory check for
+  unguarded `logging::log_message` calls.
 
-1. `pre-commit run --all-files` — must exit 0.
-2. `./scripts/check-rust.sh check` — must exit 0
-   (runs rustfmt --check and clippy -D warnings via
-   Docker).
-3. Run the test suite via Docker:
-   ```
-   docker run --rm \
-     -v "$(pwd)":/workspace \
-     -v "$(pwd)/.cargo-cache/registry":/build/.cargo/registry \
-     -v "$(pwd)/.cargo-cache/git":/build/.cargo/git \
-     -w /workspace \
-     -u "$(id -u):$(id -g)" \
-     -e HOME=/build \
-     ryll-dev cargo test --workspace
-   ```
-   All tests must pass.
+Exit codes:
 
-Report the number of tests that passed and any failures.
+| Code | Meaning                          |
+|------|----------------------------------|
+| 0    | all wave 1 checks passed         |
+| 1    | pre-commit failed                |
+| 2    | rustfmt or clippy failed         |
+| 3    | cargo test failed                |
+| 4    | raw `println!`/`eprintln!` found |
 
-### 1b. Style conformance
+If wave 1 fails, fix the cause and re-run before
+spending on wave 2.
+
+### Style conformance — judgment portion
+
+The script covers what grep can prove.  The remaining
+style questions need a sub-agent to read code:
 
 | Setting | Value |
 |---------|-------|
 | Model | sonnet |
 | Effort | low |
 
-**Brief for sub-agent:**
+**Brief for sub-agent (only if wave 1 passes):**
 
-Check the diff (`git diff develop...HEAD`) against the
-project conventions in `AGENTS.md`. Specifically verify:
+Check `git diff develop...HEAD` for adherence to project
+conventions in `AGENTS.md`:
 
-- All source lines are wrapped at 120 characters.
-- Channel handler conventions are followed: message loop
-  structure, ACK handling, verbose logging via
-  `settings::is_verbose()`, channel name prefix on all
-  log messages (e.g. `"display: ..."`, `"playback: ..."`).
+- Channel handler conventions: message loop structure,
+  ACK handling, channel name prefix on log messages
+  (e.g. `"display: ..."`, `"playback: ..."`), and the
+  `repaint_notify.notify_one()` pairing requirement
+  documented in AGENTS.md decision #16.
 - Protocol message conventions: constants in
   `shakenfist-spice-protocol/src/constants.rs`, message
   parsing in `messages.rs`, name lookups in `logging.rs`.
 - Image decompression conventions: header parsing,
   BGRX-to-RGBA conversion, `DecompressedImage` return
   type.
-- No raw `println!` or `eprintln!` — all logging goes
-  through `tracing` macros.
+- Field rename / unit-change discipline: did any field
+  silently change units (e.g. seconds → ms) without a
+  rename or doc comment?
 
-Report a short list of any violations found. If none,
+Report a short list of any violations found.  If none,
 say "Style checks passed."
 
 ## Wave 2: Deeper review
 
-Only run wave 2 after wave 1 passes. These four agents
-can run in parallel.
+Only run wave 2 after wave 1 passes.
+
+Start with the consolidated mechanical script (one
+approval):
+
+```
+tools/audit/wave2-mechanical.sh
+```
+
+It reports (does not block; never exits non-zero on
+findings):
+
+- TODO / FIXME / HACK / XXX in changed source files.
+- Newly added `#[allow(dead_code)]` annotations.
+- Count of new `#[test]` functions vs Rust files
+  changed.
+- Documentation files touched (warns if none — the diff
+  may have merited doc updates).
+- New `unsafe {}` blocks.
+- New `.unwrap()` / `.expect()` in changed files (raw
+  list — review whether each is in test code or panic-
+  safe in production).
+
+Then spawn the judgment agents below.  They can run in
+parallel.
 
 ### 2a. Code quality
 
@@ -98,23 +124,28 @@ can run in parallel.
 
 **Brief for sub-agent:**
 
-Review the diff (`git diff develop...HEAD`) for:
+The mechanical script (`tools/audit/wave2-mechanical.sh`)
+already extracted TODO/FIXME comments, new
+`#[allow(dead_code)]`, `unsafe{}` blocks, and unwrap/
+expect lists.  Take that report as input.
 
-- **Duplicated code:** Are there any significant blocks
-  of duplicated logic? Look for copy-paste patterns
-  across channel handlers or message parsers.
+Add the judgment-level review on the diff
+(`git diff develop...HEAD`):
+
+- **Duplicated code:** Are there significant blocks of
+  duplicated logic that the mechanical scan can't see?
+  Look for copy-paste patterns across channel handlers
+  or message parsers.
 - **Missed abstractions:** Should any new code be
-  extracted into a shared module? Look for logic that
-  a second channel handler or decompressor would
-  likely need.
-- **TODO/FIXME comments:** List any TODO, FIXME, or
-  HACK comments in the changed files. Are any of them
-  blocking issues that should be resolved before push?
-- **Dead code:** Are there any `#[allow(dead_code)]`
-  annotations on new code? Are there unused imports,
-  functions, or struct fields?
+  extracted into a shared module?  Look for logic a
+  second channel handler or decompressor would likely
+  need.
+- **Triage the script's raw findings:** for each
+  TODO/unwrap/unsafe the mechanical script flagged, say
+  blocking or advisory and why.  Skip ones in
+  `#[cfg(test)]` blocks.
 
-Report findings as a bullet list. For each finding,
+Report findings as a bullet list.  For each finding,
 state the file, line, and whether it's blocking (must
 fix before push) or advisory (can address later).
 

@@ -142,6 +142,20 @@ Ryll uses:
     ryll sends relative `MOUSE_MOTION` messages instead of absolute
     `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
 
+16. **Event-driven egui repaints via `repaint_notify`** - egui only repaints
+    when something asks it to. Channel handlers run on the tokio runtime
+    and have no direct access to `egui::Context`. Every channel handler
+    therefore holds an `Arc<tokio::sync::Notify>` (`repaint_notify`)
+    alongside its `event_tx: mpsc::Sender<ChannelEvent>`, and a small
+    "repaint bridge" tokio task (spawned from `RyllApp::new`) waits on
+    `notify.notified().await` and calls `ctx.request_repaint()` whenever
+    a notification arrives. **Convention: every `event_tx.send(...)` call
+    in a channel handler must be immediately followed by
+    `repaint_notify.notify_one()`.** A 1 Hz fallback in `update()` covers
+    time-based UI like the bandwidth and latency sparklines. New channel
+    handlers must accept `Arc<tokio::sync::Notify>` in their constructor
+    and follow this pairing convention or idle CPU will silently regress.
+
 ## Code Organisation
 
 The repository is a Cargo workspace. Ryll itself lives at
@@ -171,6 +185,11 @@ ryll/src/
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
+├── metrics.rs           # /proc-based runtime metrics sampler
+│                        #   (RuntimeMetrics, sample()).  Linux only;
+│                        #   non-Linux returns Unavailable variant.
+│                        #   Embedded in bug reports as
+│                        #   runtime-metrics.json
 ├── protocol/            # SPICE protocol implementation
 │   ├── constants.rs     # Enums, message IDs, capability flags
 │   ├── messages.rs      # Binary serialization
@@ -405,3 +424,5 @@ partial state.
 | zip | Zip file output for bug reports |
 | png | PNG encoding for bug report screenshots |
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |
+| libc | POSIX bindings; `sysconf(_SC_CLK_TCK)` for the runtime metrics module that reads `/proc/self/*` for bug reports |
+| rfd | Native file dialogs for the screenshot save flow and bug-report save |

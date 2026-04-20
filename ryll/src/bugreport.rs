@@ -14,6 +14,7 @@ use tracing::debug;
 
 #[cfg(feature = "capture")]
 use crate::capture;
+use crate::metrics::RuntimeMetrics;
 
 /// Direction of a protocol message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,7 +490,10 @@ pub struct AppSnapshot {
     pub fps: f64,
     pub bandwidth_history: Vec<f32>,
     pub bandwidth_current: f32,
-    pub last_latency: Option<f64>,
+    /// Most recent inter-PING interval observed on the main
+    /// channel, in milliseconds.  `None` until the second PING
+    /// arrives.
+    pub last_latency_ms: Option<f64>,
     pub frames_received: u64,
     pub surfaces: Vec<SurfaceInfo>,
     pub cursor_pos: (u16, u16),
@@ -505,7 +509,7 @@ impl Default for AppSnapshot {
             fps: 0.0,
             bandwidth_history: Vec::new(),
             bandwidth_current: 0.0,
-            last_latency: None,
+            last_latency_ms: None,
             frames_received: 0,
             surfaces: Vec::new(),
             cursor_pos: (0, 0),
@@ -668,10 +672,18 @@ pub struct BugReport {
     pcap_bytes: Option<Vec<u8>>,
     /// PNG screenshot bytes (display reports only).
     screenshot_png: Option<Vec<u8>>,
+    /// Runtime process and per-thread CPU metrics.
+    runtime_metrics: RuntimeMetrics,
 }
 
 impl BugReport {
     /// Assemble a bug report from the available data.
+    ///
+    /// Note: this function samples runtime metrics over a 2-second
+    /// window before assembling the rest of the report.  The sample
+    /// blocks the calling thread, which is acceptable because bug
+    /// report saving is already a deliberate, non-interactive
+    /// operation gated on a file dialog.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         report_type: BugReportType,
@@ -683,6 +695,44 @@ impl BugReport {
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
+    ) -> anyhow::Result<Self> {
+        // 0. Sample runtime metrics first (blocks for 2 seconds).
+        //    This runs before the rest of the report is assembled so
+        //    the CPU% numbers reflect the system state at the moment
+        //    the user triggered the report, not after all the JSON
+        //    serialisation work has run.
+        let runtime_metrics = crate::metrics::sample(Duration::from_secs(2));
+        Self::assemble(
+            report_type,
+            description,
+            region,
+            target_host,
+            target_port,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            surface_pixels,
+            runtime_metrics,
+        )
+    }
+
+    /// Assemble a bug report with a caller-supplied `RuntimeMetrics`.
+    ///
+    /// This is the inner implementation used by both `new()` (which
+    /// samples real metrics) and by tests (which inject a stub to
+    /// avoid a 2-second sleep).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn assemble(
+        report_type: BugReportType,
+        description: String,
+        region: Option<ReportRegion>,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        surface_pixels: Option<(&[u8], u32, u32)>,
+        runtime_metrics: RuntimeMetrics,
     ) -> anyhow::Result<Self> {
         // 1. Session snapshot (AppSnapshot)
         let mut session = app_snapshot.lock().unwrap().clone();
@@ -749,6 +799,7 @@ impl BugReport {
             channel_state_json,
             pcap_bytes,
             screenshot_png,
+            runtime_metrics,
         })
     }
 
@@ -786,6 +837,10 @@ impl BugReport {
             zip.start_file("screenshot.png", opts)?;
             zip.write_all(png)?;
         }
+
+        let metrics_json = serde_json::to_string_pretty(&self.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
 
         zip.finish()?;
         Ok(path)
@@ -1026,6 +1081,11 @@ mod tests {
         assert!(json.contains("\"left\": 10"));
     }
 
+    /// Stub metrics used by tests to avoid a 2-second sleep.
+    fn stub_metrics() -> RuntimeMetrics {
+        RuntimeMetrics::unavailable("stub metrics for testing")
+    }
+
     #[test]
     fn test_bug_report_assemble_display() {
         let traffic = TrafficBuffers::new();
@@ -1037,7 +1097,7 @@ mod tests {
             255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
 
-        let report = BugReport::new(
+        let report = BugReport::assemble(
             BugReportType::Display,
             "corruption test".to_string(),
             Some(ReportRegion {
@@ -1052,6 +1112,7 @@ mod tests {
             &snapshots,
             &app_snap,
             Some((&pixels, 2, 2)),
+            stub_metrics(),
         )
         .unwrap();
 
@@ -1099,7 +1160,7 @@ mod tests {
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
 
-        let report = BugReport::new(
+        let report = BugReport::assemble(
             BugReportType::Input,
             "keyboard not working".to_string(),
             None,
@@ -1109,6 +1170,7 @@ mod tests {
             &snapshots,
             &app_snap,
             None,
+            stub_metrics(),
         )
         .unwrap();
 
@@ -1167,7 +1229,7 @@ mod tests {
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
 
-        let report = BugReport::new(
+        let report = BugReport::assemble(
             BugReportType::Cursor,
             "cursor disappeared".to_string(),
             None,
@@ -1177,6 +1239,7 @@ mod tests {
             &snapshots,
             &app_snap,
             None,
+            stub_metrics(),
         )
         .unwrap();
 
@@ -1210,7 +1273,7 @@ mod tests {
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
 
-        let report = BugReport::new(
+        let report = BugReport::assemble(
             BugReportType::Connection,
             "session dropped".to_string(),
             None,
@@ -1220,6 +1283,7 @@ mod tests {
             &snapshots,
             &app_snap,
             None,
+            stub_metrics(),
         )
         .unwrap();
 
@@ -1242,6 +1306,65 @@ mod tests {
             let mut meta_str = String::new();
             std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
             assert!(meta_str.contains("\"report_type\": \"Connection\""));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_bug_report_runtime_metrics_in_zip() {
+        // Verify that runtime-metrics.json is present in the ZIP and
+        // contains the expected JSON shape when a stub metrics value
+        // is injected (no actual 2-second sleep).
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let metrics = RuntimeMetrics::unavailable("stub metrics for testing");
+        let report = BugReport::assemble(
+            BugReportType::Connection,
+            "runtime metrics test".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            metrics,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-metrics");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+
+        // runtime-metrics.json must be present.
+        assert!(
+            names.contains(&"runtime-metrics.json".to_string()),
+            "runtime-metrics.json missing from ZIP; found: {:?}",
+            names
+        );
+
+        // Verify the expected JSON shape.
+        {
+            let mut metrics_file = archive.by_name("runtime-metrics.json").unwrap();
+            let mut metrics_str = String::new();
+            std::io::Read::read_to_string(&mut metrics_file, &mut metrics_str).unwrap();
+            assert!(
+                metrics_str.contains("\"available\": false"),
+                "expected 'available: false' in metrics JSON"
+            );
+            assert!(
+                metrics_str.contains("\"reason\""),
+                "expected 'reason' field in metrics JSON"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&tmp);

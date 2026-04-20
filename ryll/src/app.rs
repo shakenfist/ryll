@@ -1,12 +1,12 @@
 /// Main application - egui App and headless mode
 use anyhow::Result;
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
@@ -35,6 +35,9 @@ const STATS_BAR_HEIGHT: f32 = 20.0;
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
+/// Number of latency samples to keep for the sparkline.
+const LATENCY_HISTORY_LEN: usize = 60;
+
 /// Number of recent frame timestamps kept for the FPS sliding window.
 const FPS_WINDOW_SIZE: usize = 120;
 
@@ -50,7 +53,9 @@ struct Statistics {
     frames_received: u64,
     bytes_in: u64,
     bytes_out: u64,
-    last_latency: Option<f64>,
+    /// Inter-PING interval most recently observed on the main
+    /// channel, in milliseconds.
+    last_latency_ms: Option<f64>,
     /// Timestamps of recent DisplayMark events for sliding-window FPS.
     frame_times: Vec<Instant>,
 }
@@ -80,7 +85,9 @@ struct BandwidthTracker {
     /// Shared counter incremented by all channels.
     counter: Arc<ByteCounter>,
     /// History of bytes-per-second samples (most recent last).
-    history: Vec<f32>,
+    /// VecDeque so eviction at capacity is O(1) (`pop_front`)
+    /// instead of O(n) `Vec::remove(0)`.
+    history: VecDeque<f32>,
     /// When the current second started.
     last_tick: Instant,
 }
@@ -89,7 +96,7 @@ impl BandwidthTracker {
     fn new(counter: Arc<ByteCounter>) -> Self {
         BandwidthTracker {
             counter,
-            history: Vec::with_capacity(BANDWIDTH_HISTORY_LEN),
+            history: VecDeque::with_capacity(BANDWIDTH_HISTORY_LEN),
             last_tick: Instant::now(),
         }
     }
@@ -102,9 +109,9 @@ impl BandwidthTracker {
             let bytes = self.counter.take();
             let secs = elapsed.as_secs_f64();
             let bps = bytes as f64 / secs;
-            self.history.push(bps as f32);
+            self.history.push_back(bps as f32);
             if self.history.len() > BANDWIDTH_HISTORY_LEN {
-                self.history.remove(0);
+                self.history.pop_front();
             }
             self.last_tick = Instant::now();
         }
@@ -112,11 +119,47 @@ impl BandwidthTracker {
 
     /// Format the most recent bandwidth value for display.
     fn label(&self) -> String {
-        match self.history.last() {
+        match self.history.back() {
             Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
             None => String::from("-- B/s"),
+        }
+    }
+}
+
+/// Rolling latency tracker — samples arrive when
+/// `ChannelEvent::Latency` fires, driven by server PINGs
+/// on the main channel.  Values are stored in milliseconds
+/// (client-observed inter-PING interval) for sparkline
+/// scaling.  Lower variance is better; spikes indicate a
+/// network stall or server send-loop delay.
+struct LatencyTracker {
+    /// History of latency samples in ms (most recent last).
+    /// VecDeque so eviction at capacity is O(1) (`pop_front`).
+    history: VecDeque<f32>,
+}
+
+impl LatencyTracker {
+    fn new() -> Self {
+        LatencyTracker {
+            history: VecDeque::with_capacity(LATENCY_HISTORY_LEN),
+        }
+    }
+
+    /// Record a new latency sample in milliseconds.
+    fn record(&mut self, sample_ms: f32) {
+        self.history.push_back(sample_ms);
+        if self.history.len() > LATENCY_HISTORY_LEN {
+            self.history.pop_front();
+        }
+    }
+
+    /// Format the most recent latency value for display.
+    fn label(&self) -> String {
+        match self.history.back() {
+            Some(&v) => format!("{:.1}ms", v),
+            None => String::from("--ms"),
         }
     }
 }
@@ -168,8 +211,17 @@ pub struct RyllApp {
     // Pending viewport resize from a new surface
     pending_resize: Option<(f32, f32)>,
 
+    // Whether the window has been auto-sized to the remote
+    // surface yet.  We do this once on first connection; after
+    // that the user drives window sizing and the guest follows
+    // via VDAgentMonitorsConfig.
+    initial_resize_done: bool,
+
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
+
+    // Latency tracking for the status bar sparkline
+    latency: LatencyTracker,
 
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
@@ -243,6 +295,52 @@ pub struct RyllApp {
     traffic_filter_webdav: bool,
 }
 
+// ── Screenshot path helpers ─────────────────────────────────────────────────
+
+/// Derive per-surface output paths from a user-chosen base path.
+///
+/// * If `count <= 1`, returns `vec![base.to_path_buf()]` unchanged.
+///   Callers are expected to validate non-empty surfaces before calling
+///   (`save_screenshots` does); a `count == 0` invocation will silently
+///   produce a single path equal to `base`, never an empty vector.
+/// * If `count > 1`, strips the last extension from `base` (if any) and
+///   appends `-1.png`, `-2.png`, … `-{count}.png`.  Parent directory
+///   components in `base` are preserved.
+///
+/// Examples:
+/// ```text
+/// ("foo.png",          1) → ["foo.png"]
+/// ("foo.png",          3) → ["foo-1.png", "foo-2.png", "foo-3.png"]
+/// ("foo",              2) → ["foo-1.png", "foo-2.png"]
+/// ("foo.bar.png",      2) → ["foo.bar-1.png", "foo.bar-2.png"]
+/// ("/tmp/foo.png",     2) → ["/tmp/foo-1.png", "/tmp/foo-2.png"]
+/// ```
+fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
+    if count <= 1 {
+        return vec![base.to_path_buf()];
+    }
+
+    // Strip only the last extension.
+    let stem: std::path::PathBuf = if base.extension().is_some() {
+        base.with_extension("")
+    } else {
+        base.to_path_buf()
+    };
+
+    (1..=count)
+        .map(|n| {
+            let mut name = stem
+                .file_name()
+                .map(|s| s.to_os_string())
+                .unwrap_or_default();
+            name.push(format!("-{}.png", n));
+            stem.with_file_name(name)
+        })
+        .collect()
+}
+
+// ── End screenshot path helpers ─────────────────────────────────────────────
+
 impl RyllApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -282,11 +380,21 @@ impl RyllApp {
             .map(|d| (d.path.clone(), d.read_only))
             .collect();
 
+        // Repaint when channel events arrive; 1s fallback for time-based UI.
+        // The bridge task waits on the Arc<Notify> and pings egui any time a
+        // channel handler signals it.  Channel handlers call notify_one()
+        // after each event_tx.send(), so egui sleeps when nothing is happening
+        // and wakes immediately when something is.
+        let repaint_notify = Arc::new(Notify::new());
+
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
+        let bridge_ctx = cc.egui_ctx.clone();
+        let bridge_notify = repaint_notify.clone();
+        let conn_notify = repaint_notify.clone();
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
@@ -301,9 +409,19 @@ impl RyllApp {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
+                // Repaint bridge: wake egui whenever a channel handler
+                // signals notify_one() after pushing a ChannelEvent.
+                tokio::spawn(async move {
+                    loop {
+                        bridge_notify.notified().await;
+                        bridge_ctx.request_repaint();
+                    }
+                });
+
                 if let Err(e) = run_connection(
                     config_clone,
                     event_tx_clone,
+                    conn_notify,
                     input_rx,
                     usb_rx,
                     webdav_rx,
@@ -350,7 +468,9 @@ impl RyllApp {
             last_modifiers: None,
             forwarded_buttons: 0,
             pending_resize: None,
+            initial_resize_done: false,
             bandwidth: BandwidthTracker::new(byte_counter),
+            latency: LatencyTracker::new(),
             capture,
             usb_tx: Some(usb_tx),
             webdav_tx: Some(webdav_tx),
@@ -533,8 +653,9 @@ impl RyllApp {
                     self.stats.bytes_out += bytes_out;
                 }
 
-                ChannelEvent::Latency { key_timestamp } => {
-                    self.stats.last_latency = Some(key_timestamp);
+                ChannelEvent::Latency { sample_ms } => {
+                    self.stats.last_latency_ms = Some(sample_ms as f64);
+                    self.latency.record(sample_ms);
                 }
 
                 ChannelEvent::Error(msg) => {
@@ -667,9 +788,9 @@ impl RyllApp {
             0.0
         };
 
-        snap.bandwidth_history = self.bandwidth.history.clone();
-        snap.bandwidth_current = self.bandwidth.history.last().copied().unwrap_or(0.0);
-        snap.last_latency = self.stats.last_latency;
+        snap.bandwidth_history = self.bandwidth.history.iter().copied().collect();
+        snap.bandwidth_current = self.bandwidth.history.back().copied().unwrap_or(0.0);
+        snap.last_latency_ms = self.stats.last_latency_ms;
         snap.frames_received = self.stats.frames_received;
         snap.surfaces = self
             .surfaces
@@ -866,6 +987,80 @@ impl RyllApp {
             self.last_sent_resize = Some((width, height));
         }
     }
+
+    /// Save the current display surface(s) as PNG file(s).
+    ///
+    /// If there is exactly one surface, the file is written directly to
+    /// `base_path`.  With multiple surfaces the last extension is stripped
+    /// from `base_path` and each surface gets its own file with a `-N.png`
+    /// suffix (e.g. `foo-1.png`, `foo-2.png`).  Surfaces are visited in
+    /// deterministic order (sorted by their `(channel_id, surface_id)` key).
+    ///
+    /// Returns the list of paths that were successfully written.
+    fn save_screenshots(&self, base_path: PathBuf) -> anyhow::Result<Vec<PathBuf>> {
+        if self.surfaces.is_empty() {
+            anyhow::bail!("No display surfaces to capture");
+        }
+
+        let mut sorted: Vec<_> = self.surfaces.iter().collect();
+        sorted.sort_by_key(|(k, _)| *k);
+
+        let paths = screenshot_paths(&base_path, sorted.len());
+
+        let mut written = Vec::new();
+        for ((_, surface), path) in sorted.into_iter().zip(paths) {
+            let png_bytes =
+                crate::bugreport::encode_png(surface.pixels(), surface.width, surface.height)?;
+            std::fs::write(&path, &png_bytes)?;
+            written.push(path);
+        }
+
+        Ok(written)
+    }
+
+    /// Open a native save dialog and write the current surface(s) as PNG(s).
+    ///
+    /// Sets `self.bug_status_message` with a success or failure message.
+    /// If the dialog is cancelled, nothing happens.
+    fn open_screenshot_dialog(&mut self) {
+        if self.surfaces.is_empty() {
+            self.bug_status_message = Some((
+                "No display surface to capture yet".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
+
+        let default_name = format!(
+            "ryll-screenshot-{}.png",
+            crate::bugreport::filename_timestamp()
+        );
+
+        let picked = rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .save_file();
+
+        if let Some(path) = picked {
+            match self.save_screenshots(path) {
+                Ok(paths) => {
+                    let msg = if paths.len() == 1 {
+                        format!("Saved screenshot to {}", paths[0].display())
+                    } else {
+                        let names: Vec<String> =
+                            paths.iter().map(|p| p.display().to_string()).collect();
+                        format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
+                    };
+                    info!("app: {}", msg);
+                    self.bug_status_message = Some((msg, Instant::now()));
+                }
+                Err(e) => {
+                    let msg = format!("Screenshot failed: {}", e);
+                    error!("app: {}", msg);
+                    self.bug_status_message = Some((msg, Instant::now()));
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for RyllApp {
@@ -885,8 +1080,26 @@ impl eframe::App for RyllApp {
         self.process_events();
 
         // Resize viewport to match the remote surface (plus stats bar)
-        if let Some((_w, _h)) = self.pending_resize.take() {
-            debug!("app: surface resize {}x{} (not resizing window)", _w, _h);
+        // on first connection only.  After that, window sizing is
+        // user-driven and the guest follows via VDAgentMonitorsConfig.
+        if let Some((w, h)) = self.pending_resize.take() {
+            if !self.initial_resize_done {
+                let total_h = h + STATS_BAR_HEIGHT;
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+                // Seed last_sent_resize so maybe_send_monitors_resize
+                // doesn't echo our own resize back to the guest as a
+                // VDAgentMonitorsConfig change.  Mirror the alignment
+                // and minimum-size logic from that function.
+                let mut aw = w as u32;
+                let mut ah = h as u32;
+                aw -= aw % 8;
+                ah -= ah % 8;
+                self.last_sent_resize = Some((aw.max(8), ah.max(8)));
+                self.initial_resize_done = true;
+                info!("app: initial window resize to {}x{}", w as u32, h as u32);
+            } else {
+                debug!("app: surface resize {}x{} (window already sized)", w, h);
+            }
         }
 
         self.maybe_send_monitors_resize(ctx);
@@ -934,6 +1147,14 @@ impl eframe::App for RyllApp {
             }
         }
 
+        // F8 opens screenshot save dialog (not during region selection)
+        if !self.region_select_active {
+            let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
+            if f8_pressed {
+                self.open_screenshot_dialog();
+            }
+        }
+
         // Escape closes the dialog
         if self.show_bug_dialog {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -968,8 +1189,31 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if let Some(latency) = self.stats.last_latency {
-                        ui.label(format!("Latency: {:.1}ms", latency * 1000.0));
+                    if !self.latency.history.is_empty() {
+                        ui.label(format!("Latency: {}", self.latency.label()));
+                    }
+                    if self.latency.history.len() >= 2 {
+                        let max_val = self.latency.history.iter().cloned().fold(1.0f32, f32::max);
+                        let sparkline_w = 80.0;
+                        let sparkline_h = 12.0;
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(sparkline_w, sparkline_h),
+                            egui::Sense::hover(),
+                        );
+                        let painter = ui.painter_at(rect);
+                        let n = self.latency.history.len();
+                        let bar_w = sparkline_w / n as f32;
+                        for (i, &val) in self.latency.history.iter().enumerate() {
+                            let h = (val / max_val) * sparkline_h;
+                            let x = rect.min.x + i as f32 * bar_w;
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(x, rect.max.y - h),
+                                egui::pos2(x + bar_w - 0.5, rect.max.y),
+                            );
+                            painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(180, 140, 80));
+                        }
+                    }
+                    if !self.latency.history.is_empty() {
                         ui.separator();
                     }
 
@@ -982,22 +1226,6 @@ impl eframe::App for RyllApp {
                             let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
                             ui.label(format!("FPS: {:.1}", fps));
                         }
-                    }
-
-                    ui.separator();
-                    if self.mouse_mode == 1 {
-                        ui.label("Cursor: server mode");
-                    } else {
-                        ui.label(format!(
-                            "Cursor: ({}, {}) {}",
-                            self.cursor_pos.0,
-                            self.cursor_pos.1,
-                            if self.cursor_visible {
-                                "visible"
-                            } else {
-                                "hidden"
-                            }
-                        ));
                     }
 
                     if self.cadence_enabled {
@@ -1070,6 +1298,9 @@ impl eframe::App for RyllApp {
                         }
                         if ui.small_button("Folders").clicked() {
                             self.show_webdav_panel = !self.show_webdav_panel;
+                        }
+                        if ui.small_button("Screenshot").clicked() {
+                            self.open_screenshot_dialog();
                         }
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
@@ -1968,7 +2199,13 @@ impl eframe::App for RyllApp {
                 });
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        // Repaint when channel events arrive; 1s fallback for time-based UI
+        // (bandwidth/latency sparklines, status-message expiry, cadence-mode
+        // keystroke injection).  The bridge task wakes us immediately when
+        // an event arrives via the Arc<Notify>; this fallback only ensures
+        // anything that polls Instant::elapsed() updates roughly once a
+        // second.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 }
 
@@ -2028,6 +2265,7 @@ fn default_arrow_cursor() -> Vec<u8> {
 async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     input_rx: mpsc::Receiver<InputEvent>,
     usb_rx: mpsc::Receiver<UsbCommand>,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
@@ -2053,6 +2291,7 @@ async fn run_connection(
     let mut main_channel = MainChannel::new(
         main_stream,
         event_tx_clone,
+        repaint_notify.clone(),
         capture.clone(),
         byte_counter.clone(),
         traffic.clone(),
@@ -2079,6 +2318,7 @@ async fn run_connection(
                     .send(ChannelEvent::SessionInitialized(id))
                     .await
                     .ok();
+                repaint_notify.notify_one();
             }
             Some(ChannelEvent::ChannelsAvailable(chs)) => {
                 temp_channels = chs;
@@ -2087,9 +2327,11 @@ async fn run_connection(
                     .send(ChannelEvent::ChannelsAvailable(temp_channels.clone()))
                     .await
                     .ok();
+                repaint_notify.notify_one();
             }
             Some(other) => {
                 event_tx.send(other).await.ok();
+                repaint_notify.notify_one();
             }
             None => break,
         }
@@ -2124,6 +2366,7 @@ async fn run_connection(
                     channel_id,
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -2140,6 +2383,7 @@ async fn run_connection(
                 let mut channel = CursorChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -2155,6 +2399,7 @@ async fn run_connection(
                 let mut channel = InputsChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     input_rx,
                     capture.clone(),
                     byte_counter.clone(),
@@ -2174,6 +2419,7 @@ async fn run_connection(
                     let mut channel = UsbredirChannel::new(
                         stream,
                         event_tx.clone(),
+                        repaint_notify.clone(),
                         usb_rx,
                         virtual_disks.clone(),
                         capture.clone(),
@@ -2196,6 +2442,7 @@ async fn run_connection(
                     let mut channel = WebdavChannel::new(
                         stream,
                         event_tx.clone(),
+                        repaint_notify.clone(),
                         webdav_rx,
                         share_dir.clone(),
                         capture.clone(),
@@ -2217,6 +2464,7 @@ async fn run_connection(
                 let mut channel = PlaybackChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
@@ -2244,6 +2492,7 @@ async fn run_connection(
                 let msg = format!("channel error: {}", e);
                 error!("app: {}", msg);
                 event_tx.send(ChannelEvent::Error(msg)).await.ok();
+                repaint_notify.notify_one();
             }
             Ok(Ok(())) => {}
         }
@@ -2281,11 +2530,18 @@ pub async fn run_headless(
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
 
+    // Headless mode does not paint anything, but the channel handlers still
+    // call notify_one().  Give them a Notify whose notifications nobody
+    // listens for; tokio::sync::Notify::notify_one is cheap (no allocation,
+    // no waker if no waiters) so this is harmless.
+    let repaint_notify = Arc::new(Notify::new());
+
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
         run_connection(
             config,
             event_tx,
+            repaint_notify,
             input_rx,
             usb_rx,
             webdav_rx,
@@ -2402,4 +2658,89 @@ pub async fn run_headless(
 
     info!("Headless mode finished");
     Ok(())
+}
+
+// ── Unit tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_paths_single() {
+        let paths = screenshot_paths(std::path::Path::new("foo.png"), 1);
+        assert_eq!(paths, vec![PathBuf::from("foo.png")]);
+    }
+
+    #[test]
+    fn screenshot_paths_multi() {
+        let paths = screenshot_paths(std::path::Path::new("foo.png"), 3);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("foo-1.png"),
+                PathBuf::from("foo-2.png"),
+                PathBuf::from("foo-3.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_no_extension() {
+        let paths = screenshot_paths(std::path::Path::new("foo"), 2);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("foo-1.png"), PathBuf::from("foo-2.png"),]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_multi_extension() {
+        let paths = screenshot_paths(std::path::Path::new("foo.bar.png"), 2);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("foo.bar-1.png"),
+                PathBuf::from("foo.bar-2.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_with_directory() {
+        let paths = screenshot_paths(std::path::Path::new("/tmp/captures/foo.png"), 2);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/captures/foo-1.png"),
+                PathBuf::from("/tmp/captures/foo-2.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn latency_tracker_label_empty() {
+        let tracker = LatencyTracker::new();
+        assert_eq!(tracker.label(), "--ms");
+    }
+
+    #[test]
+    fn latency_tracker_label_non_empty() {
+        let mut tracker = LatencyTracker::new();
+        tracker.record(12.34);
+        assert_eq!(tracker.label(), "12.3ms");
+    }
+
+    #[test]
+    fn latency_tracker_record_trims_to_capacity() {
+        let mut tracker = LatencyTracker::new();
+        // Push 65 values: 0.0, 1.0, ..., 64.0
+        for i in 0..65 {
+            tracker.record(i as f32);
+        }
+        // Should be capped at LATENCY_HISTORY_LEN (60)
+        assert_eq!(tracker.history.len(), LATENCY_HISTORY_LEN);
+        // The first kept value should be the 6th original (index 5)
+        assert_eq!(tracker.history[0], 5.0);
+    }
 }

@@ -18,10 +18,12 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
 - **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
+- **Screenshot capture** - Press F8 or click "Screenshot" in the status bar to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
+- **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
-- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, and screenshots; Display reports include interactive region selection to highlight corruption
+- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, screenshots, and runtime metrics (process and per-thread CPU, RSS) for diagnosing performance reports; Display reports include interactive region selection to highlight corruption
 - **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 - **Folder sharing** - Click "Folders" in the status bar for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
@@ -208,6 +210,7 @@ ryll/src/
 ├── bugreport.rs         # Traffic ring buffer + channel snapshots
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
+├── metrics.rs           # /proc-based runtime metrics (Linux only)
 ├── protocol/
 │   ├── constants.rs     # SPICE protocol constants, capabilities
 │   ├── messages.rs      # Binary message structures

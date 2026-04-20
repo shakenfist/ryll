@@ -2,7 +2,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -21,6 +21,7 @@ use super::{ChannelEvent, CursorImage};
 pub struct CursorChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<CaptureSession>>,
@@ -39,6 +40,7 @@ impl CursorChannel {
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
@@ -47,6 +49,7 @@ impl CursorChannel {
         CursorChannel {
             stream,
             event_tx,
+            repaint_notify,
             buffer: Vec::with_capacity(65536),
             cursor_cache: HashMap::new(),
             capture,
@@ -86,6 +89,7 @@ impl CursorChannel {
                     .send(ChannelEvent::Disconnected(ChannelType::Cursor))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
                 break;
             }
 
@@ -170,6 +174,7 @@ impl CursorChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
 
                 // SpiceCursor data follows the 9-byte INIT header
                 self.parse_and_emit_cursor(&payload[CursorInit::SIZE..])
@@ -194,6 +199,7 @@ impl CursorChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
 
                 // SpiceCursor data follows the 5-byte SET header
                 self.parse_and_emit_cursor(&payload[CursorSet::SIZE..])
@@ -214,6 +220,7 @@ impl CursorChannel {
                         })
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
             }
 
@@ -227,6 +234,7 @@ impl CursorChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
 
             cursor_server::RESET => {
@@ -353,6 +361,7 @@ impl CursorChannel {
                     .send(ChannelEvent::CursorShape(img.clone()))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             } else {
                 warn!(
                     "cursor: cache miss for id={} (cache has {} entries)",
@@ -375,6 +384,7 @@ impl CursorChannel {
                 .send(ChannelEvent::CursorShape(img))
                 .await
                 .ok();
+            self.repaint_notify.notify_one();
         }
     }
 

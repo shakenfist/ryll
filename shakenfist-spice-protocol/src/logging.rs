@@ -2,49 +2,26 @@
 ///
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-/// Get current timestamp as float (Unix epoch seconds)
-pub fn timestamp() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
-
-/// Format a timestamp for logging
-pub fn format_timestamp() -> String {
-    format!("{:.6}", timestamp())
-}
-
-/// Log a protocol message with timestamp
+/// Log a protocol message
 pub fn log_message(direction: &str, channel: &str, msg_type: u16, msg_type_str: &str, size: u32) {
-    info!(
-        "[{}] {} {} {} byte opcode {} {}",
-        format_timestamp(),
-        channel,
-        direction,
-        size,
-        msg_type,
-        msg_type_str
+    debug!(
+        "{} {} {} byte opcode {} {}",
+        channel, direction, size, msg_type, msg_type_str
     );
 }
 
 /// Log message details (indented continuation)
 pub fn log_detail(detail: &str) {
-    info!("   ... {}", detail);
+    debug!("   ... {}", detail);
 }
 
 /// Log an unknown/undecoded message type
 pub fn log_unknown(channel: &str, direction: &str, msg_type: u16, size: u32, data: &[u8]) {
     warn!(
-        "[{}] {} {} {} byte UNKNOWN opcode {}",
-        format_timestamp(),
-        channel,
-        direction,
-        size,
-        msg_type
+        "{} {} {} byte UNKNOWN opcode {}",
+        channel, direction, size, msg_type
     );
     hex_dump(data, 64);
 }
@@ -53,12 +30,8 @@ pub fn log_unknown(channel: &str, direction: &str, msg_type: u16, size: u32, dat
 #[allow(dead_code)]
 pub fn log_incomplete(channel: &str, msg_type_str: &str, have: usize, want: usize) {
     debug!(
-        "[{}] {} message {} incomplete: have {} bytes, want {}",
-        format_timestamp(),
-        channel,
-        msg_type_str,
-        have,
-        want
+        "{} message {} incomplete: have {} bytes, want {}",
+        channel, msg_type_str, have, want
     );
 }
 

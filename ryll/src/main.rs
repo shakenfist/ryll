@@ -2,6 +2,7 @@ mod app;
 mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
+mod metrics;
 #[cfg(not(feature = "capture"))]
 mod capture {
     /// Stub CaptureSession when capture feature is disabled.

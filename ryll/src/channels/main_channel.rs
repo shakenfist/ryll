@@ -2,7 +2,9 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::sync::Notify as RepaintNotify;
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -39,6 +41,7 @@ const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 pub struct MainChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<RepaintNotify>,
     buffer: Vec<u8>,
     session_id: Option<u32>,
     agent_connected: bool,
@@ -58,6 +61,7 @@ pub struct MainChannel {
     snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
+    last_ping_at: Option<Instant>,
 }
 
 impl MainChannel {
@@ -65,6 +69,7 @@ impl MainChannel {
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<RepaintNotify>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
@@ -75,6 +80,7 @@ impl MainChannel {
         MainChannel {
             stream,
             event_tx,
+            repaint_notify,
             buffer: Vec::with_capacity(65536),
             session_id: None,
             agent_connected: false,
@@ -94,6 +100,7 @@ impl MainChannel {
             snapshot,
             bytes_in: 0,
             bytes_out: 0,
+            last_ping_at: None,
         }
     }
 
@@ -159,6 +166,7 @@ impl MainChannel {
                             .send(ChannelEvent::Disconnected(ChannelType::Main))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                         break;
                     }
 
@@ -192,6 +200,7 @@ impl MainChannel {
                             .send(ChannelEvent::MonitorsConfig { width, height })
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                         self.maybe_send_agent_monitors_config().await?;
                     }
                 }
@@ -206,6 +215,7 @@ impl MainChannel {
                         .send(ChannelEvent::Disconnected(ChannelType::Main))
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                     break;
                 }
             }
@@ -292,6 +302,7 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
                     2 => "client (absolute)",
@@ -308,6 +319,7 @@ impl MainChannel {
                     .send(ChannelEvent::MouseMode(init.current_mouse_mode))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
 
                 // Request client mouse mode (absolute positioning) if
                 // the server supports it. Client mode allows absolute
@@ -340,6 +352,7 @@ impl MainChannel {
                     };
                     info!("main: mouse mode changed to {} ({})", mode, mode_name);
                     self.event_tx.send(ChannelEvent::MouseMode(mode)).await.ok();
+                    self.repaint_notify.notify_one();
                 }
             }
 
@@ -373,9 +386,26 @@ impl MainChannel {
                     .send(ChannelEvent::ChannelsAvailable(channels))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
 
             main_server::PING => {
+                let now = Instant::now();
+                if let Some(last) = self.last_ping_at {
+                    // f32 storage matches the LatencyTracker history
+                    // Vec<f32>; loss of precision is irrelevant for a
+                    // sub-millisecond sparkline.
+                    let sample_ms = (now - last).as_secs_f64() * 1000.0;
+                    self.event_tx
+                        .send(ChannelEvent::Latency {
+                            sample_ms: sample_ms as f32,
+                        })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                }
+                self.last_ping_at = Some(now);
+
                 let ping = Ping::read(payload)?;
 
                 if settings::is_verbose() {
@@ -447,6 +477,7 @@ impl MainChannel {
                     .send(ChannelEvent::Disconnected(ChannelType::Main))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
 
             main_server::AGENT_CONNECTED => {
