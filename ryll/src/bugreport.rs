@@ -490,7 +490,10 @@ pub struct AppSnapshot {
     pub fps: f64,
     pub bandwidth_history: Vec<f32>,
     pub bandwidth_current: f32,
-    pub last_latency: Option<f64>,
+    /// Most recent inter-PING interval observed on the main
+    /// channel, in milliseconds.  `None` until the second PING
+    /// arrives.
+    pub last_latency_ms: Option<f64>,
     pub frames_received: u64,
     pub surfaces: Vec<SurfaceInfo>,
     pub cursor_pos: (u16, u16),
@@ -506,7 +509,7 @@ impl Default for AppSnapshot {
             fps: 0.0,
             bandwidth_history: Vec::new(),
             bandwidth_current: 0.0,
-            last_latency: None,
+            last_latency_ms: None,
             frames_received: 0,
             surfaces: Vec::new(),
             cursor_pos: (0, 0),

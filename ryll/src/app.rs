@@ -53,7 +53,9 @@ struct Statistics {
     frames_received: u64,
     bytes_in: u64,
     bytes_out: u64,
-    last_latency: Option<f64>,
+    /// Inter-PING interval most recently observed on the main
+    /// channel, in milliseconds.
+    last_latency_ms: Option<f64>,
     /// Timestamps of recent DisplayMark events for sliding-window FPS.
     frame_times: Vec<Instant>,
 }
@@ -644,7 +646,7 @@ impl RyllApp {
                 }
 
                 ChannelEvent::Latency { sample_ms } => {
-                    self.stats.last_latency = Some(sample_ms as f64);
+                    self.stats.last_latency_ms = Some(sample_ms as f64);
                     self.latency.record(sample_ms);
                 }
 
@@ -780,7 +782,7 @@ impl RyllApp {
 
         snap.bandwidth_history = self.bandwidth.history.clone();
         snap.bandwidth_current = self.bandwidth.history.last().copied().unwrap_or(0.0);
-        snap.last_latency = self.stats.last_latency;
+        snap.last_latency_ms = self.stats.last_latency_ms;
         snap.frames_received = self.stats.frames_received;
         snap.surfaces = self
             .surfaces
@@ -1179,7 +1181,7 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if self.stats.last_latency.is_some() {
+                    if self.stats.last_latency_ms.is_some() {
                         ui.label(format!("Latency: {}", self.latency.label()));
                     }
                     if self.latency.history.len() >= 2 {
@@ -1203,7 +1205,7 @@ impl eframe::App for RyllApp {
                             painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(180, 140, 80));
                         }
                     }
-                    if self.stats.last_latency.is_some() || self.latency.history.len() >= 2 {
+                    if self.stats.last_latency_ms.is_some() || self.latency.history.len() >= 2 {
                         ui.separator();
                     }
 

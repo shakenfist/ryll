@@ -392,6 +392,9 @@ impl MainChannel {
             main_server::PING => {
                 let now = Instant::now();
                 if let Some(last) = self.last_ping_at {
+                    // f32 storage matches the LatencyTracker history
+                    // Vec<f32>; loss of precision is irrelevant for a
+                    // sub-millisecond sparkline.
                     let sample_ms = (now - last).as_secs_f64() * 1000.0;
                     self.event_tx
                         .send(ChannelEvent::Latency {

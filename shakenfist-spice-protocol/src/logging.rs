@@ -2,16 +2,7 @@
 ///
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
-use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
-
-/// Get current timestamp as float (Unix epoch seconds)
-pub fn timestamp() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
-}
 
 /// Log a protocol message
 pub fn log_message(direction: &str, channel: &str, msg_type: u16, msg_type_str: &str, size: u32) {
