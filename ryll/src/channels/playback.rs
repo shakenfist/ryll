@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
 use crate::bugreport::TrafficBuffers;
+use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
@@ -416,13 +417,15 @@ impl PlaybackChannel {
             self.buffer.drain(..total);
             let msg_type = header.message_type;
 
-            logging::log_message(
-                "received",
-                "playback",
-                msg_type,
-                message_names::playback_server(msg_type),
-                header.message_size,
-            );
+            if settings::is_verbose() {
+                logging::log_message(
+                    "received",
+                    "playback",
+                    msg_type,
+                    message_names::playback_server(msg_type),
+                    header.message_size,
+                );
+            }
 
             self.message_count += 1;
             if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
@@ -597,13 +600,15 @@ impl PlaybackChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let payload_size = data.len().saturating_sub(MessageHeader::SIZE) as u32;
-        logging::log_message(
-            "sent",
-            "playback",
-            msg_type,
-            message_names::playback_client(msg_type),
-            payload_size,
-        );
+        if settings::is_verbose() {
+            logging::log_message(
+                "sent",
+                "playback",
+                msg_type,
+                message_names::playback_client(msg_type),
+                payload_size,
+            );
+        }
         match &mut self.stream {
             SpiceStream::Plain(s) => {
                 use tokio::io::AsyncWriteExt;
