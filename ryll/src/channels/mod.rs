@@ -84,9 +84,9 @@ pub enum ChannelEvent {
         bytes_out: u64,
     },
 
-    /// Latency measurement
+    /// Latency measurement (sample in milliseconds)
     Latency {
-        key_timestamp: f64,
+        sample_ms: f32,
     },
 
     /// Connection error

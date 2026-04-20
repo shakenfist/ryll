@@ -640,9 +640,9 @@ impl RyllApp {
                     self.stats.bytes_out += bytes_out;
                 }
 
-                ChannelEvent::Latency { key_timestamp } => {
-                    self.stats.last_latency = Some(key_timestamp);
-                    self.latency.record((key_timestamp * 1000.0) as f32);
+                ChannelEvent::Latency { sample_ms } => {
+                    self.stats.last_latency = Some(sample_ms as f64);
+                    self.latency.record(sample_ms);
                 }
 
                 ChannelEvent::Error(msg) => {

@@ -2,6 +2,7 @@
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
 use tracing::{debug, info, warn};
@@ -60,6 +61,7 @@ pub struct MainChannel {
     snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
+    last_ping_at: Option<Instant>,
 }
 
 impl MainChannel {
@@ -98,6 +100,7 @@ impl MainChannel {
             snapshot,
             bytes_in: 0,
             bytes_out: 0,
+            last_ping_at: None,
         }
     }
 
@@ -387,6 +390,19 @@ impl MainChannel {
             }
 
             main_server::PING => {
+                let now = Instant::now();
+                if let Some(last) = self.last_ping_at {
+                    let sample_ms = (now - last).as_secs_f64() * 1000.0;
+                    self.event_tx
+                        .send(ChannelEvent::Latency {
+                            sample_ms: sample_ms as f32,
+                        })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                }
+                self.last_ping_at = Some(now);
+
                 let ping = Ping::read(payload)?;
 
                 if settings::is_verbose() {

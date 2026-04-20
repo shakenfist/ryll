@@ -344,16 +344,9 @@ impl InputsChannel {
 
         match event {
             InputEvent::KeyDown(scancode) => {
+                // last_key_time is recorded for the bug-report snapshot only;
+                // latency is now measured from server PINGs in main_channel.rs.
                 self.last_key_time = Some(Instant::now());
-
-                // Send latency timestamp
-                self.event_tx
-                    .send(ChannelEvent::Latency {
-                        key_timestamp: self.last_key_time.unwrap().elapsed().as_secs_f64(),
-                    })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
 
                 self.record_event(InputEventRecord {
                     event_type: "KeyDown".to_string(),
