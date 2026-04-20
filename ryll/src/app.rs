@@ -125,8 +125,11 @@ impl BandwidthTracker {
 }
 
 /// Rolling latency tracker — samples arrive when
-/// `ChannelEvent::Latency` fires.  Values are stored in
-/// milliseconds for intuitive sparkline scaling.
+/// `ChannelEvent::Latency` fires, driven by server PINGs
+/// on the main channel.  Values are stored in milliseconds
+/// (client-observed inter-PING interval) for sparkline
+/// scaling.  Lower variance is better; spikes indicate a
+/// network stall or server send-loop delay.
 struct LatencyTracker {
     /// History of latency samples in ms (most recent last).
     history: Vec<f32>,

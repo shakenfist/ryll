@@ -197,7 +197,7 @@ guest). Out of scope for this plan.
 | 1. Profile idle CPU | PLAN-idle-cpu-and-latency-phase-01-profile.md | Complete |
 | 2. Repaint cadence fix | PLAN-idle-cpu-and-latency-phase-02-repaint.md | Code landed; awaiting user verification |
 | 3. Demote protocol logging | PLAN-idle-cpu-and-latency-phase-03-logging.md | Complete |
-| 4. Real latency from PING/PONG | PLAN-idle-cpu-and-latency-phase-04-latency.md | Not started |
+| 4. Real latency from PING/PONG | PLAN-idle-cpu-and-latency-phase-04-latency.md | Complete |
 | 5. Capture runtime metrics in bug reports | PLAN-idle-cpu-and-latency-phase-05-metrics.md | Not started |
 
 Phase 1 informs phase 2: if profiling shows logging is the
