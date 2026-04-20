@@ -1,0 +1,105 @@
+# cargo-deny policy for ryll.
+#
+# Maintained alongside docs/plans/PLAN-supply-chain-scanning.md.
+# Update the license allowlist below when a new permissive licence
+# is pulled in by a dependency. Only add `[[licenses.exceptions]]`
+# entries after confirming that the non-standard license is safe
+# for our redistribution use.
+#
+# The advisories ignore list tracks known issues we have explicitly
+# accepted. Every entry must have a URL, a rationale, and a
+# follow-up tracked in docs/plans/PLAN-supply-chain-followups.md.
+
+[graph]
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # RUSTSEC-2025-0008: openh264-sys2 heap overflow.
+    # Fix is in >=0.8.0 but that is a semver-incompatible upgrade.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2025-0008
+    "RUSTSEC-2025-0008",
+
+    # RUSTSEC-2024-0436: paste crate unmaintained.
+    # Transitive dependency. Drop-in replacement `pastey` exists.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2024-0436
+    "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2026-0097: rand 0.8.5 unsound with custom logger.
+    # Transitive via rsa. Only triggers with a custom logger that
+    # calls rand::rng() in the log path, which we do not have.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0097
+    "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2023-0071: rsa Marvin timing attack.
+    # No fixed version available in the ecosystem yet. Exploitation
+    # requires local timing observation of the SPICE client;
+    # realistic exposure is low. Tracked in
+    # PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2023-0071
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0134: rustls-pemfile unmaintained.
+    # Upstream archived; functionality moved into rustls-pki-types
+    # 1.9.0+. Migration is a code change in our TLS setup.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2025-0134
+    "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MIT-0",
+    "0BSD",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+]
+confidence-threshold = 0.93
+
+# `epaint_default_fonts` embeds Ubuntu fonts which are distributed under
+# the Ubuntu Font Licence 1.0. UFL-1.0 is a permissive font licence but
+# is not in the SPDX identifier list, so cargo-deny requires an explicit
+# exception for the `LicenseRef-UFL-1.0` reference the crate declares.
+exceptions = [
+    { allow = ["LicenseRef-UFL-1.0"], crate = "epaint_default_fonts" },
+]
+
+[bans]
+multiple-versions = "warn"
+# Intra-workspace path dependencies (e.g. `shakenfist-spice-protocol`
+# referenced by `path = "..."` without a version) register as wildcard
+# deps. Allow them explicitly; real wildcard deps on external crates
+# would still be flagged because they would appear in the lockfile as
+# such.
+wildcards = "allow"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

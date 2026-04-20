@@ -5,6 +5,10 @@ plans decompose work into numbered phases, each with its own detailed plan
 file. Standalone plans track issues, follow-ups, or design decisions that
 do not require phased execution.
 
+New plans should follow the structure in `PLAN-TEMPLATE.md` at the repo
+root. For pre-push audits of our own work see `PUSH-TEMPLATE.md`; for
+reviewing and merging external contributor PRs see `MERGE-TEMPLATE.md`.
+
 ## Master plans
 
 | Date | Plan | Intent | Status | Phases |
@@ -32,6 +36,8 @@ execution.
 | 2026-04-08 | [Display iteration follow-ups](PLAN-display-iteration-followups.md) | Deferred work from display rendering, QUIC decode, and multi-monitor PRs |
 | 2026-04-11 | [PR #20 follow-up](PLAN-pr20-followup.md) | Follow-up fixes from clipboard, MJPEG, and disconnect handling |
 | 2026-04-11 | [PR #23 follow-up](PLAN-pr23-followup.md) | Follow-up fixes from audio playback channel integration |
+| 2026-04-18 | [Supply-chain scanning](PLAN-supply-chain-scanning.md) | Deterministic scanners for dependencies, secrets, and Unicode-based attacks |
+| 2026-04-18 | [Supply-chain follow-ups](PLAN-supply-chain-followups.md) | Tracked advisory ignores and unmaintained-crate debt surfaced when landing scanners |
 
 ## Consolidation plans
 

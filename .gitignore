@@ -4,6 +4,11 @@
 # Cargo cache (used by devcontainer builds)
 /.cargo-cache/
 
+# Cargo tools installed for local scanner runs (e.g. cargo-deny,
+# cargo-audit). Kept outside the shared registry cache so we can
+# install tooling without needing root.
+/.cargo-tools/
+
 # IDE
 .idea/
 *.iml
