@@ -714,17 +714,23 @@ zip contains:
 
 ```
 ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
-├── metadata.json       # report type, description, ryll version,
-│                       #   platform, target host/port, timestamp
-├── session.json        # AppSnapshot (FPS, bandwidth, surfaces)
-├── channel-state.json  # snapshot of the affected channel
-├── traffic.pcap        # ring buffer pcap (capture feature only)
-└── screenshot.png      # display reports only (RGBA → PNG)
+├── metadata.json         # report type, description, ryll version,
+│                         #   platform, target host/port, timestamp
+├── session.json          # AppSnapshot (FPS, bandwidth, surfaces)
+├── channel-state.json    # snapshot of the affected channel
+├── traffic.pcap          # ring buffer pcap (capture feature only)
+├── screenshot.png        # display reports only (RGBA → PNG)
+└── runtime-metrics.json  # process and per-thread CPU%, RSS, VmSize
+                          #   sampled over a 2-second window at
+                          #   report-creation time (Linux only;
+                          #   non-Linux platforms record
+                          #   available:false with a reason)
 ```
 
 Report types are `Display`, `Input`, `Cursor`, and `Connection`,
-each mapping to one SPICE channel.  `BugReport::new()` gathers
-and serialises all data synchronously.  `BugReport::write_zip()`
+each mapping to one SPICE channel.  `BugReport::new()` samples
+runtime metrics over a 2-second window (blocking the caller), then
+gathers and serialises all data synchronously.  `BugReport::write_zip()`
 writes the zip to the capture directory's `bug-reports/`
 subdirectory (if `--capture` is active) or the current working
 directory.
