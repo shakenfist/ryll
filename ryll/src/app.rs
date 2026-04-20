@@ -1,7 +1,7 @@
 /// Main application - egui App and headless mode
 use anyhow::Result;
 use eframe::egui;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -85,7 +85,9 @@ struct BandwidthTracker {
     /// Shared counter incremented by all channels.
     counter: Arc<ByteCounter>,
     /// History of bytes-per-second samples (most recent last).
-    history: Vec<f32>,
+    /// VecDeque so eviction at capacity is O(1) (`pop_front`)
+    /// instead of O(n) `Vec::remove(0)`.
+    history: VecDeque<f32>,
     /// When the current second started.
     last_tick: Instant,
 }
@@ -94,7 +96,7 @@ impl BandwidthTracker {
     fn new(counter: Arc<ByteCounter>) -> Self {
         BandwidthTracker {
             counter,
-            history: Vec::with_capacity(BANDWIDTH_HISTORY_LEN),
+            history: VecDeque::with_capacity(BANDWIDTH_HISTORY_LEN),
             last_tick: Instant::now(),
         }
     }
@@ -107,9 +109,9 @@ impl BandwidthTracker {
             let bytes = self.counter.take();
             let secs = elapsed.as_secs_f64();
             let bps = bytes as f64 / secs;
-            self.history.push(bps as f32);
+            self.history.push_back(bps as f32);
             if self.history.len() > BANDWIDTH_HISTORY_LEN {
-                self.history.remove(0);
+                self.history.pop_front();
             }
             self.last_tick = Instant::now();
         }
@@ -117,7 +119,7 @@ impl BandwidthTracker {
 
     /// Format the most recent bandwidth value for display.
     fn label(&self) -> String {
-        match self.history.last() {
+        match self.history.back() {
             Some(&bps) if bps >= 1_000_000.0 => format!("{:.1} MB/s", bps / 1_000_000.0),
             Some(&bps) if bps >= 1_000.0 => format!("{:.0} KB/s", bps / 1_000.0),
             Some(&bps) => format!("{:.0} B/s", bps),
@@ -134,27 +136,28 @@ impl BandwidthTracker {
 /// network stall or server send-loop delay.
 struct LatencyTracker {
     /// History of latency samples in ms (most recent last).
-    history: Vec<f32>,
+    /// VecDeque so eviction at capacity is O(1) (`pop_front`).
+    history: VecDeque<f32>,
 }
 
 impl LatencyTracker {
     fn new() -> Self {
         LatencyTracker {
-            history: Vec::with_capacity(LATENCY_HISTORY_LEN),
+            history: VecDeque::with_capacity(LATENCY_HISTORY_LEN),
         }
     }
 
     /// Record a new latency sample in milliseconds.
     fn record(&mut self, sample_ms: f32) {
-        self.history.push(sample_ms);
+        self.history.push_back(sample_ms);
         if self.history.len() > LATENCY_HISTORY_LEN {
-            self.history.remove(0);
+            self.history.pop_front();
         }
     }
 
     /// Format the most recent latency value for display.
     fn label(&self) -> String {
-        match self.history.last() {
+        match self.history.back() {
             Some(&v) => format!("{:.1}ms", v),
             None => String::from("--ms"),
         }
@@ -296,16 +299,21 @@ pub struct RyllApp {
 
 /// Derive per-surface output paths from a user-chosen base path.
 ///
-/// * If `count == 1`, returns `vec![base.to_path_buf()]` unchanged.
+/// * If `count <= 1`, returns `vec![base.to_path_buf()]` unchanged.
+///   Callers are expected to validate non-empty surfaces before calling
+///   (`save_screenshots` does); a `count == 0` invocation will silently
+///   produce a single path equal to `base`, never an empty vector.
 /// * If `count > 1`, strips the last extension from `base` (if any) and
-///   appends `-1.png`, `-2.png`, … `-{count}.png`.
+///   appends `-1.png`, `-2.png`, … `-{count}.png`.  Parent directory
+///   components in `base` are preserved.
 ///
 /// Examples:
 /// ```text
-/// ("foo.png",     1) → ["foo.png"]
-/// ("foo.png",     3) → ["foo-1.png", "foo-2.png", "foo-3.png"]
-/// ("foo",         2) → ["foo-1.png", "foo-2.png"]
-/// ("foo.bar.png", 2) → ["foo.bar-1.png", "foo.bar-2.png"]
+/// ("foo.png",          1) → ["foo.png"]
+/// ("foo.png",          3) → ["foo-1.png", "foo-2.png", "foo-3.png"]
+/// ("foo",              2) → ["foo-1.png", "foo-2.png"]
+/// ("foo.bar.png",      2) → ["foo.bar-1.png", "foo.bar-2.png"]
+/// ("/tmp/foo.png",     2) → ["/tmp/foo-1.png", "/tmp/foo-2.png"]
 /// ```
 fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
     if count <= 1 {
@@ -780,8 +788,8 @@ impl RyllApp {
             0.0
         };
 
-        snap.bandwidth_history = self.bandwidth.history.clone();
-        snap.bandwidth_current = self.bandwidth.history.last().copied().unwrap_or(0.0);
+        snap.bandwidth_history = self.bandwidth.history.iter().copied().collect();
+        snap.bandwidth_current = self.bandwidth.history.back().copied().unwrap_or(0.0);
         snap.last_latency_ms = self.stats.last_latency_ms;
         snap.frames_received = self.stats.frames_received;
         snap.surfaces = self
@@ -1181,7 +1189,7 @@ impl eframe::App for RyllApp {
             .frame(stats_frame)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if self.stats.last_latency_ms.is_some() {
+                    if !self.latency.history.is_empty() {
                         ui.label(format!("Latency: {}", self.latency.label()));
                     }
                     if self.latency.history.len() >= 2 {
@@ -1205,7 +1213,7 @@ impl eframe::App for RyllApp {
                             painter.rect_filled(bar, 0.0, egui::Color32::from_rgb(180, 140, 80));
                         }
                     }
-                    if self.stats.last_latency_ms.is_some() || self.latency.history.len() >= 2 {
+                    if !self.latency.history.is_empty() {
                         ui.separator();
                     }
 
@@ -2694,6 +2702,18 @@ mod tests {
             vec![
                 PathBuf::from("foo.bar-1.png"),
                 PathBuf::from("foo.bar-2.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screenshot_paths_with_directory() {
+        let paths = screenshot_paths(std::path::Path::new("/tmp/captures/foo.png"), 2);
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/captures/foo-1.png"),
+                PathBuf::from("/tmp/captures/foo-2.png"),
             ]
         );
     }
