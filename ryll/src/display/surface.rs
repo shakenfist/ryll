@@ -14,16 +14,11 @@ pub struct DisplaySurface {
 impl DisplaySurface {
     /// Create a new surface with the given dimensions
     pub fn new(id: u32, width: u32, height: u32) -> Self {
-        let size = (width * height * 4) as usize;
-        let mut pixels = vec![0u8; size];
-
-        // Initialize with a dark gray background
-        for i in (0..size).step_by(4) {
-            pixels[i] = 50; // R
-            pixels[i + 1] = 50; // G
-            pixels[i + 2] = 50; // B
-            pixels[i + 3] = 255; // A
-        }
+        let num_pixels = (width * height) as usize;
+        // RGBA: R=0, G=0, B=0, A=255 (opaque black) for each pixel
+        let pixels: Vec<u8> = (0..num_pixels)
+            .flat_map(|_| [0u8, 0u8, 0u8, 255u8])
+            .collect();
 
         DisplaySurface {
             id,
@@ -106,5 +101,19 @@ impl DisplaySurface {
     #[allow(dead_code)]
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_init_is_black() {
+        let surface = DisplaySurface::new(0, 2, 2);
+        let pixels = surface.pixels();
+        for chunk in pixels.chunks(4) {
+            assert_eq!(chunk, &[0, 0, 0, 255], "pixel should be opaque black");
+        }
     }
 }
