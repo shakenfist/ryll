@@ -209,6 +209,7 @@ ryll/src/
 ├── bugreport.rs         # Traffic ring buffer + channel snapshots
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
+├── metrics.rs           # /proc-based runtime metrics (Linux only)
 ├── protocol/
 │   ├── constants.rs     # SPICE protocol constants, capabilities
 │   ├── messages.rs      # Binary message structures

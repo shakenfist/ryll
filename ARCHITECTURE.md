@@ -62,6 +62,7 @@ communication between tasks.
 | Playback channel | Decode audio, push samples to ring buffer |
 | Audio thread | Consume ring buffer, resample, write to cpal device |
 | UI thread | egui rendering, input capture (GUI mode only) |
+| Repaint bridge | Wait on `Arc<Notify>`; call `egui::Context::request_repaint()` when channel handlers signal a state change. GUI mode only. |
 
 ### Channel Communication
 
@@ -89,7 +90,13 @@ communication between tasks.
 ```
 
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)
-  to the UI thread
+  to the UI thread. Each `event_tx.send()` is paired with a
+  `repaint_notify.notify_one()` on a shared `Arc<tokio::sync::Notify>`,
+  which a small bridge task forwards to `egui::Context::request_repaint()`.
+  This lets egui sleep when nothing is happening rather than polling
+  at 60 Hz; idle CPU drops by an order of magnitude on systems without
+  GPU acceleration. A 1 Hz `request_repaint_after` fallback covers
+  time-based UI elements (sparkline ticks, status-message expiry).
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
   inputs channel handler. The channel is bounded (256 slots). The consumer
   coalesces consecutive MouseMove events into a single position update (or
@@ -657,11 +664,25 @@ Ryll tracks:
   The window keeps the most recent 120 timestamps for an accurate
   short-term reading.
 - **Bytes in/out**: Network throughput per channel
-- **Latency**: Time from key press to display update (cadence mode)
+- **Latency**: Client-observed inter-PING interval on the main channel,
+  in milliseconds. SPICE has no client-originated probe (`SPICE_MSG_PING`
+  is server→client only), so ryll cannot measure absolute network RTT.
+  Instead, the main-channel PING handler records `Instant::now()` and
+  emits the gap to the previous PING as a sample. The number includes
+  the server's send cadence and the client's receive turnaround;
+  spikes indicate a network or server stall. Sparkline mirrors the
+  bandwidth one (60-sample rolling history, amber bars). Implemented
+  via `LatencyTracker` in `app.rs`.
 - **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
   displayed in the status bar as a small bar chart. Channel read loops
   increment a shared `AtomicU64` byte counter; the `BandwidthTracker`
   in `app.rs` samples it once per second and renders the sparkline.
+- **Runtime metrics in bug reports**: each bug-report ZIP includes a
+  `runtime-metrics.json` file with process and per-thread CPU%, RSS,
+  and VmSize sampled over a 2-second window. Linux-only (reads
+  `/proc/self/stat`, `/proc/self/status`, and `/proc/self/task/*/`);
+  non-Linux platforms emit a graceful "unavailable" payload.
+  Implemented in `ryll/src/metrics.rs`.
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
