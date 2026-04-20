@@ -4,7 +4,7 @@ use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info};
 
 use crate::app::ByteCounter;
@@ -30,6 +30,7 @@ const MAX_RECENT_EVENTS: usize = 50;
 pub struct InputsChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     input_rx: mpsc::Receiver<InputEvent>,
     buffer: Vec<u8>,
     last_key_time: Option<Instant>,
@@ -45,9 +46,11 @@ pub struct InputsChannel {
 }
 
 impl InputsChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         input_rx: mpsc::Receiver<InputEvent>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
@@ -57,6 +60,7 @@ impl InputsChannel {
         InputsChannel {
             stream,
             event_tx,
+            repaint_notify,
             input_rx,
             buffer: Vec::with_capacity(4096),
             last_key_time: None,
@@ -123,6 +127,7 @@ impl InputsChannel {
                                 .send(ChannelEvent::Disconnected(ChannelType::Inputs))
                                 .await
                                 .ok();
+                            self.repaint_notify.notify_one();
                             break;
                         }
                         Ok(_) => {
@@ -133,6 +138,7 @@ impl InputsChannel {
                                 .send(ChannelEvent::Error(format!("inputs: read error: {}", e)))
                                 .await
                                 .ok();
+                            self.repaint_notify.notify_one();
                             break;
                         }
                     }
@@ -347,6 +353,7 @@ impl InputsChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
 
                 self.record_event(InputEventRecord {
                     event_type: "KeyDown".to_string(),

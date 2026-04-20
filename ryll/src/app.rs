@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
@@ -367,11 +367,21 @@ impl RyllApp {
             .map(|d| (d.path.clone(), d.read_only))
             .collect();
 
+        // Repaint when channel events arrive; 1s fallback for time-based UI.
+        // The bridge task waits on the Arc<Notify> and pings egui any time a
+        // channel handler signals it.  Channel handlers call notify_one()
+        // after each event_tx.send(), so egui sleeps when nothing is happening
+        // and wakes immediately when something is.
+        let repaint_notify = Arc::new(Notify::new());
+
         // Spawn connection task
         let config_clone = config.clone();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
+        let bridge_ctx = cc.egui_ctx.clone();
+        let bridge_notify = repaint_notify.clone();
+        let conn_notify = repaint_notify.clone();
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
@@ -386,9 +396,19 @@ impl RyllApp {
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
+                // Repaint bridge: wake egui whenever a channel handler
+                // signals notify_one() after pushing a ChannelEvent.
+                tokio::spawn(async move {
+                    loop {
+                        bridge_notify.notified().await;
+                        bridge_ctx.request_repaint();
+                    }
+                });
+
                 if let Err(e) = run_connection(
                     config_clone,
                     event_tx_clone,
+                    conn_notify,
                     input_rx,
                     usb_rx,
                     webdav_rx,
@@ -2166,7 +2186,13 @@ impl eframe::App for RyllApp {
                 });
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        // Repaint when channel events arrive; 1s fallback for time-based UI
+        // (bandwidth/latency sparklines, status-message expiry, cadence-mode
+        // keystroke injection).  The bridge task wakes us immediately when
+        // an event arrives via the Arc<Notify>; this fallback only ensures
+        // anything that polls Instant::elapsed() updates roughly once a
+        // second.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 }
 
@@ -2226,6 +2252,7 @@ fn default_arrow_cursor() -> Vec<u8> {
 async fn run_connection(
     config: Config,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     input_rx: mpsc::Receiver<InputEvent>,
     usb_rx: mpsc::Receiver<UsbCommand>,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
@@ -2251,6 +2278,7 @@ async fn run_connection(
     let mut main_channel = MainChannel::new(
         main_stream,
         event_tx_clone,
+        repaint_notify.clone(),
         capture.clone(),
         byte_counter.clone(),
         traffic.clone(),
@@ -2277,6 +2305,7 @@ async fn run_connection(
                     .send(ChannelEvent::SessionInitialized(id))
                     .await
                     .ok();
+                repaint_notify.notify_one();
             }
             Some(ChannelEvent::ChannelsAvailable(chs)) => {
                 temp_channels = chs;
@@ -2285,9 +2314,11 @@ async fn run_connection(
                     .send(ChannelEvent::ChannelsAvailable(temp_channels.clone()))
                     .await
                     .ok();
+                repaint_notify.notify_one();
             }
             Some(other) => {
                 event_tx.send(other).await.ok();
+                repaint_notify.notify_one();
             }
             None => break,
         }
@@ -2322,6 +2353,7 @@ async fn run_connection(
                     channel_id,
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -2338,6 +2370,7 @@ async fn run_connection(
                 let mut channel = CursorChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -2353,6 +2386,7 @@ async fn run_connection(
                 let mut channel = InputsChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     input_rx,
                     capture.clone(),
                     byte_counter.clone(),
@@ -2372,6 +2406,7 @@ async fn run_connection(
                     let mut channel = UsbredirChannel::new(
                         stream,
                         event_tx.clone(),
+                        repaint_notify.clone(),
                         usb_rx,
                         virtual_disks.clone(),
                         capture.clone(),
@@ -2394,6 +2429,7 @@ async fn run_connection(
                     let mut channel = WebdavChannel::new(
                         stream,
                         event_tx.clone(),
+                        repaint_notify.clone(),
                         webdav_rx,
                         share_dir.clone(),
                         capture.clone(),
@@ -2415,6 +2451,7 @@ async fn run_connection(
                 let mut channel = PlaybackChannel::new(
                     stream,
                     event_tx.clone(),
+                    repaint_notify.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
@@ -2442,6 +2479,7 @@ async fn run_connection(
                 let msg = format!("channel error: {}", e);
                 error!("app: {}", msg);
                 event_tx.send(ChannelEvent::Error(msg)).await.ok();
+                repaint_notify.notify_one();
             }
             Ok(Ok(())) => {}
         }
@@ -2479,11 +2517,18 @@ pub async fn run_headless(
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
 
+    // Headless mode does not paint anything, but the channel handlers still
+    // call notify_one().  Give them a Notify whose notifications nobody
+    // listens for; tokio::sync::Notify::notify_one is cheap (no allocation,
+    // no waker if no waiters) so this is harmless.
+    let repaint_notify = Arc::new(Notify::new());
+
     // Spawn connection task
     let connection_handle = tokio::spawn(async move {
         run_connection(
             config,
             event_tx,
+            repaint_notify,
             input_rx,
             usb_rx,
             webdav_rx,

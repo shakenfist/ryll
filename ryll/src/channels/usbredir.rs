@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 #[cfg(target_os = "linux")]
 use nusb::MaybeFuture;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -36,6 +36,7 @@ use super::{ChannelEvent, UsbCommand};
 pub struct UsbredirChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     usb_rx: mpsc::Receiver<UsbCommand>,
     buffer: Vec<u8>,
     capture: Option<Arc<CaptureSession>>,
@@ -66,9 +67,11 @@ pub struct UsbredirChannel {
 }
 
 impl UsbredirChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         usb_rx: mpsc::Receiver<UsbCommand>,
         auto_connect_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
@@ -78,6 +81,7 @@ impl UsbredirChannel {
         UsbredirChannel {
             stream,
             event_tx,
+            repaint_notify,
             usb_rx,
             buffer: Vec::with_capacity(65536),
             capture,
@@ -102,6 +106,7 @@ impl UsbredirChannel {
     pub async fn run(&mut self) -> Result<()> {
         info!("usbredir: channel started");
         self.event_tx.send(ChannelEvent::UsbChannelReady).await.ok();
+        self.repaint_notify.notify_one();
 
         // Send our hello immediately
         self.send_hello().await?;
@@ -134,6 +139,7 @@ impl UsbredirChannel {
                             .send(ChannelEvent::Disconnected(ChannelType::Usbredir))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                         break;
                     }
 
@@ -343,6 +349,7 @@ impl UsbredirChannel {
                                 .send(ChannelEvent::UsbConnectFailed(msg))
                                 .await
                                 .ok();
+                            self.repaint_notify.notify_one();
                         }
                     }
                 }
@@ -657,6 +664,7 @@ impl UsbredirChannel {
                             .send(ChannelEvent::UsbConnectFailed(msg))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                         return Ok(());
                     }
                 };
@@ -676,6 +684,7 @@ impl UsbredirChannel {
                             .send(ChannelEvent::UsbConnectFailed(msg))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                     }
                     Some(info) => match RealDevice::open(&info).await {
                         Ok(dev) => {
@@ -691,6 +700,7 @@ impl UsbredirChannel {
                                 .send(ChannelEvent::UsbConnectFailed(msg))
                                 .await
                                 .ok();
+                            self.repaint_notify.notify_one();
                         }
                     },
                 }
@@ -713,6 +723,7 @@ impl UsbredirChannel {
                             .send(ChannelEvent::UsbConnectFailed(msg))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                     }
                 }
             }
@@ -754,6 +765,7 @@ impl UsbredirChannel {
             .send(ChannelEvent::UsbDeviceConnected(desc))
             .await
             .ok();
+        self.repaint_notify.notify_one();
         Ok(())
     }
 
@@ -768,6 +780,7 @@ impl UsbredirChannel {
                 .send(ChannelEvent::UsbDeviceDisconnected)
                 .await
                 .ok();
+            self.repaint_notify.notify_one();
         }
         Ok(())
     }

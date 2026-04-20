@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -298,6 +298,7 @@ impl AudioThread {
 pub struct PlaybackChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
@@ -320,6 +321,7 @@ impl PlaybackChannel {
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         volume_control: Arc<VolumeControl>,
@@ -327,6 +329,7 @@ impl PlaybackChannel {
         PlaybackChannel {
             stream,
             event_tx,
+            repaint_notify,
             buffer: Vec::with_capacity(65536),
             byte_counter,
             traffic,
@@ -380,6 +383,7 @@ impl PlaybackChannel {
                         .send(ChannelEvent::Disconnected(ChannelType::Playback))
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                     break;
                 }
                 Some(Ok(n)) => n,

@@ -4,7 +4,7 @@ use flate2::read::ZlibDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -149,6 +149,7 @@ pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
     image_cache: HashMap<u64, Vec<u8>>,
@@ -176,6 +177,7 @@ impl DisplayChannel {
         channel_id: u8,
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
@@ -186,6 +188,7 @@ impl DisplayChannel {
             channel_id,
             stream,
             event_tx,
+            repaint_notify,
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
             image_cache: HashMap::new(),
@@ -231,6 +234,7 @@ impl DisplayChannel {
                     .send(ChannelEvent::Disconnected(ChannelType::Display))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
                 break;
             }
 
@@ -348,6 +352,7 @@ impl DisplayChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
 
             display_server::SURFACE_DESTROY => {
@@ -366,6 +371,7 @@ impl DisplayChannel {
                         })
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
             }
 
@@ -409,6 +415,7 @@ impl DisplayChannel {
             display_server::MARK => {
                 debug!("display: mark");
                 self.event_tx.send(ChannelEvent::DisplayMark).await.ok();
+                self.repaint_notify.notify_one();
             }
 
             display_server::SET_ACK => {
@@ -610,6 +617,7 @@ impl DisplayChannel {
                                     })
                                     .await
                                     .ok();
+                                self.repaint_notify.notify_one();
                             }
                             None => {
                                 debug!("display: stream {} MJPEG decode failed", stream_id);
@@ -1129,6 +1137,7 @@ impl DisplayChannel {
                         })
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
             } else {
                 self.event_tx
@@ -1144,6 +1153,7 @@ impl DisplayChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
         }
 
