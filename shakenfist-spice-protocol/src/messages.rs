@@ -250,9 +250,12 @@ impl SurfaceCreate {
     }
 }
 
-/// Draw copy message base (SpiceMsgDisplayBase)
+/// Generic SpiceMsgDisplayBase: surface_id, bounding box, clip.
+///
+/// Shared by every display draw opcode (DRAW_COPY, DRAW_FILL,
+/// COPY_BITS, DRAW_BLACKNESS, …).
 #[derive(Debug, Clone)]
-pub struct DrawCopyBase {
+pub struct DrawBase {
     pub surface_id: u32,
     pub top: u32,
     pub left: u32,
@@ -264,12 +267,12 @@ pub struct DrawCopyBase {
     pub end_offset: usize,
 }
 
-impl DrawCopyBase {
+impl DrawBase {
     pub fn read(data: &[u8]) -> io::Result<Self> {
         if data.len() < 21 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "Not enough data for DrawCopyBase",
+                "Not enough data for DrawBase",
             ));
         }
 
@@ -338,7 +341,7 @@ impl DrawCopyBase {
             }
         }
 
-        Ok(DrawCopyBase {
+        Ok(DrawBase {
             surface_id,
             top,
             left,
@@ -1015,7 +1018,7 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    // --- DrawCopyBase tests ---
+    // --- DrawBase tests ---
 
     fn draw_copy_base_minimal() -> Vec<u8> {
         let mut data = Vec::new();
@@ -1039,7 +1042,7 @@ mod tests {
         let data = draw_copy_base_minimal();
         assert_eq!(data.len(), 21);
 
-        let msg = DrawCopyBase::read(&data).expect("DrawCopyBase minimal read failed");
+        let msg = DrawBase::read(&data).expect("DrawBase minimal read failed");
         assert_eq!(msg.surface_id, 1);
         assert_eq!(msg.top, 10);
         assert_eq!(msg.left, 20);
@@ -1078,7 +1081,7 @@ mod tests {
         // Expected: 21 (header) + 4 (count) + 2*16 (rects) = 57 bytes
         assert_eq!(data.len(), 57);
 
-        let msg = DrawCopyBase::read(&data).expect("DrawCopyBase with clip rects failed");
+        let msg = DrawBase::read(&data).expect("DrawBase with clip rects failed");
         assert_eq!(msg.surface_id, 5);
         assert_eq!(msg.clip_type, 1);
         assert_eq!(msg.clip_rects.len(), 2);
@@ -1091,10 +1094,10 @@ mod tests {
     #[test]
     fn test_draw_copy_base_too_short() {
         let data = vec![0u8; 20]; // one byte short of the 21-byte minimum
-        let result = DrawCopyBase::read(&data);
+        let result = DrawBase::read(&data);
         assert!(
             result.is_err(),
-            "Expected error for too-short DrawCopyBase input"
+            "Expected error for too-short DrawBase input"
         );
     }
 

@@ -18,7 +18,7 @@ use shakenfist_spice_compression::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
+    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
     SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
@@ -672,7 +672,7 @@ impl DisplayChannel {
             return Ok(());
         }
 
-        let base = DrawCopyBase::read(payload)?;
+        let base = DrawBase::read(payload)?;
         let left = base.left;
         let top = base.top;
 
