@@ -20,7 +20,8 @@ use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint, SurfaceCreate,
+    SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
+    SpiceTransparent, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
@@ -350,11 +351,9 @@ enum CompositeMode {
     Overwrite,
     /// Chroma-key — emits ChannelEvent::ImageReadyChroma.
     /// Used by DRAW_TRANSPARENT.
-    #[allow(dead_code)] // constructed in phase 6d
     ChromaKey { chroma_rgba: [u8; 4] },
     /// Constant-alpha source-over — emits ChannelEvent::ImageReadyAlpha.
     /// Used by DRAW_ALPHA_BLEND.
-    #[allow(dead_code)] // constructed in phase 6d
     AlphaBlend { alpha: u8 },
 }
 
@@ -665,6 +664,14 @@ impl DisplayChannel {
 
             display_server::DRAW_WHITENESS => {
                 self.handle_draw_whiteness(payload).await?;
+            }
+
+            display_server::DRAW_TRANSPARENT => {
+                self.handle_draw_transparent(payload).await?;
+            }
+
+            display_server::DRAW_ALPHA_BLEND => {
+                self.handle_draw_alpha_blend(payload).await?;
             }
 
             display_server::DRAW_COMPOSITE => {
@@ -1722,6 +1729,83 @@ impl DisplayChannel {
                 .await
             }
         }
+    }
+
+    async fn handle_draw_transparent(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_transparent: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        let base = DrawBase::read(payload)?;
+        let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
+
+        // src_color is BGRX little-endian, same convention as brush colour.
+        let chroma_rgba = [
+            ((transparent.src_color >> 16) & 0xff) as u8,
+            ((transparent.src_color >> 8) & 0xff) as u8,
+            (transparent.src_color & 0xff) as u8,
+            0xff,
+        ];
+
+        self.decode_image_and_emit(
+            payload,
+            "draw_transparent",
+            &base,
+            transparent.src_bitmap as usize,
+            transparent.src_top,
+            transparent.src_left,
+            transparent.src_bottom,
+            transparent.src_right,
+            CompositeMode::ChromaKey { chroma_rgba },
+        )
+        .await
+    }
+
+    async fn handle_draw_alpha_blend(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_alpha_blend: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        let base = DrawBase::read(payload)?;
+        let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
+
+        // Canvas-base reference returns early for alpha == 0 (no pixels
+        // would change); skip the decode entirely rather than run it and
+        // drop the result.
+        if ab.alpha == 0 {
+            return Ok(());
+        }
+
+        if ab.alpha_flags != 0 {
+            warn_once!(
+                "display:draw_alpha_blend:alpha_flags",
+                "display: draw_alpha_blend: non-zero alpha_flags {:#x} ignored, painting with straight alpha",
+                ab.alpha_flags
+            );
+        }
+
+        self.decode_image_and_emit(
+            payload,
+            "draw_alpha_blend",
+            &base,
+            ab.src_bitmap as usize,
+            ab.src_top,
+            ab.src_left,
+            ab.src_bottom,
+            ab.src_right,
+            CompositeMode::AlphaBlend { alpha: ab.alpha },
+        )
+        .await
     }
 
     /// Record a decode result and update the snapshot.

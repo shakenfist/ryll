@@ -59,7 +59,6 @@ pub enum ChannelEvent {
     ///
     /// Pixels whose lower-24-bit RGB equals `chroma_rgba[0..3]`
     /// leave the destination untouched.
-    #[allow(dead_code)] // constructed in phase 6d
     ImageReadyChroma {
         display_channel_id: u8,
         surface_id: u32,
@@ -76,7 +75,6 @@ pub enum ChannelEvent {
     /// Image-bearing paint with constant-alpha blending
     /// (DRAW_ALPHA_BLEND).  Straight (non-premultiplied) alpha;
     /// per-pixel source alpha multiplies through the constant.
-    #[allow(dead_code)] // constructed in phase 6d
     ImageReadyAlpha {
         display_channel_id: u8,
         surface_id: u32,
