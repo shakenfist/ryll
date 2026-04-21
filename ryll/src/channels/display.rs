@@ -19,8 +19,8 @@ use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck, SpiceBrush,
-    SpiceFill, SurfaceCreate,
+    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
+    SpiceBlackness, SpiceBrush, SpiceFill, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
@@ -194,6 +194,30 @@ fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
     Ok(FillOutcome::Paint {
         base,
         colour: rgba,
+        masked_fallback,
+    })
+}
+
+/// Outcome of decoding a DRAW_BLACKNESS or DRAW_WHITENESS payload.
+///
+/// Both opcodes share the same 13-byte body (SpiceQMask) and both
+/// reduce to painting a solid RGBA rect, so the decoder returns the
+/// geometry and whether a non-null mask was present; the caller
+/// supplies the colour.
+#[derive(Debug, Clone)]
+enum SolidFillOutcome {
+    Paint {
+        base: DrawBase,
+        masked_fallback: bool,
+    },
+}
+
+fn decode_draw_solid_fill(payload: &[u8]) -> std::io::Result<SolidFillOutcome> {
+    let base = DrawBase::read(payload)?;
+    let body = SpiceBlackness::read(&payload[base.end_offset..])?;
+    let masked_fallback = body.mask.flags != 0 || body.mask.bitmap_offset != 0;
+    Ok(SolidFillOutcome::Paint {
+        base,
         masked_fallback,
     })
 }
@@ -437,6 +461,14 @@ impl DisplayChannel {
 
             display_server::DRAW_COPY => {
                 self.handle_draw_copy(payload).await?;
+            }
+
+            display_server::DRAW_BLACKNESS => {
+                self.handle_draw_blackness(payload).await?;
+            }
+
+            display_server::DRAW_WHITENESS => {
+                self.handle_draw_whiteness(payload).await?;
             }
 
             display_server::DRAW_COMPOSITE => {
@@ -1282,6 +1314,75 @@ impl DisplayChannel {
         Ok(())
     }
 
+    async fn handle_draw_solid_fill(
+        &mut self,
+        payload: &[u8],
+        op_name: &'static str,
+        mask_warn_key: &'static str,
+        colour: [u8; 4],
+    ) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    op_name,
+                    base.surface_id,
+                    base.left,
+                    base.top,
+                    base.right,
+                    base.bottom,
+                    base.clip_type,
+                ));
+            }
+        }
+
+        let SolidFillOutcome::Paint {
+            base,
+            masked_fallback,
+        } = decode_draw_solid_fill(payload)?;
+
+        if masked_fallback {
+            logging::warn_once_impl(
+                mask_warn_key,
+                &format!("display: {}: non-null mask, painting unmasked", op_name),
+            );
+        }
+
+        self.event_tx
+            .send(ChannelEvent::FillRect {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                rect: (base.left, base.top, base.right, base.bottom),
+                colour,
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
+    }
+
+    async fn handle_draw_blackness(&mut self, payload: &[u8]) -> Result<()> {
+        self.handle_draw_solid_fill(
+            payload,
+            "draw_blackness",
+            "display:draw_blackness:mask_present",
+            [0, 0, 0, 0xff],
+        )
+        .await
+    }
+
+    async fn handle_draw_whiteness(&mut self, payload: &[u8]) -> Result<()> {
+        self.handle_draw_solid_fill(
+            payload,
+            "draw_whiteness",
+            "display:draw_whiteness:mask_present",
+            [0xff, 0xff, 0xff, 0xff],
+        )
+        .await
+    }
+
     /// Record a decode result and update the snapshot.
     fn record_decode(&mut self, decode: DecodeResult) {
         self.recent_decodes.push_back(decode);
@@ -1633,5 +1734,74 @@ mod tests {
             FillOutcome::SkipNoneBrush => {}
             other => panic!("expected SkipNoneBrush, got {:?}", other),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_solid_fill tests (DRAW_BLACKNESS / DRAW_WHITENESS)
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_BLACKNESS / DRAW_WHITENESS payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpiceQMask (flags u8 + pos i32 i32 + bitmap_offset u32 = 13 bytes)
+    fn build_draw_solid_fill_payload(mask_flags: u8, mask_bitmap_offset: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        v.push(mask_flags);
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&mask_bitmap_offset.to_le_bytes());
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_happy_path() {
+        let payload = build_draw_solid_fill_payload(0, 0);
+        match decode_draw_solid_fill(&payload).expect("decode failed") {
+            SolidFillOutcome::Paint {
+                base,
+                masked_fallback,
+            } => {
+                assert!(!masked_fallback);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_masked_fallback() {
+        let payload = build_draw_solid_fill_payload(0, 0x200);
+        match decode_draw_solid_fill(&payload).expect("decode failed") {
+            SolidFillOutcome::Paint {
+                masked_fallback, ..
+            } => assert!(masked_fallback),
+        }
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_rejects_short_payload() {
+        // 21 bytes of DrawBase but no SpiceQMask body.
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(0);
+        // 12 bytes of mask instead of 13.
+        v.extend_from_slice(&[0u8; 12]);
+
+        let result = decode_draw_solid_fill(&v);
+        assert!(result.is_err(), "expected short-payload error");
     }
 }
