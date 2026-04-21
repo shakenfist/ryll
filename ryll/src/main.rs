@@ -25,8 +25,8 @@ mod settings;
 mod usb;
 mod webdav;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -35,7 +35,7 @@ use tracing::{info, Level};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-use crate::bugreport::{AppSnapshot, ChannelSnapshots, TrafficBuffers};
+use crate::bugreport::PedanticConfig;
 use crate::capture::CaptureSession;
 use crate::config::{
     parse_share_dir, parse_virtual_disks, Args, Config, ShareDirConfig, VirtualDiskConfig,
@@ -120,92 +120,43 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "capture"))]
     let capture: Option<Arc<CaptureSession>> = None;
 
-    // Register the --pedantic gap observer before the session starts so no
-    // early-boot gaps are missed (register_gap_observer replays existing keys).
-    //
-    // KNOWN LIMITATION: the traffic / channel-snapshot handles here are
-    // fresh stubs, not the live handles that channel tasks write to inside
-    // app::RyllApp::new / run_headless. Pedantic zips therefore contain:
-    //   * gap_key in metadata.json and in the filename           [present]
-    //   * session metadata, target host/port, runtime_metrics    [present]
-    //   * traffic pcap                                           [empty]
-    //   * channel-state snapshots                                [empty]
-    // The gap key is usually enough to act on a report; traffic context is
-    // secondary. Future work (noted in master plan's "Future work" list)
-    // moves the observer registration into the app constructors where live
-    // handles exist and relies on register_gap_observer's replay semantics
-    // to catch any gaps fired during the construction window.
-    if args.pedantic {
+    // Eager-failure `mkdir -p` for the --pedantic output directory so the
+    // user hears about disk/permission problems before the session starts.
+    // The actual gap-observer registration happens inside the app
+    // constructors (app::RyllApp::new / app::run_headless) once the live
+    // traffic / channel-snapshot handles have been built.
+    let pedantic_config = if args.pedantic {
         std::fs::create_dir_all(&args.pedantic_dir).with_context(|| {
             format!(
                 "failed to create pedantic directory {}",
                 args.pedantic_dir.display()
             )
         })?;
-
-        const PEDANTIC_REPORT_CAP: usize = 50;
-
-        let dir = Arc::new(args.pedantic_dir.clone());
-        let target_host = Arc::new(config.host.clone());
-        let target_port = config.port;
-        let traffic = Arc::new(TrafficBuffers::new());
-        // Arc-wrap ChannelSnapshots so the closure can clone the Arc cheaply
-        // rather than relying on ChannelSnapshots itself implementing Clone.
-        let channel_snapshots = Arc::new(ChannelSnapshots::new());
-        let app_snapshot: Arc<Mutex<AppSnapshot>> = Arc::new(Mutex::new(AppSnapshot::default()));
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        shakenfist_spice_protocol::logging::register_gap_observer(Arc::new(
-            move |key: &'static str| {
-                let n = counter.fetch_add(1, Ordering::SeqCst);
-                if n >= PEDANTIC_REPORT_CAP {
-                    return;
-                }
-                let dir = dir.clone();
-                let target_host = target_host.clone();
-                let traffic = traffic.clone();
-                let channel_snapshots = channel_snapshots.clone();
-                let app_snapshot = app_snapshot.clone();
-                let key_str = key.to_string();
-                tokio::spawn(async move {
-                    // metrics::sample blocks for its sample window; run it on a
-                    // dedicated thread so the tokio executor is not stalled.
-                    let metrics = tokio::task::spawn_blocking(|| {
-                        crate::metrics::sample(std::time::Duration::from_secs(1))
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        crate::metrics::RuntimeMetrics::unavailable(
-                            "spawn_blocking panicked during metrics sample",
-                        )
-                    });
-                    match crate::bugreport::BugReport::write_pedantic(
-                        &dir,
-                        &key_str,
-                        &target_host,
-                        target_port,
-                        &traffic,
-                        &channel_snapshots,
-                        &app_snapshot,
-                        metrics,
-                    ) {
-                        Ok(path) => tracing::info!("pedantic: wrote {}", path.display()),
-                        Err(e) => tracing::warn!("pedantic: write failed for {}: {}", key_str, e),
-                    }
-                });
-            },
-        ));
-
-        tracing::info!(
-            "pedantic mode enabled; reports will land in {}",
-            args.pedantic_dir.display()
-        );
-    }
+        Some(PedanticConfig {
+            dir: args.pedantic_dir.clone(),
+        })
+    } else {
+        None
+    };
 
     if args.headless {
-        run_headless(config, &args, virtual_disks, share_dir, capture)
+        run_headless(
+            config,
+            &args,
+            virtual_disks,
+            share_dir,
+            capture,
+            pedantic_config,
+        )
     } else {
-        run_gui(config, &args, virtual_disks, share_dir, capture)
+        run_gui(
+            config,
+            &args,
+            virtual_disks,
+            share_dir,
+            capture,
+            pedantic_config,
+        )
     }
 }
 
@@ -215,6 +166,7 @@ fn run_headless(
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -227,6 +179,7 @@ fn run_headless(
             share_dir,
             capture,
             args.monitors,
+            pedantic_config,
         )
         .await
     })
@@ -238,6 +191,7 @@ fn run_gui(
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Starting GUI");
 
@@ -262,6 +216,7 @@ fn run_gui(
                 share_dir,
                 capture,
                 monitors,
+                pedantic_config,
             )))
         }),
     )

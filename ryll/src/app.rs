@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
-    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion,
-    SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig,
+    ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
 };
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
@@ -345,6 +345,7 @@ fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
 // ── End screenshot path helpers ─────────────────────────────────────────────
 
 impl RyllApp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         config: Config,
@@ -353,6 +354,7 @@ impl RyllApp {
         share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
+        pedantic_config: Option<PedanticConfig>,
     ) -> Self {
         // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
@@ -376,6 +378,22 @@ impl RyllApp {
         // Save connection target for bug report metadata
         let target_host = config.host.clone();
         let target_port = config.port;
+
+        // Register the --pedantic gap observer now that the live traffic,
+        // channel-snapshot, and app-snapshot handles exist. The underlying
+        // register_gap_observer has replay semantics, so any gaps fired
+        // during the construction window before this call are delivered
+        // when we register.
+        if let Some(config) = pedantic_config {
+            BugReport::register_pedantic_observer(
+                config,
+                target_host.clone(),
+                target_port,
+                traffic.clone(),
+                channel_snapshots.clone(),
+                app_snapshot.clone(),
+            );
+        }
 
         // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
@@ -2644,6 +2662,7 @@ pub async fn run_headless(
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     monitors: u8,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -2664,6 +2683,30 @@ pub async fn run_headless(
 
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
+
+    // Register the --pedantic gap observer. Traffic is live in headless so
+    // pedantic zips will have a real pcap. Channel-state snapshots are also
+    // live (channel tasks write through the `snapshots` handle passed into
+    // run_connection below). The `app_snapshot`, however, is only populated
+    // by the GUI update loop; in headless it would stay at its default, so
+    // we register with a fresh empty AppSnapshot and warn the user.
+    if let Some(pedantic) = pedantic_config {
+        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+        tracing::warn!(
+            "pedantic mode in headless: traffic pcap and channel-state are \
+             live, but app-level snapshot (surfaces list, bandwidth, latency) \
+             is not populated — that field is updated by the GUI loop only. \
+             See docs/plans/PLAN-display-draw-ops-phase-09-pedantic-handles.md."
+        );
+        BugReport::register_pedantic_observer(
+            pedantic,
+            config.host.clone(),
+            config.port,
+            traffic.clone(),
+            snapshots.clone(),
+            app_snapshot,
+        );
+    }
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody

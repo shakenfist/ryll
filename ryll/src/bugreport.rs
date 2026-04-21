@@ -614,7 +614,6 @@ pub(crate) fn format_size(bytes: u32) -> String {
 
 /// Configuration bundle passed from main.rs into the
 /// app constructors when --pedantic is enabled.
-#[allow(dead_code)] // wired up in 9b
 #[derive(Debug, Clone)]
 pub(crate) struct PedanticConfig {
     pub dir: std::path::PathBuf,
@@ -623,7 +622,6 @@ pub(crate) struct PedanticConfig {
 /// Cap on the number of pedantic reports per session.
 /// Prevents disk-fill if the dedupe key set explodes for
 /// some reason.
-#[allow(dead_code)] // wired up in 9b
 pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
 /// Which channel the bug report is about.
@@ -995,7 +993,6 @@ impl BugReport {
     /// Spawns a tokio task per new gap so the firing thread
     /// (usually a channel task) never blocks on disk I/O or
     /// metrics sampling.
-    #[allow(dead_code)] // wired up in 9b
     pub(crate) fn register_pedantic_observer(
         config: PedanticConfig,
         target_host: String,
