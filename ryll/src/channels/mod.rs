@@ -70,7 +70,6 @@ pub enum ChannelEvent {
     },
 
     /// Intra-surface pixel copy (DRAW_COPY_BITS).
-    #[allow(dead_code)] // constructed in phase 4
     CopyBits {
         display_channel_id: u8,
         surface_id: u32,

@@ -20,7 +20,7 @@ use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SpiceBlackness, SpiceBrush, SpiceFill, SurfaceCreate,
+    SpiceBlackness, SpiceBrush, SpiceFill, SpicePoint, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
@@ -220,6 +220,30 @@ fn decode_draw_solid_fill(payload: &[u8]) -> std::io::Result<SolidFillOutcome> {
         base,
         masked_fallback,
     })
+}
+
+/// Outcome of decoding a COPY_BITS payload.
+///
+/// COPY_BITS has no mask, brush, or rop — every payload is an
+/// intra-surface pixel copy — so the decoder just classifies the
+/// geometry and leaves the actual copy to `DisplaySurface::copy_bits`.
+#[derive(Debug, Clone)]
+enum CopyBitsOutcome {
+    Copy {
+        base: DrawBase,
+        src_x: u32,
+        src_y: u32,
+    },
+}
+
+fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
+    let base = DrawBase::read(payload)?;
+    let src_pos = SpicePoint::read(&payload[base.end_offset..])?;
+    // Wire type is int32; source coords are logically unsigned
+    // indices into the surface buffer. Clamp negatives to 0.
+    let src_x = src_pos.x.max(0) as u32;
+    let src_y = src_pos.y.max(0) as u32;
+    Ok(CopyBitsOutcome::Copy { base, src_x, src_y })
 }
 
 /// GLZ dictionary shared across all display channels.
@@ -453,6 +477,10 @@ impl DisplayChannel {
                         .ok();
                     self.repaint_notify.notify_one();
                 }
+            }
+
+            display_server::COPY_BITS => {
+                self.handle_copy_bits(payload).await?;
             }
 
             display_server::DRAW_FILL => {
@@ -1383,6 +1411,34 @@ impl DisplayChannel {
         .await
     }
 
+    async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "copy_bits: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
+
+        self.event_tx
+            .send(ChannelEvent::CopyBits {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                src_x,
+                src_y,
+                dest_rect: (base.left, base.top, base.right, base.bottom),
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
+    }
+
     /// Record a decode result and update the snapshot.
     fn record_decode(&mut self, decode: DecodeResult) {
         self.recent_decodes.push_back(decode);
@@ -1802,6 +1858,69 @@ mod tests {
         v.extend_from_slice(&[0u8; 12]);
 
         let result = decode_draw_solid_fill(&v);
+        assert!(result.is_err(), "expected short-payload error");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_copy_bits tests
+    // -------------------------------------------------------------------------
+
+    /// Build a COPY_BITS payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpicePoint (i32 x, i32 y = 8 bytes)
+    fn build_copy_bits_payload(src_x: i32, src_y: i32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&50u32.to_le_bytes()); // top
+        v.extend_from_slice(&100u32.to_le_bytes()); // left
+        v.extend_from_slice(&70u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&200u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+        v.extend_from_slice(&src_x.to_le_bytes());
+        v.extend_from_slice(&src_y.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn decode_copy_bits_happy_path() {
+        let payload = build_copy_bits_payload(15, 7);
+        match decode_copy_bits(&payload).expect("decode failed") {
+            CopyBitsOutcome::Copy { base, src_x, src_y } => {
+                assert_eq!(src_x, 15);
+                assert_eq!(src_y, 7);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 50);
+                assert_eq!(base.left, 100);
+                assert_eq!(base.bottom, 70);
+                assert_eq!(base.right, 200);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_copy_bits_negative_src_clamped() {
+        let payload = build_copy_bits_payload(-3, -2);
+        match decode_copy_bits(&payload).expect("decode failed") {
+            CopyBitsOutcome::Copy { src_x, src_y, .. } => {
+                assert_eq!(src_x, 0);
+                assert_eq!(src_y, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_copy_bits_rejects_short_payload() {
+        // 21-byte DrawBase + only 7 bytes of SpicePoint (one byte short).
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(0);
+        v.extend_from_slice(&[0u8; 7]);
+
+        let result = decode_copy_bits(&v);
         assert!(result.is_err(), "expected short-payload error");
     }
 }

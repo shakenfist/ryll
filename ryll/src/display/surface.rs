@@ -102,7 +102,7 @@ impl DisplaySurface {
     /// Copy a `(dest_right - dest_left, dest_bottom - dest_top)` rect from
     /// (src_x, src_y) on this surface to (dest_left, dest_top), correctly
     /// handling overlapping source and destination rects (memmove semantics).
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[allow(clippy::too_many_arguments)]
     pub fn copy_bits(
         &mut self,
         src_x: u32,
@@ -287,7 +287,7 @@ impl DisplaySurface {
 
     /// Copy a pre-clipped sub-rect from (sx, sy) to (dl, dt)-(dr, db).
     /// Aliasing-safe: snapshots the source first, then writes to dest.
-    #[allow(clippy::too_many_arguments, dead_code)]
+    #[allow(clippy::too_many_arguments)]
     fn copy_subrect(&mut self, sx: u32, sy: u32, dl: u32, dt: u32, dr: u32, db: u32) {
         let stride = (self.width * 4) as usize;
         let w = (dr - dl) as usize;
