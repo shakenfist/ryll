@@ -2,7 +2,69 @@
 ///
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
+
 use tracing::{debug, warn};
+
+fn registry() -> &'static Mutex<HashSet<&'static str>> {
+    static REG: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Emit `tracing::warn!` exactly once per session for each distinct
+/// `key`. Subsequent calls with the same key are silent. Thread-safe.
+///
+/// Prefer the `warn_once!` macro at call sites so `format!` is
+/// deferred until the first occurrence.
+pub fn warn_once_impl(key: &'static str, message: &str) {
+    let is_new = {
+        let mut set = registry().lock().expect("registry lock poisoned");
+        set.insert(key)
+    };
+    if is_new {
+        warn!("{}", message);
+    }
+}
+
+/// Number of distinct keys that have fired so far this session.
+/// Used by the phase-8 status-bar gap counter.
+pub fn warn_once_count() -> usize {
+    registry().lock().expect("registry lock poisoned").len()
+}
+
+/// Snapshot of the fired keys (in some order). Caller does not hold
+/// the registry lock. Used by the phase-8 pedantic popup / bug
+/// report assembly.
+pub fn warn_once_keys() -> Vec<&'static str> {
+    registry()
+        .lock()
+        .expect("registry lock poisoned")
+        .iter()
+        .copied()
+        .collect()
+}
+
+/// Emit `tracing::warn!` exactly once per session for a given key.
+///
+/// The message expression is only evaluated on the first call for
+/// each key, so `format!` overhead is paid at most once.
+///
+/// # Example
+///
+/// ```
+/// use shakenfist_spice_protocol::warn_once;
+/// warn_once!("my-feature:unsupported", "unsupported thing: {}", 42);
+/// ```
+#[macro_export]
+macro_rules! warn_once {
+    ($key:expr, $($arg:tt)+) => {{
+        $crate::logging::warn_once_impl(
+            $key,
+            &format!($($arg)+),
+        );
+    }};
+}
 
 /// Log a protocol message
 pub fn log_message(direction: &str, channel: &str, msg_type: u16, msg_type_str: &str, size: u32) {
@@ -256,5 +318,49 @@ pub mod message_names {
             spicevmc_client::COMPRESSED_DATA => "vmc_compressed_data",
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::warn_once_keys;
+
+    // The registry is process-global and cargo-test runs tests in
+    // parallel, so assertions here key off specific literals unique
+    // to each test rather than `warn_once_count()` deltas.
+
+    #[test]
+    fn test_warn_once_fires_once() {
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        let keys = warn_once_keys();
+        assert_eq!(
+            keys.iter()
+                .filter(|k| **k == "test_warn_once_fires_once:k1")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_warn_once_distinct_keys_all_fire() {
+        warn_once!("test_warn_once_distinct_keys_all_fire:a", "msg a");
+        warn_once!("test_warn_once_distinct_keys_all_fire:b", "msg b");
+        warn_once!("test_warn_once_distinct_keys_all_fire:c", "msg c");
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:a"));
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:b"));
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:c"));
+    }
+
+    #[test]
+    fn test_warn_once_keys_snapshot_is_stable() {
+        warn_once!(
+            "test_warn_once_keys_snapshot_is_stable:unique",
+            "unique msg"
+        );
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_warn_once_keys_snapshot_is_stable:unique"));
     }
 }
