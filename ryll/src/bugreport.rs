@@ -522,6 +522,7 @@ impl Default for AppSnapshot {
 }
 
 /// Holds all four per-channel snapshot `Arc<Mutex<T>>`s.
+#[derive(Clone)]
 pub struct ChannelSnapshots {
     pub display: Arc<Mutex<DisplaySnapshot>>,
     pub inputs: Arc<Mutex<InputsSnapshot>>,
@@ -610,6 +611,20 @@ pub(crate) fn format_size(bytes: u32) -> String {
 }
 
 // ── Bug report assembly ────────────────────────────────────
+
+/// Configuration bundle passed from main.rs into the
+/// app constructors when --pedantic is enabled.
+#[allow(dead_code)] // wired up in 9b
+#[derive(Debug, Clone)]
+pub(crate) struct PedanticConfig {
+    pub dir: std::path::PathBuf,
+}
+
+/// Cap on the number of pedantic reports per session.
+/// Prevents disk-fill if the dedupe key set explodes for
+/// some reason.
+#[allow(dead_code)] // wired up in 9b
+pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
 /// Which channel the bug report is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -966,6 +981,84 @@ impl BugReport {
 
         zip.finish()?;
         Ok(path)
+    }
+
+    /// Build the --pedantic observer closure and register it
+    /// with the warn_once registry. Called from
+    /// `app::RyllApp::new` (GUI) and `app::run_headless`
+    /// after the live handles are built; rely on
+    /// `register_gap_observer`'s replay semantics to cover
+    /// the window between session start and observer
+    /// registration (empirically empty on the current code
+    /// paths; replay catches anything that slips in).
+    ///
+    /// Spawns a tokio task per new gap so the firing thread
+    /// (usually a channel task) never blocks on disk I/O or
+    /// metrics sampling.
+    #[allow(dead_code)] // wired up in 9b
+    pub(crate) fn register_pedantic_observer(
+        config: PedanticConfig,
+        target_host: String,
+        target_port: u16,
+        traffic: Arc<TrafficBuffers>,
+        channel_snapshots: ChannelSnapshots, // cheap Clone (4 Arcs)
+        app_snapshot: Arc<Mutex<AppSnapshot>>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = Arc::new(config.dir);
+        let host = Arc::new(target_host);
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        let dir_for_log = dir.clone();
+
+        shakenfist_spice_protocol::logging::register_gap_observer(Arc::new(
+            move |key: &'static str| {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n >= PEDANTIC_REPORT_CAP {
+                    return;
+                }
+                let dir = dir.clone();
+                let host = host.clone();
+                let traffic = traffic.clone();
+                let snaps = channel_snapshots.clone();
+                let app_snap = app_snapshot.clone();
+                let key_str = key.to_string();
+                tokio::spawn(async move {
+                    // metrics::sample blocks for its sample window; run it on a
+                    // dedicated thread so the tokio executor is not stalled.
+                    let metrics = tokio::task::spawn_blocking(|| {
+                        crate::metrics::sample(std::time::Duration::from_secs(1))
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::metrics::RuntimeMetrics::unavailable(
+                            "spawn_blocking panicked during metrics sample",
+                        )
+                    });
+                    match BugReport::write_pedantic(
+                        &dir,
+                        &key_str,
+                        &host,
+                        target_port,
+                        &traffic,
+                        &snaps,
+                        &app_snap,
+                        metrics,
+                    ) {
+                        Ok(path) => tracing::info!("pedantic: wrote {}", path.display()),
+                        Err(e) => {
+                            tracing::warn!("pedantic: write failed for {}: {}", key_str, e)
+                        }
+                    }
+                });
+            },
+        ));
+
+        tracing::info!(
+            "pedantic mode enabled; reports will land in {}",
+            dir_for_log.display()
+        );
     }
 }
 
