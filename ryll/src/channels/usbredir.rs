@@ -243,13 +243,7 @@ impl UsbredirChannel {
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
             }
             _ => {
-                logging::log_unknown(
-                    "usbredir",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                logging::log_unknown_once("usbredir", msg_type, payload);
             }
         }
 

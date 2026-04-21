@@ -979,14 +979,8 @@ impl DisplayChannel {
             }
 
             _ => {
-                // Unknown message - log with hex dump
-                logging::log_unknown(
-                    "display",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                // Unknown opcode — log hex once per msg_type, silent on repeat.
+                logging::log_unknown_once("display", msg_type, payload);
             }
         }
 

@@ -289,13 +289,7 @@ impl WebdavChannel {
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
             }
             _ => {
-                logging::log_unknown(
-                    "webdav",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                logging::log_unknown_once("webdav", msg_type, payload);
             }
         }
 

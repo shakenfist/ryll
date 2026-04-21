@@ -306,14 +306,8 @@ impl CursorChannel {
             }
 
             _ => {
-                // Unknown message - log with hex dump
-                logging::log_unknown(
-                    "cursor",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                // Unknown message — log hex once, silent on repeat.
+                logging::log_unknown_once("cursor", msg_type, payload);
             }
         }
 

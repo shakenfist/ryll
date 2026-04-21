@@ -529,8 +529,8 @@ impl MainChannel {
             }
 
             _ => {
-                // Unknown message - log with hex dump
-                logging::log_unknown("main", "received", msg_type, payload.len() as u32, payload);
+                // Unknown opcode — log hex once per msg_type, silent on repeat.
+                logging::log_unknown_once("main", msg_type, payload);
             }
         }
 
