@@ -843,16 +843,42 @@ impl DisplayChannel {
             );
         }
 
+        self.decode_image_and_emit(
+            payload,
+            "draw_copy",
+            &base,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn decode_image_and_emit(
+        &mut self,
+        payload: &[u8],
+        op_name: &str,
+        base: &DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    ) -> Result<()> {
         if src_bitmap_offset == 0 {
-            warn!("display: draw_copy: null src_bitmap");
+            warn!("display: {}: null src_bitmap", op_name);
             return Ok(());
         }
 
         let image_start = src_bitmap_offset;
         if payload.len() < image_start + ImageDescriptor::SIZE {
             warn!(
-                "display: draw_copy: payload too short for image descriptor \
+                "display: {}: payload too short for image descriptor \
                  (have {}, need {}, offset={})",
+                op_name,
                 payload.len(),
                 image_start + ImageDescriptor::SIZE,
                 src_bitmap_offset
@@ -865,18 +891,19 @@ impl DisplayChannel {
 
         let image_data_start = image_start + ImageDescriptor::SIZE;
         if image_data_start >= payload.len() {
-            warn!("display: draw_copy: no image data");
+            warn!("display: {}: no image data", op_name);
             return Ok(());
         }
 
         let image_data = &payload[image_data_start..];
 
         debug!(
-            "display: draw_copy: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
+            "display: {}: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
              flags={}, data_bytes={}",
+            op_name,
             base.surface_id,
-            left,
-            top,
+            base.left,
+            base.top,
             img_desc.width,
             img_desc.height,
             image_type,
@@ -1143,8 +1170,8 @@ impl DisplayChannel {
 
         if decompressed.is_none() {
             info!(
-                "display: draw_copy: no pixels produced for type={:?}",
-                image_type
+                "display: {}: no pixels produced for type={:?}",
+                op_name, image_type
             );
         }
 
@@ -1215,8 +1242,8 @@ impl DisplayChannel {
                 }
             }
 
-            let dest_left = left;
-            let dest_top = top;
+            let dest_left = base.left;
+            let dest_top = base.top;
             let dest_right = dest_left.saturating_add(out_width);
             let dest_bottom = dest_top.saturating_add(out_height);
 
@@ -1264,8 +1291,8 @@ impl DisplayChannel {
                     .send(ChannelEvent::ImageReady {
                         display_channel_id: self.channel_id,
                         surface_id: base.surface_id,
-                        left,
-                        top,
+                        left: base.left,
+                        top: base.top,
                         width: out_width,
                         height: out_height,
                         pixels: out_pixels,
