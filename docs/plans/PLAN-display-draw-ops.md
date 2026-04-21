@@ -663,6 +663,20 @@ Items deliberately deferred from this plan:
   because doing it simultaneously with the
   `decode_image_and_emit` extraction would muddy
   bisection if a DRAW_COPY regression crept in.
+* **Thread live bug-report handles to --pedantic observer.**
+  Phase 8e registers the observer from `main.rs`, which
+  doesn't have access to the live `TrafficBuffers` and
+  `ChannelSnapshots` built inside `app::RyllApp::new` /
+  `run_headless`. Registration uses fresh empty stubs
+  instead, so pedantic-mode zips capture the gap key +
+  session metadata correctly but their traffic pcaps
+  and channel-state snapshots are empty. Resolving this
+  needs a small refactor — either an
+  `app::on_new_handles(cb)` hook, or moving the
+  observer registration into the app constructors after
+  handles exist and relying on
+  `register_gap_observer`'s replay semantics to pick up
+  any gaps that fired during the construction window.
 * **`Rect` newtype on `ChannelEvent`.** Today every draw-
   related variant (`ImageReady` and the new `FillRect` /
   `CopyBits` / `Invert` from phase 1) carries rect

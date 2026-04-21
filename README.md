@@ -196,6 +196,24 @@ This will:
 - Send automatic keystrokes every 2 seconds
 - Print statistics periodically
 
+### `--pedantic` mode
+
+When enabled with `--pedantic`, ryll writes a bug-report
+zip to `./ryll-pedantic-reports/` (or the directory
+specified with `--pedantic-dir <path>`) the first time
+each distinct protocol gap is seen — unsupported opcodes,
+unhandled sub-features, recoverable decode errors.
+Capped at 50 reports per session. Useful for surfacing
+implementation gaps against a specific guest workload.
+The always-visible `Gaps: N` status-bar counter works
+without `--pedantic` too; the counter only counts, it
+doesn't write.
+
+```bash
+ryll --file connection.vv --pedantic
+ryll --file connection.vv --pedantic --pedantic-dir /tmp/my-gaps
+```
+
 ## Architecture
 
 The repository is a Cargo workspace. Ryll itself lives in
