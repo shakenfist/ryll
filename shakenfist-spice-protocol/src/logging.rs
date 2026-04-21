@@ -3,20 +3,96 @@
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::{debug, warn};
+
+/// Observer callback invoked the first time a given warn_once key fires
+/// in this session. See [`register_gap_observer`] for semantics.
+pub type GapObserver = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
 
 fn registry() -> &'static Mutex<HashSet<&'static str>> {
     static REG: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn observer_list() -> &'static Mutex<Vec<GapObserver>> {
+    static OBS: OnceLock<Mutex<Vec<GapObserver>>> = OnceLock::new();
+    OBS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 /// Insert `key` into the warn_once registry. Returns `true` if the key
 /// was newly inserted (never seen before this call), `false` on repeat.
+///
+/// When a new key is inserted, registered gap observers are invoked
+/// *after* the registry lock is released, so observers may freely call
+/// back into `warn_once_*` or register additional observers without
+/// deadlocking.
 fn register_key(key: &'static str) -> bool {
-    let mut set = registry().lock().expect("registry lock poisoned");
-    set.insert(key)
+    let is_new = {
+        let mut set = registry().lock().expect("registry lock poisoned");
+        set.insert(key)
+    };
+    if is_new {
+        dispatch_new_gap(key);
+    }
+    is_new
+}
+
+/// Walk the observer list and invoke each observer with `key`. The
+/// observer-list lock is held only long enough to clone the `Arc`
+/// pointers into a local `Vec`; observers then run with no internal
+/// locks held, so they may freely call back into the logging module.
+fn dispatch_new_gap(key: &'static str) {
+    let observers: Vec<GapObserver> = {
+        let guard = observer_list().lock().expect("observer list lock poisoned");
+        guard.iter().cloned().collect()
+    };
+    for observer in observers {
+        observer(key);
+    }
+}
+
+/// Register a callback to be invoked whenever a new warn_once key is
+/// registered for the first time in this session.
+///
+/// On registration, the observer is immediately replayed with every
+/// key that has already fired so far, so late observers see a complete
+/// history.
+///
+/// # Threading
+///
+/// The observer runs on the thread of the triggering `register_key`
+/// call, after the registry lock has been released. Observers may
+/// therefore call `warn_once_*`, `warn_once_keys`, or
+/// `register_gap_observer` without deadlocking.
+///
+/// # Double-fire during registration races
+///
+/// There is a small race window during registration: if another thread
+/// fires a brand-new key between the moment this function pushes the
+/// observer onto the list and the moment it snapshots the registry for
+/// replay, the observer may see that key twice (once via normal
+/// dispatch, once via replay). Observers must therefore be idempotent
+/// per key. This is already a natural requirement, since the registry
+/// is process-global and the same key may legitimately appear in
+/// multiple observers' replay histories across a session.
+pub fn register_gap_observer(observer: GapObserver) {
+    // Push first so any key fired after this point is dispatched to
+    // the new observer. The subsequent replay then covers keys that
+    // fired before the push. Keys fired between the push and the
+    // snapshot may arrive twice — callers must tolerate that.
+    {
+        let mut observers = observer_list().lock().expect("observer list lock poisoned");
+        observers.push(observer.clone());
+    }
+    // Snapshot the registry AFTER releasing the observer-list lock so
+    // an observer that itself calls `warn_once_*` during replay won't
+    // deadlock on the observer-list lock.
+    let snapshot = warn_once_keys();
+    for key in snapshot {
+        observer(key);
+    }
 }
 
 /// Emit `tracing::warn!` exactly once per session for each distinct
@@ -372,7 +448,9 @@ pub mod message_names {
 
 #[cfg(test)]
 mod tests {
-    use super::{intern_key, log_unknown_once, warn_once_keys};
+    use std::sync::{Arc, Mutex};
+
+    use super::{intern_key, log_unknown_once, register_gap_observer, warn_once_keys};
 
     // The registry is process-global and cargo-test runs tests in
     // parallel, so assertions here key off specific literals unique
@@ -441,5 +519,54 @@ mod tests {
         let a = intern_key("test_intern_key_same:foo".to_string());
         let b = intern_key("test_intern_key_same:foo".to_string());
         assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn register_gap_observer_fires_on_new_key() {
+        const PREFIX: &str = "test_register_gap_observer_fires_on_new_key:";
+        let captured: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        register_gap_observer(Arc::new(move |key: &'static str| {
+            captured_clone
+                .lock()
+                .expect("captured lock poisoned")
+                .push(key);
+        }));
+        warn_once!("test_register_gap_observer_fires_on_new_key:k1", "msg");
+        let seen = captured.lock().expect("captured lock poisoned");
+        let filtered: Vec<&&'static str> = seen.iter().filter(|k| k.starts_with(PREFIX)).collect();
+        assert!(
+            filtered
+                .iter()
+                .any(|k| ***k == *"test_register_gap_observer_fires_on_new_key:k1"),
+            "observer did not see new key; saw: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn register_gap_observer_replays_existing_keys() {
+        const PREFIX: &str = "test_register_gap_observer_replays_existing_keys:";
+        warn_once!(
+            "test_register_gap_observer_replays_existing_keys:pre",
+            "msg"
+        );
+        let captured: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        register_gap_observer(Arc::new(move |key: &'static str| {
+            captured_clone
+                .lock()
+                .expect("captured lock poisoned")
+                .push(key);
+        }));
+        let seen = captured.lock().expect("captured lock poisoned");
+        let filtered: Vec<&&'static str> = seen.iter().filter(|k| k.starts_with(PREFIX)).collect();
+        assert!(
+            filtered
+                .iter()
+                .any(|k| ***k == *"test_register_gap_observer_replays_existing_keys:pre"),
+            "observer did not replay pre-existing key; saw: {:?}",
+            filtered
+        );
     }
 }
