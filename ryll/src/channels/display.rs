@@ -989,7 +989,10 @@ impl DisplayChannel {
 
     async fn handle_draw_copy(&mut self, payload: &[u8]) -> Result<()> {
         if payload.len() < 21 {
-            warn!("display: draw_copy payload too short");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_payload",
+                "display: draw_copy payload too short"
+            );
             return Ok(());
         }
 
@@ -1007,14 +1010,20 @@ impl DisplayChannel {
         // SpiceCopy starts with src_bitmap offset (u32) pointing to SpiceImage
         let copy_start = base.end_offset;
         if payload.len() < copy_start + 4 {
-            warn!("display: draw_copy: payload too short for SpiceCopy");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_spice_copy",
+                "display: draw_copy: payload too short for SpiceCopy"
+            );
             return Ok(());
         }
 
         let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
 
         if payload.len() < copy_start + 36 {
-            warn!("display: draw_copy: payload too short for SpiceCopy header");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_spice_copy_header",
+                "display: draw_copy: payload too short for SpiceCopy header"
+            );
             return Ok(());
         }
 
@@ -1072,19 +1081,31 @@ impl DisplayChannel {
         composite: CompositeMode,
     ) -> Result<()> {
         if src_bitmap_offset == 0 {
-            warn!("display: {}: null src_bitmap", op_name);
+            logging::warn_once_impl(
+                logging::intern_key(format!(
+                    "display:decode_failure:{}:null_src_bitmap",
+                    op_name
+                )),
+                &format!("display: {}: null src_bitmap", op_name),
+            );
             return Ok(());
         }
 
         let image_start = src_bitmap_offset;
         if payload.len() < image_start + ImageDescriptor::SIZE {
-            warn!(
-                "display: {}: payload too short for image descriptor \
-                 (have {}, need {}, offset={})",
-                op_name,
-                payload.len(),
-                image_start + ImageDescriptor::SIZE,
-                src_bitmap_offset
+            logging::warn_once_impl(
+                logging::intern_key(format!(
+                    "display:decode_failure:{}:short_payload_img_desc",
+                    op_name
+                )),
+                &format!(
+                    "display: {}: payload too short for image descriptor \
+                     (have {}, need {}, offset={})",
+                    op_name,
+                    payload.len(),
+                    image_start + ImageDescriptor::SIZE,
+                    src_bitmap_offset
+                ),
             );
             return Ok(());
         }
@@ -1094,7 +1115,10 @@ impl DisplayChannel {
 
         let image_data_start = image_start + ImageDescriptor::SIZE;
         if image_data_start >= payload.len() {
-            warn!("display: {}: no image data", op_name);
+            logging::warn_once_impl(
+                logging::intern_key(format!("display:decode_failure:{}:no_image_data", op_name)),
+                &format!("display: {}: no image data", op_name),
+            );
             return Ok(());
         }
 
@@ -1122,7 +1146,10 @@ impl DisplayChannel {
                 // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
                 // then raw pixel rows.
                 if image_data.len() < 18 {
-                    warn!("display: pixmap BitmapData header too short");
+                    warn_once!(
+                        "display:decode_failure:pixmap:short_bitmap_data",
+                        "display: pixmap BitmapData header too short"
+                    );
                     None
                 } else {
                     let bmp_fmt = image_data[0];
@@ -1141,7 +1168,8 @@ impl DisplayChannel {
 
                     // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
                     if bmp_fmt != 8 && bmp_fmt != 9 {
-                        warn!(
+                        warn_once!(
+                            "display:decode_failure:pixmap:format_unsupported",
                             "display: pixmap format {} not supported (only 32-bit)",
                             bmp_fmt
                         );
@@ -1155,7 +1183,8 @@ impl DisplayChannel {
                     let expected_pixels = pixel_count * 4;
 
                     if stride * (height as usize) > pixel_data.len() {
-                        warn!(
+                        warn_once!(
+                            "display:decode_failure:pixmap:short_pixel_data",
                             "display: pixmap data too short (have {}, need {})",
                             pixel_data.len(),
                             stride * (height as usize)
@@ -1195,13 +1224,20 @@ impl DisplayChannel {
             Some(ImageType::GlzRgb) => {
                 // Skip 4-byte data_size prefix before the GLZ header
                 if image_data.len() < 4 {
-                    warn!("display: GLZ image data too short");
+                    warn_once!(
+                        "display:decode_failure:glz:short_data",
+                        "display: GLZ image data too short"
+                    );
                     None
                 } else {
                     match decompress_glz(&image_data[4..], &self.glz_dictionary).await {
                         Ok(img) => Some(img),
                         Err(e) => {
-                            warn!("display: GLZ decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:glz:decompress_failed",
+                                "display: GLZ decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -1210,13 +1246,20 @@ impl DisplayChannel {
             Some(ImageType::LzRgb) => {
                 // Skip 4-byte data_size prefix before the LZ header
                 if image_data.len() < 4 {
-                    warn!("display: LZ image data too short");
+                    warn_once!(
+                        "display:decode_failure:lz:short_data",
+                        "display: LZ image data too short"
+                    );
                     None
                 } else {
                     match decompress_lz(&image_data[4..]) {
                         Ok(img) => Some(img),
                         Err(e) => {
-                            warn!("display: LZ decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:lz:decompress_failed",
+                                "display: LZ decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -1226,7 +1269,10 @@ impl DisplayChannel {
                 // Zlib-compressed GLZ data: glz_data_size (u32 LE) +
                 // compressed_size (u32 LE) + zlib-compressed GLZ stream
                 if image_data.len() < 8 {
-                    warn!("display: ZLIB_GLZ_RGB data too short");
+                    warn_once!(
+                        "display:decode_failure:zlib_glz:short_data",
+                        "display: ZLIB_GLZ_RGB data too short"
+                    );
                     None
                 } else {
                     let _glz_size = read_u32_le(image_data, 0) as usize;
@@ -1239,12 +1285,20 @@ impl DisplayChannel {
                         Ok(_) => match decompress_glz(&glz_data, &self.glz_dictionary).await {
                             Ok(img) => Some(img),
                             Err(e) => {
-                                warn!("display: ZLIB_GLZ_RGB GLZ decompression failed: {}", e);
+                                warn_once!(
+                                    "display:decode_failure:zlib_glz:glz_failed",
+                                    "display: ZLIB_GLZ_RGB GLZ decompression failed: {}",
+                                    e
+                                );
                                 None
                             }
                         },
                         Err(e) => {
-                            warn!("display: ZLIB_GLZ_RGB zlib decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:zlib_failed",
+                                "display: ZLIB_GLZ_RGB zlib decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -1273,14 +1327,21 @@ impl DisplayChannel {
                         img_desc.image_id,
                     ))
                 } else {
-                    warn!("display: image {} not in cache", img_desc.image_id);
+                    warn_once!(
+                        "display:decode_failure:from_cache:miss",
+                        "display: image {} not in cache",
+                        img_desc.image_id
+                    );
                     None
                 }
             }
             Some(ImageType::Jpeg) => {
                 // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
                 if image_data.len() < 4 {
-                    warn!("display: JPEG data too short");
+                    warn_once!(
+                        "display:decode_failure:jpeg:short_data",
+                        "display: JPEG data too short"
+                    );
                     None
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
@@ -1296,7 +1357,11 @@ impl DisplayChannel {
                             ))
                         }
                         Err(e) => {
-                            warn!("display: JPEG decode failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:jpeg:decode_failed",
+                                "display: JPEG decode failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -1304,7 +1369,10 @@ impl DisplayChannel {
             }
             Some(ImageType::Quic) => {
                 if image_data.len() < 4 {
-                    warn!("display: QUIC data too short");
+                    warn_once!(
+                        "display:decode_failure:quic:short_data",
+                        "display: QUIC data too short"
+                    );
                     None
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
@@ -1317,14 +1385,18 @@ impl DisplayChannel {
                             img_desc.image_id,
                         )),
                         None => {
-                            warn!("display: QUIC decode failed");
+                            warn_once!(
+                                "display:decode_failure:quic:decode_failed",
+                                "display: QUIC decode failed"
+                            );
                             None
                         }
                     }
                 }
             }
             Some(ImageType::LzPalette) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:lz_palette:unsupported",
                     "display: LzPalette images require palette data (not yet implemented), \
                      id={}",
                     img_desc.image_id
@@ -1332,21 +1404,24 @@ impl DisplayChannel {
                 None
             }
             Some(ImageType::Surface) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:surface:unsupported",
                     "display: Surface-to-surface copy (not yet implemented), id={}",
                     img_desc.image_id
                 );
                 None
             }
             Some(ImageType::FromCacheLossless) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:from_cache_lossless:unsupported",
                     "display: FromCacheLossless (not yet implemented), id={}",
                     img_desc.image_id
                 );
                 None
             }
             Some(ImageType::JpegAlpha) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:jpeg_alpha:unsupported",
                     "display: JpegAlpha requires separate alpha plane (not yet implemented), \
                      id={}",
                     img_desc.image_id
@@ -1354,7 +1429,11 @@ impl DisplayChannel {
                 None
             }
             None => {
-                warn!("display: unknown image type byte: {}", img_desc.image_type);
+                warn_once!(
+                    "display:decode_failure:image_type:unknown",
+                    "display: unknown image type byte: {}",
+                    img_desc.image_type
+                );
                 None
             }
         };
