@@ -651,6 +651,18 @@ Items deliberately deferred from this plan:
 * **`DRAW_COMPOSITE`** is currently a stub. It's not in
   scope here but should be revisited once the simpler
   ops are working.
+* **`SpiceCopy` / `SpiceBlend` protocol-crate parser.**
+  `handle_draw_copy` (and, after phase 5,
+  `handle_draw_blend`) still parse the 36-byte SpiceCopy
+  header inline with `read_u32_le` / `read_u16_le` — a
+  pre-phase-1 idiom that phases 1-4 did not touch. Add a
+  `SpiceCopy { src_bitmap, src_top, src_left, src_bottom,
+  src_right, rop_descriptor, scale_mode, mask }` struct
+  (with an alias `SpiceBlend = SpiceCopy`, per draw.h)
+  and migrate both call sites. Deferred from phase 5
+  because doing it simultaneously with the
+  `decode_image_and_emit` extraction would muddy
+  bisection if a DRAW_COPY regression crept in.
 * **`Rect` newtype on `ChannelEvent`.** Today every draw-
   related variant (`ImageReady` and the new `FillRect` /
   `CopyBits` / `Invert` from phase 1) carries rect
