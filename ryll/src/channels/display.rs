@@ -341,6 +341,71 @@ fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
     })
 }
 
+/// How `decode_image_and_emit` should composite the decoded
+/// source pixels into the destination surface.
+#[derive(Debug, Clone, Copy)]
+enum CompositeMode {
+    /// Straight overwrite — emits ChannelEvent::ImageReady.
+    /// Used by DRAW_COPY, DRAW_BLEND, DRAW_OPAQUE.
+    Overwrite,
+    /// Chroma-key — emits ChannelEvent::ImageReadyChroma.
+    /// Used by DRAW_TRANSPARENT.
+    #[allow(dead_code)] // constructed in phase 6d
+    ChromaKey { chroma_rgba: [u8; 4] },
+    /// Constant-alpha source-over — emits ChannelEvent::ImageReadyAlpha.
+    /// Used by DRAW_ALPHA_BLEND.
+    #[allow(dead_code)] // constructed in phase 6d
+    AlphaBlend { alpha: u8 },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_image_event(
+    composite: CompositeMode,
+    display_channel_id: u8,
+    surface_id: u32,
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    image_id: u64,
+) -> ChannelEvent {
+    match composite {
+        CompositeMode::Overwrite => ChannelEvent::ImageReady {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            image_id,
+        },
+        CompositeMode::ChromaKey { chroma_rgba } => ChannelEvent::ImageReadyChroma {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            chroma_rgba,
+            image_id,
+        },
+        CompositeMode::AlphaBlend { alpha } => ChannelEvent::ImageReadyAlpha {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            alpha,
+            image_id,
+        },
+    }
+}
+
 /// GLZ dictionary shared across all display channels.
 pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
@@ -955,6 +1020,7 @@ impl DisplayChannel {
             src_left,
             src_bottom,
             src_right,
+            CompositeMode::Overwrite,
         )
         .await
     }
@@ -970,6 +1036,7 @@ impl DisplayChannel {
         src_left: u32,
         src_bottom: u32,
         src_right: u32,
+        composite: CompositeMode,
     ) -> Result<()> {
         if src_bitmap_offset == 0 {
             warn!("display: {}: null src_bitmap", op_name);
@@ -1375,32 +1442,34 @@ impl DisplayChannel {
                     }
 
                     self.event_tx
-                        .send(ChannelEvent::ImageReady {
-                            display_channel_id: self.channel_id,
-                            surface_id: base.surface_id,
-                            left: il,
-                            top: it,
-                            width: sub_w as u32,
-                            height: sub_h as u32,
-                            pixels: sub_pixels,
-                            image_id: img.image_id,
-                        })
+                        .send(build_image_event(
+                            composite,
+                            self.channel_id,
+                            base.surface_id,
+                            il,
+                            it,
+                            sub_w as u32,
+                            sub_h as u32,
+                            sub_pixels,
+                            img.image_id,
+                        ))
                         .await
                         .ok();
                     self.repaint_notify.notify_one();
                 }
             } else {
                 self.event_tx
-                    .send(ChannelEvent::ImageReady {
-                        display_channel_id: self.channel_id,
-                        surface_id: base.surface_id,
-                        left: base.left,
-                        top: base.top,
-                        width: out_width,
-                        height: out_height,
-                        pixels: out_pixels,
-                        image_id: img.image_id,
-                    })
+                    .send(build_image_event(
+                        composite,
+                        self.channel_id,
+                        base.surface_id,
+                        base.left,
+                        base.top,
+                        out_width,
+                        out_height,
+                        out_pixels,
+                        img.image_id,
+                    ))
                     .await
                     .ok();
                 self.repaint_notify.notify_one();
@@ -1605,6 +1674,7 @@ impl DisplayChannel {
                     src_left,
                     src_bottom,
                     src_right,
+                    CompositeMode::Overwrite,
                 )
                 .await
             }
@@ -1647,6 +1717,7 @@ impl DisplayChannel {
                     src_left,
                     src_bottom,
                     src_right,
+                    CompositeMode::Overwrite,
                 )
                 .await
             }
