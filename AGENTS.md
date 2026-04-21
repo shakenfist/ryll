@@ -246,6 +246,31 @@ ryll/src/
 2. Constants/enums in `ryll/src/protocol/constants.rs`
 3. Channel-specific logic in `ryll/src/channels/*.rs`
 
+### Inspecting a `--capture` pcap
+
+`tools/pcap-inspect.py` is a pure-Python helper (no tshark
+or scapy dependency) for sifting through a ryll capture.
+Three subcommands:
+
+```
+tools/pcap-inspect.py opcodes   <path>                 # histogram of SPICE message types
+tools/pcap-inspect.py draw-copy <path>                 # DRAW_COPY breakdown by surface / image type
+tools/pcap-inspect.py timeline  <path> [--since-last N]  # server-side messages in order
+```
+
+Typical use: when investigating a rendering artefact,
+`opcodes` tells you whether the problem window even
+contains the draw ops you thought it did (phase-3 found
+that a "static" artefact was 100% DRAW_COPY, not missing
+draw ops); `draw-copy` narrows further to the image types
+involved; `timeline --since-last 5` dumps the last five
+seconds of traffic when the user has pressed F8 right
+after seeing the artefact.
+
+ryll's pcap files are big-endian libpcap format carrying
+synthetic TCP frames around the raw post-link SPICE
+stream. The helper handles that without any extra flags.
+
 ## Process templates
 
 Four templates at the repo root capture the workflows we
