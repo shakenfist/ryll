@@ -2,7 +2,7 @@
 ///
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use tracing::{debug, warn};
@@ -12,18 +12,67 @@ fn registry() -> &'static Mutex<HashSet<&'static str>> {
     REG.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Insert `key` into the warn_once registry. Returns `true` if the key
+/// was newly inserted (never seen before this call), `false` on repeat.
+fn register_key(key: &'static str) -> bool {
+    let mut set = registry().lock().expect("registry lock poisoned");
+    set.insert(key)
+}
+
 /// Emit `tracing::warn!` exactly once per session for each distinct
 /// `key`. Subsequent calls with the same key are silent. Thread-safe.
 ///
 /// Prefer the `warn_once!` macro at call sites so `format!` is
 /// deferred until the first occurrence.
 pub fn warn_once_impl(key: &'static str, message: &str) {
-    let is_new = {
-        let mut set = registry().lock().expect("registry lock poisoned");
-        set.insert(key)
-    };
-    if is_new {
+    if register_key(key) {
         warn!("{}", message);
+    }
+}
+
+/// Caller-side variant of the warn-once pattern. Returns `true` if
+/// `key` was newly inserted into the session registry (caller should
+/// fire side-effects such as a hex dump), `false` on repeat (caller
+/// should stay silent). No formatting, no `warn!` call — the caller
+/// controls what "fire" means.
+pub fn warn_once_impl_if_new(key: &'static str) -> bool {
+    register_key(key)
+}
+
+/// Intern a dynamically-composed key into process-lifetime memory so
+/// the `HashSet<&'static str>` warn_once registry can accept it.
+///
+/// The leaked memory is bounded by the number of distinct dynamic keys
+/// the session will ever produce — typically on the order of
+/// `channel × msg_type` combinations (~50 in practice). Callers must
+/// not pass unbounded per-message data as the key.
+pub fn intern_key(key: String) -> &'static str {
+    static INTERN: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let map = INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("intern map lock poisoned");
+    if let Some(existing) = guard.get(&key) {
+        existing
+    } else {
+        let leaked: &'static str = Box::leak(key.clone().into_boxed_str());
+        guard.insert(key, leaked);
+        leaked
+    }
+}
+
+/// One-shot variant of `log_unknown`: hex-dumps the payload on the
+/// first call for `(channel, msg_type)` in this session and is silent
+/// on repeats. Used by the display channel's known-but-unimplemented
+/// opcode arms (phase 7) and by truly-unknown arms elsewhere (phase 8).
+pub fn log_unknown_once(channel: &'static str, msg_type: u16, payload: &[u8]) {
+    let key = intern_key(format!("{}:hexdump:{}", channel, msg_type));
+    if warn_once_impl_if_new(key) {
+        warn!(
+            "{} {} byte UNKNOWN opcode {} (first occurrence; subsequent silent)",
+            channel,
+            payload.len(),
+            msg_type
+        );
+        hex_dump(payload, 64);
     }
 }
 
@@ -323,7 +372,7 @@ pub mod message_names {
 
 #[cfg(test)]
 mod tests {
-    use super::warn_once_keys;
+    use super::{intern_key, log_unknown_once, warn_once_keys};
 
     // The registry is process-global and cargo-test runs tests in
     // parallel, so assertions here key off specific literals unique
@@ -362,5 +411,35 @@ mod tests {
         );
         let keys = warn_once_keys();
         assert!(keys.contains(&"test_warn_once_keys_snapshot_is_stable:unique"));
+    }
+
+    #[test]
+    fn log_unknown_once_fires_once() {
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        let keys = warn_once_keys();
+        assert_eq!(
+            keys.iter()
+                .filter(|k| **k == "test_log_unknown_once_fires_once:hexdump:999")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn log_unknown_once_distinct_opcodes() {
+        log_unknown_once("test_log_unknown_once_distinct_opcodes", 9001, &[0x01]);
+        log_unknown_once("test_log_unknown_once_distinct_opcodes", 9002, &[0x02]);
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_log_unknown_once_distinct_opcodes:hexdump:9001"));
+        assert!(keys.contains(&"test_log_unknown_once_distinct_opcodes:hexdump:9002"));
+    }
+
+    #[test]
+    fn intern_key_returns_same_str_for_same_input() {
+        let a = intern_key("test_intern_key_same:foo".to_string());
+        let b = intern_key("test_intern_key_same:foo".to_string());
+        assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()));
     }
 }
