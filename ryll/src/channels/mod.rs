@@ -55,6 +55,41 @@ pub enum ChannelEvent {
         image_id: u64,
     },
 
+    /// Solid-colour fill of a destination rect.
+    ///
+    /// Used by DRAW_FILL (with a solid brush), DRAW_BLACKNESS,
+    /// and DRAW_WHITENESS. `rect` is `(left, top, right, bottom)`
+    /// in surface coordinates; `clip` is the SpiceClip rect list
+    /// from the draw message (empty = no extra clipping).
+    #[allow(dead_code)] // constructed in phase 2+
+    FillRect {
+        display_channel_id: u8,
+        surface_id: u32,
+        rect: (u32, u32, u32, u32),
+        colour: [u8; 4],
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
+    /// Intra-surface pixel copy (DRAW_COPY_BITS).
+    #[allow(dead_code)] // constructed in phase 4
+    CopyBits {
+        display_channel_id: u8,
+        surface_id: u32,
+        src_x: u32,
+        src_y: u32,
+        dest_rect: (u32, u32, u32, u32),
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
+    /// In-place RGB inversion of a rect (DRAW_INVERS).
+    #[allow(dead_code)] // constructed in phase 7
+    Invert {
+        display_channel_id: u8,
+        surface_id: u32,
+        rect: (u32, u32, u32, u32),
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
     /// Display mark (frame boundary)
     DisplayMark,
 
