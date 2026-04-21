@@ -284,7 +284,8 @@ Concretely:
 | 6. `DRAW_TRANSPARENT` and `DRAW_ALPHA_BLEND` | PLAN-display-draw-ops-phase-06-alpha.md | Not started |
 | 7. `DRAW_INVERS` and warn-once for deferred ops | PLAN-display-draw-ops-phase-07-invers-and-warnings.md | Not started |
 | 8. `--pedantic` mode and status-bar gap counter | PLAN-display-draw-ops-phase-08-pedantic.md | Not started |
-| 9. Documentation and release notes | PLAN-display-draw-ops-phase-09-docs.md | Not started |
+| 9. Thread live bug-report handles to the pedantic observer | PLAN-display-draw-ops-phase-09-pedantic-handles.md | Not started |
+| 10. Documentation and release notes | PLAN-display-draw-ops-phase-10-docs.md | Not started |
 
 ### Sequencing rationale
 
@@ -534,7 +535,44 @@ even if the dedupe key explodes for some reason.
 - `--pedantic` should not interact with capture mode
   (`--capture`); they're orthogonal toggles.
 
-### Phase 9: Documentation — sketch
+### Phase 9: Thread live bug-report handles — sketch
+
+Phase 8e shipped the --pedantic observer wired to fresh
+stub TrafficBuffers / ChannelSnapshots / AppSnapshot
+because main.rs doesn't have access to the live handles
+the channel tasks write to (those are built inside
+`app::RyllApp::new` / `run_headless`). Pedantic zips
+therefore capture gap_key + session metadata correctly
+but their traffic pcaps and channel snapshots are empty
+— which defeats the *debugging* half of the feature.
+
+Phase 9 moves observer registration from main.rs into
+the app constructors so the observer closure captures
+the real handles. The master plan treats this as
+critical for debugging user-reported issues later; the
+gap key tells you *what* failed but the traffic pcap
+tells you *why*.
+
+* Derive `Clone` on `ChannelSnapshots` (its fields are
+  already `Arc<Mutex<..>>` so cloning is cheap).
+* Add `BugReport::register_pedantic_observer(...)` in
+  `bugreport.rs` — takes the live handles + a
+  `PedanticConfig { dir: PathBuf }` and registers the
+  observer closure. This is the factoring that makes
+  both the GUI and headless paths share the wiring.
+* In `main.rs`, keep the `mkdir -p` eager-failure
+  check and the `PedanticConfig` build, pass
+  `Option<PedanticConfig>` into `run_gui` /
+  `run_headless`. Remove the stub-handle block.
+* In `app::RyllApp::new`, after the live handles are
+  built, call `register_pedantic_observer` if config
+  is Some. `register_gap_observer`'s replay semantics
+  cover the (tiny) window between session start and
+  observer registration.
+* In `run_headless`, same pattern.
+* Delete the KNOWN LIMITATION comment in main.rs.
+
+### Phase 10: Documentation — sketch
 
 * Update `ARCHITECTURE.md` to describe the now-broader
   draw-op coverage and the `FillRect`/`CopyBits`/`Invert`
@@ -663,20 +701,6 @@ Items deliberately deferred from this plan:
   because doing it simultaneously with the
   `decode_image_and_emit` extraction would muddy
   bisection if a DRAW_COPY regression crept in.
-* **Thread live bug-report handles to --pedantic observer.**
-  Phase 8e registers the observer from `main.rs`, which
-  doesn't have access to the live `TrafficBuffers` and
-  `ChannelSnapshots` built inside `app::RyllApp::new` /
-  `run_headless`. Registration uses fresh empty stubs
-  instead, so pedantic-mode zips capture the gap key +
-  session metadata correctly but their traffic pcaps
-  and channel-state snapshots are empty. Resolving this
-  needs a small refactor — either an
-  `app::on_new_handles(cb)` hook, or moving the
-  observer registration into the app constructors after
-  handles exist and relying on
-  `register_gap_observer`'s replay semantics to pick up
-  any gaps that fired during the construction window.
 * **`Rect` newtype on `ChannelEvent`.** Today every draw-
   related variant (`ImageReady` and the new `FillRect` /
   `CopyBits` / `Invert` from phase 1) carries rect
