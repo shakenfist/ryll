@@ -596,6 +596,54 @@ impl RyllApp {
                     );
                 }
 
+                ChannelEvent::FillRect {
+                    display_channel_id,
+                    surface_id,
+                    rect: (left, top, right, bottom),
+                    colour,
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.fill_rect(left, top, right, bottom, colour, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: FillRect on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::CopyBits {
+                    display_channel_id,
+                    surface_id,
+                    src_x,
+                    src_y,
+                    dest_rect: (left, top, right, bottom),
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.copy_bits(src_x, src_y, left, top, right, bottom, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: CopyBits on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::Invert {
+                    display_channel_id,
+                    surface_id,
+                    rect: (left, top, right, bottom),
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.invert_rect(left, top, right, bottom, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: Invert on unknown surface {}", surface_id);
+                    }
+                }
+
                 ChannelEvent::DisplayMark => {
                     // Frame boundary — record timestamp for FPS calculation
                     let now = Instant::now();
