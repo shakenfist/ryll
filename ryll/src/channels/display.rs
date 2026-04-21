@@ -246,6 +246,59 @@ fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
     Ok(CopyBitsOutcome::Copy { base, src_x, src_y })
 }
 
+/// Outcome of decoding a DRAW_BLEND payload.
+///
+/// DRAW_BLEND shares the 36-byte SpiceCopy/SpiceBlend header with
+/// DRAW_COPY (draw.h defines the latter as a typedef for the
+/// former). On OP_PUT the blend is identical to a DRAW_COPY; any
+/// other ROP would require compositing that we don't implement, so
+/// we warn_once and skip.
+#[derive(Debug, Clone)]
+enum BlendOutcome {
+    Paint {
+        base: DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipNonOpPut {
+        rop: u16,
+    },
+}
+
+fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
+    let base = DrawBase::read(payload)?;
+    let copy_start = base.end_offset;
+    if payload.len() < copy_start + 36 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Not enough data for SpiceBlend",
+        ));
+    }
+    let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
+    let src_top = read_u32_le(payload, copy_start + 4);
+    let src_left = read_u32_le(payload, copy_start + 8);
+    let src_bottom = read_u32_le(payload, copy_start + 12);
+    let src_right = read_u32_le(payload, copy_start + 16);
+    let rop = read_u16_le(payload, copy_start + 20);
+    // scale_mode and mask are parsed-through silently, matching
+    // how handle_draw_copy treats them today.
+
+    if rop != ropd::OP_PUT {
+        return Ok(BlendOutcome::SkipNonOpPut { rop });
+    }
+    Ok(BlendOutcome::Paint {
+        base,
+        src_bitmap_offset,
+        src_top,
+        src_left,
+        src_bottom,
+        src_right,
+    })
+}
+
 /// GLZ dictionary shared across all display channels.
 pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
@@ -489,6 +542,10 @@ impl DisplayChannel {
 
             display_server::DRAW_COPY => {
                 self.handle_draw_copy(payload).await?;
+            }
+
+            display_server::DRAW_BLEND => {
+                self.handle_draw_blend(payload).await?;
             }
 
             display_server::DRAW_BLACKNESS => {
@@ -1466,6 +1523,48 @@ impl DisplayChannel {
         Ok(())
     }
 
+    async fn handle_draw_blend(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_blend: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        match decode_draw_blend(payload)? {
+            BlendOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_blend:non_op_put",
+                    "display: draw_blend: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+                Ok(())
+            }
+            BlendOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_blend",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                )
+                .await
+            }
+        }
+    }
+
     /// Record a decode result and update the snapshot.
     fn record_decode(&mut self, decode: DecodeResult) {
         self.recent_decodes.push_back(decode);
@@ -1949,5 +2048,75 @@ mod tests {
 
         let result = decode_copy_bits(&v);
         assert!(result.is_err(), "expected short-payload error");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_blend tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_BLEND payload = DrawBase (21 bytes, clip_type=0) +
+    /// SpiceCopy (36 bytes: src_bitmap + src_area + rop + scale + mask).
+    fn build_draw_blend_payload(rop_descriptor: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // SpiceCopy header
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap offset
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+        v.push(0); // scale_mode
+                   // SpiceQMask (13 bytes)
+        v.push(0); // flags
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&0u32.to_le_bytes()); // bitmap_offset
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_blend_happy_path_op_put() {
+        let payload = build_draw_blend_payload(ropd::OP_PUT);
+        match decode_draw_blend(&payload).expect("decode failed") {
+            BlendOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_blend_non_op_put_skips() {
+        // 0x10 = OP_OR.
+        let payload = build_draw_blend_payload(0x10);
+        match decode_draw_blend(&payload).expect("decode failed") {
+            BlendOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
     }
 }
