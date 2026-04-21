@@ -15,15 +15,16 @@ use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
     GlzDictionary,
 };
+use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SurfaceCreate,
+    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck, SpiceBrush,
+    SpiceFill, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
-    display_client, display_server, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
+    display_client, display_server, warn_once, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
 };
 
 use super::ChannelEvent;
@@ -141,6 +142,61 @@ struct StreamState {
 
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
+
+/// What we decided to do with a DRAW_FILL after classifying its
+/// rop/brush/mask. Extracted from `handle_draw_fill` so the
+/// parse-and-classify logic is independently testable without
+/// standing up a full `DisplayChannel`.
+#[derive(Debug, Clone)]
+enum FillOutcome {
+    /// Happy path: paint `colour` (RGBA) into `base.rect` with
+    /// `base.clip_rects`.
+    Paint {
+        base: DrawBase,
+        colour: [u8; 4],
+        /// True when a non-null mask was present; we still paint,
+        /// but unmasked, and the caller has already warn_once'd.
+        masked_fallback: bool,
+    },
+    /// ROP descriptor wasn't SPICE_ROPD_OP_PUT — skip.
+    SkipNonOpPut { rop: u16 },
+    /// Brush type was NONE — skip.
+    SkipNoneBrush,
+    /// Brush type was PATTERN — skip (not yet supported).
+    SkipPatternBrush,
+}
+
+fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
+    let base = DrawBase::read(payload)?;
+    let (fill, _consumed) = SpiceFill::read(&payload[base.end_offset..])?;
+
+    if fill.rop_descriptor != ropd::OP_PUT {
+        return Ok(FillOutcome::SkipNonOpPut {
+            rop: fill.rop_descriptor,
+        });
+    }
+
+    let color = match fill.brush {
+        SpiceBrush::Solid { color } => color,
+        SpiceBrush::None => return Ok(FillOutcome::SkipNoneBrush),
+        SpiceBrush::Pattern { .. } => return Ok(FillOutcome::SkipPatternBrush),
+    };
+
+    let masked_fallback = fill.mask.flags != 0 || fill.mask.bitmap_offset != 0;
+
+    let rgba = [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        0xff,
+    ];
+
+    Ok(FillOutcome::Paint {
+        base,
+        colour: rgba,
+        masked_fallback,
+    })
+}
 
 /// GLZ dictionary shared across all display channels.
 pub type SharedGlzDictionary = Arc<GlzDictionary>;
@@ -373,6 +429,10 @@ impl DisplayChannel {
                         .ok();
                     self.repaint_notify.notify_one();
                 }
+            }
+
+            display_server::DRAW_FILL => {
+                self.handle_draw_fill(payload).await?;
             }
 
             display_server::DRAW_COPY => {
@@ -1160,6 +1220,68 @@ impl DisplayChannel {
         Ok(())
     }
 
+    async fn handle_draw_fill(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            // Cheap preview (surface/box/clip) for -v users; the real
+            // decoding happens in decode_draw_fill. Read just the base
+            // fields here for the log line.
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_fill: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        let outcome = decode_draw_fill(payload)?;
+        match outcome {
+            FillOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_fill:non_op_put",
+                    "display: draw_fill: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+            }
+            FillOutcome::SkipNoneBrush => {
+                warn_once!(
+                    "display:draw_fill:none_brush",
+                    "display: draw_fill: NONE brush, skipping"
+                );
+            }
+            FillOutcome::SkipPatternBrush => {
+                warn_once!(
+                    "display:draw_fill:pattern_brush",
+                    "display: draw_fill: PATTERN brush not yet supported, skipping"
+                );
+            }
+            FillOutcome::Paint {
+                base,
+                colour,
+                masked_fallback,
+            } => {
+                if masked_fallback {
+                    warn_once!(
+                        "display:draw_fill:mask_present",
+                        "display: draw_fill: non-null mask, painting unmasked"
+                    );
+                }
+                self.event_tx
+                    .send(ChannelEvent::FillRect {
+                        display_channel_id: self.channel_id,
+                        surface_id: base.surface_id,
+                        rect: (base.left, base.top, base.right, base.bottom),
+                        colour,
+                        clip: base.clip_rects,
+                    })
+                    .await
+                    .ok();
+                self.repaint_notify.notify_one();
+            }
+        }
+
+        Ok(())
+    }
+
     /// Record a decode result and update the snapshot.
     fn record_decode(&mut self, decode: DecodeResult) {
         self.recent_decodes.push_back(decode);
@@ -1388,5 +1510,128 @@ mod tests {
         // A few bytes that look like a JPEG start but are truncated.
         let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
         assert!(result.is_none(), "expected None for truncated JPEG");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_fill tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_FILL payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpiceBrush
+    ///     + rop_descriptor (u16 LE)
+    ///     + SpiceQMask (flags u8 + pos i32 i32 + bitmap_offset u32 = 13 bytes)
+    fn build_draw_fill_payload(
+        brush: &[u8],
+        rop_descriptor: u16,
+        mask_flags: u8,
+        mask_bitmap_offset: u32,
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase: surface_id, top, left, bottom, right (all u32 LE), clip_type u8
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // Brush (tag + body).
+        v.extend_from_slice(brush);
+
+        // rop_descriptor (u16 LE).
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+
+        // SpiceQMask: flags u8 + pos (i32, i32) + bitmap_offset u32.
+        v.push(mask_flags);
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&mask_bitmap_offset.to_le_bytes());
+
+        v
+    }
+
+    fn solid_brush(color: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.push(1); // SPICE_BRUSH_TYPE_SOLID
+        b.extend_from_slice(&color.to_le_bytes());
+        b
+    }
+
+    fn none_brush() -> Vec<u8> {
+        vec![0] // SPICE_BRUSH_TYPE_NONE
+    }
+
+    #[test]
+    fn decode_draw_fill_happy_path() {
+        // colour = 0x00123456 → R=0x12, G=0x34, B=0x56
+        let brush = solid_brush(0x0012_3456);
+        let payload = build_draw_fill_payload(
+            &brush,
+            ropd::OP_PUT,
+            0, // mask flags
+            0, // bitmap_offset (null)
+        );
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::Paint {
+                base,
+                colour,
+                masked_fallback,
+            } => {
+                assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
+                assert!(!masked_fallback);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_masked_fallback() {
+        // Same as happy path, but with a non-null mask bitmap_offset.
+        let brush = solid_brush(0x0012_3456);
+        let payload = build_draw_fill_payload(&brush, ropd::OP_PUT, 0, 0x100);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::Paint {
+                masked_fallback,
+                colour,
+                ..
+            } => {
+                assert!(masked_fallback, "expected masked_fallback = true");
+                assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_non_op_put() {
+        let brush = solid_brush(0x0012_3456);
+        // 0x10 = OP_OR.
+        let payload = build_draw_fill_payload(&brush, 0x10, 0, 0);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::SkipNonOpPut { rop } => {
+                assert_eq!(rop, 0x10);
+            }
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_none_brush() {
+        let brush = none_brush();
+        let payload = build_draw_fill_payload(&brush, ropd::OP_PUT, 0, 0);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::SkipNoneBrush => {}
+            other => panic!("expected SkipNoneBrush, got {:?}", other),
+        }
     }
 }

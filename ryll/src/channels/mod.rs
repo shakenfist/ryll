@@ -61,7 +61,6 @@ pub enum ChannelEvent {
     /// and DRAW_WHITENESS. `rect` is `(left, top, right, bottom)`
     /// in surface coordinates; `clip` is the SpiceClip rect list
     /// from the draw message (empty = no extra clipping).
-    #[allow(dead_code)] // constructed in phase 2+
     FillRect {
         display_channel_id: u8,
         surface_id: u32,

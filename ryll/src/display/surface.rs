@@ -61,7 +61,6 @@ impl DisplaySurface {
     /// Paint `colour` (RGBA) into `rect` on this surface, clipped to the
     /// surface bounds and to the union of `clip` rects (empty = no extra
     /// clipping).
-    #[allow(dead_code)]
     pub fn fill_rect(
         &mut self,
         left: u32,
@@ -236,7 +235,6 @@ impl DisplaySurface {
 
     /// Intersect `(left,top,right,bottom)` with surface bounds. Returns None
     /// if the result is empty.
-    #[allow(dead_code)]
     fn clip_to_bounds(
         width: u32,
         height: u32,
@@ -257,7 +255,6 @@ impl DisplaySurface {
     }
 
     /// Fill a pre-clipped sub-rect with `colour`. Assumes bounds are valid.
-    #[allow(dead_code)]
     fn fill_subrect(&mut self, left: u32, top: u32, right: u32, bottom: u32, colour: [u8; 4]) {
         let stride = (self.width * 4) as usize;
         for y in top..bottom {
