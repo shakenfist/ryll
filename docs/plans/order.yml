@@ -24,3 +24,4 @@
 - PLAN-supply-chain-followups.md: Supply-chain follow-ups
 - PLAN-screenshot-and-latency-hud.md: Screenshot and latency HUD
 - PLAN-idle-cpu-and-latency.md: Idle CPU and latency
+- PLAN-display-draw-ops.md: Display draw-op coverage
