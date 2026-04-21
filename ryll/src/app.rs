@@ -293,6 +293,9 @@ pub struct RyllApp {
     traffic_filter_cursor: bool,
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
+
+    /// Whether the "Protocol gaps" floating window is currently open.
+    gaps_popup_open: bool,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -520,6 +523,7 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
+            gaps_popup_open: false,
         }
     }
 
@@ -1390,6 +1394,27 @@ impl eframe::App for RyllApp {
                         if ui.small_button("Screenshot").clicked() {
                             self.open_screenshot_dialog();
                         }
+                        let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
+                        let gap_label = format!("Gaps: {}", gap_count);
+                        let gap_response = if gap_count > 0 {
+                            ui.add(egui::Button::new(
+                                egui::RichText::new(&gap_label)
+                                    .color(egui::Color32::from_rgb(200, 80, 80)),
+                            ))
+                        } else {
+                            ui.add(egui::Button::new(&gap_label))
+                        };
+                        if gap_response.clicked() {
+                            self.gaps_popup_open = !self.gaps_popup_open;
+                        }
+                        if gap_response.hovered() {
+                            gap_response.on_hover_text(
+                                "Distinct protocol gaps seen this session \
+                                 — click to list.\nPass --pedantic to write \
+                                 a bug report per gap.",
+                            );
+                        }
+
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
@@ -2263,6 +2288,28 @@ impl eframe::App for RyllApp {
                 painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
             }
         }
+
+        // Protocol gaps floating window (toggled by the Gaps: N button)
+        egui::Window::new("Protocol gaps")
+            .open(&mut self.gaps_popup_open)
+            .resizable(true)
+            .default_width(400.0)
+            .default_height(300.0)
+            .show(ctx, |ui| {
+                let mut keys = shakenfist_spice_protocol::logging::warn_once_keys();
+                keys.sort();
+                if keys.is_empty() {
+                    ui.label("No protocol gaps seen this session.");
+                } else {
+                    ui.label(format!("{} distinct gaps:", keys.len()));
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for key in &keys {
+                            ui.monospace(*key);
+                        }
+                    });
+                }
+            });
 
         if self.show_disconnect_dialog {
             let reason = self
