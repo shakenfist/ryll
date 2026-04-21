@@ -233,6 +233,135 @@ impl DisplaySurface {
         }
     }
 
+    /// Paint `pixels` (RGBA) into (left, top) but skip any source
+    /// pixel whose RGB equals the lower 24 bits of `chroma_rgba`.
+    /// The alpha byte of `chroma_rgba` is ignored (we compare R/G/B
+    /// only, matching pixman_utils.c:827-829).
+    #[allow(dead_code)]
+    pub fn blit_chroma(
+        &mut self,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        chroma_rgba: [u8; 4],
+    ) {
+        if left >= self.width || top >= self.height {
+            return;
+        }
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        let clip_w = width.min(self.width - left);
+        let clip_h = height.min(self.height - top);
+        if clip_w == 0 || clip_h == 0 {
+            return;
+        }
+
+        let src_stride = (width as usize) * 4;
+        let dst_stride = (self.width as usize) * 4;
+        let cr = chroma_rgba[0];
+        let cg = chroma_rgba[1];
+        let cb = chroma_rgba[2];
+
+        let mut wrote = false;
+        for y in 0..clip_h as usize {
+            let src_row = y * src_stride;
+            let dst_row = ((top as usize) + y) * dst_stride + (left as usize) * 4;
+            for x in 0..clip_w as usize {
+                let sp = src_row + x * 4;
+                if sp + 4 > pixels.len() {
+                    break;
+                }
+                let sr = pixels[sp];
+                let sg = pixels[sp + 1];
+                let sb = pixels[sp + 2];
+                let sa = pixels[sp + 3];
+                if sr == cr && sg == cg && sb == cb {
+                    continue;
+                }
+                let dp = dst_row + x * 4;
+                self.pixels[dp] = sr;
+                self.pixels[dp + 1] = sg;
+                self.pixels[dp + 2] = sb;
+                self.pixels[dp + 3] = sa;
+                wrote = true;
+            }
+        }
+
+        if wrote {
+            self.dirty = true;
+        }
+    }
+
+    /// Paint `pixels` (RGBA, straight/non-premultiplied) into
+    /// (left, top) via source-over alpha blending with a constant
+    /// `alpha` multiplier (0-255). Per-pixel source alpha multiplies
+    /// through: effective_a = src_a * alpha / 255, rounded.
+    #[allow(dead_code)]
+    pub fn blit_alpha(
+        &mut self,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+        alpha: u8,
+    ) {
+        if left >= self.width || top >= self.height {
+            return;
+        }
+        if width == 0 || height == 0 || alpha == 0 {
+            return;
+        }
+
+        let clip_w = width.min(self.width - left);
+        let clip_h = height.min(self.height - top);
+        if clip_w == 0 || clip_h == 0 {
+            return;
+        }
+
+        let src_stride = (width as usize) * 4;
+        let dst_stride = (self.width as usize) * 4;
+        let alpha_u16 = alpha as u16;
+
+        for y in 0..clip_h as usize {
+            let src_row = y * src_stride;
+            let dst_row = ((top as usize) + y) * dst_stride + (left as usize) * 4;
+            for x in 0..clip_w as usize {
+                let sp = src_row + x * 4;
+                if sp + 4 > pixels.len() {
+                    break;
+                }
+                let sr = pixels[sp] as u16;
+                let sg = pixels[sp + 1] as u16;
+                let sb = pixels[sp + 2] as u16;
+                let sa = pixels[sp + 3] as u16;
+
+                let effective_a = (sa * alpha_u16 + 127) / 255;
+                let inv_a = 255 - effective_a;
+
+                let dp = dst_row + x * 4;
+                let dr = self.pixels[dp] as u16;
+                let dg = self.pixels[dp + 1] as u16;
+                let db = self.pixels[dp + 2] as u16;
+
+                let out_r = (sr * effective_a + dr * inv_a + 127) / 255;
+                let out_g = (sg * effective_a + dg * inv_a + 127) / 255;
+                let out_b = (sb * effective_a + db * inv_a + 127) / 255;
+
+                self.pixels[dp] = out_r as u8;
+                self.pixels[dp + 1] = out_g as u8;
+                self.pixels[dp + 2] = out_b as u8;
+                self.pixels[dp + 3] = 255;
+            }
+        }
+
+        self.dirty = true;
+    }
+
     /// Intersect `(left,top,right,bottom)` with surface bounds. Returns None
     /// if the result is empty.
     fn clip_to_bounds(
@@ -541,5 +670,148 @@ mod tests {
                 assert_eq!(pixel_at(&s, x, y), [155, 105, 55, 255], "({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn blit_chroma_skips_matching_pixels() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        s.fill_rect(0, 0, 2, 2, [0, 0, 64, 255], &[]);
+        let src: Vec<u8> = vec![
+            255, 0, 255, 255, // (0,0) chroma
+            100, 200, 50, 255, // (1,0)
+            100, 200, 50, 255, // (0,1)
+            100, 200, 50, 255, // (1,1)
+        ];
+        s.blit_chroma(0, 0, 2, 2, &src, [255, 0, 255, 255]);
+        assert_eq!(pixel_at(&s, 0, 0), [0, 0, 64, 255]);
+        assert_eq!(pixel_at(&s, 1, 0), [100, 200, 50, 255]);
+        assert_eq!(pixel_at(&s, 0, 1), [100, 200, 50, 255]);
+        assert_eq!(pixel_at(&s, 1, 1), [100, 200, 50, 255]);
+    }
+
+    #[test]
+    fn blit_chroma_ignores_chroma_alpha_byte() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        s.fill_rect(0, 0, 2, 2, [0, 0, 64, 255], &[]);
+        let src: Vec<u8> = vec![
+            255, 0, 255, 255, // (0,0) chroma
+            100, 200, 50, 255, // (1,0)
+            100, 200, 50, 255, // (0,1)
+            100, 200, 50, 255, // (1,1)
+        ];
+        // alpha byte 0 rather than 255 — should still match.
+        s.blit_chroma(0, 0, 2, 2, &src, [255, 0, 255, 0]);
+        assert_eq!(pixel_at(&s, 0, 0), [0, 0, 64, 255]);
+        assert_eq!(pixel_at(&s, 1, 0), [100, 200, 50, 255]);
+        assert_eq!(pixel_at(&s, 0, 1), [100, 200, 50, 255]);
+        assert_eq!(pixel_at(&s, 1, 1), [100, 200, 50, 255]);
+    }
+
+    #[test]
+    fn blit_chroma_clipped_to_surface() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        // Pre-filled opaque black via constructor.
+        // 3x3 all-red source; chroma is magenta so nothing matches.
+        let mut src: Vec<u8> = Vec::with_capacity(3 * 3 * 4);
+        for _ in 0..9 {
+            src.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        s.blit_chroma(1, 0, 3, 3, &src, [255, 0, 255, 255]);
+        // In-bounds pixels: (1,0) and (1,1).
+        assert_eq!(pixel_at(&s, 1, 0), [255, 0, 0, 255]);
+        assert_eq!(pixel_at(&s, 1, 1), [255, 0, 0, 255]);
+        // (0,0) and (0,1) untouched.
+        assert_eq!(pixel_at(&s, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel_at(&s, 0, 1), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn blit_alpha_full_opaque() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        let mut src: Vec<u8> = Vec::with_capacity(2 * 2 * 4);
+        for _ in 0..4 {
+            src.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        s.blit_alpha(0, 0, 2, 2, &src, 255);
+        for y in 0..2 {
+            for x in 0..2 {
+                assert_eq!(pixel_at(&s, x, y), [255, 0, 0, 255], "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn blit_alpha_half() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        let mut src: Vec<u8> = Vec::with_capacity(2 * 2 * 4);
+        for _ in 0..4 {
+            src.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        s.blit_alpha(0, 0, 2, 2, &src, 128);
+        for y in 0..2 {
+            for x in 0..2 {
+                let px = pixel_at(&s, x, y);
+                assert!(
+                    (px[0] as i32 - 128).abs() <= 1,
+                    "r out of range at ({x},{y}): {px:?}"
+                );
+                assert_eq!(px[1], 0);
+                assert_eq!(px[2], 0);
+                assert_eq!(px[3], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn blit_alpha_zero_is_noop() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        s.fill_rect(0, 0, 2, 2, [0, 255, 255, 255], &[]);
+        let before: Vec<u8> = s.pixels().to_vec();
+        let mut src: Vec<u8> = Vec::with_capacity(2 * 2 * 4);
+        for _ in 0..4 {
+            src.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        s.blit_alpha(0, 0, 2, 2, &src, 0);
+        assert_eq!(s.pixels(), before.as_slice());
+    }
+
+    #[test]
+    fn blit_alpha_per_pixel_alpha_multiplies() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        let mut src: Vec<u8> = Vec::with_capacity(2 * 2 * 4);
+        for _ in 0..4 {
+            src.extend_from_slice(&[200, 0, 0, 128]);
+        }
+        s.blit_alpha(0, 0, 2, 2, &src, 128);
+        for y in 0..2 {
+            for x in 0..2 {
+                let px = pixel_at(&s, x, y);
+                assert!(
+                    (px[0] as i32 - 50).abs() <= 2,
+                    "r out of range at ({x},{y}): {px:?}"
+                );
+                assert_eq!(px[1], 0);
+                assert_eq!(px[2], 0);
+                assert_eq!(px[3], 255);
+            }
+        }
+    }
+
+    #[test]
+    fn blit_alpha_clipped_to_surface() {
+        let mut s = DisplaySurface::new(0, 2, 2);
+        let mut src: Vec<u8> = Vec::with_capacity(3 * 3 * 4);
+        for _ in 0..9 {
+            src.extend_from_slice(&[255, 0, 0, 255]);
+        }
+        // Ensure dirty starts false by consuming it through a fresh run:
+        // the constructor sets dirty=true, so just observe it stays/sets
+        // true. The key assertion is no panic and in-bounds pixel written.
+        s.blit_alpha(1, 0, 3, 3, &src, 255);
+        assert_eq!(pixel_at(&s, 1, 0), [255, 0, 0, 255]);
+        assert_eq!(pixel_at(&s, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(pixel_at(&s, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel_at(&s, 0, 1), [0, 0, 0, 255]);
+        assert!(s.is_dirty());
     }
 }
