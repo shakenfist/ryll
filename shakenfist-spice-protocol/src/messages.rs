@@ -415,8 +415,8 @@ impl SpiceBrush {
 
         let brush_type = data[0];
         match brush_type {
-            0 => Ok((SpiceBrush::None, 1)),
-            1 => {
+            crate::constants::brush::NONE => Ok((SpiceBrush::None, 1)),
+            crate::constants::brush::SOLID => {
                 if data.len() < 1 + 4 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -427,7 +427,7 @@ impl SpiceBrush {
                 let color = cursor.read_u32::<LittleEndian>()?;
                 Ok((SpiceBrush::Solid { color }, 1 + 4))
             }
-            2 => {
+            crate::constants::brush::PATTERN => {
                 if data.len() < 1 + 16 {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
