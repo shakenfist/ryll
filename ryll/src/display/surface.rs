@@ -237,7 +237,6 @@ impl DisplaySurface {
     /// pixel whose RGB equals the lower 24 bits of `chroma_rgba`.
     /// The alpha byte of `chroma_rgba` is ignored (we compare R/G/B
     /// only, matching pixman_utils.c:827-829).
-    #[allow(dead_code)]
     pub fn blit_chroma(
         &mut self,
         left: u32,
@@ -300,7 +299,6 @@ impl DisplaySurface {
     /// (left, top) via source-over alpha blending with a constant
     /// `alpha` multiplier (0-255). Per-pixel source alpha multiplies
     /// through: effective_a = src_a * alpha / 255, rounded.
-    #[allow(dead_code)]
     pub fn blit_alpha(
         &mut self,
         left: u32,

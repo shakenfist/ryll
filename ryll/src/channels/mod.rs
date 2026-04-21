@@ -55,6 +55,41 @@ pub enum ChannelEvent {
         image_id: u64,
     },
 
+    /// Image-bearing paint with chroma-keying (DRAW_TRANSPARENT).
+    ///
+    /// Pixels whose lower-24-bit RGB equals `chroma_rgba[0..3]`
+    /// leave the destination untouched.
+    #[allow(dead_code)] // constructed in phase 6d
+    ImageReadyChroma {
+        display_channel_id: u8,
+        surface_id: u32,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>, // RGBA
+        chroma_rgba: [u8; 4],
+        #[allow(dead_code)]
+        image_id: u64,
+    },
+
+    /// Image-bearing paint with constant-alpha blending
+    /// (DRAW_ALPHA_BLEND).  Straight (non-premultiplied) alpha;
+    /// per-pixel source alpha multiplies through the constant.
+    #[allow(dead_code)] // constructed in phase 6d
+    ImageReadyAlpha {
+        display_channel_id: u8,
+        surface_id: u32,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>, // RGBA
+        alpha: u8,
+        #[allow(dead_code)]
+        image_id: u64,
+    },
+
     /// Solid-colour fill of a destination rect.
     ///
     /// Used by DRAW_FILL (with a solid brush), DRAW_BLACKNESS,

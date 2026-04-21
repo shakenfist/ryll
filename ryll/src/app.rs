@@ -596,6 +596,46 @@ impl RyllApp {
                     );
                 }
 
+                ChannelEvent::ImageReadyChroma {
+                    display_channel_id,
+                    surface_id,
+                    left,
+                    top,
+                    width,
+                    height,
+                    pixels,
+                    chroma_rgba,
+                    ..
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.blit_chroma(left, top, width, height, &pixels, chroma_rgba);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: ImageReadyChroma on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::ImageReadyAlpha {
+                    display_channel_id,
+                    surface_id,
+                    left,
+                    top,
+                    width,
+                    height,
+                    pixels,
+                    alpha,
+                    ..
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.blit_alpha(left, top, width, height, &pixels, alpha);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: ImageReadyAlpha on unknown surface {}", surface_id);
+                    }
+                }
+
                 ChannelEvent::FillRect {
                     display_channel_id,
                     surface_id,
