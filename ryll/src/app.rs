@@ -1206,7 +1206,7 @@ impl eframe::App for RyllApp {
         if self.region_select_active {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
-                let report_type = self.bug_report_type;
+                let report_type = self.bug_report_type.clone();
                 let description = self.bug_description.clone();
                 self.finish_bug_report(report_type, description, None);
                 self.region_select_active = false;
@@ -2099,7 +2099,7 @@ impl eframe::App for RyllApp {
                     self.region_drag_end = None;
                 } else {
                     // Non-display: generate immediately
-                    let report_type = self.bug_report_type;
+                    let report_type = self.bug_report_type.clone();
                     let description = self.bug_description.clone();
                     self.finish_bug_report(report_type, description, None);
                 }
@@ -2200,7 +2200,7 @@ impl eframe::App for RyllApp {
                     right: sx.max(ex),
                     bottom: sy.max(ey),
                 };
-                let report_type = self.bug_report_type;
+                let report_type = self.bug_report_type.clone();
                 let description = self.bug_description.clone();
                 self.finish_bug_report(report_type, description, Some(region));
                 self.region_select_active = false;
