@@ -20,7 +20,7 @@ use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SpiceBlackness, SpiceBrush, SpiceFill, SpicePoint, SurfaceCreate,
+    SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
@@ -299,6 +299,48 @@ fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
     })
 }
 
+/// Outcome of decoding a DRAW_OPAQUE payload.
+///
+/// DRAW_OPAQUE carries a brush between src_area and rop_descriptor,
+/// parsed via the phase-1 SpiceOpaque struct. On OP_PUT the brush
+/// is irrelevant (per draw.h semantics: the brush only participates
+/// in ROPs that reference the pattern source), so we ignore it
+/// silently. On any other ROP we warn_once and skip — the rop/brush
+/// combination would require compositing we don't implement.
+#[derive(Debug, Clone)]
+enum OpaqueOutcome {
+    Paint {
+        base: DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipNonOpPut {
+        rop: u16,
+    },
+}
+
+fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
+    let base = DrawBase::read(payload)?;
+    let (opaque, _consumed) = SpiceOpaque::read(&payload[base.end_offset..])?;
+
+    if opaque.rop_descriptor != ropd::OP_PUT {
+        return Ok(OpaqueOutcome::SkipNonOpPut {
+            rop: opaque.rop_descriptor,
+        });
+    }
+    Ok(OpaqueOutcome::Paint {
+        base,
+        src_bitmap_offset: opaque.src_bitmap as usize,
+        src_top: opaque.src_top,
+        src_left: opaque.src_left,
+        src_bottom: opaque.src_bottom,
+        src_right: opaque.src_right,
+    })
+}
+
 /// GLZ dictionary shared across all display channels.
 pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
@@ -538,6 +580,10 @@ impl DisplayChannel {
 
             display_server::DRAW_FILL => {
                 self.handle_draw_fill(payload).await?;
+            }
+
+            display_server::DRAW_OPAQUE => {
+                self.handle_draw_opaque(payload).await?;
             }
 
             display_server::DRAW_COPY => {
@@ -1523,6 +1569,48 @@ impl DisplayChannel {
         Ok(())
     }
 
+    async fn handle_draw_opaque(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_opaque: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        match decode_draw_opaque(payload)? {
+            OpaqueOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_opaque:non_op_put",
+                    "display: draw_opaque: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+                Ok(())
+            }
+            OpaqueOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_opaque",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                )
+                .await
+            }
+        }
+    }
+
     async fn handle_draw_blend(&mut self, payload: &[u8]) -> Result<()> {
         if settings::is_verbose() {
             if let Ok(base) = DrawBase::read(payload) {
@@ -2116,6 +2204,83 @@ mod tests {
         let payload = build_draw_blend_payload(0x10);
         match decode_draw_blend(&payload).expect("decode failed") {
             BlendOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_opaque tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_OPAQUE payload = DrawBase (21 bytes, clip_type=0) +
+    /// SpiceOpaque (src_bitmap + src_area + SOLID brush + rop + scale + mask).
+    /// SOLID brush body is 4 bytes of colour, so the variable portion is
+    /// 5 bytes total (1-byte tag + 4-byte body).
+    fn build_draw_opaque_payload(rop_descriptor: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // SpiceOpaque: src_bitmap + src_area (20 bytes)
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap offset
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+
+        // SOLID brush (5 bytes: type + u32 colour).
+        v.push(1); // brush type = SOLID
+        v.extend_from_slice(&0u32.to_le_bytes()); // colour
+
+        // rop + scale + mask.
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+        v.push(0); // scale_mode
+        v.push(0); // mask.flags
+        v.extend_from_slice(&0i32.to_le_bytes()); // mask.pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // mask.pos.y
+        v.extend_from_slice(&0u32.to_le_bytes()); // mask.bitmap_offset
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_opaque_happy_path_op_put() {
+        let payload = build_draw_opaque_payload(ropd::OP_PUT);
+        match decode_draw_opaque(&payload).expect("decode failed") {
+            OpaqueOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_opaque_non_op_put_skips() {
+        // 0x10 = OP_OR.
+        let payload = build_draw_opaque_payload(0x10);
+        match decode_draw_opaque(&payload).expect("decode failed") {
+            OpaqueOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
             other => panic!("expected SkipNonOpPut, got {:?}", other),
         }
     }
