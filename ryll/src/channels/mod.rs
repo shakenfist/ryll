@@ -113,7 +113,6 @@ pub enum ChannelEvent {
     },
 
     /// In-place RGB inversion of a rect (DRAW_INVERS).
-    #[allow(dead_code)] // constructed in phase 7
     Invert {
         display_channel_id: u8,
         surface_id: u32,

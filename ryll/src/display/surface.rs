@@ -195,7 +195,6 @@ impl DisplaySurface {
 
     /// Invert the RGB channels of every pixel in `rect`; leave alpha
     /// unchanged. Clipping semantics match fill_rect.
-    #[allow(dead_code)]
     pub fn invert_rect(
         &mut self,
         left: u32,
@@ -397,7 +396,6 @@ impl DisplaySurface {
     }
 
     /// Invert the RGB channels of every pixel in a pre-clipped sub-rect.
-    #[allow(dead_code)]
     fn invert_subrect(&mut self, left: u32, top: u32, right: u32, bottom: u32) {
         let stride = (self.width * 4) as usize;
         for y in top..bottom {

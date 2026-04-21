@@ -666,6 +666,10 @@ impl DisplayChannel {
                 self.handle_draw_whiteness(payload).await?;
             }
 
+            display_server::DRAW_INVERS => {
+                self.handle_draw_invers(payload).await?;
+            }
+
             display_server::DRAW_TRANSPARENT => {
                 self.handle_draw_transparent(payload).await?;
             }
@@ -674,8 +678,36 @@ impl DisplayChannel {
                 self.handle_draw_alpha_blend(payload).await?;
             }
 
+            display_server::DRAW_ROP3 => {
+                warn_once!(
+                    "display:unimpl:draw_rop3",
+                    "display: draw_rop3: unimplemented, skipping (256-entry ROP truth-table evaluator not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
+            display_server::DRAW_STROKE => {
+                warn_once!(
+                    "display:unimpl:draw_stroke",
+                    "display: draw_stroke: unimplemented, skipping (line/path rasteriser not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
+            display_server::DRAW_TEXT => {
+                warn_once!(
+                    "display:unimpl:draw_text",
+                    "display: draw_text: unimplemented, skipping (glyph rendering not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
             display_server::DRAW_COMPOSITE => {
-                debug!("display: draw_composite (not yet implemented, skipping)");
+                warn_once!(
+                    "display:unimpl:draw_composite",
+                    "display: draw_composite: unimplemented, skipping"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
             }
 
             display_server::MONITORS_CONFIG => {
@@ -1615,6 +1647,45 @@ impl DisplayChannel {
             [0xff, 0xff, 0xff, 0xff],
         )
         .await
+    }
+
+    async fn handle_draw_invers(&mut self, payload: &[u8]) -> Result<()> {
+        if settings::is_verbose() {
+            if let Ok(base) = DrawBase::read(payload) {
+                logging::log_detail(&format!(
+                    "draw_invers: surface={}, rect=({},{})-({},{}), clip_type={}",
+                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+                ));
+            }
+        }
+
+        // DRAW_INVERS shares its wire format (DrawBase + SpiceQMask) with
+        // DRAW_BLACKNESS / DRAW_WHITENESS, so the phase-3 solid-fill
+        // decoder slots in unchanged — only the paint semantic differs.
+        let SolidFillOutcome::Paint {
+            base,
+            masked_fallback,
+        } = decode_draw_solid_fill(payload)?;
+
+        if masked_fallback {
+            warn_once!(
+                "display:draw_invers:mask_present",
+                "display: draw_invers: non-null mask, inverting unmasked"
+            );
+        }
+
+        self.event_tx
+            .send(ChannelEvent::Invert {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                rect: (base.left, base.top, base.right, base.bottom),
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
     }
 
     async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
