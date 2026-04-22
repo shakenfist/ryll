@@ -48,8 +48,8 @@ New script [tools/cut-release.sh](../../tools/cut-release.sh), invoked
 as `make publish 0.1.4`. The script:
 
 1. Parses and validates the version argument as `X.Y.Z`.
-2. Verifies git: on `main`, working tree clean, up to date with
-   `origin/main`.
+2. Verifies git: on `develop` (the repository default branch),
+   working tree clean, up to date with `origin/develop`.
 3. Verifies the tag `v0.1.4` does not already exist locally or on
    `origin`.
 4. Verifies crates.io does not already have `0.1.4` for any of the
