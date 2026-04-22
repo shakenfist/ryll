@@ -18,7 +18,7 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
-.PHONY: all build release clean clean-testdata devcontainer ensure-cache \
+.PHONY: all build release publish clean clean-testdata devcontainer ensure-cache \
 	lint lint-fix test help test-qemu test-qemu-usb test-qemu-stop
 
 all: build
@@ -27,6 +27,7 @@ help:
 	@echo "Ryll build targets:"
 	@echo "  make build          - Build debug version"
 	@echo "  make release        - Build release version"
+	@echo "  make publish X.Y.Z  - Cut a release: bump versions, tag, push"
 	@echo "  make test           - Run tests"
 	@echo "  make lint           - Run rustfmt and clippy checks"
 	@echo "  make lint-fix       - Run rustfmt and clippy with auto-fix"
@@ -80,6 +81,24 @@ release: ensure-cache
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
+
+# Cut a release: bump versions, commit, tag, push. Takes the version as a
+# positional arg: `make publish 0.1.4`. The second word of MAKECMDGOALS is
+# the version; the no-op rules below catch X.Y.Z-shaped goals so make does
+# not complain about "no rule to make target 0.1.4".
+RELEASE_VERSION := $(word 2,$(MAKECMDGOALS))
+publish:
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "usage: make publish X.Y.Z"; exit 1; \
+	fi
+	./tools/cut-release.sh $(RELEASE_VERSION)
+
+# Absorb a version-shaped second word as a no-op target. This only matches
+# X.Y.Z numeric forms, so typos in real targets still fail loudly.
+ifneq ($(filter publish,$(MAKECMDGOALS)),)
+$(RELEASE_VERSION):
+	@:
+endif
 
 # Run tests
 test: ensure-cache
