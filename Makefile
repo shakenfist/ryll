@@ -31,15 +31,15 @@ help:
 	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
 	@echo "  make tag-release X.Y.Z      - After PR merge: tag develop, trigger release"
 	@echo "  make test                   - Run tests"
-	@echo "  make lint           - Run rustfmt and clippy checks"
-	@echo "  make lint-fix       - Run rustfmt and clippy with auto-fix"
-	@echo "  make devcontainer   - Build the development container"
-	@echo "  make clean          - Remove build artifacts"
+	@echo "  make lint                   - Run rustfmt and clippy checks"
+	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
+	@echo "  make devcontainer           - Build the development container"
+	@echo "  make clean                  - Remove build artifacts"
 	@echo ""
 	@echo "Test SPICE server:"
-	@echo "  make test-qemu      - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
-	@echo "  make test-qemu-usb  - Same, with USB redirection enabled"
-	@echo "  make test-qemu-stop - Stop the test QEMU instance"
+	@echo "  make test-qemu              - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
+	@echo "  make test-qemu-usb          - Same, with USB redirection enabled"
+	@echo "  make test-qemu-stop         - Stop the test QEMU instance"
 
 # Build the devcontainer image
 devcontainer:
