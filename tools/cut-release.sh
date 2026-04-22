@@ -60,17 +60,17 @@ cd "$(dirname "$0")/.."
 info "Checking git state"
 
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-[[ "$BRANCH" == "main" ]] \
-    || err "must be on main, currently on: $BRANCH"
+[[ "$BRANCH" == "develop" ]] \
+    || err "must be on develop, currently on: $BRANCH"
 
 [[ -z "$(git status --porcelain)" ]] \
     || err "working tree is dirty; commit or stash first"
 
-git fetch origin main --quiet
+git fetch origin develop --quiet
 LOCAL=$(git rev-parse HEAD)
-REMOTE=$(git rev-parse origin/main)
+REMOTE=$(git rev-parse origin/develop)
 [[ "$LOCAL" == "$REMOTE" ]] \
-    || err "local main is not in sync with origin/main"
+    || err "local develop is not in sync with origin/develop"
 
 if git rev-parse "$TAG" >/dev/null 2>&1; then
     err "tag $TAG already exists locally"
@@ -136,8 +136,8 @@ git commit -m "Release ${VERSION}."
 info "Creating annotated tag $TAG"
 git tag -a "$TAG" -m "Release $VERSION"
 
-info "Pushing main"
-git push origin main
+info "Pushing develop"
+git push origin develop
 
 info "Pushing tag $TAG (this triggers the release workflow)"
 git push origin "$TAG"
