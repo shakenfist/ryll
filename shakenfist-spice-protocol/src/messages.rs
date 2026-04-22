@@ -1372,6 +1372,38 @@ mod tests {
         assert_eq!(blackness.mask.bitmap_offset, 0);
     }
 
+    #[test]
+    fn test_spice_blackness_too_short() {
+        // 12 bytes (one short of the 13-byte SpiceQMask body).
+        let data = vec![0u8; 12];
+        let result = SpiceBlackness::read(&data);
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got {:?}",
+            result
+        );
+    }
+
+    // --- SpiceFill too-short --
+
+    #[test]
+    fn test_spice_fill_too_short() {
+        // Brush::None is a 1-byte tag; rop_descriptor is 2 bytes; mask is
+        // 13 bytes. A 10-byte payload (brush + rop + 7 bytes of mask) is
+        // short enough that the mask parse must fail.
+        let mut data = Vec::new();
+        data.push(crate::constants::brush::NONE); // 1
+        data.extend_from_slice(&0u16.to_le_bytes()); // 2
+        data.extend_from_slice(&[0u8; 7]); // 7 (mask needs 13)
+
+        let result = SpiceFill::read(&data);
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got {:?}",
+            result
+        );
+    }
+
     // --- SpiceOpaque tests ---
 
     #[test]
@@ -1415,6 +1447,19 @@ mod tests {
         assert_eq!(opaque.mask.flags, 0);
         assert_eq!(opaque.mask.bitmap_offset, 0);
         assert_eq!(consumed, 41);
+    }
+
+    #[test]
+    fn test_spice_opaque_too_short() {
+        // 19 bytes — shorter than the 20-byte fixed preamble
+        // (src_bitmap u32 + src_area 4×u32).
+        let data = vec![0u8; 19];
+        let result = SpiceOpaque::read(&data);
+        assert!(
+            matches!(result, Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof),
+            "expected UnexpectedEof, got {:?}",
+            result
+        );
     }
 
     // --- SpiceTransparent tests ---
