@@ -13,35 +13,23 @@ decompression algorithms:
   independently compressed with `lz4_flex` and a 4-byte length
   prefix). Feature `lz4` (default), pulls in `lz4_flex`.
 
-All four decoders return a `DecompressedImage { width, height,
-pixels: Vec<u8>, image_id, win_head_dist }` on success (with
-the historical exception of `quic_decode`, which returns
-`Option<Vec<u8>>` and leaves the wrapping to the caller — this
-asymmetry will be smoothed out before the first published
-release). The struct is `#[non_exhaustive]`; construct via
-`DecompressedImage::new(...)` (sets `win_head_dist` to 0) or
-`DecompressedImage::new_glz(...)` for GLZ images.
+The crate name covers both directions. The current release
+provides decompression only, matching what the ryll client
+needs today. Compression may be added in future minor releases
+(SPICE proxies and server-side tooling are likely consumers)
+without a crate rename.
 
-## Status
+## Return types
 
-This crate is **not yet published to crates.io**. The `0.0.0`
-entry there is a Phase 2 name reservation; the real `0.1.0`
-release will follow once API polish is complete (see the
-[extraction plan](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md)
-for the polish list).
-
-The crate name deliberately covers both directions of the
-codecs (compression and decompression) so that compression
-implementations can be added in future minor releases without
-a crate rename. SPICE proxies (such as the planned Rust
-rewrite of the shakenfist kerbside proxy) and server-side
-tooling are likely to want compression as well as
-decompression. The current `0.1.0`-target code is
-decompression only, matching what ryll needs today.
-
-Internal consumers (ryll itself and the planned kerbside
-rewrite) should depend on this crate via a workspace path or a
-git dependency until `0.1.0` ships.
+`decompress_glz`, `decompress_lz`, and `decompress_spice_lz4`
+return a `DecompressedImage { width, height, pixels: Vec<u8>,
+image_id, win_head_dist }` (directly, inside `Option`, or
+inside `Result` depending on the codec). `quic_decode` is the
+exception: it returns `Option<Vec<u8>>` and leaves the
+dimension wrapping to the caller. The struct is
+`#[non_exhaustive]`; construct via `DecompressedImage::new(...)`
+(sets `win_head_dist` to 0) or `DecompressedImage::new_glz(...)`
+for GLZ images.
 
 ## Usage
 
@@ -67,3 +55,11 @@ dict.insert(image.image_id, image.pixels.clone());
 
 Extracted from the
 [ryll](https://github.com/shakenfist/ryll) SPICE client.
+Internal consumers within the shakenfist project (ryll and
+the planned Rust rewrite of the kerbside SPICE proxy) depend
+on this crate via workspace paths; external consumers should
+use `cargo add shakenfist-spice-compression`.
+
+## License
+
+Apache-2.0
