@@ -1,23 +1,29 @@
 #!/bin/bash
 #
-# Cut a release of the ryll workspace.
+# Propose a release of the ryll workspace.
 #
-# Bumps the workspace version to the one given on the command line,
-# runs tests, and (after confirmation) commits, tags, and pushes.
-# The push of the tag triggers .github/workflows/release.yml, which
-# builds binaries, publishes the four workspace crates to crates.io,
-# creates a GitHub Release, and updates the Homebrew tap.
+# Creates a `release-X.Y.Z` branch from develop, bumps the workspace
+# version, runs the test suite, and (after confirmation) commits and
+# pushes the branch. Does NOT open a PR and does NOT tag — both of
+# those happen outside the script:
+#
+#   1. Run this script.
+#   2. Open a PR from release-X.Y.Z to develop, get it reviewed
+#      and merged like any other change.
+#   3. Run tools/tag-release.sh X.Y.Z to tag the merge commit on
+#      develop and push the tag (that is what triggers
+#      .github/workflows/release.yml).
 #
 # Usage:
-#   tools/cut-release.sh VERSION
-#   make publish VERSION
+#   tools/propose-release.sh VERSION
+#   make propose-release VERSION
 #
 # Example:
-#   make publish 0.1.4
+#   make propose-release 0.1.4
 #
 # Requirements on the host:
 #   - cargo-release:  cargo install --locked cargo-release
-#   - gh CLI:         for watching the release workflow
+#     (or cargo install --locked cargo-release@0.25.18 on rustc 1.85)
 #   - curl, jq:       for querying crates.io
 
 set -euo pipefail
@@ -41,13 +47,12 @@ VERSION="$1"
     || err "version must be X.Y.Z, got: $VERSION"
 
 TAG="v$VERSION"
+RELEASE_BRANCH="release-$VERSION"
 
 # --- tool availability ---
 
 command -v cargo-release >/dev/null \
     || err "cargo-release not installed. Run: cargo install --locked cargo-release"
-command -v gh >/dev/null \
-    || err "gh CLI not installed"
 command -v jq >/dev/null || err "jq not installed"
 
 # --- working directory must be repo root ---
@@ -79,6 +84,13 @@ if git ls-remote --tags --exit-code origin "$TAG" >/dev/null 2>&1; then
     err "tag $TAG already exists on origin"
 fi
 
+if git rev-parse --verify "$RELEASE_BRANCH" >/dev/null 2>&1; then
+    err "branch $RELEASE_BRANCH already exists locally"
+fi
+if git ls-remote --heads --exit-code origin "$RELEASE_BRANCH" >/dev/null 2>&1; then
+    err "branch $RELEASE_BRANCH already exists on origin"
+fi
+
 # --- crates.io version availability ---
 
 info "Checking crates.io for existing $VERSION"
@@ -96,6 +108,24 @@ for crate in "${CRATES[@]}"; do
         *)   err "unexpected HTTP $code checking $crate $VERSION" ;;
     esac
 done
+
+# --- create release branch ---
+
+info "Creating branch $RELEASE_BRANCH from develop"
+git switch -c "$RELEASE_BRANCH"
+
+# Ensure we clean up the branch if the script aborts after this
+# point without a successful push.
+CLEANUP_BRANCH=1
+cleanup() {
+    if [[ "${CLEANUP_BRANCH:-0}" == "1" ]]; then
+        info "Cleaning up: switching back to develop and deleting $RELEASE_BRANCH"
+        git checkout -- . 2>/dev/null || true
+        git switch develop 2>/dev/null || true
+        git branch -D "$RELEASE_BRANCH" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 # --- pre-commit ---
 
@@ -118,45 +148,35 @@ cargo test --workspace
 # --- confirmation ---
 
 echo
-echo "About to release $TAG. Pending changes:"
+echo "About to propose release $VERSION on branch $RELEASE_BRANCH."
+echo "Pending changes:"
 git diff --stat
 echo
-read -rp "Release $TAG? [y/N] " REPLY
+read -rp "Commit and push $RELEASE_BRANCH? [y/N] " REPLY
 [[ "$REPLY" =~ ^[Yy]$ ]] || {
-    info "Aborted. Version bumps left uncommitted; revert with: git checkout -- ."
+    info "Aborted at confirmation."
     exit 1
 }
 
-# --- commit, tag, push ---
+# --- commit and push ---
 
-info "Creating release commit"
+info "Creating release proposal commit"
 git add -u
 git commit -m "Release ${VERSION}."
 
-info "Creating annotated tag $TAG"
-git tag -a "$TAG" -m "Release $VERSION"
+info "Pushing $RELEASE_BRANCH"
+git push --set-upstream origin "$RELEASE_BRANCH"
 
-info "Pushing develop"
-git push origin develop
+# Successful push — disable cleanup so we leave the user on the
+# release branch for PR creation.
+CLEANUP_BRANCH=0
 
-info "Pushing tag $TAG (this triggers the release workflow)"
-git push origin "$TAG"
-
-# --- watch the workflow ---
-
-info "Waiting for release workflow to start"
-sleep 5
-RUN_ID=$(gh run list \
-    --workflow=release.yml \
-    --limit 1 \
-    --json databaseId \
-    --jq '.[0].databaseId')
-
-if [[ -n "$RUN_ID" ]]; then
-    info "Watching workflow run $RUN_ID"
-    gh run watch "$RUN_ID" || info "workflow did not complete cleanly"
-    info "Opening release page"
-    gh release view "$TAG" --web || true
-else
-    info "Could not find workflow run. Check manually: gh run list --workflow=release.yml"
-fi
+echo
+info "Release proposed on branch $RELEASE_BRANCH."
+echo
+echo "Next steps:"
+echo "  1. Open a PR from $RELEASE_BRANCH into develop:"
+echo "     https://github.com/shakenfist/ryll/pull/new/$RELEASE_BRANCH"
+echo "  2. Get it reviewed and merged."
+echo "  3. Run 'make tag-release $VERSION' to tag develop and"
+echo "     trigger the release workflow."

@@ -18,17 +18,19 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
-.PHONY: all build release publish clean clean-testdata devcontainer ensure-cache \
-	lint lint-fix test help test-qemu test-qemu-usb test-qemu-stop
+.PHONY: all build release propose-release tag-release clean clean-testdata \
+	devcontainer ensure-cache lint lint-fix test help \
+	test-qemu test-qemu-usb test-qemu-stop
 
 all: build
 
 help:
 	@echo "Ryll build targets:"
-	@echo "  make build          - Build debug version"
-	@echo "  make release        - Build release version"
-	@echo "  make publish X.Y.Z  - Cut a release: bump versions, tag, push"
-	@echo "  make test           - Run tests"
+	@echo "  make build                  - Build debug version"
+	@echo "  make release                - Build release version"
+	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
+	@echo "  make tag-release X.Y.Z      - After PR merge: tag develop, trigger release"
+	@echo "  make test                   - Run tests"
 	@echo "  make lint           - Run rustfmt and clippy checks"
 	@echo "  make lint-fix       - Run rustfmt and clippy with auto-fix"
 	@echo "  make devcontainer   - Build the development container"
@@ -82,20 +84,38 @@ release: ensure-cache
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
 
-# Cut a release: bump versions, commit, tag, push. Takes the version as a
-# positional arg: `make publish 0.1.4`. The second word of MAKECMDGOALS is
-# the version; the no-op rules below catch X.Y.Z-shaped goals so make does
-# not complain about "no rule to make target 0.1.4".
+# Cutting a release is a two-phase operation so the version bump
+# goes through the normal PR review gate rather than landing
+# directly on develop.
+#
+# Phase 1: `make propose-release X.Y.Z` creates a release-X.Y.Z
+# branch off develop, bumps the workspace version, pushes the
+# branch, and prints the PR creation URL.
+#
+# Phase 2: after the PR merges, `make tag-release X.Y.Z` tags
+# the resulting commit on develop and pushes the tag, which
+# triggers .github/workflows/release.yml.
+#
+# The second word of MAKECMDGOALS is the version; the no-op
+# rules below catch X.Y.Z-shaped goals so make does not
+# complain about "no rule to make target 0.1.4".
 RELEASE_VERSION := $(word 2,$(MAKECMDGOALS))
-publish:
+propose-release:
 	@if [ -z "$(RELEASE_VERSION)" ]; then \
-		echo "usage: make publish X.Y.Z"; exit 1; \
+		echo "usage: make propose-release X.Y.Z"; exit 1; \
 	fi
-	./tools/cut-release.sh $(RELEASE_VERSION)
+	./tools/propose-release.sh $(RELEASE_VERSION)
 
-# Absorb a version-shaped second word as a no-op target. This only matches
-# X.Y.Z numeric forms, so typos in real targets still fail loudly.
-ifneq ($(filter publish,$(MAKECMDGOALS)),)
+tag-release:
+	@if [ -z "$(RELEASE_VERSION)" ]; then \
+		echo "usage: make tag-release X.Y.Z"; exit 1; \
+	fi
+	./tools/tag-release.sh $(RELEASE_VERSION)
+
+# Absorb a version-shaped second word as a no-op target. This only
+# matches X.Y.Z numeric forms, so typos in real targets still fail
+# loudly.
+ifneq ($(filter propose-release tag-release,$(MAKECMDGOALS)),)
 $(RELEASE_VERSION):
 	@:
 endif
