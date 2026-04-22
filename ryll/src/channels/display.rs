@@ -167,6 +167,24 @@ enum FillOutcome {
     SkipPatternBrush,
 }
 
+/// Emit a one-line "surface / rect / clip_type" preview of a draw-op
+/// payload when `-v` verbose mode is set. Handlers call this as a
+/// cheap header on entry; the real decoding still happens in the
+/// `decode_*` classifier. Doing it here keeps the nine image- and
+/// mask-bearing handlers from each copy-pasting the same eight
+/// lines.
+fn log_draw_base_if_verbose(payload: &[u8], op_name: &str) {
+    if !settings::is_verbose() {
+        return;
+    }
+    if let Ok(base) = DrawBase::read(payload) {
+        logging::log_detail(&format!(
+            "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
+            op_name, base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+        ));
+    }
+}
+
 fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
     let base = DrawBase::read(payload)?;
     let (fill, _consumed) = SpiceFill::read(&payload[base.end_offset..])?;
@@ -339,6 +357,85 @@ fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
         src_left: opaque.src_left,
         src_bottom: opaque.src_bottom,
         src_right: opaque.src_right,
+    })
+}
+
+/// Outcome of decoding a DRAW_TRANSPARENT payload.
+///
+/// Chroma-key blit with no skip case: every payload is paintable
+/// (the compositor at the surface side is what inspects the chroma
+/// colour against each pixel).
+#[derive(Debug, Clone)]
+enum TransparentOutcome {
+    Paint {
+        base: DrawBase,
+        chroma_rgba: [u8; 4],
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+}
+
+fn decode_draw_transparent(payload: &[u8]) -> std::io::Result<TransparentOutcome> {
+    let base = DrawBase::read(payload)?;
+    let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
+    // src_color is BGRX little-endian, same convention as brush colour.
+    let chroma_rgba = [
+        ((transparent.src_color >> 16) & 0xff) as u8,
+        ((transparent.src_color >> 8) & 0xff) as u8,
+        (transparent.src_color & 0xff) as u8,
+        0xff,
+    ];
+    Ok(TransparentOutcome::Paint {
+        base,
+        chroma_rgba,
+        src_bitmap_offset: transparent.src_bitmap as usize,
+        src_top: transparent.src_top,
+        src_left: transparent.src_left,
+        src_bottom: transparent.src_bottom,
+        src_right: transparent.src_right,
+    })
+}
+
+/// Outcome of decoding a DRAW_ALPHA_BLEND payload.
+///
+/// `alpha == 0` is short-circuited here (matches canvas_base.c
+/// which early-returns without touching the destination); the
+/// handler simply returns without decoding the image. `alpha_flags`
+/// is carried through so the handler can warn_once on non-zero
+/// values even though we paint anyway.
+#[derive(Debug, Clone)]
+enum AlphaBlendOutcome {
+    Paint {
+        base: DrawBase,
+        alpha: u8,
+        alpha_flags: u16,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipZeroAlpha,
+}
+
+fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome> {
+    let base = DrawBase::read(payload)?;
+    let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
+    if ab.alpha == 0 {
+        return Ok(AlphaBlendOutcome::SkipZeroAlpha);
+    }
+    Ok(AlphaBlendOutcome::Paint {
+        base,
+        alpha: ab.alpha,
+        alpha_flags: ab.alpha_flags,
+        src_bitmap_offset: ab.src_bitmap as usize,
+        src_top: ab.src_top,
+        src_left: ab.src_left,
+        src_bottom: ab.src_bottom,
+        src_right: ab.src_right,
     })
 }
 
@@ -1641,18 +1738,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_fill(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            // Cheap preview (surface/box/clip) for -v users; the real
-            // decoding happens in decode_draw_fill. Read just the base
-            // fields here for the log line.
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_fill: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, "draw_fill");
         let outcome = decode_draw_fill(payload)?;
         match outcome {
             FillOutcome::SkipNonOpPut { rop } => {
@@ -1709,21 +1795,7 @@ impl DisplayChannel {
         mask_warn_key: &'static str,
         colour: [u8; 4],
     ) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    op_name,
-                    base.surface_id,
-                    base.left,
-                    base.top,
-                    base.right,
-                    base.bottom,
-                    base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, op_name);
         let SolidFillOutcome::Paint {
             base,
             masked_fallback,
@@ -1772,15 +1844,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_invers(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_invers: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, "draw_invers");
         // DRAW_INVERS shares its wire format (DrawBase + SpiceQMask) with
         // DRAW_BLACKNESS / DRAW_WHITENESS, so the phase-3 solid-fill
         // decoder slots in unchanged — only the paint semantic differs.
@@ -1811,15 +1875,7 @@ impl DisplayChannel {
     }
 
     async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "copy_bits: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, "copy_bits");
         let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
 
         self.event_tx
@@ -1839,15 +1895,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_opaque(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_opaque: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, "draw_opaque");
         match decode_draw_opaque(payload)? {
             OpaqueOutcome::SkipNonOpPut { rop } => {
                 warn_once!(
@@ -1882,15 +1930,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_blend(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_blend: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
+        log_draw_base_if_verbose(payload, "draw_blend");
         match decode_draw_blend(payload)? {
             BlendOutcome::SkipNonOpPut { rop } => {
                 warn_once!(
@@ -1925,80 +1965,65 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_transparent(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_transparent: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
-            }
-        }
-
-        let base = DrawBase::read(payload)?;
-        let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
-
-        // src_color is BGRX little-endian, same convention as brush colour.
-        let chroma_rgba = [
-            ((transparent.src_color >> 16) & 0xff) as u8,
-            ((transparent.src_color >> 8) & 0xff) as u8,
-            (transparent.src_color & 0xff) as u8,
-            0xff,
-        ];
-
+        log_draw_base_if_verbose(payload, "draw_transparent");
+        let TransparentOutcome::Paint {
+            base,
+            chroma_rgba,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
+        } = decode_draw_transparent(payload)?;
         self.decode_image_and_emit(
             payload,
             "draw_transparent",
             &base,
-            transparent.src_bitmap as usize,
-            transparent.src_top,
-            transparent.src_left,
-            transparent.src_bottom,
-            transparent.src_right,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
             CompositeMode::ChromaKey { chroma_rgba },
         )
         .await
     }
 
     async fn handle_draw_alpha_blend(&mut self, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
-            if let Ok(base) = DrawBase::read(payload) {
-                logging::log_detail(&format!(
-                    "draw_alpha_blend: surface={}, rect=({},{})-({},{}), clip_type={}",
-                    base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
-                ));
+        log_draw_base_if_verbose(payload, "draw_alpha_blend");
+        match decode_draw_alpha_blend(payload)? {
+            AlphaBlendOutcome::SkipZeroAlpha => Ok(()),
+            AlphaBlendOutcome::Paint {
+                base,
+                alpha,
+                alpha_flags,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                if alpha_flags != 0 {
+                    warn_once!(
+                        "display:draw_alpha_blend:alpha_flags",
+                        "display: draw_alpha_blend: non-zero alpha_flags {:#x} ignored, painting with straight alpha",
+                        alpha_flags
+                    );
+                }
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_alpha_blend",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                    CompositeMode::AlphaBlend { alpha },
+                )
+                .await
             }
         }
-
-        let base = DrawBase::read(payload)?;
-        let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
-
-        // Canvas-base reference returns early for alpha == 0 (no pixels
-        // would change); skip the decode entirely rather than run it and
-        // drop the result.
-        if ab.alpha == 0 {
-            return Ok(());
-        }
-
-        if ab.alpha_flags != 0 {
-            warn_once!(
-                "display:draw_alpha_blend:alpha_flags",
-                "display: draw_alpha_blend: non-zero alpha_flags {:#x} ignored, painting with straight alpha",
-                ab.alpha_flags
-            );
-        }
-
-        self.decode_image_and_emit(
-            payload,
-            "draw_alpha_blend",
-            &base,
-            ab.src_bitmap as usize,
-            ab.src_top,
-            ab.src_left,
-            ab.src_bottom,
-            ab.src_right,
-            CompositeMode::AlphaBlend { alpha: ab.alpha },
-        )
-        .await
     }
 
     /// Record a decode result and update the snapshot.
@@ -2630,6 +2655,136 @@ mod tests {
         match decode_draw_opaque(&payload).expect("decode failed") {
             OpaqueOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
             other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_transparent tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_TRANSPARENT payload: DrawBase (21 bytes, clip_type=0) +
+    /// SpiceTransparent (28 bytes: src_bitmap u32 + src_area 4×u32 +
+    /// src_color u32 + true_color u32).
+    fn build_draw_transparent_payload(src_color: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = NONE
+
+        // SpiceTransparent
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+        v.extend_from_slice(&src_color.to_le_bytes()); // src_color (BGRX)
+        v.extend_from_slice(&0u32.to_le_bytes()); // true_color (deprecated; ignored)
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_transparent_converts_bgrx_to_rgba() {
+        // src_color = 0x00AB_CDEF → wire bytes [EF, CD, AB, 00]
+        // RGBA conversion = R=0xAB, G=0xCD, B=0xEF, A=0xFF.
+        let payload = build_draw_transparent_payload(0x00AB_CDEF);
+        match decode_draw_transparent(&payload).expect("decode failed") {
+            TransparentOutcome::Paint {
+                base,
+                chroma_rgba,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(chroma_rgba, [0xAB, 0xCD, 0xEF, 0xFF]);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_alpha_blend tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_ALPHA_BLEND payload: DrawBase (21 bytes) +
+    /// SpiceAlphaBlend (23 bytes: alpha_flags u16 + alpha u8 +
+    /// src_bitmap u32 + src_area 4×u32).
+    fn build_draw_alpha_blend_payload(alpha: u8, alpha_flags: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = NONE
+
+        // SpiceAlphaBlend
+        v.extend_from_slice(&alpha_flags.to_le_bytes());
+        v.push(alpha);
+        v.extend_from_slice(&0x200u32.to_le_bytes()); // src_bitmap
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_happy_path() {
+        let payload = build_draw_alpha_blend_payload(128, 0);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::Paint {
+                base,
+                alpha,
+                alpha_flags,
+                src_bitmap_offset,
+                ..
+            } => {
+                assert_eq!(alpha, 128);
+                assert_eq!(alpha_flags, 0);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(src_bitmap_offset, 0x200);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_zero_alpha_skips() {
+        let payload = build_draw_alpha_blend_payload(0, 0);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::SkipZeroAlpha => {}
+            other => panic!("expected SkipZeroAlpha, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_carries_alpha_flags() {
+        // alpha_flags != 0 is surfaced through Paint so the handler
+        // can warn_once and still paint. The decoder does not skip.
+        let payload = build_draw_alpha_blend_payload(128, 0x02);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::Paint {
+                alpha, alpha_flags, ..
+            } => {
+                assert_eq!(alpha, 128);
+                assert_eq!(alpha_flags, 0x02);
+            }
+            other => panic!("expected Paint, got {:?}", other),
         }
     }
 }
