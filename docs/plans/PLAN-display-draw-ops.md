@@ -276,16 +276,16 @@ Concretely:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Plumbing: protocol structs, events, surface helpers, surface-init colour fix | PLAN-display-draw-ops-phase-01-plumbing.md | Not started |
-| 2. `DRAW_FILL` (solid brush) | PLAN-display-draw-ops-phase-02-fill.md | Not started |
-| 3. `DRAW_BLACKNESS` and `DRAW_WHITENESS` | PLAN-display-draw-ops-phase-03-monochrome.md | Not started |
-| 4. `COPY_BITS` | PLAN-display-draw-ops-phase-04-copy-bits.md | Not started |
-| 5. `DRAW_OPAQUE` and `DRAW_BLEND` | PLAN-display-draw-ops-phase-05-image-rop.md | Not started |
-| 6. `DRAW_TRANSPARENT` and `DRAW_ALPHA_BLEND` | PLAN-display-draw-ops-phase-06-alpha.md | Not started |
-| 7. `DRAW_INVERS` and warn-once for deferred ops | PLAN-display-draw-ops-phase-07-invers-and-warnings.md | Not started |
-| 8. `--pedantic` mode and status-bar gap counter | PLAN-display-draw-ops-phase-08-pedantic.md | Not started |
-| 9. Thread live bug-report handles to the pedantic observer | PLAN-display-draw-ops-phase-09-pedantic-handles.md | Not started |
-| 10. Documentation and release notes | PLAN-display-draw-ops-phase-10-docs.md | Not started |
+| 1. Plumbing: protocol structs, events, surface helpers, surface-init colour fix | PLAN-display-draw-ops-phase-01-plumbing.md | Complete |
+| 2. `DRAW_FILL` (solid brush) | PLAN-display-draw-ops-phase-02-fill.md | Complete |
+| 3. `DRAW_BLACKNESS` and `DRAW_WHITENESS` | PLAN-display-draw-ops-phase-03-monochrome.md | Complete |
+| 4. `COPY_BITS` | PLAN-display-draw-ops-phase-04-copy-bits.md | Complete |
+| 5. `DRAW_OPAQUE` and `DRAW_BLEND` | PLAN-display-draw-ops-phase-05-image-rop.md | Complete |
+| 6. `DRAW_TRANSPARENT` and `DRAW_ALPHA_BLEND` | PLAN-display-draw-ops-phase-06-alpha.md | Complete |
+| 7. `DRAW_INVERS` and warn-once for deferred ops | PLAN-display-draw-ops-phase-07-invers-and-warnings.md | Complete |
+| 8. `--pedantic` mode and status-bar gap counter | PLAN-display-draw-ops-phase-08-pedantic.md | Complete |
+| 9. Thread live bug-report handles to the pedantic observer | PLAN-display-draw-ops-phase-09-pedantic-handles.md | Complete |
+| 10. Documentation and release notes | (inline; no separate plan file) | Complete |
 
 ### Sequencing rationale
 

@@ -203,11 +203,13 @@ Rules:
 * Silent repeats: `warn_once!` only fires its `tracing::warn!` the
   first time per session. The rest of the flow (skip / unmasked
   paint / etc.) still runs normally on every call.
-* The truly-unknown-opcode `_ =>` arm stays separate (it calls
-  `logging::log_unknown(...)` without `_once`) because phase 8 is
-  where unknown-opcode categorisation lands. See
-  `docs/plans/PLAN-display-draw-ops-phase-08-pedantic.md` when that
-  exists.
+* The truly-unknown-opcode `_ =>` arms in every channel handler
+  call `logging::log_unknown_once(channel, msg_type, payload)`
+  (added in phase 7 and wired up across every channel in phase 8c).
+  `log_unknown_once` enters the same warn_once registry with key
+  `"<channel>:hexdump:<msg_type>"`, hex-dumps the payload on first
+  occurrence, and stays silent on repeats. The older `log_unknown`
+  is unused in channel handlers as of phase 8.
 
 The registry is append-only within a session; there is no
 remove-or-reset API. Tests query via `warn_once_keys()` and key off

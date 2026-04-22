@@ -1179,15 +1179,64 @@ impl DisplayChannel {
                     let width = bmp_width;
                     let height = bmp_height;
                     let stride = bmp_stride as usize;
-                    let pixel_count = (width as usize) * (height as usize);
-                    let expected_pixels = pixel_count * 4;
+                    let width_usize = width as usize;
+                    let height_usize = height as usize;
 
-                    if stride * (height as usize) > pixel_data.len() {
+                    // Guard every width/height/stride multiplication against
+                    // overflow — a malicious server can send u32::MAX on
+                    // any of these, and unchecked arithmetic on usize would
+                    // either panic (debug) or wrap silently (release) and
+                    // allow the short-data check below to pass before we
+                    // index out-of-bounds in the blit loop.
+                    let Some(pixel_count) = width_usize.checked_mul(height_usize) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap dimensions overflow ({} × {}), skipping",
+                            width,
+                            height
+                        );
+                        return Ok(());
+                    };
+                    // Cap pixel count at 64M (= 8192 × 8192 worth of RGBA,
+                    // i.e. 256 MiB). No realistic SPICE pixmap draw needs
+                    // more; a larger value means the server is malformed
+                    // or adversarial and we refuse to allocate against
+                    // attacker-controlled dimensions.
+                    const MAX_PIXMAP_PIXELS: usize = 64 * 1024 * 1024;
+                    if pixel_count > MAX_PIXMAP_PIXELS {
+                        warn_once!(
+                            "display:decode_failure:pixmap:too_large",
+                            "display: pixmap {} pixels exceeds {} cap, skipping",
+                            pixel_count,
+                            MAX_PIXMAP_PIXELS
+                        );
+                        return Ok(());
+                    }
+                    let Some(expected_pixels) = pixel_count.checked_mul(4) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap pixel bytes overflow ({} × {} × 4), skipping",
+                            width,
+                            height
+                        );
+                        return Ok(());
+                    };
+                    let Some(needed_bytes) = stride.checked_mul(height_usize) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap stride × height overflow (stride={}, height={}), skipping",
+                            stride,
+                            height
+                        );
+                        return Ok(());
+                    };
+
+                    if needed_bytes > pixel_data.len() {
                         warn_once!(
                             "display:decode_failure:pixmap:short_pixel_data",
                             "display: pixmap data too short (have {}, need {})",
                             pixel_data.len(),
-                            stride * (height as usize)
+                            needed_bytes
                         );
                         None
                     } else {

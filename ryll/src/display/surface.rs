@@ -1,5 +1,13 @@
 /// Display surface management for egui rendering
 use eframe::egui::{ColorImage, Context, TextureFilter, TextureHandle, TextureOptions};
+use tracing::warn;
+
+/// Maximum surface side length. Server-supplied or auto-computed
+/// dimensions larger than this are clamped to prevent
+/// `width * height * 4` from overflowing `usize` (which on 64-bit
+/// would still allocate an absurd buffer even without overflow;
+/// 16 384 × 16 384 × 4 = 1 GiB — already past any real display).
+const MAX_SURFACE_DIMENSION: u32 = 16_384;
 
 /// A display surface that holds pixel data and can be rendered by egui
 pub struct DisplaySurface {
@@ -12,9 +20,28 @@ pub struct DisplaySurface {
 }
 
 impl DisplaySurface {
-    /// Create a new surface with the given dimensions
+    /// Create a new surface with the given dimensions. Server-supplied
+    /// dimensions are clamped to `MAX_SURFACE_DIMENSION` on each axis
+    /// so that `width * height * 4` cannot overflow `usize` via a
+    /// malicious `SurfaceCreate` (or via the app-side auto-create
+    /// path computing `left + width` without bounds).
     pub fn new(id: u32, width: u32, height: u32) -> Self {
-        let num_pixels = (width * height) as usize;
+        let (width, height) = if width > MAX_SURFACE_DIMENSION || height > MAX_SURFACE_DIMENSION {
+            warn!(
+                "surface {}: requested {}×{} exceeds {}×{} cap; clamping",
+                id, width, height, MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION
+            );
+            (
+                width.min(MAX_SURFACE_DIMENSION),
+                height.min(MAX_SURFACE_DIMENSION),
+            )
+        } else {
+            (width, height)
+        };
+        // Both axes are now ≤ 16 384, so width * height ≤ 2^28 and
+        // width * height * 4 ≤ 2^30 — well inside usize on 32-bit or
+        // 64-bit.
+        let num_pixels = (width as usize) * (height as usize);
         // RGBA: R=0, G=0, B=0, A=255 (opaque black) for each pixel
         let pixels: Vec<u8> = (0..num_pixels)
             .flat_map(|_| [0u8, 0u8, 0u8, 255u8])
@@ -809,5 +836,20 @@ mod tests {
         assert_eq!(pixel_at(&s, 0, 0), [0, 0, 0, 255]);
         assert_eq!(pixel_at(&s, 0, 1), [0, 0, 0, 255]);
         assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn surface_new_clamps_oversized_dimensions() {
+        // width * height would overflow usize; constructor must clamp
+        // to MAX_SURFACE_DIMENSION rather than panic. u32::MAX on both
+        // axes is the pathological case.
+        let s = DisplaySurface::new(0, u32::MAX, u32::MAX);
+        assert_eq!(s.width, MAX_SURFACE_DIMENSION);
+        assert_eq!(s.height, MAX_SURFACE_DIMENSION);
+        // Sanity: the pixel buffer has the clamped size, not u32::MAX^2.
+        assert_eq!(
+            s.pixels.len(),
+            (MAX_SURFACE_DIMENSION as usize) * (MAX_SURFACE_DIMENSION as usize) * 4
+        );
     }
 }
