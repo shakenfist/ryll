@@ -10,8 +10,8 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
-    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, ReportRegion,
-    SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig,
+    ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
 };
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
@@ -293,6 +293,9 @@ pub struct RyllApp {
     traffic_filter_cursor: bool,
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
+
+    /// Whether the "Protocol gaps" floating window is currently open.
+    gaps_popup_open: bool,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -342,6 +345,7 @@ fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
 // ── End screenshot path helpers ─────────────────────────────────────────────
 
 impl RyllApp {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         config: Config,
@@ -350,6 +354,7 @@ impl RyllApp {
         share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
+        pedantic_config: Option<PedanticConfig>,
     ) -> Self {
         // Create event and command channels
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
@@ -373,6 +378,22 @@ impl RyllApp {
         // Save connection target for bug report metadata
         let target_host = config.host.clone();
         let target_port = config.port;
+
+        // Register the --pedantic gap observer now that the live traffic,
+        // channel-snapshot, and app-snapshot handles exist. The underlying
+        // register_gap_observer has replay semantics, so any gaps fired
+        // during the construction window before this call are delivered
+        // when we register.
+        if let Some(config) = pedantic_config {
+            BugReport::register_pedantic_observer(
+                config,
+                target_host.clone(),
+                target_port,
+                traffic.clone(),
+                channel_snapshots.clone(),
+                app_snapshot.clone(),
+            );
+        }
 
         // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
@@ -520,6 +541,7 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
+            gaps_popup_open: false,
         }
     }
 
@@ -594,6 +616,94 @@ impl RyllApp {
                         "app: blit surface={}, pos=({},{}), size={}x{}",
                         surface_id, left, top, width, height
                     );
+                }
+
+                ChannelEvent::ImageReadyChroma {
+                    display_channel_id,
+                    surface_id,
+                    left,
+                    top,
+                    width,
+                    height,
+                    pixels,
+                    chroma_rgba,
+                    ..
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.blit_chroma(left, top, width, height, &pixels, chroma_rgba);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: ImageReadyChroma on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::ImageReadyAlpha {
+                    display_channel_id,
+                    surface_id,
+                    left,
+                    top,
+                    width,
+                    height,
+                    pixels,
+                    alpha,
+                    ..
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.blit_alpha(left, top, width, height, &pixels, alpha);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: ImageReadyAlpha on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::FillRect {
+                    display_channel_id,
+                    surface_id,
+                    rect: (left, top, right, bottom),
+                    colour,
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.fill_rect(left, top, right, bottom, colour, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: FillRect on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::CopyBits {
+                    display_channel_id,
+                    surface_id,
+                    src_x,
+                    src_y,
+                    dest_rect: (left, top, right, bottom),
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.copy_bits(src_x, src_y, left, top, right, bottom, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: CopyBits on unknown surface {}", surface_id);
+                    }
+                }
+
+                ChannelEvent::Invert {
+                    display_channel_id,
+                    surface_id,
+                    rect: (left, top, right, bottom),
+                    clip,
+                } => {
+                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
+                    {
+                        surface.invert_rect(left, top, right, bottom, &clip);
+                        self.stats.frames_received += 1;
+                    } else {
+                        debug!("app: Invert on unknown surface {}", surface_id);
+                    }
                 }
 
                 ChannelEvent::DisplayMark => {
@@ -1118,7 +1228,7 @@ impl eframe::App for RyllApp {
         if self.region_select_active {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
-                let report_type = self.bug_report_type;
+                let report_type = self.bug_report_type.clone();
                 let description = self.bug_description.clone();
                 self.finish_bug_report(report_type, description, None);
                 self.region_select_active = false;
@@ -1302,6 +1412,27 @@ impl eframe::App for RyllApp {
                         if ui.small_button("Screenshot").clicked() {
                             self.open_screenshot_dialog();
                         }
+                        let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
+                        let gap_label = format!("Gaps: {}", gap_count);
+                        let gap_response = if gap_count > 0 {
+                            ui.add(egui::Button::new(
+                                egui::RichText::new(&gap_label)
+                                    .color(egui::Color32::from_rgb(200, 80, 80)),
+                            ))
+                        } else {
+                            ui.add(egui::Button::new(&gap_label))
+                        };
+                        if gap_response.clicked() {
+                            self.gaps_popup_open = !self.gaps_popup_open;
+                        }
+                        if gap_response.hovered() {
+                            gap_response.on_hover_text(
+                                "Distinct protocol gaps seen this session \
+                                 — click to list.\nPass --pedantic to write \
+                                 a bug report per gap.",
+                            );
+                        }
+
                         if ui.small_button("Report").clicked() {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
@@ -2011,7 +2142,7 @@ impl eframe::App for RyllApp {
                     self.region_drag_end = None;
                 } else {
                     // Non-display: generate immediately
-                    let report_type = self.bug_report_type;
+                    let report_type = self.bug_report_type.clone();
                     let description = self.bug_description.clone();
                     self.finish_bug_report(report_type, description, None);
                 }
@@ -2112,7 +2243,7 @@ impl eframe::App for RyllApp {
                     right: sx.max(ex),
                     bottom: sy.max(ey),
                 };
-                let report_type = self.bug_report_type;
+                let report_type = self.bug_report_type.clone();
                 let description = self.bug_description.clone();
                 self.finish_bug_report(report_type, description, Some(region));
                 self.region_select_active = false;
@@ -2175,6 +2306,28 @@ impl eframe::App for RyllApp {
                 painter.image(tex.id(), rect, uv, egui::Color32::WHITE);
             }
         }
+
+        // Protocol gaps floating window (toggled by the Gaps: N button)
+        egui::Window::new("Protocol gaps")
+            .open(&mut self.gaps_popup_open)
+            .resizable(true)
+            .default_width(400.0)
+            .default_height(300.0)
+            .show(ctx, |ui| {
+                let mut keys = shakenfist_spice_protocol::logging::warn_once_keys();
+                keys.sort();
+                if keys.is_empty() {
+                    ui.label("No protocol gaps seen this session.");
+                } else {
+                    ui.label(format!("{} distinct gaps:", keys.len()));
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for key in &keys {
+                            ui.monospace(*key);
+                        }
+                    });
+                }
+            });
 
         if self.show_disconnect_dialog {
             let reason = self
@@ -2509,6 +2662,7 @@ pub async fn run_headless(
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     monitors: u8,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -2529,6 +2683,30 @@ pub async fn run_headless(
 
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
+
+    // Register the --pedantic gap observer. Traffic is live in headless so
+    // pedantic zips will have a real pcap. Channel-state snapshots are also
+    // live (channel tasks write through the `snapshots` handle passed into
+    // run_connection below). The `app_snapshot`, however, is only populated
+    // by the GUI update loop; in headless it would stay at its default, so
+    // we register with a fresh empty AppSnapshot and warn the user.
+    if let Some(pedantic) = pedantic_config {
+        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+        tracing::warn!(
+            "pedantic mode in headless: traffic pcap and channel-state are \
+             live, but app-level snapshot (surfaces list, bandwidth, latency) \
+             is not populated — that field is updated by the GUI loop only. \
+             See docs/plans/PLAN-display-draw-ops-phase-09-pedantic-handles.md."
+        );
+        BugReport::register_pedantic_observer(
+            pedantic,
+            config.host.clone(),
+            config.port,
+            traffic.clone(),
+            snapshots.clone(),
+            app_snapshot,
+        );
+    }
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody

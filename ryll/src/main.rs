@@ -28,13 +28,14 @@ mod webdav;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use eframe::egui;
 use tracing::{info, Level};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
+use crate::bugreport::PedanticConfig;
 use crate::capture::CaptureSession;
 use crate::config::{
     parse_share_dir, parse_virtual_disks, Args, Config, ShareDirConfig, VirtualDiskConfig,
@@ -119,10 +120,43 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "capture"))]
     let capture: Option<Arc<CaptureSession>> = None;
 
-    if args.headless {
-        run_headless(config, &args, virtual_disks, share_dir, capture)
+    // Eager-failure `mkdir -p` for the --pedantic output directory so the
+    // user hears about disk/permission problems before the session starts.
+    // The actual gap-observer registration happens inside the app
+    // constructors (app::RyllApp::new / app::run_headless) once the live
+    // traffic / channel-snapshot handles have been built.
+    let pedantic_config = if args.pedantic {
+        std::fs::create_dir_all(&args.pedantic_dir).with_context(|| {
+            format!(
+                "failed to create pedantic directory {}",
+                args.pedantic_dir.display()
+            )
+        })?;
+        Some(PedanticConfig {
+            dir: args.pedantic_dir.clone(),
+        })
     } else {
-        run_gui(config, &args, virtual_disks, share_dir, capture)
+        None
+    };
+
+    if args.headless {
+        run_headless(
+            config,
+            &args,
+            virtual_disks,
+            share_dir,
+            capture,
+            pedantic_config,
+        )
+    } else {
+        run_gui(
+            config,
+            &args,
+            virtual_disks,
+            share_dir,
+            capture,
+            pedantic_config,
+        )
     }
 }
 
@@ -132,6 +166,7 @@ fn run_headless(
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -144,6 +179,7 @@ fn run_headless(
             share_dir,
             capture,
             args.monitors,
+            pedantic_config,
         )
         .await
     })
@@ -155,6 +191,7 @@ fn run_gui(
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
+    pedantic_config: Option<PedanticConfig>,
 ) -> Result<()> {
     info!("Starting GUI");
 
@@ -179,6 +216,7 @@ fn run_gui(
                 share_dir,
                 capture,
                 monitors,
+                pedantic_config,
             )))
         }),
     )

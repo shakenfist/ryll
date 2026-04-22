@@ -156,6 +156,49 @@ Ryll uses:
     handlers must accept `Arc<tokio::sync::Notify>` in their constructor
     and follow this pairing convention or idle CPU will silently regress.
 
+17. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
+    skipped** - Every implemented `DRAW_*` opcode on the display channel
+    follows the same shape: a pure `fn decode_<op>(payload) ->
+    io::Result<<Op>Outcome>` classifier that parses the phase-1 wire
+    struct and returns an Outcome enum describing what to do (`Paint`,
+    `SkipNonOpPut { rop }`, etc.), then an `async fn handle_<op>` shim
+    that destructures the outcome, fires `warn_once!` on each skip
+    variant, and emits a typed `ChannelEvent`. Any feature the handler
+    deliberately ignores (non-`OP_PUT` ROP descriptors, non-solid
+    brushes, non-null `SpiceQMask`, non-zero `alpha_flags`, etc.) must
+    fire `warn_once!` with a stable colon-delimited static key so the
+    gap enters the process-global warn_once registry. Unknown opcodes
+    use `log_unknown_once` which registers the same way but includes a
+    first-occurrence hex dump. See STYLEGUIDE.md §"warn_once for
+    protocol gaps" for the full convention (key format, test
+    discipline, append-only contract).
+
+18. **Colour conversion in the channel, not the surface** - SPICE
+    colour fields (brush colours, chroma keys, BGRX image pixels) are
+    BGRX on the wire; `DisplaySurface` stores pixels as RGBA. The
+    conversion lives exclusively in the channel handler (before event
+    emission) so surface helpers trust their inputs are already RGBA.
+    Concretely: `FillRect.colour`, `ImageReadyChroma.chroma_rgba`, and
+    every `ImageReady*.pixels` buffer reach `app.rs` pre-converted.
+    The idiom at the channel site is `[(c>>16)&0xff, (c>>8)&0xff,
+    c&0xff, 0xff]` for a wire `u32` colour. Do NOT add BGRX handling
+    inside `DisplaySurface` — surfaces are RGBA-only.
+
+19. **`--pedantic` mode: registry observer pattern** - The warn_once
+    registry is a process-global `HashSet<&'static str>` with a
+    `register_gap_observer(Fn(&'static str))` hook. The observer fires
+    once per newly-inserted key (with replay-on-late-registration so
+    observers don't miss keys fired before they registered). Two
+    layers sit on top today: an always-visible `Gaps: N` status-bar
+    widget that polls `warn_once_count()` each frame (no observer
+    needed), and `--pedantic` mode which registers an observer that
+    spawns a tokio task per new gap to write a bug-report zip via
+    `BugReport::write_pedantic`. The observer is registered inside
+    `RyllApp::new` / `run_headless` so it captures live
+    `TrafficBuffers` and `ChannelSnapshots` rather than stubs — this
+    matters because the traffic pcap is what makes a pedantic report
+    actionable for debugging.
+
 ## Code Organisation
 
 The repository is a Cargo workspace. Ryll itself lives at
@@ -245,6 +288,31 @@ ryll/src/
 1. Message definitions in `ryll/src/protocol/messages.rs`
 2. Constants/enums in `ryll/src/protocol/constants.rs`
 3. Channel-specific logic in `ryll/src/channels/*.rs`
+
+### Inspecting a `--capture` pcap
+
+`tools/pcap-inspect.py` is a pure-Python helper (no tshark
+or scapy dependency) for sifting through a ryll capture.
+Three subcommands:
+
+```
+tools/pcap-inspect.py opcodes   <path>                 # histogram of SPICE message types
+tools/pcap-inspect.py draw-copy <path>                 # DRAW_COPY breakdown by surface / image type
+tools/pcap-inspect.py timeline  <path> [--since-last N]  # server-side messages in order
+```
+
+Typical use: when investigating a rendering artefact,
+`opcodes` tells you whether the problem window even
+contains the draw ops you thought it did (phase-3 found
+that a "static" artefact was 100% DRAW_COPY, not missing
+draw ops); `draw-copy` narrows further to the image types
+involved; `timeline --since-last 5` dumps the last five
+seconds of traffic when the user has pressed F8 right
+after seeing the artefact.
+
+ryll's pcap files are big-endian libpcap format carrying
+synthetic TCP frames around the raw post-link SPICE
+stream. The helper handles that without any extra flags.
 
 ## Process templates
 

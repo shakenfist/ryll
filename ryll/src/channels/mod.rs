@@ -55,6 +55,71 @@ pub enum ChannelEvent {
         image_id: u64,
     },
 
+    /// Image-bearing paint with chroma-keying (DRAW_TRANSPARENT).
+    ///
+    /// Pixels whose lower-24-bit RGB equals `chroma_rgba[0..3]`
+    /// leave the destination untouched.
+    ImageReadyChroma {
+        display_channel_id: u8,
+        surface_id: u32,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>, // RGBA
+        chroma_rgba: [u8; 4],
+        #[allow(dead_code)]
+        image_id: u64,
+    },
+
+    /// Image-bearing paint with constant-alpha blending
+    /// (DRAW_ALPHA_BLEND).  Straight (non-premultiplied) alpha;
+    /// per-pixel source alpha multiplies through the constant.
+    ImageReadyAlpha {
+        display_channel_id: u8,
+        surface_id: u32,
+        left: u32,
+        top: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>, // RGBA
+        alpha: u8,
+        #[allow(dead_code)]
+        image_id: u64,
+    },
+
+    /// Solid-colour fill of a destination rect.
+    ///
+    /// Used by DRAW_FILL (with a solid brush), DRAW_BLACKNESS,
+    /// and DRAW_WHITENESS. `rect` is `(left, top, right, bottom)`
+    /// in surface coordinates; `clip` is the SpiceClip rect list
+    /// from the draw message (empty = no extra clipping).
+    FillRect {
+        display_channel_id: u8,
+        surface_id: u32,
+        rect: (u32, u32, u32, u32),
+        colour: [u8; 4],
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
+    /// Intra-surface pixel copy (DRAW_COPY_BITS).
+    CopyBits {
+        display_channel_id: u8,
+        surface_id: u32,
+        src_x: u32,
+        src_y: u32,
+        dest_rect: (u32, u32, u32, u32),
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
+    /// In-place RGB inversion of a rect (DRAW_INVERS).
+    Invert {
+        display_channel_id: u8,
+        surface_id: u32,
+        rect: (u32, u32, u32, u32),
+        clip: Vec<(u32, u32, u32, u32)>,
+    },
+
     /// Display mark (frame boundary)
     DisplayMark,
 

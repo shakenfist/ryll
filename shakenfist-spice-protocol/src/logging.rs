@@ -2,7 +2,251 @@
 ///
 /// Provides detailed logging of SPICE protocol messages for debugging
 /// and protocol coverage testing.
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use tracing::{debug, warn};
+
+/// Observer callback invoked the first time a given warn_once key fires
+/// in this session. See [`register_gap_observer`] for semantics.
+pub type GapObserver = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+
+fn registry() -> &'static Mutex<HashSet<&'static str>> {
+    static REG: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn observer_list() -> &'static Mutex<Vec<GapObserver>> {
+    static OBS: OnceLock<Mutex<Vec<GapObserver>>> = OnceLock::new();
+    OBS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Insert `key` into the warn_once registry. Returns `true` if the key
+/// was newly inserted (never seen before this call), `false` on repeat.
+///
+/// When a new key is inserted, registered gap observers are invoked
+/// *after* the registry lock is released, so observers may freely call
+/// back into `warn_once_*` or register additional observers without
+/// deadlocking.
+fn register_key(key: &'static str) -> bool {
+    let is_new = {
+        let mut set = registry().lock().expect("registry lock poisoned");
+        set.insert(key)
+    };
+    if is_new {
+        dispatch_new_gap(key);
+    }
+    is_new
+}
+
+/// Walk the observer list and invoke each observer with `key`. The
+/// observer-list lock is held only long enough to clone the `Arc`
+/// pointers into a local `Vec`; observers then run with no internal
+/// locks held, so they may freely call back into the logging module.
+fn dispatch_new_gap(key: &'static str) {
+    let observers: Vec<GapObserver> = {
+        let guard = observer_list().lock().expect("observer list lock poisoned");
+        guard.iter().cloned().collect()
+    };
+    for observer in observers {
+        observer(key);
+    }
+}
+
+/// Register a callback to be invoked whenever a new warn_once key is
+/// registered for the first time in this session.
+///
+/// On registration, the observer is immediately replayed with every
+/// key that has already fired so far, so late observers see a complete
+/// history.
+///
+/// # Threading
+///
+/// The observer runs on the thread of the triggering `register_key`
+/// call, after the registry lock has been released. Observers may
+/// therefore call `warn_once_*`, `warn_once_keys`, or
+/// `register_gap_observer` without deadlocking.
+///
+/// # Double-fire during registration races
+///
+/// There is a small race window during registration: if another thread
+/// fires a brand-new key between the moment this function pushes the
+/// observer onto the list and the moment it snapshots the registry for
+/// replay, the observer may see that key twice (once via normal
+/// dispatch, once via replay). Observers must therefore be idempotent
+/// per key. This is already a natural requirement, since the registry
+/// is process-global and the same key may legitimately appear in
+/// multiple observers' replay histories across a session.
+pub fn register_gap_observer(observer: GapObserver) {
+    // Push first so any key fired after this point is dispatched to
+    // the new observer. The subsequent replay then covers keys that
+    // fired before the push. Keys fired between the push and the
+    // snapshot may arrive twice — callers must tolerate that.
+    {
+        let mut observers = observer_list().lock().expect("observer list lock poisoned");
+        observers.push(observer.clone());
+    }
+    // Snapshot the registry AFTER releasing the observer-list lock so
+    // an observer that itself calls `warn_once_*` during replay won't
+    // deadlock on the observer-list lock.
+    let snapshot = warn_once_keys();
+    for key in snapshot {
+        observer(key);
+    }
+}
+
+/// Emit `tracing::warn!` exactly once per session for each distinct
+/// `key`. Subsequent calls with the same key are silent. Thread-safe.
+///
+/// Prefer the `warn_once!` macro at call sites so `format!` is
+/// deferred until the first occurrence.
+pub fn warn_once_impl(key: &'static str, message: &str) {
+    if register_key(key) {
+        warn!("{}", message);
+    }
+}
+
+/// Caller-side variant of the warn-once pattern. Returns `true` if
+/// `key` was newly inserted into the session registry (caller should
+/// fire side-effects such as a hex dump), `false` on repeat (caller
+/// should stay silent). No formatting, no `warn!` call — the caller
+/// controls what "fire" means.
+pub fn warn_once_impl_if_new(key: &'static str) -> bool {
+    register_key(key)
+}
+
+/// Intern a dynamically-composed key into process-lifetime memory so
+/// the `HashSet<&'static str>` warn_once registry can accept it.
+///
+/// The leaked memory is bounded by the number of distinct dynamic keys
+/// the session will ever produce — typically on the order of
+/// `channel × msg_type` combinations (~50 in practice). Callers must
+/// not pass unbounded per-message data as the key.
+pub fn intern_key(key: String) -> &'static str {
+    static INTERN: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let map = INTERN.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().expect("intern map lock poisoned");
+    if let Some(existing) = guard.get(&key) {
+        existing
+    } else {
+        let leaked: &'static str = Box::leak(key.clone().into_boxed_str());
+        guard.insert(key, leaked);
+        leaked
+    }
+}
+
+/// Per-channel cap on distinct unknown `msg_type` values that
+/// `log_unknown_once` will register into the warn_once registry
+/// before suppressing further variants. Guards against a hostile
+/// server cycling through all 65 536 `msg_type` values per channel
+/// to force unbounded `Box::leak` growth via `intern_key`. After
+/// the cap is hit, a single "further unknown opcodes suppressed"
+/// warn_once fires per channel; subsequent calls for that channel
+/// are silent. Seven channels × 64 = bounded at ~450 distinct
+/// registry entries for this category, ~20 KiB leaked.
+const UNKNOWN_OPCODE_CAP_PER_CHANNEL: usize = 64;
+
+fn unknown_seen() -> &'static Mutex<HashMap<&'static str, HashSet<u16>>> {
+    static SEEN: OnceLock<Mutex<HashMap<&'static str, HashSet<u16>>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Outcome of the check-and-insert step in `log_unknown_once`.
+/// Kept local because the three branches have no use outside
+/// the one call site.
+enum UnknownLogAction {
+    New,
+    Repeat,
+    AtCap,
+}
+
+/// One-shot variant of `log_unknown`: hex-dumps the payload on the
+/// first call for `(channel, msg_type)` in this session, silent on
+/// repeats, and silent-with-one-suppression-notice once a channel
+/// has seen `UNKNOWN_OPCODE_CAP_PER_CHANNEL` distinct unknown
+/// `msg_type` values (cap defends against hostile-server
+/// enumeration — see that constant's doc).
+pub fn log_unknown_once(channel: &'static str, msg_type: u16, payload: &[u8]) {
+    // Single critical section over the per-channel seen-set so the
+    // "is it new?", "are we at the cap?", and "record it" decisions
+    // are atomic with each other.
+    let action = {
+        let mut seen = unknown_seen().lock().expect("unknown_seen lock poisoned");
+        let set = seen.entry(channel).or_default();
+        if set.contains(&msg_type) {
+            UnknownLogAction::Repeat
+        } else if set.len() >= UNKNOWN_OPCODE_CAP_PER_CHANNEL {
+            UnknownLogAction::AtCap
+        } else {
+            set.insert(msg_type);
+            UnknownLogAction::New
+        }
+    };
+    match action {
+        UnknownLogAction::Repeat => {}
+        UnknownLogAction::New => {
+            let key = intern_key(format!("{}:hexdump:{}", channel, msg_type));
+            if warn_once_impl_if_new(key) {
+                warn!(
+                    "{} {} byte UNKNOWN opcode {} (first occurrence; subsequent silent)",
+                    channel,
+                    payload.len(),
+                    msg_type
+                );
+                hex_dump(payload, 64);
+            }
+        }
+        UnknownLogAction::AtCap => {
+            warn_once_impl(
+                intern_key(format!("{}:hexdump_cap", channel)),
+                &format!(
+                    "{}: reached cap of {} distinct unknown opcodes; \
+                     further unknown opcodes suppressed to bound memory",
+                    channel, UNKNOWN_OPCODE_CAP_PER_CHANNEL
+                ),
+            );
+        }
+    }
+}
+
+/// Number of distinct keys that have fired so far this session.
+/// Used by the phase-8 status-bar gap counter.
+pub fn warn_once_count() -> usize {
+    registry().lock().expect("registry lock poisoned").len()
+}
+
+/// Snapshot of the fired keys (in some order). Caller does not hold
+/// the registry lock. Used by the phase-8 pedantic popup / bug
+/// report assembly.
+pub fn warn_once_keys() -> Vec<&'static str> {
+    registry()
+        .lock()
+        .expect("registry lock poisoned")
+        .iter()
+        .copied()
+        .collect()
+}
+
+/// Emit `tracing::warn!` exactly once per session for a given key.
+///
+/// The message expression is only evaluated on the first call for
+/// each key, so `format!` overhead is paid at most once.
+///
+/// # Example
+///
+/// ```
+/// use shakenfist_spice_protocol::warn_once;
+/// warn_once!("my-feature:unsupported", "unsupported thing: {}", 42);
+/// ```
+#[macro_export]
+macro_rules! warn_once {
+    ($key:expr, $($arg:tt)+) => {{
+        $crate::logging::warn_once_impl(
+            $key,
+            &format!($($arg)+),
+        );
+    }};
+}
 
 /// Log a protocol message
 pub fn log_message(direction: &str, channel: &str, msg_type: u16, msg_type_str: &str, size: u32) {
@@ -256,5 +500,161 @@ pub mod message_names {
             spicevmc_client::COMPRESSED_DATA => "vmc_compressed_data",
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{intern_key, log_unknown_once, register_gap_observer, warn_once_keys};
+
+    // The registry is process-global and cargo-test runs tests in
+    // parallel, so assertions here key off specific literals unique
+    // to each test rather than `warn_once_count()` deltas.
+
+    #[test]
+    fn test_warn_once_fires_once() {
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        warn_once!("test_warn_once_fires_once:k1", "msg 1");
+        let keys = warn_once_keys();
+        assert_eq!(
+            keys.iter()
+                .filter(|k| **k == "test_warn_once_fires_once:k1")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_warn_once_distinct_keys_all_fire() {
+        warn_once!("test_warn_once_distinct_keys_all_fire:a", "msg a");
+        warn_once!("test_warn_once_distinct_keys_all_fire:b", "msg b");
+        warn_once!("test_warn_once_distinct_keys_all_fire:c", "msg c");
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:a"));
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:b"));
+        assert!(keys.contains(&"test_warn_once_distinct_keys_all_fire:c"));
+    }
+
+    #[test]
+    fn test_warn_once_keys_snapshot_is_stable() {
+        warn_once!(
+            "test_warn_once_keys_snapshot_is_stable:unique",
+            "unique msg"
+        );
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_warn_once_keys_snapshot_is_stable:unique"));
+    }
+
+    #[test]
+    fn log_unknown_once_fires_once() {
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        log_unknown_once("test_log_unknown_once_fires_once", 999, &[0xaa, 0xbb]);
+        let keys = warn_once_keys();
+        assert_eq!(
+            keys.iter()
+                .filter(|k| **k == "test_log_unknown_once_fires_once:hexdump:999")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn log_unknown_once_distinct_opcodes() {
+        log_unknown_once("test_log_unknown_once_distinct_opcodes", 9001, &[0x01]);
+        log_unknown_once("test_log_unknown_once_distinct_opcodes", 9002, &[0x02]);
+        let keys = warn_once_keys();
+        assert!(keys.contains(&"test_log_unknown_once_distinct_opcodes:hexdump:9001"));
+        assert!(keys.contains(&"test_log_unknown_once_distinct_opcodes:hexdump:9002"));
+    }
+
+    #[test]
+    fn intern_key_returns_same_str_for_same_input() {
+        let a = intern_key("test_intern_key_same:foo".to_string());
+        let b = intern_key("test_intern_key_same:foo".to_string());
+        assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn register_gap_observer_fires_on_new_key() {
+        const PREFIX: &str = "test_register_gap_observer_fires_on_new_key:";
+        let captured: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        register_gap_observer(Arc::new(move |key: &'static str| {
+            captured_clone
+                .lock()
+                .expect("captured lock poisoned")
+                .push(key);
+        }));
+        warn_once!("test_register_gap_observer_fires_on_new_key:k1", "msg");
+        let seen = captured.lock().expect("captured lock poisoned");
+        let filtered: Vec<&&'static str> = seen.iter().filter(|k| k.starts_with(PREFIX)).collect();
+        assert!(
+            filtered
+                .iter()
+                .any(|k| ***k == *"test_register_gap_observer_fires_on_new_key:k1"),
+            "observer did not see new key; saw: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn register_gap_observer_replays_existing_keys() {
+        const PREFIX: &str = "test_register_gap_observer_replays_existing_keys:";
+        warn_once!(
+            "test_register_gap_observer_replays_existing_keys:pre",
+            "msg"
+        );
+        let captured: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_clone = Arc::clone(&captured);
+        register_gap_observer(Arc::new(move |key: &'static str| {
+            captured_clone
+                .lock()
+                .expect("captured lock poisoned")
+                .push(key);
+        }));
+        let seen = captured.lock().expect("captured lock poisoned");
+        let filtered: Vec<&&'static str> = seen.iter().filter(|k| k.starts_with(PREFIX)).collect();
+        assert!(
+            filtered
+                .iter()
+                .any(|k| ***k == *"test_register_gap_observer_replays_existing_keys:pre"),
+            "observer did not replay pre-existing key; saw: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_log_unknown_once_caps_per_channel() {
+        // Unique channel name so this test doesn't pollute / get polluted
+        // by other tests' use of `log_unknown_once`.
+        const CH: &str = "test_log_unknown_once_caps_per_channel";
+        // Fire CAP + 3 distinct msg_types for this channel.
+        let cap = super::UNKNOWN_OPCODE_CAP_PER_CHANNEL;
+        for i in 0..(cap as u16) + 3 {
+            log_unknown_once(CH, i, &[]);
+        }
+        let keys = warn_once_keys();
+        // The first `cap` msg_types registered as individual hexdump keys.
+        let hexdump_count = keys
+            .iter()
+            .filter(|k| k.starts_with(&format!("{}:hexdump:", CH)))
+            .count();
+        assert_eq!(
+            hexdump_count, cap,
+            "expected exactly {} hexdump keys, got {}",
+            cap, hexdump_count
+        );
+        // The cap overflow fired a single suppression-notice key.
+        let cap_key = format!("{}:hexdump_cap", CH);
+        assert!(
+            keys.iter().any(|k| **k == cap_key),
+            "expected suppression-notice key {} in {:?}",
+            cap_key,
+            keys.iter().filter(|k| k.contains(CH)).collect::<Vec<_>>()
+        );
     }
 }

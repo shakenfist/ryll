@@ -522,13 +522,7 @@ impl PlaybackChannel {
                     debug!("playback: received opcode {} (ignored)", msg_type);
                 }
                 _ => {
-                    logging::log_unknown(
-                        "playback",
-                        "received",
-                        msg_type,
-                        header.message_size,
-                        &payload,
-                    );
+                    logging::log_unknown_once("playback", msg_type, &payload);
                 }
             }
         }

@@ -66,6 +66,17 @@ pub struct Args {
     /// Make the shared directory read-only
     #[arg(long = "share-dir-ro")]
     pub share_dir_ro: bool,
+
+    /// Auto-write a bug report zip the first time each
+    /// distinct protocol gap is seen. Capped at 50 reports
+    /// per session to bound disk use.
+    #[arg(long)]
+    pub pedantic: bool,
+
+    /// Directory for --pedantic-mode bug reports. Created
+    /// if missing.
+    #[arg(long, default_value = "./ryll-pedantic-reports")]
+    pub pedantic_dir: std::path::PathBuf,
 }
 
 /// SPICE connection configuration

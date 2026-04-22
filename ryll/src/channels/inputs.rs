@@ -325,14 +325,8 @@ impl InputsChannel {
             }
 
             _ => {
-                // Unknown message - log with hex dump
-                logging::log_unknown(
-                    "inputs",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                // Unknown opcode — log hex once per msg_type, silent on repeat.
+                logging::log_unknown_once("inputs", msg_type, payload);
             }
         }
 
