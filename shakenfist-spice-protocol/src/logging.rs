@@ -135,20 +135,77 @@ pub fn intern_key(key: String) -> &'static str {
     }
 }
 
+/// Per-channel cap on distinct unknown `msg_type` values that
+/// `log_unknown_once` will register into the warn_once registry
+/// before suppressing further variants. Guards against a hostile
+/// server cycling through all 65 536 `msg_type` values per channel
+/// to force unbounded `Box::leak` growth via `intern_key`. After
+/// the cap is hit, a single "further unknown opcodes suppressed"
+/// warn_once fires per channel; subsequent calls for that channel
+/// are silent. Seven channels × 64 = bounded at ~450 distinct
+/// registry entries for this category, ~20 KiB leaked.
+const UNKNOWN_OPCODE_CAP_PER_CHANNEL: usize = 64;
+
+fn unknown_seen() -> &'static Mutex<HashMap<&'static str, HashSet<u16>>> {
+    static SEEN: OnceLock<Mutex<HashMap<&'static str, HashSet<u16>>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Outcome of the check-and-insert step in `log_unknown_once`.
+/// Kept local because the three branches have no use outside
+/// the one call site.
+enum UnknownLogAction {
+    New,
+    Repeat,
+    AtCap,
+}
+
 /// One-shot variant of `log_unknown`: hex-dumps the payload on the
-/// first call for `(channel, msg_type)` in this session and is silent
-/// on repeats. Used by the display channel's known-but-unimplemented
-/// opcode arms (phase 7) and by truly-unknown arms elsewhere (phase 8).
+/// first call for `(channel, msg_type)` in this session, silent on
+/// repeats, and silent-with-one-suppression-notice once a channel
+/// has seen `UNKNOWN_OPCODE_CAP_PER_CHANNEL` distinct unknown
+/// `msg_type` values (cap defends against hostile-server
+/// enumeration — see that constant's doc).
 pub fn log_unknown_once(channel: &'static str, msg_type: u16, payload: &[u8]) {
-    let key = intern_key(format!("{}:hexdump:{}", channel, msg_type));
-    if warn_once_impl_if_new(key) {
-        warn!(
-            "{} {} byte UNKNOWN opcode {} (first occurrence; subsequent silent)",
-            channel,
-            payload.len(),
-            msg_type
-        );
-        hex_dump(payload, 64);
+    // Single critical section over the per-channel seen-set so the
+    // "is it new?", "are we at the cap?", and "record it" decisions
+    // are atomic with each other.
+    let action = {
+        let mut seen = unknown_seen().lock().expect("unknown_seen lock poisoned");
+        let set = seen.entry(channel).or_default();
+        if set.contains(&msg_type) {
+            UnknownLogAction::Repeat
+        } else if set.len() >= UNKNOWN_OPCODE_CAP_PER_CHANNEL {
+            UnknownLogAction::AtCap
+        } else {
+            set.insert(msg_type);
+            UnknownLogAction::New
+        }
+    };
+    match action {
+        UnknownLogAction::Repeat => {}
+        UnknownLogAction::New => {
+            let key = intern_key(format!("{}:hexdump:{}", channel, msg_type));
+            if warn_once_impl_if_new(key) {
+                warn!(
+                    "{} {} byte UNKNOWN opcode {} (first occurrence; subsequent silent)",
+                    channel,
+                    payload.len(),
+                    msg_type
+                );
+                hex_dump(payload, 64);
+            }
+        }
+        UnknownLogAction::AtCap => {
+            warn_once_impl(
+                intern_key(format!("{}:hexdump_cap", channel)),
+                &format!(
+                    "{}: reached cap of {} distinct unknown opcodes; \
+                     further unknown opcodes suppressed to bound memory",
+                    channel, UNKNOWN_OPCODE_CAP_PER_CHANNEL
+                ),
+            );
+        }
     }
 }
 
@@ -567,6 +624,37 @@ mod tests {
                 .any(|k| ***k == *"test_register_gap_observer_replays_existing_keys:pre"),
             "observer did not replay pre-existing key; saw: {:?}",
             filtered
+        );
+    }
+
+    #[test]
+    fn test_log_unknown_once_caps_per_channel() {
+        // Unique channel name so this test doesn't pollute / get polluted
+        // by other tests' use of `log_unknown_once`.
+        const CH: &str = "test_log_unknown_once_caps_per_channel";
+        // Fire CAP + 3 distinct msg_types for this channel.
+        let cap = super::UNKNOWN_OPCODE_CAP_PER_CHANNEL;
+        for i in 0..(cap as u16) + 3 {
+            log_unknown_once(CH, i, &[]);
+        }
+        let keys = warn_once_keys();
+        // The first `cap` msg_types registered as individual hexdump keys.
+        let hexdump_count = keys
+            .iter()
+            .filter(|k| k.starts_with(&format!("{}:hexdump:", CH)))
+            .count();
+        assert_eq!(
+            hexdump_count, cap,
+            "expected exactly {} hexdump keys, got {}",
+            cap, hexdump_count
+        );
+        // The cap overflow fired a single suppression-notice key.
+        let cap_key = format!("{}:hexdump_cap", CH);
+        assert!(
+            keys.iter().any(|k| **k == cap_key),
+            "expected suppression-notice key {} in {:?}",
+            cap_key,
+            keys.iter().filter(|k| k.contains(CH)).collect::<Vec<_>>()
         );
     }
 }
