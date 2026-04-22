@@ -26,6 +26,9 @@ jobs:
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@shakenfist-bot please retest')
     runs-on: [self-hosted, static]
+    concurrency:
+      group: pr-retest-${{ github.event.issue.number }}
+      cancel-in-progress: true
 
     steps:
       - name: Handle trigger

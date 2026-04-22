@@ -174,6 +174,49 @@ When adding support for a new SPICE message:
 Keep constants.rs and logging.rs in sync -- every constant should have
 a name mapping so it doesn't show as "unknown" in logs.
 
+### warn_once for protocol gaps
+
+Any time the client deliberately drops, partially-handles, or falls
+back on something it received from the server, emit `warn_once!` with
+a colon-delimited `"<channel>:<kind>:<detail>"` static key. This
+includes:
+
+* Known-but-unimplemented opcodes -- every such match arm calls
+  `warn_once!("<channel>:unimpl:<opcode_name>", "...")` and then
+  `log_unknown_once("<channel>", msg_type, payload)` for a
+  first-occurrence hex dump.
+* Ignored sub-features on an otherwise-handled op -- non-`OP_PUT`
+  ROP descriptors, non-solid brushes, non-null `SpiceQMask`, non-zero
+  `alpha_flags`, etc. Key shape:
+  `"<channel>:<opcode>:<subfeature>"`.
+* Decode failures the channel recovers from (malformed image,
+  truncated payload) -- key shape `"<channel>:<opcode>:<failure>"`.
+
+Rules:
+
+* Keys must be `&'static str`; use string literals at call sites.
+  For dynamically-composed keys (e.g. `log_unknown_once` keying off
+  `channel × msg_type`), use `logging::intern_key`.
+* One key per distinct kind per session -- do not vary by instance
+  count or payload. Phase-8 pedantic mode reads the key registry to
+  build its gap counter; per-instance keys would blow it up.
+* Silent repeats: `warn_once!` only fires its `tracing::warn!` the
+  first time per session. The rest of the flow (skip / unmasked
+  paint / etc.) still runs normally on every call.
+* The truly-unknown-opcode `_ =>` arms in every channel handler
+  call `logging::log_unknown_once(channel, msg_type, payload)`
+  (added in phase 7 and wired up across every channel in phase 8c).
+  `log_unknown_once` enters the same warn_once registry with key
+  `"<channel>:hexdump:<msg_type>"`, hex-dumps the payload on first
+  occurrence, and stays silent on repeats. The older `log_unknown`
+  is unused in channel handlers as of phase 8.
+
+The registry is append-only within a session; there is no
+remove-or-reset API. Tests query via `warn_once_keys()` and key off
+literal strings containing the test's own name to avoid
+cross-pollination (`cargo test` runs tests in parallel against the
+shared registry).
+
 ## Protocol message structs
 
 Message structs in `protocol/messages.rs` follow this pattern:

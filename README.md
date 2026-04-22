@@ -5,6 +5,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 ## Features
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
+- **Full draw-op coverage** - Handles `DRAW_FILL`, `DRAW_OPAQUE`, `DRAW_COPY`, `DRAW_BLEND`, `DRAW_BLACKNESS`, `DRAW_WHITENESS`, `DRAW_INVERS`, `DRAW_TRANSPARENT`, `DRAW_ALPHA_BLEND`, and `COPY_BITS`. BIOS, GRUB, and kernel-console rendering now paints correctly (solid backgrounds, clean scroll regions). Deferred ops (`DRAW_ROP3`, `DRAW_STROKE`, `DRAW_TEXT`, `DRAW_COMPOSITE`) warn once per session with a first-occurrence hex dump so gaps are visible without flooding the log
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming
 - **Audio playback** - SPICE playback channel with raw PCM and Opus codec support; lock-free ring buffer to dedicated audio thread via cpal
 - **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
@@ -18,10 +19,13 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
 - **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
+- **Screenshot capture** - Press F8 or click "Screenshot" in the status bar to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
+- **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
+- **Protocol-gap counter** - `Gaps: N` button in the status bar tracks the number of distinct protocol edge cases seen this session (unknown opcodes, deferred ops, recoverable decode failures). Highlights red when N > 0; click to open a floating window listing the keys. Complements `--pedantic` mode.
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
-- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, and screenshots; Display reports include interactive region selection to highlight corruption
+- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, screenshots, and runtime metrics (process and per-thread CPU, RSS) for diagnosing performance reports; Display reports include interactive region selection to highlight corruption
 - **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 - **Folder sharing** - Click "Folders" in the status bar for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
@@ -45,6 +49,7 @@ Workflows in `.github/workflows/`:
 | `ci.yml` | Lint, build, test (multi-platform), automated PR review |
 | `release.yml` | Build and publish release artifacts |
 | `codeql-analysis.yml` | CodeQL security scanning |
+| `supply-chain.yml` | Dependency advisories, license policy, secret scanning, bidi/unicode checks |
 | `renovate.yml` | Automated dependency updates (hourly) |
 | `export-repo-config.yml` | Daily repository configuration export |
 | `pr-re-review.yml` | Bot-triggered PR re-review (`@shakenfist-bot please re-review`) |
@@ -193,6 +198,24 @@ This will:
 - Send automatic keystrokes every 2 seconds
 - Print statistics periodically
 
+### `--pedantic` mode
+
+When enabled with `--pedantic`, ryll writes a bug-report
+zip to `./ryll-pedantic-reports/` (or the directory
+specified with `--pedantic-dir <path>`) the first time
+each distinct protocol gap is seen — unsupported opcodes,
+unhandled sub-features, recoverable decode errors.
+Capped at 50 reports per session. Useful for surfacing
+implementation gaps against a specific guest workload.
+The always-visible `Gaps: N` status-bar counter works
+without `--pedantic` too; the counter only counts, it
+doesn't write.
+
+```bash
+ryll --file connection.vv --pedantic
+ryll --file connection.vv --pedantic --pedantic-dir /tmp/my-gaps
+```
+
 ## Architecture
 
 The repository is a Cargo workspace. Ryll itself lives in
@@ -207,6 +230,7 @@ ryll/src/
 ├── bugreport.rs         # Traffic ring buffer + channel snapshots
 ├── capture.rs           # Pcap + MP4 capture session
 ├── config.rs            # Configuration parsing
+├── metrics.rs           # /proc-based runtime metrics (Linux only)
 ├── protocol/
 │   ├── constants.rs     # SPICE protocol constants, capabilities
 │   ├── messages.rs      # Binary message structures

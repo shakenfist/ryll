@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::app::ByteCounter;
@@ -48,6 +48,7 @@ struct MuxClient {
 pub struct WebdavChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
     buffer: Vec<u8>,
     capture: Option<Arc<CaptureSession>>,
@@ -80,9 +81,11 @@ pub struct WebdavChannel {
 }
 
 impl WebdavChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         webdav_rx: mpsc::Receiver<WebdavCommand>,
         auto_share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
@@ -92,6 +95,7 @@ impl WebdavChannel {
         WebdavChannel {
             stream,
             event_tx,
+            repaint_notify,
             webdav_rx,
             buffer: Vec::with_capacity(65536),
             capture,
@@ -118,6 +122,7 @@ impl WebdavChannel {
             .send(ChannelEvent::WebdavChannelReady)
             .await
             .ok();
+        self.repaint_notify.notify_one();
 
         // If a shared directory was configured via CLI, create the server
         if let Some(ref dir) = self.shared_dir {
@@ -136,6 +141,7 @@ impl WebdavChannel {
                         })
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
                 Err(e) => {
                     error!("webdav: failed to create server for {}: {}", path_str, e);
@@ -146,6 +152,7 @@ impl WebdavChannel {
                         )))
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
             }
         }
@@ -178,6 +185,7 @@ impl WebdavChannel {
                             .send(ChannelEvent::Disconnected(ChannelType::Webdav))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                         break;
                     }
 
@@ -281,13 +289,7 @@ impl WebdavChannel {
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
             }
             _ => {
-                logging::log_unknown(
-                    "webdav",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                logging::log_unknown_once("webdav", msg_type, payload);
             }
         }
 
@@ -522,6 +524,7 @@ impl WebdavChannel {
                             })
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                     }
                     Err(e) => {
                         error!("webdav: failed to create server for {}: {}", path_str, e);
@@ -532,6 +535,7 @@ impl WebdavChannel {
                             )))
                             .await
                             .ok();
+                        self.repaint_notify.notify_one();
                     }
                 }
             }
@@ -544,6 +548,7 @@ impl WebdavChannel {
                     .send(ChannelEvent::WebdavSharingStopped)
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
         }
         Ok(())

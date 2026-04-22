@@ -62,6 +62,7 @@ communication between tasks.
 | Playback channel | Decode audio, push samples to ring buffer |
 | Audio thread | Consume ring buffer, resample, write to cpal device |
 | UI thread | egui rendering, input capture (GUI mode only) |
+| Repaint bridge | Wait on `Arc<Notify>`; call `egui::Context::request_repaint()` when channel handlers signal a state change. GUI mode only. |
 
 ### Channel Communication
 
@@ -89,7 +90,13 @@ communication between tasks.
 ```
 
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)
-  to the UI thread
+  to the UI thread. Each `event_tx.send()` is paired with a
+  `repaint_notify.notify_one()` on a shared `Arc<tokio::sync::Notify>`,
+  which a small bridge task forwards to `egui::Context::request_repaint()`.
+  This lets egui sleep when nothing is happening rather than polling
+  at 60 Hz; idle CPU drops by an order of magnitude on systems without
+  GPU acceleration. A 1 Hz `request_repaint_after` fallback covers
+  time-based UI elements (sparkline ticks, status-message expiry).
 - **input_tx/input_rx**: UI thread sends input events (keys, mouse) to the
   inputs channel handler. The channel is bounded (256 slots). The consumer
   coalesces consecutive MouseMove events into a single position update (or
@@ -143,7 +150,7 @@ All SPICE messages use a 6-byte mini-header:
 | Channel | Purpose | Message Examples |
 |---------|---------|------------------|
 | Main (1) | Session control | init, channels_list, ping/pong |
-| Display (2) | Graphics | surface_create, draw_copy, mark |
+| Display (2) | Graphics | surface_create, draw_fill, draw_copy, draw_blackness, draw_whiteness, draw_invers, copy_bits, draw_opaque, draw_blend, draw_transparent, draw_alpha_blend, mark |
 | Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
 | Playback (5) | Audio playback | playback_start, playback_data, playback_mode, playback_stop |
@@ -269,6 +276,90 @@ The correct display server opcodes are:
 - `MONITORS_CONFIG` = 317
 - `DRAW_COMPOSITE` = 318
 
+### Draw-op coverage
+
+The display channel handles the full set of
+`DRAW_*` / `COPY_BITS` opcodes that modern QXL emits in
+practice. Each opcode parses through a phase-1 protocol
+struct, runs through a per-op `decode_*` classifier (a
+pure free function that returns an `Outcome` enum), and
+emits a typed `ChannelEvent` that the app-side handler
+turns into a `DisplaySurface` mutation.
+
+| Opcode | Status | Channel event | Surface helper |
+|--------|--------|---------------|----------------|
+| `COPY_BITS` (104) | implemented | `CopyBits` | `copy_bits` (snapshot-safe for overlap) |
+| `DRAW_FILL` (302) | implemented | `FillRect` | `fill_rect` |
+| `DRAW_OPAQUE` (303) | implemented | `ImageReady` | `blit` |
+| `DRAW_COPY` (304) | implemented | `ImageReady` | `blit` |
+| `DRAW_BLEND` (305) | implemented | `ImageReady` | `blit` |
+| `DRAW_BLACKNESS` (306) | implemented | `FillRect` (colour `[0,0,0,255]`) | `fill_rect` |
+| `DRAW_WHITENESS` (307) | implemented | `FillRect` (colour `[255,255,255,255]`) | `fill_rect` |
+| `DRAW_INVERS` (308) | implemented | `Invert` | `invert_rect` |
+| `DRAW_ROP3` (309) | warn-once | — | — |
+| `DRAW_STROKE` (310) | warn-once | — | — |
+| `DRAW_TEXT` (311) | warn-once | — | — |
+| `DRAW_TRANSPARENT` (312) | implemented | `ImageReadyChroma` | `blit_chroma` (chroma-key) |
+| `DRAW_ALPHA_BLEND` (313) | implemented | `ImageReadyAlpha` | `blit_alpha` (constant-alpha source-over) |
+| `DRAW_COMPOSITE` (318) | warn-once | — | — |
+
+Implemented ops silently ignore a handful of sub-features
+that modern QXL rarely uses (non-`SPICE_ROPD_OP_PUT`
+rops, non-solid brushes in `DRAW_FILL`/`DRAW_OPAQUE`,
+non-null `SpiceQMask`). Each such fallback fires a
+`warn_once!` with a stable registry key (see
+STYLEGUIDE.md §"warn_once for protocol gaps" for the
+convention) so the fallback is visible exactly once per
+session. The `--pedantic` mode and always-visible
+`Gaps: N` status-bar counter surface these the moment
+they happen. See the pedantic-mode entry below.
+
+### Colour byte-order convention
+
+All SPICE colour fields (brush colours, chroma keys, etc.)
+are BGRX on the wire: a `u32` read little-endian gives
+bytes `[B, G, R, X]`. `DisplaySurface` stores pixels as
+RGBA. **The BGRX → RGBA conversion happens in the channel
+handler, not in the surface helpers** — surfaces trust
+their inputs. This means:
+
+* `FillRect.colour`, `ImageReadyChroma.chroma_rgba`, and
+  every `ImageReady*.pixels` buffer is RGBA by the time
+  it reaches the app-side handler.
+* The conversion idiom at the channel site is:
+  `[r, g, b, a] = [(c>>16)&0xff, (c>>8)&0xff, c&0xff, 0xff]`
+  where `c` is the wire `u32`. Decoded image pixels are
+  byte-swapped (when the source format isn't already
+  RGBA) at decode time in `decode_image_and_emit`.
+
+### `--pedantic` mode and the warn_once registry
+
+Every protocol gap — truly-unknown opcode, known-but-
+unimplemented opcode, ignored sub-feature on an
+implemented op, recoverable decode failure — is
+registered in the process-global warn_once registry
+defined in
+[shakenfist-spice-protocol/src/logging.rs](../shakenfist-spice-protocol/src/logging.rs).
+Each call site holds a stable `&'static str` key shaped
+`"<channel>:<kind>:<detail>"`; the registry fires
+`tracing::warn!` exactly once per key per session.
+
+The registry has a subscribe-and-replay hook
+(`register_gap_observer`). `--pedantic` mode registers
+an observer that writes one bug-report zip per new gap
+into `--pedantic-dir` (default `./ryll-pedantic-reports/`,
+capped at 50 zips per session). The observer runs inside
+the app constructor (`RyllApp::new` for the GUI,
+`run_headless` for headless) so the zips capture live
+`TrafficBuffers` and `ChannelSnapshots` at the moment
+the gap fires.
+
+The always-visible `Gaps: N` button in the bottom status
+panel polls `warn_once_count()` each frame; clicking opens
+a floating window listing every fired key. The counter
+works without `--pedantic` — `--pedantic` only adds the
+bug-report-per-gap automation on top.
+
 ## Multi-Monitor Support
 
 Ryll supports multiple monitors via the `--monitors N` CLI option.
@@ -349,6 +440,13 @@ fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 
 No objects accumulate - the surface pixel buffer is updated in place, and the
 texture is re-uploaded each frame when dirty.
+
+Each frame's `process_events` drains the `ChannelEvent`
+channel and dispatches image / fill / copy-bits /
+invert / chroma / alpha events into the corresponding
+`DisplaySurface` helper. See the draw-op coverage table
+above for the full mapping from opcode to event to
+surface method.
 
 ### Headless Mode
 
@@ -657,11 +755,25 @@ Ryll tracks:
   The window keeps the most recent 120 timestamps for an accurate
   short-term reading.
 - **Bytes in/out**: Network throughput per channel
-- **Latency**: Time from key press to display update (cadence mode)
+- **Latency**: Client-observed inter-PING interval on the main channel,
+  in milliseconds. SPICE has no client-originated probe (`SPICE_MSG_PING`
+  is server→client only), so ryll cannot measure absolute network RTT.
+  Instead, the main-channel PING handler records `Instant::now()` and
+  emits the gap to the previous PING as a sample. The number includes
+  the server's send cadence and the client's receive turnaround;
+  spikes indicate a network or server stall. Sparkline mirrors the
+  bandwidth one (60-sample rolling history, amber bars). Implemented
+  via `LatencyTracker` in `app.rs`.
 - **Bandwidth sparkline**: A rolling 60-sample history of bytes/sec is
   displayed in the status bar as a small bar chart. Channel read loops
   increment a shared `AtomicU64` byte counter; the `BandwidthTracker`
   in `app.rs` samples it once per second and renders the sparkline.
+- **Runtime metrics in bug reports**: each bug-report ZIP includes a
+  `runtime-metrics.json` file with process and per-thread CPU%, RSS,
+  and VmSize sampled over a 2-second window. Linux-only (reads
+  `/proc/self/stat`, `/proc/self/status`, and `/proc/self/task/*/`);
+  non-Linux platforms emit a graceful "unavailable" payload.
+  Implemented in `ryll/src/metrics.rs`.
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
@@ -714,17 +826,23 @@ zip contains:
 
 ```
 ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
-├── metadata.json       # report type, description, ryll version,
-│                       #   platform, target host/port, timestamp
-├── session.json        # AppSnapshot (FPS, bandwidth, surfaces)
-├── channel-state.json  # snapshot of the affected channel
-├── traffic.pcap        # ring buffer pcap (capture feature only)
-└── screenshot.png      # display reports only (RGBA → PNG)
+├── metadata.json         # report type, description, ryll version,
+│                         #   platform, target host/port, timestamp
+├── session.json          # AppSnapshot (FPS, bandwidth, surfaces)
+├── channel-state.json    # snapshot of the affected channel
+├── traffic.pcap          # ring buffer pcap (capture feature only)
+├── screenshot.png        # display reports only (RGBA → PNG)
+└── runtime-metrics.json  # process and per-thread CPU%, RSS, VmSize
+                          #   sampled over a 2-second window at
+                          #   report-creation time (Linux only;
+                          #   non-Linux platforms record
+                          #   available:false with a reason)
 ```
 
 Report types are `Display`, `Input`, `Cursor`, and `Connection`,
-each mapping to one SPICE channel.  `BugReport::new()` gathers
-and serialises all data synchronously.  `BugReport::write_zip()`
+each mapping to one SPICE channel.  `BugReport::new()` samples
+runtime metrics over a 2-second window (blocking the caller), then
+gathers and serialises all data synchronously.  `BugReport::write_zip()`
 writes the zip to the capture directory's `bug-reports/`
 subdirectory (if `--capture` is active) or the current working
 directory.

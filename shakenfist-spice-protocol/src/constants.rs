@@ -355,6 +355,32 @@ pub mod mouse_buttons {
     pub const DOWN: u32 = 1 << 4;
 }
 
+/// Raster-operation descriptors (SPICE_ROPD_* in enums.h).
+///
+/// Draw ops carry a u16 bitfield describing how the source,
+/// brush, and destination combine. Modern QXL almost always
+/// emits OP_PUT (overwrite destination).
+pub mod ropd {
+    pub const INVERS_SRC: u16 = 1 << 0;
+    pub const INVERS_BRUSH: u16 = 1 << 1;
+    pub const INVERS_DEST: u16 = 1 << 2;
+    pub const OP_PUT: u16 = 1 << 3;
+    pub const OP_OR: u16 = 1 << 4;
+    pub const OP_AND: u16 = 1 << 5;
+    pub const OP_XOR: u16 = 1 << 6;
+    pub const OP_BLACKNESS: u16 = 1 << 7;
+    pub const OP_WHITENESS: u16 = 1 << 8;
+    pub const OP_INVERS: u16 = 1 << 9;
+    pub const INVERS_RES: u16 = 1 << 10;
+}
+
+/// Brush-type tag (SPICE_BRUSH_TYPE_* in enums.h).
+pub mod brush {
+    pub const NONE: u8 = 0;
+    pub const SOLID: u8 = 1;
+    pub const PATTERN: u8 = 2;
+}
+
 /// Notify severity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]

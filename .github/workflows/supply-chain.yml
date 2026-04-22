@@ -1,0 +1,119 @@
+# Supply-chain and prompt-injection scanners.
+#
+# Runs on every PR to develop and on pushes to develop, plus a weekly
+# cron to catch advisory drift. All jobs run on self-hosted VM runners
+# (the `vm` label excludes bare-metal runners which have different
+# OSes and no passwordless sudo). Most jobs target `debian-12` with
+# size `s` (2 vCPU, 4 GB RAM) — these scanners are I/O-bound and do
+# not benefit from a larger runner. The gitleaks job targets
+# `debian-13` because gitleaks is not packaged in bookworm, and the
+# cargo-deny job targets `debian-12-docker` because
+# cargo-deny-action runs its check inside a Docker container. See
+# docs/plans/PLAN-supply-chain-scanning.md for the design rationale,
+# and deny.toml for the policy enforced by cargo-deny.
+
+name: Supply chain
+
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [develop]
+  schedule:
+    # Weekly at 09:00 UTC on Monday. Catches advisory drift against
+    # develop even when no PR has run recently.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  # cargo-audit needs cargo on PATH. The static runner is minimal
+  # (git only), so we run on debian-12 and install the stable rust
+  # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
+  # for the toolchain itself).
+  cargo-audit:
+    name: cargo audit
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-audit
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # cargo-deny-action runs cargo-deny inside a Docker
+  # container, so this job needs the debian-12-docker image
+  # which ships with docker.io preinstalled.
+  cargo-deny:
+    name: cargo deny
+    runs-on: [self-hosted, vm, debian-12-docker, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # gitleaks-action@v2 refuses to run on organization repos
+  # without a paid licence. We invoke the upstream gitleaks
+  # binary directly instead, which has no such restriction.
+  # gitleaks is only packaged from Debian 13 (trixie) onward
+  # — bookworm has no gitleaks package — so this job runs on
+  # debian-13.
+  gitleaks:
+    name: gitleaks
+    runs-on: [self-hosted, vm, debian-13, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: sudo apt-get update && sudo apt-get install -y gitleaks
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose --no-banner
+
+  # shellcheck is packaged in Debian 12, so apt-install and run.
+  shellcheck:
+    name: shellcheck
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-shellcheck
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: ./tools/run-shellcheck.sh
+
+  bidi-check:
+    name: bidi and zero-width
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan tree for bidi and zero-width characters
+        run: ./tools/check-bidi.sh

@@ -4,7 +4,7 @@ use flate2::read::ZlibDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
@@ -15,15 +15,17 @@ use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
     GlzDictionary,
 };
+use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawCopyBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SurfaceCreate,
+    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
+    SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
+    SpiceTransparent, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
-    display_client, display_server, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
+    display_client, display_server, warn_once, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
 };
 
 use super::ChannelEvent;
@@ -142,6 +144,364 @@ struct StreamState {
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
 
+/// What we decided to do with a DRAW_FILL after classifying its
+/// rop/brush/mask. Extracted from `handle_draw_fill` so the
+/// parse-and-classify logic is independently testable without
+/// standing up a full `DisplayChannel`.
+#[derive(Debug, Clone)]
+enum FillOutcome {
+    /// Happy path: paint `colour` (RGBA) into `base.rect` with
+    /// `base.clip_rects`.
+    Paint {
+        base: DrawBase,
+        colour: [u8; 4],
+        /// True when a non-null mask was present; we still paint,
+        /// but unmasked, and the caller has already warn_once'd.
+        masked_fallback: bool,
+    },
+    /// ROP descriptor wasn't SPICE_ROPD_OP_PUT — skip.
+    SkipNonOpPut { rop: u16 },
+    /// Brush type was NONE — skip.
+    SkipNoneBrush,
+    /// Brush type was PATTERN — skip (not yet supported).
+    SkipPatternBrush,
+}
+
+/// Emit a one-line "surface / rect / clip_type" preview of a draw-op
+/// payload when `-v` verbose mode is set. Handlers call this as a
+/// cheap header on entry; the real decoding still happens in the
+/// `decode_*` classifier. Doing it here keeps the nine image- and
+/// mask-bearing handlers from each copy-pasting the same eight
+/// lines.
+fn log_draw_base_if_verbose(payload: &[u8], op_name: &str) {
+    if !settings::is_verbose() {
+        return;
+    }
+    if let Ok(base) = DrawBase::read(payload) {
+        logging::log_detail(&format!(
+            "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
+            op_name, base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+        ));
+    }
+}
+
+fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
+    let base = DrawBase::read(payload)?;
+    let (fill, _consumed) = SpiceFill::read(&payload[base.end_offset..])?;
+
+    if fill.rop_descriptor != ropd::OP_PUT {
+        return Ok(FillOutcome::SkipNonOpPut {
+            rop: fill.rop_descriptor,
+        });
+    }
+
+    let color = match fill.brush {
+        SpiceBrush::Solid { color } => color,
+        SpiceBrush::None => return Ok(FillOutcome::SkipNoneBrush),
+        SpiceBrush::Pattern { .. } => return Ok(FillOutcome::SkipPatternBrush),
+    };
+
+    let masked_fallback = fill.mask.flags != 0 || fill.mask.bitmap_offset != 0;
+
+    let rgba = [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        0xff,
+    ];
+
+    Ok(FillOutcome::Paint {
+        base,
+        colour: rgba,
+        masked_fallback,
+    })
+}
+
+/// Outcome of decoding a DRAW_BLACKNESS or DRAW_WHITENESS payload.
+///
+/// Both opcodes share the same 13-byte body (SpiceQMask) and both
+/// reduce to painting a solid RGBA rect, so the decoder returns the
+/// geometry and whether a non-null mask was present; the caller
+/// supplies the colour.
+#[derive(Debug, Clone)]
+enum SolidFillOutcome {
+    Paint {
+        base: DrawBase,
+        masked_fallback: bool,
+    },
+}
+
+fn decode_draw_solid_fill(payload: &[u8]) -> std::io::Result<SolidFillOutcome> {
+    let base = DrawBase::read(payload)?;
+    let body = SpiceBlackness::read(&payload[base.end_offset..])?;
+    let masked_fallback = body.mask.flags != 0 || body.mask.bitmap_offset != 0;
+    Ok(SolidFillOutcome::Paint {
+        base,
+        masked_fallback,
+    })
+}
+
+/// Outcome of decoding a COPY_BITS payload.
+///
+/// COPY_BITS has no mask, brush, or rop — every payload is an
+/// intra-surface pixel copy — so the decoder just classifies the
+/// geometry and leaves the actual copy to `DisplaySurface::copy_bits`.
+#[derive(Debug, Clone)]
+enum CopyBitsOutcome {
+    Copy {
+        base: DrawBase,
+        src_x: u32,
+        src_y: u32,
+    },
+}
+
+fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
+    let base = DrawBase::read(payload)?;
+    let src_pos = SpicePoint::read(&payload[base.end_offset..])?;
+    // Wire type is int32; source coords are logically unsigned
+    // indices into the surface buffer. Clamp negatives to 0.
+    let src_x = src_pos.x.max(0) as u32;
+    let src_y = src_pos.y.max(0) as u32;
+    Ok(CopyBitsOutcome::Copy { base, src_x, src_y })
+}
+
+/// Outcome of decoding a DRAW_BLEND payload.
+///
+/// DRAW_BLEND shares the 36-byte SpiceCopy/SpiceBlend header with
+/// DRAW_COPY (draw.h defines the latter as a typedef for the
+/// former). On OP_PUT the blend is identical to a DRAW_COPY; any
+/// other ROP would require compositing that we don't implement, so
+/// we warn_once and skip.
+#[derive(Debug, Clone)]
+enum BlendOutcome {
+    Paint {
+        base: DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipNonOpPut {
+        rop: u16,
+    },
+}
+
+fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
+    let base = DrawBase::read(payload)?;
+    let copy_start = base.end_offset;
+    if payload.len() < copy_start + 36 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Not enough data for SpiceBlend",
+        ));
+    }
+    let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
+    let src_top = read_u32_le(payload, copy_start + 4);
+    let src_left = read_u32_le(payload, copy_start + 8);
+    let src_bottom = read_u32_le(payload, copy_start + 12);
+    let src_right = read_u32_le(payload, copy_start + 16);
+    let rop = read_u16_le(payload, copy_start + 20);
+    // scale_mode and mask are parsed-through silently, matching
+    // how handle_draw_copy treats them today.
+
+    if rop != ropd::OP_PUT {
+        return Ok(BlendOutcome::SkipNonOpPut { rop });
+    }
+    Ok(BlendOutcome::Paint {
+        base,
+        src_bitmap_offset,
+        src_top,
+        src_left,
+        src_bottom,
+        src_right,
+    })
+}
+
+/// Outcome of decoding a DRAW_OPAQUE payload.
+///
+/// DRAW_OPAQUE carries a brush between src_area and rop_descriptor,
+/// parsed via the phase-1 SpiceOpaque struct. On OP_PUT the brush
+/// is irrelevant (per draw.h semantics: the brush only participates
+/// in ROPs that reference the pattern source), so we ignore it
+/// silently. On any other ROP we warn_once and skip — the rop/brush
+/// combination would require compositing we don't implement.
+#[derive(Debug, Clone)]
+enum OpaqueOutcome {
+    Paint {
+        base: DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipNonOpPut {
+        rop: u16,
+    },
+}
+
+fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
+    let base = DrawBase::read(payload)?;
+    let (opaque, _consumed) = SpiceOpaque::read(&payload[base.end_offset..])?;
+
+    if opaque.rop_descriptor != ropd::OP_PUT {
+        return Ok(OpaqueOutcome::SkipNonOpPut {
+            rop: opaque.rop_descriptor,
+        });
+    }
+    Ok(OpaqueOutcome::Paint {
+        base,
+        src_bitmap_offset: opaque.src_bitmap as usize,
+        src_top: opaque.src_top,
+        src_left: opaque.src_left,
+        src_bottom: opaque.src_bottom,
+        src_right: opaque.src_right,
+    })
+}
+
+/// Outcome of decoding a DRAW_TRANSPARENT payload.
+///
+/// Chroma-key blit with no skip case: every payload is paintable
+/// (the compositor at the surface side is what inspects the chroma
+/// colour against each pixel).
+#[derive(Debug, Clone)]
+enum TransparentOutcome {
+    Paint {
+        base: DrawBase,
+        chroma_rgba: [u8; 4],
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+}
+
+fn decode_draw_transparent(payload: &[u8]) -> std::io::Result<TransparentOutcome> {
+    let base = DrawBase::read(payload)?;
+    let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
+    // src_color is BGRX little-endian, same convention as brush colour.
+    let chroma_rgba = [
+        ((transparent.src_color >> 16) & 0xff) as u8,
+        ((transparent.src_color >> 8) & 0xff) as u8,
+        (transparent.src_color & 0xff) as u8,
+        0xff,
+    ];
+    Ok(TransparentOutcome::Paint {
+        base,
+        chroma_rgba,
+        src_bitmap_offset: transparent.src_bitmap as usize,
+        src_top: transparent.src_top,
+        src_left: transparent.src_left,
+        src_bottom: transparent.src_bottom,
+        src_right: transparent.src_right,
+    })
+}
+
+/// Outcome of decoding a DRAW_ALPHA_BLEND payload.
+///
+/// `alpha == 0` is short-circuited here (matches canvas_base.c
+/// which early-returns without touching the destination); the
+/// handler simply returns without decoding the image. `alpha_flags`
+/// is carried through so the handler can warn_once on non-zero
+/// values even though we paint anyway.
+#[derive(Debug, Clone)]
+enum AlphaBlendOutcome {
+    Paint {
+        base: DrawBase,
+        alpha: u8,
+        alpha_flags: u16,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+    },
+    SkipZeroAlpha,
+}
+
+fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome> {
+    let base = DrawBase::read(payload)?;
+    let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
+    if ab.alpha == 0 {
+        return Ok(AlphaBlendOutcome::SkipZeroAlpha);
+    }
+    Ok(AlphaBlendOutcome::Paint {
+        base,
+        alpha: ab.alpha,
+        alpha_flags: ab.alpha_flags,
+        src_bitmap_offset: ab.src_bitmap as usize,
+        src_top: ab.src_top,
+        src_left: ab.src_left,
+        src_bottom: ab.src_bottom,
+        src_right: ab.src_right,
+    })
+}
+
+/// How `decode_image_and_emit` should composite the decoded
+/// source pixels into the destination surface.
+#[derive(Debug, Clone, Copy)]
+enum CompositeMode {
+    /// Straight overwrite — emits ChannelEvent::ImageReady.
+    /// Used by DRAW_COPY, DRAW_BLEND, DRAW_OPAQUE.
+    Overwrite,
+    /// Chroma-key — emits ChannelEvent::ImageReadyChroma.
+    /// Used by DRAW_TRANSPARENT.
+    ChromaKey { chroma_rgba: [u8; 4] },
+    /// Constant-alpha source-over — emits ChannelEvent::ImageReadyAlpha.
+    /// Used by DRAW_ALPHA_BLEND.
+    AlphaBlend { alpha: u8 },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_image_event(
+    composite: CompositeMode,
+    display_channel_id: u8,
+    surface_id: u32,
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    image_id: u64,
+) -> ChannelEvent {
+    match composite {
+        CompositeMode::Overwrite => ChannelEvent::ImageReady {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            image_id,
+        },
+        CompositeMode::ChromaKey { chroma_rgba } => ChannelEvent::ImageReadyChroma {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            chroma_rgba,
+            image_id,
+        },
+        CompositeMode::AlphaBlend { alpha } => ChannelEvent::ImageReadyAlpha {
+            display_channel_id,
+            surface_id,
+            left,
+            top,
+            width,
+            height,
+            pixels,
+            alpha,
+            image_id,
+        },
+    }
+}
+
 /// GLZ dictionary shared across all display channels.
 pub type SharedGlzDictionary = Arc<GlzDictionary>;
 
@@ -149,6 +509,7 @@ pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
+    repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
     image_cache: HashMap<u64, Vec<u8>>,
@@ -176,6 +537,7 @@ impl DisplayChannel {
         channel_id: u8,
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
+        repaint_notify: Arc<Notify>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
@@ -186,6 +548,7 @@ impl DisplayChannel {
             channel_id,
             stream,
             event_tx,
+            repaint_notify,
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
             image_cache: HashMap::new(),
@@ -231,6 +594,7 @@ impl DisplayChannel {
                     .send(ChannelEvent::Disconnected(ChannelType::Display))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
                 break;
             }
 
@@ -348,6 +712,7 @@ impl DisplayChannel {
                     })
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
 
             display_server::SURFACE_DESTROY => {
@@ -366,15 +731,80 @@ impl DisplayChannel {
                         })
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
+            }
+
+            display_server::COPY_BITS => {
+                self.handle_copy_bits(payload).await?;
+            }
+
+            display_server::DRAW_FILL => {
+                self.handle_draw_fill(payload).await?;
+            }
+
+            display_server::DRAW_OPAQUE => {
+                self.handle_draw_opaque(payload).await?;
             }
 
             display_server::DRAW_COPY => {
                 self.handle_draw_copy(payload).await?;
             }
 
+            display_server::DRAW_BLEND => {
+                self.handle_draw_blend(payload).await?;
+            }
+
+            display_server::DRAW_BLACKNESS => {
+                self.handle_draw_blackness(payload).await?;
+            }
+
+            display_server::DRAW_WHITENESS => {
+                self.handle_draw_whiteness(payload).await?;
+            }
+
+            display_server::DRAW_INVERS => {
+                self.handle_draw_invers(payload).await?;
+            }
+
+            display_server::DRAW_TRANSPARENT => {
+                self.handle_draw_transparent(payload).await?;
+            }
+
+            display_server::DRAW_ALPHA_BLEND => {
+                self.handle_draw_alpha_blend(payload).await?;
+            }
+
+            display_server::DRAW_ROP3 => {
+                warn_once!(
+                    "display:unimpl:draw_rop3",
+                    "display: draw_rop3: unimplemented, skipping (256-entry ROP truth-table evaluator not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
+            display_server::DRAW_STROKE => {
+                warn_once!(
+                    "display:unimpl:draw_stroke",
+                    "display: draw_stroke: unimplemented, skipping (line/path rasteriser not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
+            display_server::DRAW_TEXT => {
+                warn_once!(
+                    "display:unimpl:draw_text",
+                    "display: draw_text: unimplemented, skipping (glyph rendering not yet ported)"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
+            }
+
             display_server::DRAW_COMPOSITE => {
-                debug!("display: draw_composite (not yet implemented, skipping)");
+                warn_once!(
+                    "display:unimpl:draw_composite",
+                    "display: draw_composite: unimplemented, skipping"
+                );
+                logging::log_unknown_once("display", msg_type, payload);
             }
 
             display_server::MONITORS_CONFIG => {
@@ -409,6 +839,7 @@ impl DisplayChannel {
             display_server::MARK => {
                 debug!("display: mark");
                 self.event_tx.send(ChannelEvent::DisplayMark).await.ok();
+                self.repaint_notify.notify_one();
             }
 
             display_server::SET_ACK => {
@@ -610,6 +1041,7 @@ impl DisplayChannel {
                                     })
                                     .await
                                     .ok();
+                                self.repaint_notify.notify_one();
                             }
                             None => {
                                 debug!("display: stream {} MJPEG decode failed", stream_id);
@@ -644,14 +1076,8 @@ impl DisplayChannel {
             }
 
             _ => {
-                // Unknown message - log with hex dump
-                logging::log_unknown(
-                    "display",
-                    "received",
-                    msg_type,
-                    payload.len() as u32,
-                    payload,
-                );
+                // Unknown opcode — log hex once per msg_type, silent on repeat.
+                logging::log_unknown_once("display", msg_type, payload);
             }
         }
 
@@ -660,11 +1086,14 @@ impl DisplayChannel {
 
     async fn handle_draw_copy(&mut self, payload: &[u8]) -> Result<()> {
         if payload.len() < 21 {
-            warn!("display: draw_copy payload too short");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_payload",
+                "display: draw_copy payload too short"
+            );
             return Ok(());
         }
 
-        let base = DrawCopyBase::read(payload)?;
+        let base = DrawBase::read(payload)?;
         let left = base.left;
         let top = base.top;
 
@@ -678,14 +1107,20 @@ impl DisplayChannel {
         // SpiceCopy starts with src_bitmap offset (u32) pointing to SpiceImage
         let copy_start = base.end_offset;
         if payload.len() < copy_start + 4 {
-            warn!("display: draw_copy: payload too short for SpiceCopy");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_spice_copy",
+                "display: draw_copy: payload too short for SpiceCopy"
+            );
             return Ok(());
         }
 
         let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
 
         if payload.len() < copy_start + 36 {
-            warn!("display: draw_copy: payload too short for SpiceCopy header");
+            warn_once!(
+                "display:decode_failure:draw_copy:short_spice_copy_header",
+                "display: draw_copy: payload too short for SpiceCopy header"
+            );
             return Ok(());
         }
 
@@ -715,19 +1150,59 @@ impl DisplayChannel {
             );
         }
 
+        self.decode_image_and_emit(
+            payload,
+            "draw_copy",
+            &base,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
+            CompositeMode::Overwrite,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn decode_image_and_emit(
+        &mut self,
+        payload: &[u8],
+        op_name: &str,
+        base: &DrawBase,
+        src_bitmap_offset: usize,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+        composite: CompositeMode,
+    ) -> Result<()> {
         if src_bitmap_offset == 0 {
-            warn!("display: draw_copy: null src_bitmap");
+            logging::warn_once_impl(
+                logging::intern_key(format!(
+                    "display:decode_failure:{}:null_src_bitmap",
+                    op_name
+                )),
+                &format!("display: {}: null src_bitmap", op_name),
+            );
             return Ok(());
         }
 
         let image_start = src_bitmap_offset;
         if payload.len() < image_start + ImageDescriptor::SIZE {
-            warn!(
-                "display: draw_copy: payload too short for image descriptor \
-                 (have {}, need {}, offset={})",
-                payload.len(),
-                image_start + ImageDescriptor::SIZE,
-                src_bitmap_offset
+            logging::warn_once_impl(
+                logging::intern_key(format!(
+                    "display:decode_failure:{}:short_payload_img_desc",
+                    op_name
+                )),
+                &format!(
+                    "display: {}: payload too short for image descriptor \
+                     (have {}, need {}, offset={})",
+                    op_name,
+                    payload.len(),
+                    image_start + ImageDescriptor::SIZE,
+                    src_bitmap_offset
+                ),
             );
             return Ok(());
         }
@@ -737,18 +1212,22 @@ impl DisplayChannel {
 
         let image_data_start = image_start + ImageDescriptor::SIZE;
         if image_data_start >= payload.len() {
-            warn!("display: draw_copy: no image data");
+            logging::warn_once_impl(
+                logging::intern_key(format!("display:decode_failure:{}:no_image_data", op_name)),
+                &format!("display: {}: no image data", op_name),
+            );
             return Ok(());
         }
 
         let image_data = &payload[image_data_start..];
 
         debug!(
-            "display: draw_copy: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
+            "display: {}: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
              flags={}, data_bytes={}",
+            op_name,
             base.surface_id,
-            left,
-            top,
+            base.left,
+            base.top,
             img_desc.width,
             img_desc.height,
             image_type,
@@ -764,7 +1243,10 @@ impl DisplayChannel {
                 // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
                 // then raw pixel rows.
                 if image_data.len() < 18 {
-                    warn!("display: pixmap BitmapData header too short");
+                    warn_once!(
+                        "display:decode_failure:pixmap:short_bitmap_data",
+                        "display: pixmap BitmapData header too short"
+                    );
                     None
                 } else {
                     let bmp_fmt = image_data[0];
@@ -783,7 +1265,8 @@ impl DisplayChannel {
 
                     // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
                     if bmp_fmt != 8 && bmp_fmt != 9 {
-                        warn!(
+                        warn_once!(
+                            "display:decode_failure:pixmap:format_unsupported",
                             "display: pixmap format {} not supported (only 32-bit)",
                             bmp_fmt
                         );
@@ -793,14 +1276,64 @@ impl DisplayChannel {
                     let width = bmp_width;
                     let height = bmp_height;
                     let stride = bmp_stride as usize;
-                    let pixel_count = (width as usize) * (height as usize);
-                    let expected_pixels = pixel_count * 4;
+                    let width_usize = width as usize;
+                    let height_usize = height as usize;
 
-                    if stride * (height as usize) > pixel_data.len() {
-                        warn!(
+                    // Guard every width/height/stride multiplication against
+                    // overflow — a malicious server can send u32::MAX on
+                    // any of these, and unchecked arithmetic on usize would
+                    // either panic (debug) or wrap silently (release) and
+                    // allow the short-data check below to pass before we
+                    // index out-of-bounds in the blit loop.
+                    let Some(pixel_count) = width_usize.checked_mul(height_usize) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap dimensions overflow ({} × {}), skipping",
+                            width,
+                            height
+                        );
+                        return Ok(());
+                    };
+                    // Cap pixel count at 64M (= 8192 × 8192 worth of RGBA,
+                    // i.e. 256 MiB). No realistic SPICE pixmap draw needs
+                    // more; a larger value means the server is malformed
+                    // or adversarial and we refuse to allocate against
+                    // attacker-controlled dimensions.
+                    const MAX_PIXMAP_PIXELS: usize = 64 * 1024 * 1024;
+                    if pixel_count > MAX_PIXMAP_PIXELS {
+                        warn_once!(
+                            "display:decode_failure:pixmap:too_large",
+                            "display: pixmap {} pixels exceeds {} cap, skipping",
+                            pixel_count,
+                            MAX_PIXMAP_PIXELS
+                        );
+                        return Ok(());
+                    }
+                    let Some(expected_pixels) = pixel_count.checked_mul(4) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap pixel bytes overflow ({} × {} × 4), skipping",
+                            width,
+                            height
+                        );
+                        return Ok(());
+                    };
+                    let Some(needed_bytes) = stride.checked_mul(height_usize) else {
+                        warn_once!(
+                            "display:decode_failure:pixmap:dimension_overflow",
+                            "display: pixmap stride × height overflow (stride={}, height={}), skipping",
+                            stride,
+                            height
+                        );
+                        return Ok(());
+                    };
+
+                    if needed_bytes > pixel_data.len() {
+                        warn_once!(
+                            "display:decode_failure:pixmap:short_pixel_data",
                             "display: pixmap data too short (have {}, need {})",
                             pixel_data.len(),
-                            stride * (height as usize)
+                            needed_bytes
                         );
                         None
                     } else {
@@ -837,13 +1370,20 @@ impl DisplayChannel {
             Some(ImageType::GlzRgb) => {
                 // Skip 4-byte data_size prefix before the GLZ header
                 if image_data.len() < 4 {
-                    warn!("display: GLZ image data too short");
+                    warn_once!(
+                        "display:decode_failure:glz:short_data",
+                        "display: GLZ image data too short"
+                    );
                     None
                 } else {
                     match decompress_glz(&image_data[4..], &self.glz_dictionary).await {
                         Ok(img) => Some(img),
                         Err(e) => {
-                            warn!("display: GLZ decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:glz:decompress_failed",
+                                "display: GLZ decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -852,13 +1392,20 @@ impl DisplayChannel {
             Some(ImageType::LzRgb) => {
                 // Skip 4-byte data_size prefix before the LZ header
                 if image_data.len() < 4 {
-                    warn!("display: LZ image data too short");
+                    warn_once!(
+                        "display:decode_failure:lz:short_data",
+                        "display: LZ image data too short"
+                    );
                     None
                 } else {
                     match decompress_lz(&image_data[4..]) {
                         Ok(img) => Some(img),
                         Err(e) => {
-                            warn!("display: LZ decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:lz:decompress_failed",
+                                "display: LZ decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -868,7 +1415,10 @@ impl DisplayChannel {
                 // Zlib-compressed GLZ data: glz_data_size (u32 LE) +
                 // compressed_size (u32 LE) + zlib-compressed GLZ stream
                 if image_data.len() < 8 {
-                    warn!("display: ZLIB_GLZ_RGB data too short");
+                    warn_once!(
+                        "display:decode_failure:zlib_glz:short_data",
+                        "display: ZLIB_GLZ_RGB data too short"
+                    );
                     None
                 } else {
                     let _glz_size = read_u32_le(image_data, 0) as usize;
@@ -881,12 +1431,20 @@ impl DisplayChannel {
                         Ok(_) => match decompress_glz(&glz_data, &self.glz_dictionary).await {
                             Ok(img) => Some(img),
                             Err(e) => {
-                                warn!("display: ZLIB_GLZ_RGB GLZ decompression failed: {}", e);
+                                warn_once!(
+                                    "display:decode_failure:zlib_glz:glz_failed",
+                                    "display: ZLIB_GLZ_RGB GLZ decompression failed: {}",
+                                    e
+                                );
                                 None
                             }
                         },
                         Err(e) => {
-                            warn!("display: ZLIB_GLZ_RGB zlib decompression failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:zlib_failed",
+                                "display: ZLIB_GLZ_RGB zlib decompression failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -915,14 +1473,21 @@ impl DisplayChannel {
                         img_desc.image_id,
                     ))
                 } else {
-                    warn!("display: image {} not in cache", img_desc.image_id);
+                    warn_once!(
+                        "display:decode_failure:from_cache:miss",
+                        "display: image {} not in cache",
+                        img_desc.image_id
+                    );
                     None
                 }
             }
             Some(ImageType::Jpeg) => {
                 // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
                 if image_data.len() < 4 {
-                    warn!("display: JPEG data too short");
+                    warn_once!(
+                        "display:decode_failure:jpeg:short_data",
+                        "display: JPEG data too short"
+                    );
                     None
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
@@ -938,7 +1503,11 @@ impl DisplayChannel {
                             ))
                         }
                         Err(e) => {
-                            warn!("display: JPEG decode failed: {}", e);
+                            warn_once!(
+                                "display:decode_failure:jpeg:decode_failed",
+                                "display: JPEG decode failed: {}",
+                                e
+                            );
                             None
                         }
                     }
@@ -946,7 +1515,10 @@ impl DisplayChannel {
             }
             Some(ImageType::Quic) => {
                 if image_data.len() < 4 {
-                    warn!("display: QUIC data too short");
+                    warn_once!(
+                        "display:decode_failure:quic:short_data",
+                        "display: QUIC data too short"
+                    );
                     None
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
@@ -959,14 +1531,18 @@ impl DisplayChannel {
                             img_desc.image_id,
                         )),
                         None => {
-                            warn!("display: QUIC decode failed");
+                            warn_once!(
+                                "display:decode_failure:quic:decode_failed",
+                                "display: QUIC decode failed"
+                            );
                             None
                         }
                     }
                 }
             }
             Some(ImageType::LzPalette) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:lz_palette:unsupported",
                     "display: LzPalette images require palette data (not yet implemented), \
                      id={}",
                     img_desc.image_id
@@ -974,21 +1550,24 @@ impl DisplayChannel {
                 None
             }
             Some(ImageType::Surface) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:surface:unsupported",
                     "display: Surface-to-surface copy (not yet implemented), id={}",
                     img_desc.image_id
                 );
                 None
             }
             Some(ImageType::FromCacheLossless) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:from_cache_lossless:unsupported",
                     "display: FromCacheLossless (not yet implemented), id={}",
                     img_desc.image_id
                 );
                 None
             }
             Some(ImageType::JpegAlpha) => {
-                warn!(
+                warn_once!(
+                    "display:decode_failure:jpeg_alpha:unsupported",
                     "display: JpegAlpha requires separate alpha plane (not yet implemented), \
                      id={}",
                     img_desc.image_id
@@ -996,7 +1575,11 @@ impl DisplayChannel {
                 None
             }
             None => {
-                warn!("display: unknown image type byte: {}", img_desc.image_type);
+                warn_once!(
+                    "display:decode_failure:image_type:unknown",
+                    "display: unknown image type byte: {}",
+                    img_desc.image_type
+                );
                 None
             }
         };
@@ -1015,8 +1598,8 @@ impl DisplayChannel {
 
         if decompressed.is_none() {
             info!(
-                "display: draw_copy: no pixels produced for type={:?}",
-                image_type
+                "display: {}: no pixels produced for type={:?}",
+                op_name, image_type
             );
         }
 
@@ -1087,8 +1670,8 @@ impl DisplayChannel {
                 }
             }
 
-            let dest_left = left;
-            let dest_top = top;
+            let dest_left = base.left;
+            let dest_top = base.top;
             let dest_right = dest_left.saturating_add(out_width);
             let dest_bottom = dest_top.saturating_add(out_height);
 
@@ -1117,37 +1700,330 @@ impl DisplayChannel {
                     }
 
                     self.event_tx
-                        .send(ChannelEvent::ImageReady {
-                            display_channel_id: self.channel_id,
-                            surface_id: base.surface_id,
-                            left: il,
-                            top: it,
-                            width: sub_w as u32,
-                            height: sub_h as u32,
-                            pixels: sub_pixels,
-                            image_id: img.image_id,
-                        })
+                        .send(build_image_event(
+                            composite,
+                            self.channel_id,
+                            base.surface_id,
+                            il,
+                            it,
+                            sub_w as u32,
+                            sub_h as u32,
+                            sub_pixels,
+                            img.image_id,
+                        ))
                         .await
                         .ok();
+                    self.repaint_notify.notify_one();
                 }
             } else {
                 self.event_tx
-                    .send(ChannelEvent::ImageReady {
-                        display_channel_id: self.channel_id,
-                        surface_id: base.surface_id,
-                        left,
-                        top,
-                        width: out_width,
-                        height: out_height,
-                        pixels: out_pixels,
-                        image_id: img.image_id,
-                    })
+                    .send(build_image_event(
+                        composite,
+                        self.channel_id,
+                        base.surface_id,
+                        base.left,
+                        base.top,
+                        out_width,
+                        out_height,
+                        out_pixels,
+                        img.image_id,
+                    ))
                     .await
                     .ok();
+                self.repaint_notify.notify_one();
             }
         }
 
         Ok(())
+    }
+
+    async fn handle_draw_fill(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_fill");
+        let outcome = decode_draw_fill(payload)?;
+        match outcome {
+            FillOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_fill:non_op_put",
+                    "display: draw_fill: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+            }
+            FillOutcome::SkipNoneBrush => {
+                warn_once!(
+                    "display:draw_fill:none_brush",
+                    "display: draw_fill: NONE brush, skipping"
+                );
+            }
+            FillOutcome::SkipPatternBrush => {
+                warn_once!(
+                    "display:draw_fill:pattern_brush",
+                    "display: draw_fill: PATTERN brush not yet supported, skipping"
+                );
+            }
+            FillOutcome::Paint {
+                base,
+                colour,
+                masked_fallback,
+            } => {
+                if masked_fallback {
+                    warn_once!(
+                        "display:draw_fill:mask_present",
+                        "display: draw_fill: non-null mask, painting unmasked"
+                    );
+                }
+                self.event_tx
+                    .send(ChannelEvent::FillRect {
+                        display_channel_id: self.channel_id,
+                        surface_id: base.surface_id,
+                        rect: (base.left, base.top, base.right, base.bottom),
+                        colour,
+                        clip: base.clip_rects,
+                    })
+                    .await
+                    .ok();
+                self.repaint_notify.notify_one();
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_draw_solid_fill(
+        &mut self,
+        payload: &[u8],
+        op_name: &'static str,
+        mask_warn_key: &'static str,
+        colour: [u8; 4],
+    ) -> Result<()> {
+        log_draw_base_if_verbose(payload, op_name);
+        let SolidFillOutcome::Paint {
+            base,
+            masked_fallback,
+        } = decode_draw_solid_fill(payload)?;
+
+        if masked_fallback {
+            logging::warn_once_impl(
+                mask_warn_key,
+                &format!("display: {}: non-null mask, painting unmasked", op_name),
+            );
+        }
+
+        self.event_tx
+            .send(ChannelEvent::FillRect {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                rect: (base.left, base.top, base.right, base.bottom),
+                colour,
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
+    }
+
+    async fn handle_draw_blackness(&mut self, payload: &[u8]) -> Result<()> {
+        self.handle_draw_solid_fill(
+            payload,
+            "draw_blackness",
+            "display:draw_blackness:mask_present",
+            [0, 0, 0, 0xff],
+        )
+        .await
+    }
+
+    async fn handle_draw_whiteness(&mut self, payload: &[u8]) -> Result<()> {
+        self.handle_draw_solid_fill(
+            payload,
+            "draw_whiteness",
+            "display:draw_whiteness:mask_present",
+            [0xff, 0xff, 0xff, 0xff],
+        )
+        .await
+    }
+
+    async fn handle_draw_invers(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_invers");
+        // DRAW_INVERS shares its wire format (DrawBase + SpiceQMask) with
+        // DRAW_BLACKNESS / DRAW_WHITENESS, so the phase-3 solid-fill
+        // decoder slots in unchanged — only the paint semantic differs.
+        let SolidFillOutcome::Paint {
+            base,
+            masked_fallback,
+        } = decode_draw_solid_fill(payload)?;
+
+        if masked_fallback {
+            warn_once!(
+                "display:draw_invers:mask_present",
+                "display: draw_invers: non-null mask, inverting unmasked"
+            );
+        }
+
+        self.event_tx
+            .send(ChannelEvent::Invert {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                rect: (base.left, base.top, base.right, base.bottom),
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
+    }
+
+    async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "copy_bits");
+        let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
+
+        self.event_tx
+            .send(ChannelEvent::CopyBits {
+                display_channel_id: self.channel_id,
+                surface_id: base.surface_id,
+                src_x,
+                src_y,
+                dest_rect: (base.left, base.top, base.right, base.bottom),
+                clip: base.clip_rects,
+            })
+            .await
+            .ok();
+        self.repaint_notify.notify_one();
+
+        Ok(())
+    }
+
+    async fn handle_draw_opaque(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_opaque");
+        match decode_draw_opaque(payload)? {
+            OpaqueOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_opaque:non_op_put",
+                    "display: draw_opaque: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+                Ok(())
+            }
+            OpaqueOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_opaque",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                    CompositeMode::Overwrite,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_draw_blend(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_blend");
+        match decode_draw_blend(payload)? {
+            BlendOutcome::SkipNonOpPut { rop } => {
+                warn_once!(
+                    "display:draw_blend:non_op_put",
+                    "display: draw_blend: unhandled ROP descriptor {:#x}, skipping",
+                    rop
+                );
+                Ok(())
+            }
+            BlendOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_blend",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                    CompositeMode::Overwrite,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_draw_transparent(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_transparent");
+        let TransparentOutcome::Paint {
+            base,
+            chroma_rgba,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
+        } = decode_draw_transparent(payload)?;
+        self.decode_image_and_emit(
+            payload,
+            "draw_transparent",
+            &base,
+            src_bitmap_offset,
+            src_top,
+            src_left,
+            src_bottom,
+            src_right,
+            CompositeMode::ChromaKey { chroma_rgba },
+        )
+        .await
+    }
+
+    async fn handle_draw_alpha_blend(&mut self, payload: &[u8]) -> Result<()> {
+        log_draw_base_if_verbose(payload, "draw_alpha_blend");
+        match decode_draw_alpha_blend(payload)? {
+            AlphaBlendOutcome::SkipZeroAlpha => Ok(()),
+            AlphaBlendOutcome::Paint {
+                base,
+                alpha,
+                alpha_flags,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                if alpha_flags != 0 {
+                    warn_once!(
+                        "display:draw_alpha_blend:alpha_flags",
+                        "display: draw_alpha_blend: non-zero alpha_flags {:#x} ignored, painting with straight alpha",
+                        alpha_flags
+                    );
+                }
+                self.decode_image_and_emit(
+                    payload,
+                    "draw_alpha_blend",
+                    &base,
+                    src_bitmap_offset,
+                    src_top,
+                    src_left,
+                    src_bottom,
+                    src_right,
+                    CompositeMode::AlphaBlend { alpha },
+                )
+                .await
+            }
+        }
     }
 
     /// Record a decode result and update the snapshot.
@@ -1378,5 +2254,537 @@ mod tests {
         // A few bytes that look like a JPEG start but are truncated.
         let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
         assert!(result.is_none(), "expected None for truncated JPEG");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_fill tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_FILL payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpiceBrush
+    ///     + rop_descriptor (u16 LE)
+    ///     + SpiceQMask (flags u8 + pos i32 i32 + bitmap_offset u32 = 13 bytes)
+    fn build_draw_fill_payload(
+        brush: &[u8],
+        rop_descriptor: u16,
+        mask_flags: u8,
+        mask_bitmap_offset: u32,
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase: surface_id, top, left, bottom, right (all u32 LE), clip_type u8
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // Brush (tag + body).
+        v.extend_from_slice(brush);
+
+        // rop_descriptor (u16 LE).
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+
+        // SpiceQMask: flags u8 + pos (i32, i32) + bitmap_offset u32.
+        v.push(mask_flags);
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&mask_bitmap_offset.to_le_bytes());
+
+        v
+    }
+
+    fn solid_brush(color: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.push(1); // SPICE_BRUSH_TYPE_SOLID
+        b.extend_from_slice(&color.to_le_bytes());
+        b
+    }
+
+    fn none_brush() -> Vec<u8> {
+        vec![0] // SPICE_BRUSH_TYPE_NONE
+    }
+
+    #[test]
+    fn decode_draw_fill_happy_path() {
+        // colour = 0x00123456 → R=0x12, G=0x34, B=0x56
+        let brush = solid_brush(0x0012_3456);
+        let payload = build_draw_fill_payload(
+            &brush,
+            ropd::OP_PUT,
+            0, // mask flags
+            0, // bitmap_offset (null)
+        );
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::Paint {
+                base,
+                colour,
+                masked_fallback,
+            } => {
+                assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
+                assert!(!masked_fallback);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_masked_fallback() {
+        // Same as happy path, but with a non-null mask bitmap_offset.
+        let brush = solid_brush(0x0012_3456);
+        let payload = build_draw_fill_payload(&brush, ropd::OP_PUT, 0, 0x100);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::Paint {
+                masked_fallback,
+                colour,
+                ..
+            } => {
+                assert!(masked_fallback, "expected masked_fallback = true");
+                assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_non_op_put() {
+        let brush = solid_brush(0x0012_3456);
+        // 0x10 = OP_OR.
+        let payload = build_draw_fill_payload(&brush, 0x10, 0, 0);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::SkipNonOpPut { rop } => {
+                assert_eq!(rop, 0x10);
+            }
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_fill_none_brush() {
+        let brush = none_brush();
+        let payload = build_draw_fill_payload(&brush, ropd::OP_PUT, 0, 0);
+
+        match decode_draw_fill(&payload).expect("decode failed") {
+            FillOutcome::SkipNoneBrush => {}
+            other => panic!("expected SkipNoneBrush, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_solid_fill tests (DRAW_BLACKNESS / DRAW_WHITENESS)
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_BLACKNESS / DRAW_WHITENESS payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpiceQMask (flags u8 + pos i32 i32 + bitmap_offset u32 = 13 bytes)
+    fn build_draw_solid_fill_payload(mask_flags: u8, mask_bitmap_offset: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        v.push(mask_flags);
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&mask_bitmap_offset.to_le_bytes());
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_happy_path() {
+        let payload = build_draw_solid_fill_payload(0, 0);
+        match decode_draw_solid_fill(&payload).expect("decode failed") {
+            SolidFillOutcome::Paint {
+                base,
+                masked_fallback,
+            } => {
+                assert!(!masked_fallback);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_masked_fallback() {
+        let payload = build_draw_solid_fill_payload(0, 0x200);
+        match decode_draw_solid_fill(&payload).expect("decode failed") {
+            SolidFillOutcome::Paint {
+                masked_fallback, ..
+            } => assert!(masked_fallback),
+        }
+    }
+
+    #[test]
+    fn decode_draw_solid_fill_rejects_short_payload() {
+        // 21 bytes of DrawBase but no SpiceQMask body.
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(0);
+        // 12 bytes of mask instead of 13.
+        v.extend_from_slice(&[0u8; 12]);
+
+        let result = decode_draw_solid_fill(&v);
+        assert!(result.is_err(), "expected short-payload error");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_copy_bits tests
+    // -------------------------------------------------------------------------
+
+    /// Build a COPY_BITS payload:
+    ///   DrawBase (21 bytes, clip_type=0, no clip rects)
+    ///     + SpicePoint (i32 x, i32 y = 8 bytes)
+    fn build_copy_bits_payload(src_x: i32, src_y: i32) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&50u32.to_le_bytes()); // top
+        v.extend_from_slice(&100u32.to_le_bytes()); // left
+        v.extend_from_slice(&70u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&200u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+        v.extend_from_slice(&src_x.to_le_bytes());
+        v.extend_from_slice(&src_y.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn decode_copy_bits_happy_path() {
+        let payload = build_copy_bits_payload(15, 7);
+        match decode_copy_bits(&payload).expect("decode failed") {
+            CopyBitsOutcome::Copy { base, src_x, src_y } => {
+                assert_eq!(src_x, 15);
+                assert_eq!(src_y, 7);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 50);
+                assert_eq!(base.left, 100);
+                assert_eq!(base.bottom, 70);
+                assert_eq!(base.right, 200);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_copy_bits_negative_src_clamped() {
+        let payload = build_copy_bits_payload(-3, -2);
+        match decode_copy_bits(&payload).expect("decode failed") {
+            CopyBitsOutcome::Copy { src_x, src_y, .. } => {
+                assert_eq!(src_x, 0);
+                assert_eq!(src_y, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn decode_copy_bits_rejects_short_payload() {
+        // 21-byte DrawBase + only 7 bytes of SpicePoint (one byte short).
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(0);
+        v.extend_from_slice(&[0u8; 7]);
+
+        let result = decode_copy_bits(&v);
+        assert!(result.is_err(), "expected short-payload error");
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_blend tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_BLEND payload = DrawBase (21 bytes, clip_type=0) +
+    /// SpiceCopy (36 bytes: src_bitmap + src_area + rop + scale + mask).
+    fn build_draw_blend_payload(rop_descriptor: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // SpiceCopy header
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap offset
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+        v.push(0); // scale_mode
+                   // SpiceQMask (13 bytes)
+        v.push(0); // flags
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // pos.y
+        v.extend_from_slice(&0u32.to_le_bytes()); // bitmap_offset
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_blend_happy_path_op_put() {
+        let payload = build_draw_blend_payload(ropd::OP_PUT);
+        match decode_draw_blend(&payload).expect("decode failed") {
+            BlendOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_blend_non_op_put_skips() {
+        // 0x10 = OP_OR.
+        let payload = build_draw_blend_payload(0x10);
+        match decode_draw_blend(&payload).expect("decode failed") {
+            BlendOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_opaque tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_OPAQUE payload = DrawBase (21 bytes, clip_type=0) +
+    /// SpiceOpaque (src_bitmap + src_area + SOLID brush + rop + scale + mask).
+    /// SOLID brush body is 4 bytes of colour, so the variable portion is
+    /// 5 bytes total (1-byte tag + 4-byte body).
+    fn build_draw_opaque_payload(rop_descriptor: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = SPICE_CLIP_TYPE_NONE
+
+        // SpiceOpaque: src_bitmap + src_area (20 bytes)
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap offset
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+
+        // SOLID brush (5 bytes: type + u32 colour).
+        v.push(1); // brush type = SOLID
+        v.extend_from_slice(&0u32.to_le_bytes()); // colour
+
+        // rop + scale + mask.
+        v.extend_from_slice(&rop_descriptor.to_le_bytes());
+        v.push(0); // scale_mode
+        v.push(0); // mask.flags
+        v.extend_from_slice(&0i32.to_le_bytes()); // mask.pos.x
+        v.extend_from_slice(&0i32.to_le_bytes()); // mask.pos.y
+        v.extend_from_slice(&0u32.to_le_bytes()); // mask.bitmap_offset
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_opaque_happy_path_op_put() {
+        let payload = build_draw_opaque_payload(ropd::OP_PUT);
+        match decode_draw_opaque(&payload).expect("decode failed") {
+            OpaqueOutcome::Paint {
+                base,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(base.left, 20);
+                assert_eq!(base.bottom, 30);
+                assert_eq!(base.right, 40);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_opaque_non_op_put_skips() {
+        // 0x10 = OP_OR.
+        let payload = build_draw_opaque_payload(0x10);
+        match decode_draw_opaque(&payload).expect("decode failed") {
+            OpaqueOutcome::SkipNonOpPut { rop } => assert_eq!(rop, 0x10),
+            other => panic!("expected SkipNonOpPut, got {:?}", other),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_transparent tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_TRANSPARENT payload: DrawBase (21 bytes, clip_type=0) +
+    /// SpiceTransparent (28 bytes: src_bitmap u32 + src_area 4×u32 +
+    /// src_color u32 + true_color u32).
+    fn build_draw_transparent_payload(src_color: u32) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = NONE
+
+        // SpiceTransparent
+        v.extend_from_slice(&0x100u32.to_le_bytes()); // src_bitmap
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+        v.extend_from_slice(&src_color.to_le_bytes()); // src_color (BGRX)
+        v.extend_from_slice(&0u32.to_le_bytes()); // true_color (deprecated; ignored)
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_transparent_converts_bgrx_to_rgba() {
+        // src_color = 0x00AB_CDEF → wire bytes [EF, CD, AB, 00]
+        // RGBA conversion = R=0xAB, G=0xCD, B=0xEF, A=0xFF.
+        let payload = build_draw_transparent_payload(0x00AB_CDEF);
+        match decode_draw_transparent(&payload).expect("decode failed") {
+            TransparentOutcome::Paint {
+                base,
+                chroma_rgba,
+                src_bitmap_offset,
+                src_top,
+                src_left,
+                src_bottom,
+                src_right,
+            } => {
+                assert_eq!(chroma_rgba, [0xAB, 0xCD, 0xEF, 0xFF]);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(base.top, 10);
+                assert_eq!(src_bitmap_offset, 0x100);
+                assert_eq!(src_top, 1);
+                assert_eq!(src_left, 2);
+                assert_eq!(src_bottom, 3);
+                assert_eq!(src_right, 4);
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // decode_draw_alpha_blend tests
+    // -------------------------------------------------------------------------
+
+    /// Build a DRAW_ALPHA_BLEND payload: DrawBase (21 bytes) +
+    /// SpiceAlphaBlend (23 bytes: alpha_flags u16 + alpha u8 +
+    /// src_bitmap u32 + src_area 4×u32).
+    fn build_draw_alpha_blend_payload(alpha: u8, alpha_flags: u16) -> Vec<u8> {
+        let mut v = Vec::new();
+        // DrawBase
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        v.extend_from_slice(&10u32.to_le_bytes()); // top
+        v.extend_from_slice(&20u32.to_le_bytes()); // left
+        v.extend_from_slice(&30u32.to_le_bytes()); // bottom
+        v.extend_from_slice(&40u32.to_le_bytes()); // right
+        v.push(0); // clip_type = NONE
+
+        // SpiceAlphaBlend
+        v.extend_from_slice(&alpha_flags.to_le_bytes());
+        v.push(alpha);
+        v.extend_from_slice(&0x200u32.to_le_bytes()); // src_bitmap
+        v.extend_from_slice(&1u32.to_le_bytes()); // src_top
+        v.extend_from_slice(&2u32.to_le_bytes()); // src_left
+        v.extend_from_slice(&3u32.to_le_bytes()); // src_bottom
+        v.extend_from_slice(&4u32.to_le_bytes()); // src_right
+
+        v
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_happy_path() {
+        let payload = build_draw_alpha_blend_payload(128, 0);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::Paint {
+                base,
+                alpha,
+                alpha_flags,
+                src_bitmap_offset,
+                ..
+            } => {
+                assert_eq!(alpha, 128);
+                assert_eq!(alpha_flags, 0);
+                assert_eq!(base.surface_id, 0);
+                assert_eq!(src_bitmap_offset, 0x200);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_zero_alpha_skips() {
+        let payload = build_draw_alpha_blend_payload(0, 0);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::SkipZeroAlpha => {}
+            other => panic!("expected SkipZeroAlpha, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decode_draw_alpha_blend_carries_alpha_flags() {
+        // alpha_flags != 0 is surfaced through Paint so the handler
+        // can warn_once and still paint. The decoder does not skip.
+        let payload = build_draw_alpha_blend_payload(128, 0x02);
+        match decode_draw_alpha_blend(&payload).expect("decode failed") {
+            AlphaBlendOutcome::Paint {
+                alpha, alpha_flags, ..
+            } => {
+                assert_eq!(alpha, 128);
+                assert_eq!(alpha_flags, 0x02);
+            }
+            other => panic!("expected Paint, got {:?}", other),
+        }
     }
 }

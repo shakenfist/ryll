@@ -142,6 +142,63 @@ Ryll uses:
     ryll sends relative `MOUSE_MOTION` messages instead of absolute
     `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
 
+16. **Event-driven egui repaints via `repaint_notify`** - egui only repaints
+    when something asks it to. Channel handlers run on the tokio runtime
+    and have no direct access to `egui::Context`. Every channel handler
+    therefore holds an `Arc<tokio::sync::Notify>` (`repaint_notify`)
+    alongside its `event_tx: mpsc::Sender<ChannelEvent>`, and a small
+    "repaint bridge" tokio task (spawned from `RyllApp::new`) waits on
+    `notify.notified().await` and calls `ctx.request_repaint()` whenever
+    a notification arrives. **Convention: every `event_tx.send(...)` call
+    in a channel handler must be immediately followed by
+    `repaint_notify.notify_one()`.** A 1 Hz fallback in `update()` covers
+    time-based UI like the bandwidth and latency sparklines. New channel
+    handlers must accept `Arc<tokio::sync::Notify>` in their constructor
+    and follow this pairing convention or idle CPU will silently regress.
+
+17. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
+    skipped** - Every implemented `DRAW_*` opcode on the display channel
+    follows the same shape: a pure `fn decode_<op>(payload) ->
+    io::Result<<Op>Outcome>` classifier that parses the phase-1 wire
+    struct and returns an Outcome enum describing what to do (`Paint`,
+    `SkipNonOpPut { rop }`, etc.), then an `async fn handle_<op>` shim
+    that destructures the outcome, fires `warn_once!` on each skip
+    variant, and emits a typed `ChannelEvent`. Any feature the handler
+    deliberately ignores (non-`OP_PUT` ROP descriptors, non-solid
+    brushes, non-null `SpiceQMask`, non-zero `alpha_flags`, etc.) must
+    fire `warn_once!` with a stable colon-delimited static key so the
+    gap enters the process-global warn_once registry. Unknown opcodes
+    use `log_unknown_once` which registers the same way but includes a
+    first-occurrence hex dump. See STYLEGUIDE.md §"warn_once for
+    protocol gaps" for the full convention (key format, test
+    discipline, append-only contract).
+
+18. **Colour conversion in the channel, not the surface** - SPICE
+    colour fields (brush colours, chroma keys, BGRX image pixels) are
+    BGRX on the wire; `DisplaySurface` stores pixels as RGBA. The
+    conversion lives exclusively in the channel handler (before event
+    emission) so surface helpers trust their inputs are already RGBA.
+    Concretely: `FillRect.colour`, `ImageReadyChroma.chroma_rgba`, and
+    every `ImageReady*.pixels` buffer reach `app.rs` pre-converted.
+    The idiom at the channel site is `[(c>>16)&0xff, (c>>8)&0xff,
+    c&0xff, 0xff]` for a wire `u32` colour. Do NOT add BGRX handling
+    inside `DisplaySurface` — surfaces are RGBA-only.
+
+19. **`--pedantic` mode: registry observer pattern** - The warn_once
+    registry is a process-global `HashSet<&'static str>` with a
+    `register_gap_observer(Fn(&'static str))` hook. The observer fires
+    once per newly-inserted key (with replay-on-late-registration so
+    observers don't miss keys fired before they registered). Two
+    layers sit on top today: an always-visible `Gaps: N` status-bar
+    widget that polls `warn_once_count()` each frame (no observer
+    needed), and `--pedantic` mode which registers an observer that
+    spawns a tokio task per new gap to write a bug-report zip via
+    `BugReport::write_pedantic`. The observer is registered inside
+    `RyllApp::new` / `run_headless` so it captures live
+    `TrafficBuffers` and `ChannelSnapshots` rather than stubs — this
+    matters because the traffic pcap is what makes a pedantic report
+    actionable for debugging.
+
 ## Code Organisation
 
 The repository is a Cargo workspace. Ryll itself lives at
@@ -171,6 +228,11 @@ ryll/src/
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
 │                        #   VideoWriter, CaptureSession)
 ├── config.rs            # .vv file parsing, CLI args
+├── metrics.rs           # /proc-based runtime metrics sampler
+│                        #   (RuntimeMetrics, sample()).  Linux only;
+│                        #   non-Linux returns Unavailable variant.
+│                        #   Embedded in bug reports as
+│                        #   runtime-metrics.json
 ├── protocol/            # SPICE protocol implementation
 │   ├── constants.rs     # Enums, message IDs, capability flags
 │   ├── messages.rs      # Binary serialization
@@ -227,6 +289,57 @@ ryll/src/
 2. Constants/enums in `ryll/src/protocol/constants.rs`
 3. Channel-specific logic in `ryll/src/channels/*.rs`
 
+### Inspecting a `--capture` pcap
+
+`tools/pcap-inspect.py` is a pure-Python helper (no tshark
+or scapy dependency) for sifting through a ryll capture.
+Three subcommands:
+
+```
+tools/pcap-inspect.py opcodes   <path>                 # histogram of SPICE message types
+tools/pcap-inspect.py draw-copy <path>                 # DRAW_COPY breakdown by surface / image type
+tools/pcap-inspect.py timeline  <path> [--since-last N]  # server-side messages in order
+```
+
+Typical use: when investigating a rendering artefact,
+`opcodes` tells you whether the problem window even
+contains the draw ops you thought it did (phase-3 found
+that a "static" artefact was 100% DRAW_COPY, not missing
+draw ops); `draw-copy` narrows further to the image types
+involved; `timeline --since-last 5` dumps the last five
+seconds of traffic when the user has pressed F8 right
+after seeing the artefact.
+
+ryll's pcap files are big-endian libpcap format carrying
+synthetic TCP frames around the raw post-link SPICE
+stream. The helper handles that without any extra flags.
+
+## Process templates
+
+Four templates at the repo root capture the workflows we
+use repeatedly. Read the template before starting one of
+these activities so the resulting plan/PR follows the
+established structure.
+
+- **`PLAN-TEMPLATE.md`** — used as the starting point for
+  new plan files in `docs/plans/`. Defines the prompt
+  preamble, situation/mission/execution sections, and the
+  sub-agent execution model.
+- **`PUSH-TEMPLATE.md`** — pre-push audit for our own
+  branches. Two-wave parallel sub-agent review (build /
+  style, then code quality / tests / docs / security).
+- **`MERGE-TEMPLATE.md`** — review and merge process for
+  external contributor PRs. Adds deterministic-scanner
+  Wave 0, prompt-injection sub-agent, and a mandatory
+  follow-up plan that lands as our own PR immediately
+  after the contributor's merge.
+- **`REVIEW-STATE-TEMPLATE.md`** — skeleton for the local-
+  only `REVIEW-STATE.md` file that lives in each
+  external-PR review's worktree. Captures findings,
+  branch state, contributor history, plan B, and a
+  "How to resume" entry point for picking the work back
+  up after a pause. Never committed.
+
 ## Testing
 
 - Unit tests exist for decompression algorithms
@@ -260,9 +373,99 @@ ryll/src/
 Run `pre-commit install` after cloning. The hooks check:
 - Code formatting (rustfmt)
 - Linting (clippy with `-D warnings`)
-- Shell script quality (shellcheck)
+- Shell script quality (shellcheck, applied to `scripts/` and `tools/`)
+- Committed credentials (gitleaks)
+- Bidi and zero-width Unicode control characters
+  (`tools/check-bidi.sh`, guards against Trojan Source —
+  CVE-2021-42574)
 
 Use `./scripts/check-rust.sh fix` to auto-fix issues.
+
+All five pre-commit hooks are also enforced in CI (rustfmt
+and clippy via `ci.yml`, the remaining three via
+`supply-chain.yml`). Skipping pre-commit locally therefore
+does not bypass enforcement — it only defers the failure to
+CI.
+
+## Security scanners
+
+ryll runs five deterministic scanners on every PR in
+addition to the LLM-driven automated reviewer. They are
+defined in `.github/workflows/supply-chain.yml`. All jobs
+run on self-hosted VM runners with the `s` size label
+(2 vCPU / 4 GB RAM; the scanners are I/O-bound).
+`cargo-audit`, `shellcheck`, and `bidi-check` run on
+`[self-hosted, vm, debian-12, s]`; `gitleaks` runs on
+`[self-hosted, vm, debian-13, s]` because gitleaks is
+only packaged from Debian 13 (trixie) onward — bookworm
+has no gitleaks package; `cargo-deny` runs on
+`[self-hosted, vm, debian-12-docker, s]` because the
+`cargo-deny-action` wrapper runs cargo-deny inside a
+Docker container and needs a runner image with docker
+preinstalled. The `vm` label matters — bare-metal runners
+have different OSes and no passwordless sudo.
+
+| Scanner | What it checks | Policy location |
+|---------|----------------|-----------------|
+| `cargo audit` | RustSec advisories against `Cargo.lock` (plus a weekly cron on `develop` to catch drift) | `.cargo/audit.toml` — ignore list mirrors `deny.toml` |
+| `cargo deny` | License allowlist, dependency sources, version bans, advisory ignores | `deny.toml` at repo root |
+| `gitleaks` | Credential-like patterns in the diff (upstream binary invoked directly; the `gitleaks-action` wrapper requires a paid licence for org repos) | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
+| `shellcheck` | Shell-script lint across `scripts/` and `tools/` (invoked via `tools/run-shellcheck.sh`) | Per-script `# shellcheck` directives as needed |
+| `tools/check-bidi.sh` | Bidi and zero-width Unicode codepoints (CVE-2021-42574 Trojan Source) | The script itself; PCRE character class at the top |
+
+Policy maintenance:
+
+- **Adding a new license** to `deny.toml` requires
+  confirming the licence is permissive and listing it in
+  the `allow` array. Only add `[[licenses.exceptions]]`
+  for crates that declare non-SPDX identifiers (see the
+  `epaint_default_fonts` / UFL-1.0 entry as the canonical
+  example).
+- **Ignoring a new advisory** requires adding the RustSec
+  ID to *both* `deny.toml` and `.cargo/audit.toml`, with
+  an inline comment on each entry linking to a rationale
+  section in `docs/plans/PLAN-supply-chain-followups.md`.
+  The two ignore lists must stay in sync — CI runs both
+  scanners and both must pass. Ignores are debt and should
+  not accumulate silently.
+- **Suppressing a gitleaks false positive** goes in a
+  `.gitleaksignore` file with a comment explaining the
+  pattern and why it is safe.
+
+## CI workflow conventions
+
+Every job in a workflow that can be triggered by a pull
+request or PR comment MUST declare a `concurrency:` block
+that cancels superseded runs. Without it, pushing a fixup
+commit (or re-commenting `@shakenfist-bot please retest`)
+leaves the old run consuming a self-hosted runner slot
+while the new run waits behind it. With `MAX_WORKERS = 6`
+on the runner fleet, a handful of stale runs can starve
+the queue for every other repo.
+
+Use the job-level form (not workflow-level) so unrelated
+jobs in the same workflow do not cancel each other:
+
+```yaml
+jobs:
+  my-job:
+    runs-on: [self-hosted, vm, debian-12, s]
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-my-job
+      cancel-in-progress: true
+```
+
+For comment-triggered workflows (`pr-retest`,
+`pr-re-review`, etc.) use
+`group: <workflow-name>-${{ github.event.issue.number }}`
+instead so the PR number — not `github.ref`, which points
+at the default branch for `issue_comment` events — scopes
+the group.
+
+Scheduled, push-to-default, and release workflows should
+**not** enable `cancel-in-progress`. Cancelling a release
+mid-publish or a renovate run mid-PR-creation leaves
+partial state.
 
 ## Dependencies to Know
 
@@ -289,3 +492,5 @@ Use `./scripts/check-rust.sh fix` to auto-fix issues.
 | zip | Zip file output for bug reports |
 | png | PNG encoding for bug report screenshots |
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |
+| libc | POSIX bindings; `sysconf(_SC_CLK_TCK)` for the runtime metrics module that reads `/proc/self/*` for bug reports |
+| rfd | Native file dialogs for the screenshot save flow and bug-report save |
