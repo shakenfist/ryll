@@ -828,10 +828,15 @@ zip contains:
 ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 ├── metadata.json         # report type, description, ryll version,
 │                         #   platform, target host/port, timestamp
+│                         #   (submit), triggered_at (dialog-open),
+│                         #   session_uptime_secs (submit),
+│                         #   triggered_uptime_secs (dialog-open)
 ├── session.json          # AppSnapshot (FPS, bandwidth, surfaces)
 ├── channel-state.json    # snapshot of the affected channel
 ├── traffic.pcap          # ring buffer pcap (capture feature only)
-├── screenshot.png        # display reports only (RGBA → PNG)
+├── screenshot.png        # trigger-time full surface (Display only)
+├── screenshot-region.png # submit-time crop at the selected region
+│                         #   (Display only, when a region was drawn)
 └── runtime-metrics.json  # process and per-thread CPU%, RSS, VmSize
                           #   sampled over a 2-second window at
                           #   report-creation time (Linux only;
@@ -839,10 +844,11 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
                           #   available:false with a reason)
 ```
 
-Report types are `Display`, `Input`, `Cursor`, and `Connection`,
-each mapping to one SPICE channel.  `BugReport::new()` samples
-runtime metrics over a 2-second window (blocking the caller), then
-gathers and serialises all data synchronously.  `BugReport::write_zip()`
+Report types are `Display`, `Input`, `Cursor`, `Connection`, `Usb`,
+and `Pedantic`, each mapping to one SPICE channel or the
+--pedantic observer path.  `BugReport::new()` samples runtime
+metrics over a 2-second window (blocking the caller), then gathers
+and serialises all data synchronously.  `BugReport::write_zip()`
 writes the zip to the capture directory's `bug-reports/`
 subdirectory (if `--capture` is active) or the current working
 directory.
@@ -850,6 +856,19 @@ directory.
 `RyllApp::generate_bug_report()` is the high-level entry point
 that collects surface pixels, constructs the `BugReport`, and
 writes the zip.
+
+Display bug reports carry two PNGs. `screenshot.png` is the
+surface captured the moment the dialog opens — a background
+`std::thread` PNG-encodes the cloned RGBA while the user types a
+description. `screenshot-region.png` (when a region was drawn) is
+a crop of the submit-time surface at the selected rectangle,
+encoded on the UI thread after the user finishes the drag. The
+two images are deliberately different moments in time.
+
+Non-Display submissions drop the precomputed PNG even if one was
+captured — the dialog captures unconditionally on open (so an
+artefact doesn't fade while the user decides what to submit), but
+only includes the PNG when the user actually submits as Display.
 
 ## Bug Report Dialog
 
@@ -890,6 +909,18 @@ closes and the app enters **region selection mode**:
 4. On mouse release, the report is generated with the region
    coordinates in the metadata.
 5. Pressing Escape skips selection and generates without a region.
+
+### Trigger-time snapshot
+
+On dialog open, `RyllApp::begin_trigger_snapshot` clones the
+largest surface's RGBA and spawns a named `std::thread`
+(`ryll-bugreport-png`) that PNG-encodes into a shared
+`Arc<Mutex<Option<Result<Vec<u8>>>>>`. The submit path
+(`finish_bug_report` → `take_trigger_for_submit`) consumes the
+encoded bytes via `try_lock`, falling back to a live encode if
+the encoder hasn't finished. Close-without-submit paths (Escape,
+Cancel, F12 toggle-off) drop the `Arc`; the thread finishes into
+what becomes garbage.
 
 Keyboard and mouse input is not forwarded to the SPICE server
 during selection.  Coordinates are clamped to the surface bounds.
