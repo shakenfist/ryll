@@ -599,6 +599,51 @@ pub(crate) fn encode_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Resu
     Ok(buf)
 }
 
+/// Extract the RGBA sub-rectangle `region` from a
+/// `width × height` RGBA buffer and PNG-encode it.
+///
+/// `region` is clamped to the surface bounds. Returns
+/// `Ok(None)` when the clamped rectangle is empty (e.g. a
+/// zero-width click, or a region entirely outside the
+/// surface after clamping). Returns `Err` only on PNG
+/// encoder failure.
+pub(crate) fn encode_region_png(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    region: &ReportRegion,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    let left = region.left.min(width);
+    let top = region.top.min(height);
+    let right = region.right.min(width);
+    let bottom = region.bottom.min(height);
+    if right <= left || bottom <= top {
+        return Ok(None);
+    }
+    let crop_w = (right - left) as usize;
+    let crop_h = (bottom - top) as usize;
+
+    let src_stride = (width as usize) * 4;
+    let dst_stride = crop_w * 4;
+    // Defensive: caller should always pass a correctly-sized
+    // buffer, but skip silently rather than indexing out of
+    // range if they don't.
+    if pixels.len() < src_stride * (height as usize) {
+        return Ok(None);
+    }
+
+    let mut out = vec![0u8; dst_stride * crop_h];
+    for row in 0..crop_h {
+        let src_y = (top as usize) + row;
+        let src_start = src_y * src_stride + (left as usize) * 4;
+        let dst_start = row * dst_stride;
+        out[dst_start..dst_start + dst_stride]
+            .copy_from_slice(&pixels[src_start..src_start + dst_stride]);
+    }
+
+    Ok(Some(encode_png(&out, crop_w as u32, crop_h as u32)?))
+}
+
 /// Format a byte size for human-readable display.
 pub(crate) fn format_size(bytes: u32) -> String {
     if bytes >= 1_000_000 {
@@ -727,6 +772,15 @@ pub struct BugReport {
     pcap_bytes: Option<Vec<u8>>,
     /// PNG screenshot bytes (display reports only).
     screenshot_png: Option<Vec<u8>>,
+    /// PNG bytes for `screenshot-region.png`: a crop of the
+    /// submit-time surface at `ReportMetadata::region`. `None`
+    /// when the report isn't Display, no region was selected,
+    /// or the clamped region is degenerate. Deliberately
+    /// cropped from the submit-time surface rather than the
+    /// trigger-time PNG — the two images represent different
+    /// moments and the trigger surface may have been a
+    /// different size.
+    screenshot_region_png: Option<Vec<u8>>,
     /// Runtime process and per-thread CPU metrics.
     runtime_metrics: RuntimeMetrics,
 }
@@ -878,6 +932,21 @@ impl BugReport {
             None
         };
 
+        // 4b. Region crop PNG (Display reports with a non-empty
+        //     region only). Cropped from the submit-time surface
+        //     pixels, deliberately *not* from the precomputed
+        //     trigger PNG — the trigger surface may have been a
+        //     different size, and the region coordinates are in
+        //     submit-time surface space.
+        let screenshot_region_png = if report_type == BugReportType::Display {
+            match (&region, surface_pixels) {
+                (Some(r), Some((pixels, w, h))) => encode_region_png(pixels, w, h, r)?,
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // 5. Report metadata. When the caller did not supply explicit
         //    trigger timestamps, substitute the submit-time values so
         //    downstream tooling can treat the fields as always present.
@@ -912,6 +981,7 @@ impl BugReport {
             channel_state_json,
             pcap_bytes,
             screenshot_png,
+            screenshot_region_png,
             runtime_metrics,
         })
     }
@@ -948,6 +1018,11 @@ impl BugReport {
 
         if let Some(ref png) = self.screenshot_png {
             zip.start_file("screenshot.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        if let Some(ref png) = self.screenshot_region_png {
+            zip.start_file("screenshot-region.png", opts)?;
             zip.write_all(png)?;
         }
 
@@ -1700,6 +1775,223 @@ mod tests {
             .as_ref()
             .expect("encoder returned Err");
         assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+
+    // When a Display report carries a region, the zip gets a
+    // second PNG cropped from the submit-time surface.
+    #[test]
+    fn test_bug_report_writes_region_crop_when_region_present() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // 2x2 RGBA — enough to produce a non-empty crop.
+        let pixels = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "region crop test".to_string(),
+            Some(ReportRegion {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            }),
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&pixels, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-region");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"screenshot.png".to_string()));
+        assert!(names.contains(&"screenshot-region.png".to_string()));
+
+        let mut region_file = archive.by_name("screenshot-region.png").unwrap();
+        let mut region_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut region_file, &mut region_bytes).unwrap();
+        assert_eq!(&region_bytes[..4], b"\x89PNG");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Display report without a region: only the full screenshot.
+    #[test]
+    fn test_bug_report_no_region_crop_without_region() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let pixels = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "no region".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&pixels, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_some());
+        assert!(report.screenshot_region_png.is_none());
+    }
+
+    // Non-Display reports never carry a region crop, even if a
+    // caller wrongly passes a region. Belt-and-braces for the
+    // report-type guard in `assemble`.
+    #[test]
+    fn test_bug_report_no_region_crop_for_non_display() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "buggy caller set a region on an Input report".to_string(),
+            Some(ReportRegion {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            }),
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_none());
+        assert!(report.screenshot_region_png.is_none());
+    }
+
+    // `encode_region_png` clamps out-of-bounds rectangles to the
+    // surface, and returns `Ok(None)` for degenerate or
+    // fully-outside rectangles.
+    #[test]
+    fn test_encode_region_png_clamps_and_skips_degenerate() {
+        // 2x2 RGBA.
+        let pixels = vec![
+            10u8, 0, 0, 255, 0, 20, 0, 255, 0, 0, 30, 255, 40, 40, 40, 255,
+        ];
+
+        // Region extends past the surface → clamps to 2x2 and
+        // produces a valid PNG.
+        let oversize = ReportRegion {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let png = encode_region_png(&pixels, 2, 2, &oversize)
+            .unwrap()
+            .expect("expected Some(PNG) for a clamped region");
+        assert_eq!(&png[..4], b"\x89PNG");
+
+        // Zero-width region → None.
+        let zero_width = ReportRegion {
+            left: 1,
+            top: 0,
+            right: 1,
+            bottom: 2,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &zero_width)
+            .unwrap()
+            .is_none());
+
+        // Zero-height region → None.
+        let zero_height = ReportRegion {
+            left: 0,
+            top: 1,
+            right: 2,
+            bottom: 1,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &zero_height)
+            .unwrap()
+            .is_none());
+
+        // Entirely outside → clamps to 0×0 → None.
+        let outside = ReportRegion {
+            left: 10,
+            top: 10,
+            right: 20,
+            bottom: 20,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &outside)
+            .unwrap()
+            .is_none());
+    }
+
+    // Stride math: the cropped PNG must contain exactly the
+    // source pixels at the cropped sub-rect, round-tripped
+    // through the PNG encoder/decoder.
+    #[test]
+    fn test_encode_region_png_pixels_match_source() {
+        // 4x4 RGBA laid out so every pixel is distinct.
+        let mut src = Vec::with_capacity(4 * 4 * 4);
+        for y in 0..4u8 {
+            for x in 0..4u8 {
+                src.extend_from_slice(&[x * 16, y * 16, (x + y) * 8, 255]);
+            }
+        }
+
+        // Crop to the 2x2 sub-rect (1,1)-(3,3).
+        let region = ReportRegion {
+            left: 1,
+            top: 1,
+            right: 3,
+            bottom: 3,
+        };
+        let png_bytes = encode_region_png(&src, 4, 4, &region)
+            .unwrap()
+            .expect("expected Some(PNG)");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut decoded = vec![0u8; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+
+        // Expected 2x2 = pixels at (x=1,y=1), (2,1), (1,2), (2,2).
+        let mut expected = Vec::with_capacity(2 * 2 * 4);
+        for y in 1..3u8 {
+            for x in 1..3u8 {
+                expected.extend_from_slice(&[x * 16, y * 16, (x + y) * 8, 255]);
+            }
+        }
+        assert_eq!(&decoded[..info.buffer_size()], expected.as_slice());
     }
 
     #[test]
