@@ -174,8 +174,8 @@ plumbing, phase 4 documents the finished behaviour.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Metadata plumbing | [PLAN-bugreport-trigger-snapshot-phase-01-metadata.md](PLAN-bugreport-trigger-snapshot-phase-01-metadata.md) | Not started |
-| 2. Trigger snapshot  | PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md (not yet written) | Not started |
+| 1. Metadata plumbing | [PLAN-bugreport-trigger-snapshot-phase-01-metadata.md](PLAN-bugreport-trigger-snapshot-phase-01-metadata.md) | Complete |
+| 2. Trigger snapshot  | [PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md](PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md) | Not started |
 | 3. Region image      | PLAN-bugreport-trigger-snapshot-phase-03-region.md (not yet written) | Not started |
 | 4. Docs              | PLAN-bugreport-trigger-snapshot-phase-04-docs.md (not yet written) | Not started |
 
