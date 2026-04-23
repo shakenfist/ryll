@@ -86,6 +86,12 @@ pub struct MainChannel {
     bytes_in: u64,
     bytes_out: u64,
     last_ping_at: Option<Instant>,
+    /// True after `maybe_request_client_mouse_mode` sends a
+    /// `MOUSE_MODE_REQUEST(CLIENT)` and until a MOUSE_MODE
+    /// message confirms we're in CLIENT mode. Stops a flappy
+    /// or hostile server from amplifying outbound requests
+    /// 1:1 on inbound MOUSE_MODE messages.
+    mouse_mode_request_pending: bool,
 }
 
 impl MainChannel {
@@ -125,6 +131,7 @@ impl MainChannel {
             bytes_in: 0,
             bytes_out: 0,
             last_ping_at: None,
+            mouse_mode_request_pending: false,
         }
     }
 
@@ -367,8 +374,6 @@ impl MainChannel {
                 // like 131075 (=0x00020003 when supported=3 and
                 // current=2) which then fails every mode check.
                 if let Some((supported, current)) = parse_mouse_mode_payload(payload) {
-                    let current_u32 = current as u32;
-                    let supported_u32 = supported as u32;
                     let mode_name = match current {
                         1 => "server (relative)",
                         2 => "client (absolute)",
@@ -378,8 +383,15 @@ impl MainChannel {
                         "main: mouse mode changed to {} ({}), supported_modes={}",
                         current, mode_name, supported
                     );
+                    // Clearing happens regardless of whether the
+                    // server's MOUSE_MODE was a direct response to
+                    // our request — if we're now in CLIENT mode,
+                    // there's nothing left to ask for.
+                    if current as u32 == MOUSE_MODE_CLIENT {
+                        self.mouse_mode_request_pending = false;
+                    }
                     self.event_tx
-                        .send(ChannelEvent::MouseMode(current_u32))
+                        .send(ChannelEvent::MouseMode(current as u32))
                         .await
                         .ok();
                     self.repaint_notify.notify_one();
@@ -387,7 +399,7 @@ impl MainChannel {
                     // The server often reverts to SERVER mode after a
                     // guest reboot; re-request CLIENT mode so the
                     // absolute MOUSE_POSITION path keeps working.
-                    self.maybe_request_client_mouse_mode(supported_u32, current_u32)
+                    self.maybe_request_client_mouse_mode(supported as u32, current as u32)
                         .await?;
                 } else {
                     warn!("main: short MOUSE_MODE payload ({} bytes)", payload.len());
@@ -610,6 +622,12 @@ impl MainChannel {
     /// MOUSE_MODE handler so a guest reboot — which typically
     /// reverts the server to SERVER mode — can recover absolute
     /// positioning without a reconnect.
+    ///
+    /// Skips sending if a prior request is already outstanding
+    /// (`mouse_mode_request_pending`). This caps outbound request
+    /// volume at one per round-trip, so a flappy or hostile
+    /// server toggling `current_mode` can't amplify its MOUSE_MODE
+    /// messages into a storm of client-side requests.
     async fn maybe_request_client_mouse_mode(
         &mut self,
         supported_modes: u32,
@@ -618,12 +636,18 @@ impl MainChannel {
         if !should_request_client_mouse_mode(supported_modes, current_mode) {
             return Ok(());
         }
+        if self.mouse_mode_request_pending {
+            debug!("main: client mouse mode request already pending; skipping");
+            return Ok(());
+        }
         info!("main: requesting client mouse mode");
         let mut mode_payload = Vec::new();
         mode_payload.write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)?;
         let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
         self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
-            .await
+            .await?;
+        self.mouse_mode_request_pending = true;
+        Ok(())
     }
 
     async fn connect_agent(&mut self) -> Result<()> {

@@ -613,6 +613,17 @@ pub(crate) fn encode_region_png(
     height: u32,
     region: &ReportRegion,
 ) -> anyhow::Result<Option<Vec<u8>>> {
+    // Reject obviously-unsafe dimensions before any arithmetic.
+    // `DisplaySurface` already clamps at construction, so every
+    // live caller passes values within bounds — this guard is
+    // insurance against a future caller that skips the surface
+    // layer and defends `(width as usize) * 4` from overflow on
+    // 32-bit targets.
+    if width > crate::display::MAX_SURFACE_DIMENSION
+        || height > crate::display::MAX_SURFACE_DIMENSION
+    {
+        return Ok(None);
+    }
     let left = region.left.min(width);
     let top = region.top.min(height);
     let right = region.right.min(width);

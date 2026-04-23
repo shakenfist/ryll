@@ -178,7 +178,11 @@ impl LatencyTracker {
 /// finishing — so they always make it into metadata.json even
 /// when the surface is missing or encoding fails.
 struct TriggerSnapshot {
+    /// ISO 8601 UTC timestamp of when the dialog opened. Same
+    /// format as `ReportMetadata::timestamp`.
     triggered_at: String,
+    /// Session uptime in seconds at the moment of dialog open.
+    /// Same units as `AppSnapshot::uptime_secs`.
     triggered_uptime_secs: f64,
     /// Slot the encoder thread fills with either the PNG bytes
     /// or an `Err` on encode failure. `None` while the worker is
@@ -1040,6 +1044,15 @@ impl RyllApp {
         let Some(snap) = self.pending_trigger.take() else {
             return (None, None);
         };
+        // The `.ok()` intentionally discards any `Err` written
+        // by the encoder thread: an encode failure (or the
+        // no-surface-at-trigger-time sentinel seeded by
+        // `begin_trigger_snapshot`) is indistinguishable here
+        // from "the worker hadn't finished yet", and in both
+        // cases we want the submit path to fall back to live
+        // encoding of the submit-time surface. If we ever need
+        // to surface the error to the user, it has to be logged
+        // here *and* handled in the live-encode fallback.
         let png = match snap.png_slot.try_lock() {
             Ok(mut guard) => guard.take().and_then(|r| r.ok()),
             Err(_) => None,
