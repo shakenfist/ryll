@@ -141,9 +141,14 @@ cargo release version "$VERSION" \
     --no-confirm
 
 # --- final test gate ---
+#
+# Delegate to `make test` so the test compile/run uses the
+# devcontainer's toolchain. Running `cargo test` directly here
+# would pick up the host's rustc, which is typically older than
+# what the workspace's dependency tree requires.
 
-info "Running workspace tests"
-cargo test --workspace
+info "Running workspace tests (via make test, in devcontainer)"
+make test
 
 # --- confirmation ---
 
