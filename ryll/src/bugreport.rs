@@ -751,6 +751,7 @@ impl BugReport {
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
         trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         // 0. Sample runtime metrics first (blocks for 2 seconds).
         //    This runs before the rest of the report is assembled so
@@ -770,6 +771,7 @@ impl BugReport {
             surface_pixels,
             runtime_metrics,
             trigger,
+            precomputed_screenshot_png,
         )
     }
 
@@ -791,6 +793,7 @@ impl BugReport {
         surface_pixels: Option<(&[u8], u32, u32)>,
         runtime_metrics: RuntimeMetrics,
         trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         // 1. Session snapshot (AppSnapshot)
         let mut session = app_snapshot.lock().unwrap().clone();
@@ -852,9 +855,21 @@ impl BugReport {
         let channel_name = report_type.channel_name();
         let pcap_bytes = traffic.drain_channel_pcap_bytes(channel_name);
 
-        // 4. PNG screenshot (display reports only)
+        // 4. PNG screenshot (display reports only). Prefer a
+        //    precomputed PNG from the trigger-time encoder thread
+        //    over re-encoding the live surface at submit time; fall
+        //    back to a live encode when the background thread was
+        //    never spawned (e.g. pedantic observer path) or hasn't
+        //    produced bytes yet.
+        //
+        //    Non-Display submissions drop the precomputed PNG on
+        //    the floor. The policy is to always *capture* on dialog
+        //    open and only *include* the PNG when the user actually
+        //    submits a Display report.
         let screenshot_png = if report_type == BugReportType::Display {
-            if let Some((pixels, w, h)) = surface_pixels {
+            if let Some(bytes) = precomputed_screenshot_png {
+                Some(bytes)
+            } else if let Some((pixels, w, h)) = surface_pixels {
                 Some(encode_png(pixels, w, h)?)
             } else {
                 None
@@ -968,6 +983,10 @@ impl BugReport {
         use zip::write::SimpleFileOptions;
         use zip::ZipWriter;
 
+        // Pedantic reports never carry a precomputed PNG — the
+        // observer fires inside a protocol handler, not the GUI,
+        // and pedantic reports use the non-Display branch of
+        // `BugReportType` anyway.
         let report = Self::assemble(
             BugReportType::Pedantic {
                 gap_key: gap_key.to_string(),
@@ -982,6 +1001,7 @@ impl BugReport {
             None,
             runtime_metrics,
             trigger,
+            None,
         )?;
 
         std::fs::create_dir_all(dir)?;
@@ -1379,6 +1399,7 @@ mod tests {
             Some((&pixels, 2, 2)),
             stub_metrics(),
             None,
+            None,
         )
         .unwrap();
 
@@ -1441,6 +1462,7 @@ mod tests {
             None,
             stub_metrics(),
             None,
+            None,
         )
         .unwrap();
 
@@ -1479,6 +1501,7 @@ mod tests {
             None,
             stub_metrics(),
             Some(trigger),
+            None,
         )
         .unwrap();
 
@@ -1516,6 +1539,7 @@ mod tests {
                 triggered_at: "2021-06-06T06:06:06Z".to_string(),
                 triggered_uptime_secs: 12.25,
             }),
+            None,
         )
         .unwrap();
 
@@ -1538,6 +1562,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // When the caller supplies a precomputed PNG, assemble() must
+    // use those bytes verbatim rather than re-encoding the live
+    // surface pixels. This is the trigger-snapshot hot path: the
+    // background thread produces the PNG and the submit path uses
+    // it as-is instead of encoding the potentially-changed surface.
+    #[test]
+    fn test_bug_report_uses_precomputed_png_when_provided() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // Raw 2x2 RGBA that would produce a very different PNG if
+        // re-encoded vs. the sentinel bytes we hand in.
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        // Sentinel bytes: not a valid PNG, but we're proving they
+        // reach the zip untouched.
+        let sentinel = b"sentinel-precomputed-png-bytes".to_vec();
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "precomputed png path".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&raw, 2, 2)),
+            stub_metrics(),
+            None,
+            Some(sentinel.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(report.screenshot_png.as_deref(), Some(sentinel.as_slice()));
+    }
+
+    // Regression: when no precomputed PNG is supplied, assemble()
+    // still encodes the live surface pixels. This is the fallback
+    // path used when the background encoder never ran (pedantic
+    // observers, tests) or hasn't finished by submit time.
+    #[test]
+    fn test_bug_report_falls_back_to_live_encoding_when_no_precomputed_png() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "live encode fallback".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&raw, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let png = report
+            .screenshot_png
+            .expect("screenshot.png was not encoded");
+        assert_eq!(&png[..4], b"\x89PNG");
+    }
+
+    // Non-Display submissions must drop any precomputed PNG on the
+    // floor. Policy is "always capture on dialog open, only include
+    // the PNG when the submitted type is Display".
+    #[test]
+    fn test_bug_report_drops_precomputed_png_for_non_display() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let sentinel = b"sentinel-precomputed-png-bytes".to_vec();
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "non-display drops png".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+            Some(sentinel),
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_none());
+    }
+
+    // The background encoder thread's contract: given a
+    // shared Arc<Mutex<Option<Result<Vec<u8>>>>> slot, a clone of
+    // the surface pixels, and width/height, it eventually writes
+    // a valid PNG into the slot. No egui or RyllApp involved.
+    #[test]
+    fn test_trigger_snapshot_worker_encodes_png() {
+        use std::sync::Mutex as StdMutex;
+
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let slot: std::sync::Arc<StdMutex<Option<anyhow::Result<Vec<u8>>>>> =
+            std::sync::Arc::new(StdMutex::new(None));
+        let slot_for_thread = std::sync::Arc::clone(&slot);
+
+        let handle = std::thread::Builder::new()
+            .name("ryll-bugreport-png-test".to_string())
+            .spawn(move || {
+                let result = encode_png(&raw, 2, 2);
+                if let Ok(mut guard) = slot_for_thread.lock() {
+                    *guard = Some(result);
+                }
+            })
+            .expect("failed to spawn encoder thread");
+        handle.join().expect("encoder thread panicked");
+
+        let guard = slot.lock().expect("slot lock poisoned");
+        let bytes = guard
+            .as_ref()
+            .expect("encoder did not write into slot")
+            .as_ref()
+            .expect("encoder returned Err");
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+
     #[test]
     fn test_bug_report_assemble_input() {
         let traffic = TrafficBuffers::new();
@@ -1555,6 +1719,7 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
             None,
         )
         .unwrap();
@@ -1626,6 +1791,7 @@ mod tests {
             None,
             stub_metrics(),
             None,
+            None,
         )
         .unwrap();
 
@@ -1670,6 +1836,7 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
             None,
         )
         .unwrap();
@@ -1719,6 +1886,7 @@ mod tests {
             &app_snap,
             None,
             metrics,
+            None,
             None,
         )
         .unwrap();

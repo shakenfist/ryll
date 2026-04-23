@@ -10,8 +10,9 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
-    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig,
-    ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
+    PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    TriggerTimestamps,
 };
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
@@ -164,6 +165,27 @@ impl LatencyTracker {
     }
 }
 
+/// Captured on the UI thread when a bug-report dialog opens.
+///
+/// The raw RGBA is cloned and handed to a background
+/// `std::thread` that PNG-encodes into `png_slot`; the UI
+/// thread holds another clone of the `Arc` and consumes the
+/// bytes at submit time (or drops the `Arc` on cancel, letting
+/// the worker write into what becomes garbage).
+///
+/// Timestamps are recorded synchronously on the UI thread at
+/// dialog-open — they never depend on the encoder thread
+/// finishing — so they always make it into metadata.json even
+/// when the surface is missing or encoding fails.
+struct TriggerSnapshot {
+    triggered_at: String,
+    triggered_uptime_secs: f64,
+    /// Slot the encoder thread fills with either the PNG bytes
+    /// or an `Err` on encode failure. `None` while the worker is
+    /// still running.
+    png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
+
 /// The egui application
 pub struct RyllApp {
     // Communication channels
@@ -252,6 +274,13 @@ pub struct RyllApp {
     bug_report_type: BugReportType,
     bug_description: String,
     bug_status_message: Option<(String, Instant)>,
+
+    // Snapshot of the display surface captured the moment a
+    // bug-report dialog opens. Encoding runs in a background
+    // thread; `take_trigger_for_submit` consumes both the
+    // timestamps and (if ready) the PNG bytes at submit time.
+    // `discard_trigger_snapshot` drops it on cancel.
+    pending_trigger: Option<TriggerSnapshot>,
 
     // Region selection state (Display bug reports)
     region_select_active: bool,
@@ -511,6 +540,7 @@ impl RyllApp {
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
             bug_status_message: None,
+            pending_trigger: None,
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
@@ -918,15 +948,132 @@ impl RyllApp {
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
     }
 
+    /// Clone the largest surface's RGBA pixels, capture trigger
+    /// timestamps, and spawn a background thread to PNG-encode.
+    ///
+    /// Called from every dialog-open path. Idempotent — a no-op
+    /// when a snapshot is already pending, so call sites can
+    /// fire it unconditionally without worrying about a second
+    /// open stomping the first.
+    ///
+    /// The operator's rule is to always capture here, regardless
+    /// of which report type the dialog was opened with, so the
+    /// artefact survives the form-filling delay. The decision to
+    /// *include* the resulting PNG in the zip happens at submit
+    /// time in `BugReport::assemble`, which drops it for
+    /// non-Display submissions.
+    fn begin_trigger_snapshot(&mut self) {
+        if self.pending_trigger.is_some() {
+            return;
+        }
+        let triggered_at = chrono_now();
+        let triggered_uptime_secs = self.traffic.elapsed().as_secs_f64();
+
+        // Pre-first-SURFACE_CREATE: no surface to snap. Record
+        // timestamps anyway and seed an Err into the slot so the
+        // submit path falls back cleanly to live encoding (which
+        // will also produce None when there's no surface).
+        let Some(surface) = self
+            .surfaces
+            .values()
+            .max_by_key(|s| (s.width as u64) * (s.height as u64))
+        else {
+            let slot = Arc::new(std::sync::Mutex::new(Some(Err(anyhow::anyhow!(
+                "no surface available at trigger time"
+            )))));
+            self.pending_trigger = Some(TriggerSnapshot {
+                triggered_at,
+                triggered_uptime_secs,
+                png_slot: slot,
+            });
+            return;
+        };
+
+        let pixels: Vec<u8> = surface.pixels().to_vec();
+        let width = surface.width;
+        let height = surface.height;
+        let slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_for_thread = Arc::clone(&slot);
+
+        let spawned = std::thread::Builder::new()
+            .name("ryll-bugreport-png".to_string())
+            .spawn(move || {
+                let result = encode_png(&pixels, width, height);
+                // If the Mutex is poisoned the UI thread panicked;
+                // nothing to write and the process is already
+                // tearing down.
+                if let Ok(mut guard) = slot_for_thread.lock() {
+                    *guard = Some(result);
+                }
+            });
+        if let Err(e) = spawned {
+            // Thread spawn failed (OS resource pressure); leave
+            // the slot empty so the submit path falls back to
+            // live encoding.
+            debug!("app: failed to spawn PNG encoder thread: {}", e);
+        }
+
+        self.pending_trigger = Some(TriggerSnapshot {
+            triggered_at,
+            triggered_uptime_secs,
+            png_slot: slot,
+        });
+    }
+
+    /// Drop the pending snapshot without consuming it. The
+    /// encoder thread (if still running) keeps its Arc clone and
+    /// eventually writes into a Mutex whose last reference it
+    /// holds, which is then dropped. Safe when no snapshot is
+    /// pending.
+    fn discard_trigger_snapshot(&mut self) {
+        let _ = self.pending_trigger.take();
+    }
+
+    /// Called from `finish_bug_report`. Returns the captured
+    /// trigger timestamps (if any) and the encoded PNG bytes (if
+    /// the worker has finished with `Ok`). Uses `try_lock` so a
+    /// still-running encoder on a large surface can't block the
+    /// UI thread — `None` falls back to live encoding inside
+    /// `BugReport::assemble`.
+    fn take_trigger_for_submit(&mut self) -> (Option<TriggerTimestamps>, Option<Vec<u8>>) {
+        let Some(snap) = self.pending_trigger.take() else {
+            return (None, None);
+        };
+        let png = match snap.png_slot.try_lock() {
+            Ok(mut guard) => guard.take().and_then(|r| r.ok()),
+            Err(_) => None,
+        };
+        let trigger = TriggerTimestamps {
+            triggered_at: snap.triggered_at,
+            triggered_uptime_secs: snap.triggered_uptime_secs,
+        };
+        (Some(trigger), png)
+    }
+
     /// Generate a bug report and write it to disk.
     /// Returns the path of the written zip file.
+    ///
+    /// `trigger` carries the trigger-time timestamps captured
+    /// when the dialog opened; `precomputed_screenshot_png`
+    /// carries the PNG that the background encoder produced
+    /// from the trigger-time surface. Both are `None` if the
+    /// dialog wasn't open when this was called (e.g. the
+    /// dev-only F8 path used to trigger reports without a
+    /// dialog, though that doesn't exist today) — `BugReport`
+    /// falls back to the submit-time behaviour in that case.
     pub fn generate_bug_report(
         &self,
         report_type: BugReportType,
         description: String,
         region: Option<ReportRegion>,
+        trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<std::path::PathBuf> {
-        // Get surface pixels for display reports
+        // Keep the live surface-pixels fallback path. It's the
+        // safety net when the background encoder wasn't spawned
+        // or hasn't finished; phase 3 will also reuse this to
+        // produce the submit-time region crop.
         let surface_data = if report_type == BugReportType::Display {
             self.surfaces
                 .values()
@@ -936,9 +1083,6 @@ impl RyllApp {
             None
         };
 
-        // Assemble the report. Phase 1 of the trigger-snapshot work
-        // passes None; phase 2 will stash a real TriggerTimestamps on
-        // the app when the dialog opens and pass Some here.
         let report = BugReport::new(
             report_type,
             description,
@@ -949,7 +1093,8 @@ impl RyllApp {
             &self.channel_snapshots,
             &self.app_snapshot,
             surface_data,
-            None,
+            trigger,
+            precomputed_screenshot_png,
         )?;
 
         // Determine output directory
@@ -968,7 +1113,8 @@ impl RyllApp {
         description: String,
         region: Option<ReportRegion>,
     ) {
-        match self.generate_bug_report(report_type, description, region) {
+        let (trigger, precomputed_png) = self.take_trigger_for_submit();
+        match self.generate_bug_report(report_type, description, region, trigger, precomputed_png) {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
@@ -1244,10 +1390,14 @@ impl eframe::App for RyllApp {
         if !self.region_select_active {
             let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
             if f12_pressed {
-                self.show_bug_dialog = !self.show_bug_dialog;
                 if self.show_bug_dialog {
+                    self.show_bug_dialog = false;
+                    self.discard_trigger_snapshot();
+                } else {
+                    self.show_bug_dialog = true;
                     self.bug_report_type = BugReportType::Display;
                     self.bug_description.clear();
+                    self.begin_trigger_snapshot();
                 }
             }
         }
@@ -1273,6 +1423,7 @@ impl eframe::App for RyllApp {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
                 self.show_bug_dialog = false;
+                self.discard_trigger_snapshot();
             }
         }
 
@@ -1440,6 +1591,7 @@ impl eframe::App for RyllApp {
                             self.show_bug_dialog = true;
                             self.bug_report_type = BugReportType::Display;
                             self.bug_description.clear();
+                            self.begin_trigger_snapshot();
                         }
 
                         // Transient status message from bug report
@@ -1786,6 +1938,7 @@ impl eframe::App for RyllApp {
                 self.show_bug_dialog = true;
                 self.bug_report_type = BugReportType::Usb;
                 self.bug_description = self.usb_error_message.clone().unwrap_or_default();
+                self.begin_trigger_snapshot();
             }
         }
 
@@ -2066,6 +2219,7 @@ impl eframe::App for RyllApp {
             self.show_bug_dialog = true;
             self.bug_report_type = BugReportType::Connection;
             self.bug_description = self.error_message.clone().unwrap_or_default();
+            self.begin_trigger_snapshot();
         }
 
         // Bug report dialog (two-pass: render then act)
@@ -2153,6 +2307,7 @@ impl eframe::App for RyllApp {
             }
             Some(false) => {
                 self.show_bug_dialog = false;
+                self.discard_trigger_snapshot();
             }
             None => {}
         }
