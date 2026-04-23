@@ -145,6 +145,7 @@ pub mod main_server {
     pub const INIT: u16 = 103;
     pub const CHANNELS_LIST: u16 = 104;
     pub const MOUSE_MODE: u16 = 105;
+    pub const MULTI_MEDIA_TIME: u16 = 106;
     pub const AGENT_CONNECTED: u16 = 107;
     pub const AGENT_DISCONNECTED: u16 = 108;
     pub const AGENT_DATA: u16 = 109;

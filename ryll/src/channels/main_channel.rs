@@ -356,6 +356,22 @@ impl MainChannel {
                 }
             }
 
+            main_server::MULTI_MEDIA_TIME => {
+                // Periodic multimedia-time tick for audio/video sync.
+                // Not wired into playback yet; accept the payload so
+                // --pedantic doesn't flag it as an unknown opcode.
+                if payload.len() >= 4 {
+                    let mm_time =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    debug!("main: multi_media_time={}", mm_time);
+                } else {
+                    debug!(
+                        "main: short MULTI_MEDIA_TIME payload ({} bytes)",
+                        payload.len()
+                    );
+                }
+            }
+
             main_server::CHANNELS_LIST => {
                 let list = ChannelsList::read(payload)?;
                 info!(
