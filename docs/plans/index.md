@@ -40,6 +40,7 @@ execution.
 | 2026-04-11 | [PR #23 follow-up](PLAN-pr23-followup.md) | Follow-up fixes from audio playback channel integration |
 | 2026-04-18 | [Supply-chain scanning](PLAN-supply-chain-scanning.md) | Deterministic scanners for dependencies, secrets, and Unicode-based attacks |
 | 2026-04-18 | [Supply-chain follow-ups](PLAN-supply-chain-followups.md) | Tracked advisory ignores and unmaintained-crate debt surfaced when landing scanners |
+| 2026-04-23 | [Macbook bug-report fixes](PLAN-macbook-bugreport-fixes.md) | MOUSE_MODE wire format, client-mode re-request after guest reboot, and MULTI_MEDIA_TIME handler |
 
 ## Consolidation plans
 
