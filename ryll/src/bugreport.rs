@@ -599,6 +599,62 @@ pub(crate) fn encode_png(pixels: &[u8], width: u32, height: u32) -> anyhow::Resu
     Ok(buf)
 }
 
+/// Extract the RGBA sub-rectangle `region` from a
+/// `width × height` RGBA buffer and PNG-encode it.
+///
+/// `region` is clamped to the surface bounds. Returns
+/// `Ok(None)` when the clamped rectangle is empty (e.g. a
+/// zero-width click, or a region entirely outside the
+/// surface after clamping). Returns `Err` only on PNG
+/// encoder failure.
+pub(crate) fn encode_region_png(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    region: &ReportRegion,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    // Reject obviously-unsafe dimensions before any arithmetic.
+    // `DisplaySurface` already clamps at construction, so every
+    // live caller passes values within bounds — this guard is
+    // insurance against a future caller that skips the surface
+    // layer and defends `(width as usize) * 4` from overflow on
+    // 32-bit targets.
+    if width > crate::display::MAX_SURFACE_DIMENSION
+        || height > crate::display::MAX_SURFACE_DIMENSION
+    {
+        return Ok(None);
+    }
+    let left = region.left.min(width);
+    let top = region.top.min(height);
+    let right = region.right.min(width);
+    let bottom = region.bottom.min(height);
+    if right <= left || bottom <= top {
+        return Ok(None);
+    }
+    let crop_w = (right - left) as usize;
+    let crop_h = (bottom - top) as usize;
+
+    let src_stride = (width as usize) * 4;
+    let dst_stride = crop_w * 4;
+    // Defensive: caller should always pass a correctly-sized
+    // buffer, but skip silently rather than indexing out of
+    // range if they don't.
+    if pixels.len() < src_stride * (height as usize) {
+        return Ok(None);
+    }
+
+    let mut out = vec![0u8; dst_stride * crop_h];
+    for row in 0..crop_h {
+        let src_y = (top as usize) + row;
+        let src_start = src_y * src_stride + (left as usize) * 4;
+        let dst_start = row * dst_stride;
+        out[dst_start..dst_start + dst_stride]
+            .copy_from_slice(&pixels[src_start..src_start + dst_stride]);
+    }
+
+    Ok(Some(encode_png(&out, crop_w as u32, crop_h as u32)?))
+}
+
 /// Format a byte size for human-readable display.
 pub(crate) fn format_size(bytes: u32) -> String {
     if bytes >= 1_000_000 {
@@ -671,6 +727,25 @@ pub struct ReportRegion {
     pub bottom: u32,
 }
 
+/// Captured at the moment a bug-report dialog opened, or at
+/// the moment a --pedantic observer fired. Threaded through
+/// `BugReport::new` / `BugReport::write_pedantic` so the
+/// submitted zip can record when the user *saw* the bug in
+/// addition to when they *submitted* the report.
+///
+/// Phase 1 of the trigger-snapshot work plumbs this through
+/// with every caller passing `None` (which falls back to
+/// submit time); phase 2 wires up real trigger-time capture
+/// from the app.
+#[derive(Debug, Clone)]
+pub struct TriggerTimestamps {
+    /// ISO 8601 UTC timestamp (same format as
+    /// `ReportMetadata::timestamp`).
+    pub triggered_at: String,
+    /// Session uptime in seconds at the moment of trigger.
+    pub triggered_uptime_secs: f64,
+}
+
 /// Top-level metadata written to metadata.json.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportMetadata {
@@ -685,6 +760,15 @@ pub struct ReportMetadata {
     pub target_host: String,
     pub target_port: u16,
     pub session_uptime_secs: f64,
+    /// ISO 8601 UTC timestamp of when the user opened the
+    /// bug-report dialog (or when the --pedantic observer
+    /// fired). Equal to `timestamp` when the caller did not
+    /// supply an explicit trigger.
+    pub triggered_at: String,
+    /// Session uptime in seconds at the moment of trigger.
+    /// Equal to `session_uptime_secs` when no explicit
+    /// trigger was supplied.
+    pub triggered_uptime_secs: f64,
 }
 
 /// A fully assembled bug report ready to write to disk.
@@ -699,6 +783,15 @@ pub struct BugReport {
     pcap_bytes: Option<Vec<u8>>,
     /// PNG screenshot bytes (display reports only).
     screenshot_png: Option<Vec<u8>>,
+    /// PNG bytes for `screenshot-region.png`: a crop of the
+    /// submit-time surface at `ReportMetadata::region`. `None`
+    /// when the report isn't Display, no region was selected,
+    /// or the clamped region is degenerate. Deliberately
+    /// cropped from the submit-time surface rather than the
+    /// trigger-time PNG — the two images represent different
+    /// moments and the trigger surface may have been a
+    /// different size.
+    screenshot_region_png: Option<Vec<u8>>,
     /// Runtime process and per-thread CPU metrics.
     runtime_metrics: RuntimeMetrics,
 }
@@ -722,6 +815,8 @@ impl BugReport {
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
+        trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         // 0. Sample runtime metrics first (blocks for 2 seconds).
         //    This runs before the rest of the report is assembled so
@@ -740,6 +835,8 @@ impl BugReport {
             app_snapshot,
             surface_pixels,
             runtime_metrics,
+            trigger,
+            precomputed_screenshot_png,
         )
     }
 
@@ -760,6 +857,8 @@ impl BugReport {
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
         runtime_metrics: RuntimeMetrics,
+        trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         // 1. Session snapshot (AppSnapshot)
         let mut session = app_snapshot.lock().unwrap().clone();
@@ -821,9 +920,21 @@ impl BugReport {
         let channel_name = report_type.channel_name();
         let pcap_bytes = traffic.drain_channel_pcap_bytes(channel_name);
 
-        // 4. PNG screenshot (display reports only)
+        // 4. PNG screenshot (display reports only). Prefer a
+        //    precomputed PNG from the trigger-time encoder thread
+        //    over re-encoding the live surface at submit time; fall
+        //    back to a live encode when the background thread was
+        //    never spawned (e.g. pedantic observer path) or hasn't
+        //    produced bytes yet.
+        //
+        //    Non-Display submissions drop the precomputed PNG on
+        //    the floor. The policy is to always *capture* on dialog
+        //    open and only *include* the PNG when the user actually
+        //    submits a Display report.
         let screenshot_png = if report_type == BugReportType::Display {
-            if let Some((pixels, w, h)) = surface_pixels {
+            if let Some(bytes) = precomputed_screenshot_png {
+                Some(bytes)
+            } else if let Some((pixels, w, h)) = surface_pixels {
                 Some(encode_png(pixels, w, h)?)
             } else {
                 None
@@ -832,7 +943,32 @@ impl BugReport {
             None
         };
 
-        // 5. Report metadata
+        // 4b. Region crop PNG (Display reports with a non-empty
+        //     region only). Cropped from the submit-time surface
+        //     pixels, deliberately *not* from the precomputed
+        //     trigger PNG — the trigger surface may have been a
+        //     different size, and the region coordinates are in
+        //     submit-time surface space.
+        let screenshot_region_png = if report_type == BugReportType::Display {
+            match (&region, surface_pixels) {
+                (Some(r), Some((pixels, w, h))) => encode_region_png(pixels, w, h, r)?,
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        // 5. Report metadata. When the caller did not supply explicit
+        //    trigger timestamps, substitute the submit-time values so
+        //    downstream tooling can treat the fields as always present.
+        //    Single `chrono_now()` call means the fallback string is
+        //    byte-identical to `timestamp`.
+        let submit_iso = chrono_now();
+        let submit_uptime = session.uptime_secs;
+        let (triggered_at, triggered_uptime_secs) = match trigger {
+            Some(t) => (t.triggered_at, t.triggered_uptime_secs),
+            None => (submit_iso.clone(), submit_uptime),
+        };
         let metadata = ReportMetadata {
             ryll_version: env!("CARGO_PKG_VERSION").to_string(),
             platform_os: std::env::consts::OS.to_string(),
@@ -841,10 +977,12 @@ impl BugReport {
             report_type,
             description,
             region,
-            timestamp: chrono_now(),
+            timestamp: submit_iso,
             target_host: target_host.to_string(),
             target_port,
-            session_uptime_secs: session.uptime_secs,
+            session_uptime_secs: submit_uptime,
+            triggered_at,
+            triggered_uptime_secs,
         };
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
 
@@ -854,6 +992,7 @@ impl BugReport {
             channel_state_json,
             pcap_bytes,
             screenshot_png,
+            screenshot_region_png,
             runtime_metrics,
         })
     }
@@ -893,6 +1032,11 @@ impl BugReport {
             zip.write_all(png)?;
         }
 
+        if let Some(ref png) = self.screenshot_region_png {
+            zip.start_file("screenshot-region.png", opts)?;
+            zip.write_all(png)?;
+        }
+
         let metrics_json = serde_json::to_string_pretty(&self.runtime_metrics)?;
         zip.start_file("runtime-metrics.json", opts)?;
         zip.write_all(metrics_json.as_bytes())?;
@@ -919,11 +1063,16 @@ impl BugReport {
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
         runtime_metrics: RuntimeMetrics,
+        trigger: Option<TriggerTimestamps>,
     ) -> anyhow::Result<std::path::PathBuf> {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
         use zip::ZipWriter;
 
+        // Pedantic reports never carry a precomputed PNG — the
+        // observer fires inside a protocol handler, not the GUI,
+        // and pedantic reports use the non-Display branch of
+        // `BugReportType` anyway.
         let report = Self::assemble(
             BugReportType::Pedantic {
                 gap_key: gap_key.to_string(),
@@ -937,6 +1086,8 @@ impl BugReport {
             app_snapshot,
             None,
             runtime_metrics,
+            trigger,
+            None,
         )?;
 
         std::fs::create_dir_all(dir)?;
@@ -1032,6 +1183,10 @@ impl BugReport {
                             "spawn_blocking panicked during metrics sample",
                         )
                     });
+                    // Pedantic observers fire synchronously on the
+                    // gap event, so trigger-time and submit-time are
+                    // the same moment; None lets `assemble()` default
+                    // the triggered_* metadata fields to submit time.
                     match BugReport::write_pedantic(
                         &dir,
                         &key_str,
@@ -1041,6 +1196,7 @@ impl BugReport {
                         &snaps,
                         &app_snap,
                         metrics,
+                        None,
                     ) {
                         Ok(path) => tracing::info!("pedantic: wrote {}", path.display()),
                         Err(e) => {
@@ -1284,12 +1440,16 @@ mod tests {
             target_host: "192.168.1.100".to_string(),
             target_port: 5900,
             session_uptime_secs: 45.3,
+            triggered_at: "2026-04-03T12:34:50Z".to_string(),
+            triggered_uptime_secs: 39.1,
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
         assert!(json.contains("\"report_type\": \"Display\""));
         assert!(json.contains("\"channel\": \"display\""));
         assert!(json.contains("\"description\": \"test bug\""));
         assert!(json.contains("\"left\": 10"));
+        assert!(json.contains("\"triggered_at\": \"2026-04-03T12:34:50Z\""));
+        assert!(json.contains("\"triggered_uptime_secs\": 39.1"));
     }
 
     /// Stub metrics used by tests to avoid a 2-second sleep.
@@ -1324,6 +1484,8 @@ mod tests {
             &app_snap,
             Some((&pixels, 2, 2)),
             stub_metrics(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1365,6 +1527,484 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // When no explicit TriggerTimestamps are supplied, assemble()
+    // must default the new fields to the submit-time values so
+    // downstream tooling can treat them as always present.
+    #[test]
+    fn test_bug_report_assemble_defaults_trigger_to_submit() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "no trigger supplied".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let meta: serde_json::Value = serde_json::from_str(&report.metadata_json).unwrap();
+        let submit_iso = meta["timestamp"].as_str().unwrap();
+        let submit_uptime = meta["session_uptime_secs"].as_f64().unwrap();
+        assert_eq!(meta["triggered_at"].as_str().unwrap(), submit_iso);
+        assert_eq!(
+            meta["triggered_uptime_secs"].as_f64().unwrap(),
+            submit_uptime
+        );
+    }
+
+    // An explicit TriggerTimestamps must surface verbatim in the
+    // metadata without being overwritten by the submit-time values.
+    #[test]
+    fn test_bug_report_assemble_propagates_explicit_trigger() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let trigger = TriggerTimestamps {
+            triggered_at: "2020-01-01T00:00:00Z".to_string(),
+            triggered_uptime_secs: 1.5,
+        };
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "explicit trigger".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            Some(trigger),
+            None,
+        )
+        .unwrap();
+
+        let meta: serde_json::Value = serde_json::from_str(&report.metadata_json).unwrap();
+        assert_eq!(
+            meta["triggered_at"].as_str().unwrap(),
+            "2020-01-01T00:00:00Z"
+        );
+        assert_eq!(meta["triggered_uptime_secs"].as_f64().unwrap(), 1.5);
+        // The submit-time fields must not have been clobbered by the
+        // explicit trigger values.
+        assert_ne!(meta["timestamp"].as_str().unwrap(), "2020-01-01T00:00:00Z");
+    }
+
+    // Round-trip sanity: the metadata.json inside the zip still
+    // contains both new fields once it survives ZipWriter + serde.
+    #[test]
+    fn test_bug_report_zip_metadata_has_trigger_fields() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "zip round-trip".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            Some(TriggerTimestamps {
+                triggered_at: "2021-06-06T06:06:06Z".to_string(),
+                triggered_uptime_secs: 12.25,
+            }),
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-trigger-zip");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut meta_file = archive.by_name("metadata.json").unwrap();
+        let mut meta_str = String::new();
+        std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+        assert_eq!(
+            meta["triggered_at"].as_str().unwrap(),
+            "2021-06-06T06:06:06Z"
+        );
+        assert_eq!(meta["triggered_uptime_secs"].as_f64().unwrap(), 12.25);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // When the caller supplies a precomputed PNG, assemble() must
+    // use those bytes verbatim rather than re-encoding the live
+    // surface pixels. This is the trigger-snapshot hot path: the
+    // background thread produces the PNG and the submit path uses
+    // it as-is instead of encoding the potentially-changed surface.
+    #[test]
+    fn test_bug_report_uses_precomputed_png_when_provided() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // Raw 2x2 RGBA that would produce a very different PNG if
+        // re-encoded vs. the sentinel bytes we hand in.
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        // Sentinel bytes: not a valid PNG, but we're proving they
+        // reach the zip untouched.
+        let sentinel = b"sentinel-precomputed-png-bytes".to_vec();
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "precomputed png path".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&raw, 2, 2)),
+            stub_metrics(),
+            None,
+            Some(sentinel.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(report.screenshot_png.as_deref(), Some(sentinel.as_slice()));
+    }
+
+    // Regression: when no precomputed PNG is supplied, assemble()
+    // still encodes the live surface pixels. This is the fallback
+    // path used when the background encoder never ran (pedantic
+    // observers, tests) or hasn't finished by submit time.
+    #[test]
+    fn test_bug_report_falls_back_to_live_encoding_when_no_precomputed_png() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "live encode fallback".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&raw, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let png = report
+            .screenshot_png
+            .expect("screenshot.png was not encoded");
+        assert_eq!(&png[..4], b"\x89PNG");
+    }
+
+    // Non-Display submissions must drop any precomputed PNG on the
+    // floor. Policy is "always capture on dialog open, only include
+    // the PNG when the submitted type is Display".
+    #[test]
+    fn test_bug_report_drops_precomputed_png_for_non_display() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let sentinel = b"sentinel-precomputed-png-bytes".to_vec();
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "non-display drops png".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+            Some(sentinel),
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_none());
+    }
+
+    // The background encoder thread's contract: given a
+    // shared Arc<Mutex<Option<Result<Vec<u8>>>>> slot, a clone of
+    // the surface pixels, and width/height, it eventually writes
+    // a valid PNG into the slot. No egui or RyllApp involved.
+    #[test]
+    fn test_trigger_snapshot_worker_encodes_png() {
+        use std::sync::Mutex as StdMutex;
+
+        let raw = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let slot: std::sync::Arc<StdMutex<Option<anyhow::Result<Vec<u8>>>>> =
+            std::sync::Arc::new(StdMutex::new(None));
+        let slot_for_thread = std::sync::Arc::clone(&slot);
+
+        let handle = std::thread::Builder::new()
+            .name("ryll-bugreport-png-test".to_string())
+            .spawn(move || {
+                let result = encode_png(&raw, 2, 2);
+                if let Ok(mut guard) = slot_for_thread.lock() {
+                    *guard = Some(result);
+                }
+            })
+            .expect("failed to spawn encoder thread");
+        handle.join().expect("encoder thread panicked");
+
+        let guard = slot.lock().expect("slot lock poisoned");
+        let bytes = guard
+            .as_ref()
+            .expect("encoder did not write into slot")
+            .as_ref()
+            .expect("encoder returned Err");
+        assert_eq!(&bytes[..4], b"\x89PNG");
+    }
+
+    // When a Display report carries a region, the zip gets a
+    // second PNG cropped from the submit-time surface.
+    #[test]
+    fn test_bug_report_writes_region_crop_when_region_present() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // 2x2 RGBA — enough to produce a non-empty crop.
+        let pixels = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "region crop test".to_string(),
+            Some(ReportRegion {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            }),
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&pixels, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-region");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"screenshot.png".to_string()));
+        assert!(names.contains(&"screenshot-region.png".to_string()));
+
+        let mut region_file = archive.by_name("screenshot-region.png").unwrap();
+        let mut region_bytes = Vec::new();
+        std::io::Read::read_to_end(&mut region_file, &mut region_bytes).unwrap();
+        assert_eq!(&region_bytes[..4], b"\x89PNG");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // Display report without a region: only the full screenshot.
+    #[test]
+    fn test_bug_report_no_region_crop_without_region() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let pixels = vec![
+            255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+
+        let report = BugReport::assemble(
+            BugReportType::Display,
+            "no region".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            Some((&pixels, 2, 2)),
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_some());
+        assert!(report.screenshot_region_png.is_none());
+    }
+
+    // Non-Display reports never carry a region crop, even if a
+    // caller wrongly passes a region. Belt-and-braces for the
+    // report-type guard in `assemble`.
+    #[test]
+    fn test_bug_report_no_region_crop_for_non_display() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "buggy caller set a region on an Input report".to_string(),
+            Some(ReportRegion {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            }),
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(report.screenshot_png.is_none());
+        assert!(report.screenshot_region_png.is_none());
+    }
+
+    // `encode_region_png` clamps out-of-bounds rectangles to the
+    // surface, and returns `Ok(None)` for degenerate or
+    // fully-outside rectangles.
+    #[test]
+    fn test_encode_region_png_clamps_and_skips_degenerate() {
+        // 2x2 RGBA.
+        let pixels = vec![
+            10u8, 0, 0, 255, 0, 20, 0, 255, 0, 0, 30, 255, 40, 40, 40, 255,
+        ];
+
+        // Region extends past the surface → clamps to 2x2 and
+        // produces a valid PNG.
+        let oversize = ReportRegion {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let png = encode_region_png(&pixels, 2, 2, &oversize)
+            .unwrap()
+            .expect("expected Some(PNG) for a clamped region");
+        assert_eq!(&png[..4], b"\x89PNG");
+
+        // Zero-width region → None.
+        let zero_width = ReportRegion {
+            left: 1,
+            top: 0,
+            right: 1,
+            bottom: 2,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &zero_width)
+            .unwrap()
+            .is_none());
+
+        // Zero-height region → None.
+        let zero_height = ReportRegion {
+            left: 0,
+            top: 1,
+            right: 2,
+            bottom: 1,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &zero_height)
+            .unwrap()
+            .is_none());
+
+        // Entirely outside → clamps to 0×0 → None.
+        let outside = ReportRegion {
+            left: 10,
+            top: 10,
+            right: 20,
+            bottom: 20,
+        };
+        assert!(encode_region_png(&pixels, 2, 2, &outside)
+            .unwrap()
+            .is_none());
+    }
+
+    // Stride math: the cropped PNG must contain exactly the
+    // source pixels at the cropped sub-rect, round-tripped
+    // through the PNG encoder/decoder.
+    #[test]
+    fn test_encode_region_png_pixels_match_source() {
+        // 4x4 RGBA laid out so every pixel is distinct.
+        let mut src = Vec::with_capacity(4 * 4 * 4);
+        for y in 0..4u8 {
+            for x in 0..4u8 {
+                src.extend_from_slice(&[x * 16, y * 16, (x + y) * 8, 255]);
+            }
+        }
+
+        // Crop to the 2x2 sub-rect (1,1)-(3,3).
+        let region = ReportRegion {
+            left: 1,
+            top: 1,
+            right: 3,
+            bottom: 3,
+        };
+        let png_bytes = encode_region_png(&src, 4, 4, &region)
+            .unwrap()
+            .expect("expected Some(PNG)");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&png_bytes));
+        let mut reader = decoder.read_info().unwrap();
+        let mut decoded = vec![0u8; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut decoded).unwrap();
+        assert_eq!(info.width, 2);
+        assert_eq!(info.height, 2);
+
+        // Expected 2x2 = pixels at (x=1,y=1), (2,1), (1,2), (2,2).
+        let mut expected = Vec::with_capacity(2 * 2 * 4);
+        for y in 1..3u8 {
+            for x in 1..3u8 {
+                expected.extend_from_slice(&[x * 16, y * 16, (x + y) * 8, 255]);
+            }
+        }
+        assert_eq!(&decoded[..info.buffer_size()], expected.as_slice());
+    }
+
     #[test]
     fn test_bug_report_assemble_input() {
         let traffic = TrafficBuffers::new();
@@ -1382,6 +2022,8 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1451,6 +2093,8 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1495,6 +2139,8 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
+            None,
         )
         .unwrap();
 
@@ -1543,6 +2189,8 @@ mod tests {
             &app_snap,
             None,
             metrics,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1678,6 +2326,7 @@ mod tests {
             &snapshots,
             &app_snap,
             metrics,
+            None,
         )
         .unwrap();
 

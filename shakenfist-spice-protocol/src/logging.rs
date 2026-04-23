@@ -344,6 +344,7 @@ pub mod message_names {
             main_server::INIT => "init",
             main_server::CHANNELS_LIST => "channels_list",
             main_server::MOUSE_MODE => "mouse_mode",
+            main_server::MULTI_MEDIA_TIME => "multi_media_time",
             main_server::AGENT_CONNECTED => "agent_connected",
             main_server::AGENT_DISCONNECTED => "agent_disconnected",
             main_server::AGENT_DATA => "agent_data",
@@ -507,7 +508,10 @@ pub mod message_names {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{intern_key, log_unknown_once, register_gap_observer, warn_once_keys};
+    use super::{
+        intern_key, log_unknown_once, message_names, register_gap_observer, warn_once_keys,
+    };
+    use crate::constants::main_server;
 
     // The registry is process-global and cargo-test runs tests in
     // parallel, so assertions here key off specific literals unique
@@ -655,6 +659,18 @@ mod tests {
             "expected suppression-notice key {} in {:?}",
             cap_key,
             keys.iter().filter(|k| k.contains(CH)).collect::<Vec<_>>()
+        );
+    }
+
+    // Guard against regressions where MULTI_MEDIA_TIME (106) loses its
+    // const or name-table entry and starts showing up as a --pedantic
+    // "main:hexdump:106" gap again.
+    #[test]
+    fn main_server_multi_media_time_const_and_name() {
+        assert_eq!(main_server::MULTI_MEDIA_TIME, 106);
+        assert_eq!(
+            message_names::main_server(main_server::MULTI_MEDIA_TIME),
+            "multi_media_time"
         );
     }
 }

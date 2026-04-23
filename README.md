@@ -25,7 +25,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
-- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, screenshots, and runtime metrics (process and per-thread CPU, RSS) for diagnosing performance reports; Display reports include interactive region selection to highlight corruption
+- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, runtime metrics, and a screenshot taken the moment the dialog opened so transient display artefacts survive the form-filling delay; Display reports with a region selection also include a crop of the submit-time surface
 - **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 - **Folder sharing** - Click "Folders" in the status bar for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
