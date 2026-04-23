@@ -671,6 +671,25 @@ pub struct ReportRegion {
     pub bottom: u32,
 }
 
+/// Captured at the moment a bug-report dialog opened, or at
+/// the moment a --pedantic observer fired. Threaded through
+/// `BugReport::new` / `BugReport::write_pedantic` so the
+/// submitted zip can record when the user *saw* the bug in
+/// addition to when they *submitted* the report.
+///
+/// Phase 1 of the trigger-snapshot work plumbs this through
+/// with every caller passing `None` (which falls back to
+/// submit time); phase 2 wires up real trigger-time capture
+/// from the app.
+#[derive(Debug, Clone)]
+pub struct TriggerTimestamps {
+    /// ISO 8601 UTC timestamp (same format as
+    /// `ReportMetadata::timestamp`).
+    pub triggered_at: String,
+    /// Session uptime in seconds at the moment of trigger.
+    pub triggered_uptime_secs: f64,
+}
+
 /// Top-level metadata written to metadata.json.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportMetadata {
@@ -685,6 +704,15 @@ pub struct ReportMetadata {
     pub target_host: String,
     pub target_port: u16,
     pub session_uptime_secs: f64,
+    /// ISO 8601 UTC timestamp of when the user opened the
+    /// bug-report dialog (or when the --pedantic observer
+    /// fired). Equal to `timestamp` when the caller did not
+    /// supply an explicit trigger.
+    pub triggered_at: String,
+    /// Session uptime in seconds at the moment of trigger.
+    /// Equal to `session_uptime_secs` when no explicit
+    /// trigger was supplied.
+    pub triggered_uptime_secs: f64,
 }
 
 /// A fully assembled bug report ready to write to disk.
@@ -722,6 +750,7 @@ impl BugReport {
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
+        trigger: Option<TriggerTimestamps>,
     ) -> anyhow::Result<Self> {
         // 0. Sample runtime metrics first (blocks for 2 seconds).
         //    This runs before the rest of the report is assembled so
@@ -740,6 +769,7 @@ impl BugReport {
             app_snapshot,
             surface_pixels,
             runtime_metrics,
+            trigger,
         )
     }
 
@@ -760,6 +790,7 @@ impl BugReport {
         app_snapshot: &Mutex<AppSnapshot>,
         surface_pixels: Option<(&[u8], u32, u32)>,
         runtime_metrics: RuntimeMetrics,
+        trigger: Option<TriggerTimestamps>,
     ) -> anyhow::Result<Self> {
         // 1. Session snapshot (AppSnapshot)
         let mut session = app_snapshot.lock().unwrap().clone();
@@ -832,7 +863,17 @@ impl BugReport {
             None
         };
 
-        // 5. Report metadata
+        // 5. Report metadata. When the caller did not supply explicit
+        //    trigger timestamps, substitute the submit-time values so
+        //    downstream tooling can treat the fields as always present.
+        //    Single `chrono_now()` call means the fallback string is
+        //    byte-identical to `timestamp`.
+        let submit_iso = chrono_now();
+        let submit_uptime = session.uptime_secs;
+        let (triggered_at, triggered_uptime_secs) = match trigger {
+            Some(t) => (t.triggered_at, t.triggered_uptime_secs),
+            None => (submit_iso.clone(), submit_uptime),
+        };
         let metadata = ReportMetadata {
             ryll_version: env!("CARGO_PKG_VERSION").to_string(),
             platform_os: std::env::consts::OS.to_string(),
@@ -841,10 +882,12 @@ impl BugReport {
             report_type,
             description,
             region,
-            timestamp: chrono_now(),
+            timestamp: submit_iso,
             target_host: target_host.to_string(),
             target_port,
-            session_uptime_secs: session.uptime_secs,
+            session_uptime_secs: submit_uptime,
+            triggered_at,
+            triggered_uptime_secs,
         };
         let metadata_json = serde_json::to_string_pretty(&metadata)?;
 
@@ -919,6 +962,7 @@ impl BugReport {
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
         runtime_metrics: RuntimeMetrics,
+        trigger: Option<TriggerTimestamps>,
     ) -> anyhow::Result<std::path::PathBuf> {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
@@ -937,6 +981,7 @@ impl BugReport {
             app_snapshot,
             None,
             runtime_metrics,
+            trigger,
         )?;
 
         std::fs::create_dir_all(dir)?;
@@ -1032,6 +1077,10 @@ impl BugReport {
                             "spawn_blocking panicked during metrics sample",
                         )
                     });
+                    // Pedantic observers fire synchronously on the
+                    // gap event, so trigger-time and submit-time are
+                    // the same moment; None lets `assemble()` default
+                    // the triggered_* metadata fields to submit time.
                     match BugReport::write_pedantic(
                         &dir,
                         &key_str,
@@ -1041,6 +1090,7 @@ impl BugReport {
                         &snaps,
                         &app_snap,
                         metrics,
+                        None,
                     ) {
                         Ok(path) => tracing::info!("pedantic: wrote {}", path.display()),
                         Err(e) => {
@@ -1284,12 +1334,16 @@ mod tests {
             target_host: "192.168.1.100".to_string(),
             target_port: 5900,
             session_uptime_secs: 45.3,
+            triggered_at: "2026-04-03T12:34:50Z".to_string(),
+            triggered_uptime_secs: 39.1,
         };
         let json = serde_json::to_string_pretty(&meta).unwrap();
         assert!(json.contains("\"report_type\": \"Display\""));
         assert!(json.contains("\"channel\": \"display\""));
         assert!(json.contains("\"description\": \"test bug\""));
         assert!(json.contains("\"left\": 10"));
+        assert!(json.contains("\"triggered_at\": \"2026-04-03T12:34:50Z\""));
+        assert!(json.contains("\"triggered_uptime_secs\": 39.1"));
     }
 
     /// Stub metrics used by tests to avoid a 2-second sleep.
@@ -1324,6 +1378,7 @@ mod tests {
             &app_snap,
             Some((&pixels, 2, 2)),
             stub_metrics(),
+            None,
         )
         .unwrap();
 
@@ -1365,6 +1420,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // When no explicit TriggerTimestamps are supplied, assemble()
+    // must default the new fields to the submit-time values so
+    // downstream tooling can treat them as always present.
+    #[test]
+    fn test_bug_report_assemble_defaults_trigger_to_submit() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "no trigger supplied".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            None,
+        )
+        .unwrap();
+
+        let meta: serde_json::Value = serde_json::from_str(&report.metadata_json).unwrap();
+        let submit_iso = meta["timestamp"].as_str().unwrap();
+        let submit_uptime = meta["session_uptime_secs"].as_f64().unwrap();
+        assert_eq!(meta["triggered_at"].as_str().unwrap(), submit_iso);
+        assert_eq!(
+            meta["triggered_uptime_secs"].as_f64().unwrap(),
+            submit_uptime
+        );
+    }
+
+    // An explicit TriggerTimestamps must surface verbatim in the
+    // metadata without being overwritten by the submit-time values.
+    #[test]
+    fn test_bug_report_assemble_propagates_explicit_trigger() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let trigger = TriggerTimestamps {
+            triggered_at: "2020-01-01T00:00:00Z".to_string(),
+            triggered_uptime_secs: 1.5,
+        };
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "explicit trigger".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            Some(trigger),
+        )
+        .unwrap();
+
+        let meta: serde_json::Value = serde_json::from_str(&report.metadata_json).unwrap();
+        assert_eq!(
+            meta["triggered_at"].as_str().unwrap(),
+            "2020-01-01T00:00:00Z"
+        );
+        assert_eq!(meta["triggered_uptime_secs"].as_f64().unwrap(), 1.5);
+        // The submit-time fields must not have been clobbered by the
+        // explicit trigger values.
+        assert_ne!(meta["timestamp"].as_str().unwrap(), "2020-01-01T00:00:00Z");
+    }
+
+    // Round-trip sanity: the metadata.json inside the zip still
+    // contains both new fields once it survives ZipWriter + serde.
+    #[test]
+    fn test_bug_report_zip_metadata_has_trigger_fields() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        let report = BugReport::assemble(
+            BugReportType::Input,
+            "zip round-trip".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            None,
+            stub_metrics(),
+            Some(TriggerTimestamps {
+                triggered_at: "2021-06-06T06:06:06Z".to_string(),
+                triggered_uptime_secs: 12.25,
+            }),
+        )
+        .unwrap();
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-trigger-zip");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = report.write_zip(&tmp).unwrap();
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut meta_file = archive.by_name("metadata.json").unwrap();
+        let mut meta_str = String::new();
+        std::io::Read::read_to_string(&mut meta_file, &mut meta_str).unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+        assert_eq!(
+            meta["triggered_at"].as_str().unwrap(),
+            "2021-06-06T06:06:06Z"
+        );
+        assert_eq!(meta["triggered_uptime_secs"].as_f64().unwrap(), 12.25);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn test_bug_report_assemble_input() {
         let traffic = TrafficBuffers::new();
@@ -1382,6 +1555,7 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
         )
         .unwrap();
 
@@ -1451,6 +1625,7 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
         )
         .unwrap();
 
@@ -1495,6 +1670,7 @@ mod tests {
             &app_snap,
             None,
             stub_metrics(),
+            None,
         )
         .unwrap();
 
@@ -1543,6 +1719,7 @@ mod tests {
             &app_snap,
             None,
             metrics,
+            None,
         )
         .unwrap();
 
@@ -1678,6 +1855,7 @@ mod tests {
             &snapshots,
             &app_snap,
             metrics,
+            None,
         )
         .unwrap();
 

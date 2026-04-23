@@ -936,7 +936,9 @@ impl RyllApp {
             None
         };
 
-        // Assemble the report
+        // Assemble the report. Phase 1 of the trigger-snapshot work
+        // passes None; phase 2 will stash a real TriggerTimestamps on
+        // the app when the dialog opens and pass Some here.
         let report = BugReport::new(
             report_type,
             description,
@@ -947,6 +949,7 @@ impl RyllApp {
             &self.channel_snapshots,
             &self.app_snapshot,
             surface_data,
+            None,
         )?;
 
         // Determine output directory
