@@ -275,10 +275,10 @@ with a single integration test.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Translator | PLAN-paste-as-keystrokes-phase-01-translator.md | Not started |
-| 2. Channel + CLI | PLAN-paste-as-keystrokes-phase-02-channel-cli.md | Not started |
-| 3. GUI gesture | PLAN-paste-as-keystrokes-phase-03-gui.md | Not started |
-| 4. Docs and cross-repo | PLAN-paste-as-keystrokes-phase-04-docs.md | Not started |
+| 1. Translator | [Phase 1](PLAN-paste-as-keystrokes-phase-01-translator.md) | Complete |
+| 2. Channel + CLI | [Phase 2](PLAN-paste-as-keystrokes-phase-02-channel-cli.md) | Complete |
+| 3. GUI gesture | [Phase 3](PLAN-paste-as-keystrokes-phase-03-gui.md) | Complete |
+| 4. Docs and cross-repo | [Phase 4](PLAN-paste-as-keystrokes-phase-04-docs.md) | Complete |
 
 **Phase 1 — Translator (medium effort, sonnet model)**.
 Pure-function translator from `&str` to a sequence of
