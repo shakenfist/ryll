@@ -28,6 +28,7 @@ reviewing and merging external contributor PRs see `MERGE-TEMPLATE.md`.
 | 2026-04-23 | [Android APK port](PLAN-android-apk.md) | Concept plan for a sideloadable Android APK of ryll, targeting the Google TV Streamer as a thin-client SPICE endpoint | Proposed (concept) | (phases not yet written) |
 | 2026-04-23 | [Bug-report trigger snapshot](PLAN-bugreport-trigger-snapshot.md) | Capture the display surface when the bug dialog opens, not at submit, so transient artefacts survive the form-filling delay | Complete | [1. Metadata](PLAN-bugreport-trigger-snapshot-phase-01-metadata.md), [2. Snapshot](PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md), [3. Region image](PLAN-bugreport-trigger-snapshot-phase-03-region.md), [4. Docs](PLAN-bugreport-trigger-snapshot-phase-04-docs.md) |
 | 2026-04-25 | [Paste-as-keystrokes fallback](PLAN-paste-as-keystrokes.md) | Synthesise SPICE keystrokes for the contents of a string when no vdagent is available, so guests like uncalibrated-sextant can be driven without an in-guest agent | In planning | (phases not yet written) |
+| 2026-04-25 | [Hamburger menu](PLAN-hamburger-menu.md) | Replace the status-bar action-button row with a single hamburger menu so the row returns to glanceable state | Not started | (single phase, inline) |
 
 ## Standalone plans
 
