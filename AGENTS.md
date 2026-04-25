@@ -146,7 +146,10 @@ Ryll uses:
     per invocation and updates the next-fire time. Modifier keys (Ctrl, Shift,
     Alt) are tracked via `KeyDown`/`KeyUp` observations and saved/restored
     around the paste. The `send_key_down`/`send_key_up` helpers bypass event
-    recording and modifier tracking for synthetic paste events.
+    recording and modifier tracking for synthetic paste events. Public API:
+    `translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError>`,
+    `PasteKey` (struct with press, release, shift fields), `PasteError`
+    (enum with Unrepresentable variant).
 
 16. **Mouse mode negotiation** - On session init, ryll requests client mouse
     mode (absolute positioning) via `MOUSE_MODE_REQUEST` if the server

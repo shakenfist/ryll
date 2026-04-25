@@ -976,6 +976,17 @@ CLI flags: `--enable-paste-as-keystrokes` (master gate),
 `--paste-text TEXT` (headless trigger, implies enable),
 `--paste-char-delay-ms N` (default 16ms).
 
+GUI surface: When enabled, a "Paste" entry appears in the hamburger
+menu with "Ctrl+Alt+V" shortcut text. The entry is disabled (greyed
+out) when vdagent is connected, with a tooltip explaining to use
+normal Ctrl+V. The Ctrl+Alt+V shortcut is detected before
+`handle_input()` to prevent the V keypress from reaching the guest.
+Pre-validation via `translate_paste()` catches unrepresentable
+characters and shows an error dialog listing up to three sample
+codepoints. The clipboard is read via `arboard::Clipboard` (lazily
+initialised in `RyllApp::clipboard()`, separate from the
+`MainChannel` instance).
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.

@@ -331,12 +331,20 @@ pub struct RyllApp {
     gaps_popup_open: bool,
 
     /// Whether paste-as-keystrokes is enabled.
-    #[allow(dead_code)] // used in Phase 3 (GUI paste button)
     enable_paste: bool,
 
     /// Inter-character delay for paste-as-keystrokes in milliseconds.
-    #[allow(dead_code)] // used in Phase 3 (GUI paste button)
     paste_char_delay_ms: u32,
+
+    /// Whether the guest has a vdagent connected (disables
+    /// paste-as-keystrokes in favour of the clipboard path).
+    agent_connected: bool,
+
+    /// Cached clipboard instance for reading host clipboard.
+    cached_clipboard: Option<arboard::Clipboard>,
+
+    /// Error message for the paste error dialog (None = hidden).
+    paste_error_message: Option<String>,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -590,6 +598,9 @@ impl RyllApp {
             gaps_popup_open: false,
             enable_paste,
             paste_char_delay_ms,
+            agent_connected: false,
+            cached_clipboard: None,
+            paste_error_message: None,
         }
     }
 
@@ -884,8 +895,12 @@ impl RyllApp {
 
                 ChannelEvent::PasteFailed { reason } => {
                     error!("app: paste failed: {}", reason);
-                    self.bug_status_message =
-                        Some((format!("Paste failed: {}", reason), Instant::now()));
+                    self.paste_error_message = Some(reason);
+                }
+
+                ChannelEvent::AgentConnected(connected) => {
+                    info!("app: vdagent connected={}", connected);
+                    self.agent_connected = connected;
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -940,6 +955,75 @@ impl RyllApp {
     fn clear_usb_operation_flags(&mut self) {
         self.usb_connecting = false;
         self.usb_disconnecting = false;
+    }
+
+    /// Get or create the cached clipboard instance.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.cached_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.cached_clipboard = Some(cb),
+                Err(e) => {
+                    tracing::warn!("app: failed to open clipboard: {}", e);
+                    return None;
+                }
+            }
+        }
+        self.cached_clipboard.as_mut()
+    }
+
+    /// Attempt to paste the host clipboard as keystrokes.
+    /// Returns true if a paste was triggered (or an error
+    /// dialog was shown), false if there was nothing to do.
+    fn trigger_paste(&mut self) -> bool {
+        use crate::channels::{translate_paste, PasteError};
+
+        if !self.enable_paste || self.agent_connected {
+            return false;
+        }
+
+        // Read clipboard
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get_text() {
+                Ok(t) if !t.is_empty() => t,
+                Ok(_) => return false, // empty clipboard
+                Err(e) => {
+                    self.paste_error_message = Some(format!("Failed to read clipboard: {}", e));
+                    return true;
+                }
+            },
+            None => {
+                self.paste_error_message = Some("No clipboard available".to_string());
+                return true;
+            }
+        };
+
+        // Pre-validate with the translator
+        match translate_paste(&text) {
+            Ok(_) => {
+                // Translation will succeed — send to the inputs channel.
+                if let Some(tx) = &self.input_tx {
+                    let _ = tx.try_send(InputEvent::PasteText {
+                        text,
+                        char_delay_ms: self.paste_char_delay_ms,
+                    });
+                }
+            }
+            Err(PasteError::Unrepresentable { count, sample }) => {
+                let sample_str: String = sample
+                    .iter()
+                    .map(|c| format!("U+{:04X}", *c as u32))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.paste_error_message = Some(format!(
+                    "The clipboard contains {} character(s) that have no \
+                     US-QWERTY scancode mapping: {}",
+                    count, sample_str,
+                ));
+                return true;
+            }
+        }
+
+        true
     }
 
     /// Sync app-level state to the shared snapshot.
@@ -1468,8 +1552,22 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Handle input
-        self.handle_input(ctx);
+        // Ctrl+Alt+V triggers paste-as-keystrokes (not during
+        // region selection or dialogs)
+        let mut paste_triggered = false;
+        if !self.region_select_active && !self.show_bug_dialog && self.paste_error_message.is_none()
+        {
+            let ctrl_alt_v =
+                ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::V));
+            if ctrl_alt_v {
+                paste_triggered = self.trigger_paste();
+            }
+        }
+
+        // Handle input (skip if paste was triggered this frame)
+        if !paste_triggered {
+            self.handle_input(ctx);
+        }
 
         // Handle cadence mode
         self.handle_cadence();
@@ -1612,6 +1710,21 @@ impl eframe::App for RyllApp {
                                 self.bug_description.clear();
                                 self.begin_trigger_snapshot();
                                 ui.close_menu();
+                            }
+                            if self.enable_paste {
+                                ui.separator();
+                                let label = egui::Button::new("Paste").shortcut_text("Ctrl+Alt+V");
+                                let enabled = !self.agent_connected;
+                                let response = ui.add_enabled(enabled, label);
+                                if response.clicked() {
+                                    self.trigger_paste();
+                                    ui.close_menu();
+                                }
+                                if !enabled {
+                                    response.on_disabled_hover_text(
+                                        "vdagent is connected — use Ctrl+V instead",
+                                    );
+                                }
                             }
                         });
                         let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
@@ -2353,6 +2466,34 @@ impl eframe::App for RyllApp {
             None => {}
         }
 
+        // Paste error dialog (two-pass: render then act)
+        let mut paste_dialog_action = None;
+        if let Some(ref msg) = self.paste_error_message {
+            egui::Window::new("Cannot paste as keystrokes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(350.0);
+                    ui.label(msg);
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        paste_dialog_action = Some(());
+                    }
+                });
+        }
+        if paste_dialog_action.is_some() {
+            self.paste_error_message = None;
+        }
+
+        // Escape also dismisses the paste error dialog
+        if self.paste_error_message.is_some() {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                self.paste_error_message = None;
+            }
+        }
+
         // Region selection mode: crosshair, drag tracking, overlays
         if self.region_select_active && self.surface_rect != egui::Rect::NOTHING {
             // Show crosshair cursor over the surface
@@ -3035,6 +3176,9 @@ pub async fn run_headless(
                     ChannelEvent::PasteFailed { reason } => {
                         error!("headless: paste failed: {}", reason);
                         paste_failed = true;
+                    }
+                    ChannelEvent::AgentConnected(connected) => {
+                        info!("headless: vdagent connected={}", connected);
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);

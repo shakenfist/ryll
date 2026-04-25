@@ -8,7 +8,8 @@ pub mod webdav;
 
 pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
-pub use inputs::InputsChannel;
+#[allow(unused_imports)] // PasteKey is part of translate_paste's return type
+pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::MainChannel;
 pub use playback::{PlaybackChannel, VolumeControl};
 pub use usbredir::UsbredirChannel;
@@ -164,6 +165,9 @@ pub enum ChannelEvent {
     PasteFailed {
         reason: String,
     },
+
+    /// vdagent connection state changed.
+    AgentConnected(bool),
 
     /// Connection error
     Error(String),
