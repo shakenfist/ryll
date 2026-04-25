@@ -1567,18 +1567,25 @@ impl eframe::App for RyllApp {
                         }
 
                         ui.separator();
-                        if ui.small_button("Traffic").clicked() {
-                            self.show_traffic_viewer = !self.show_traffic_viewer;
-                        }
-                        if ui.small_button("USB").clicked() {
-                            self.show_usb_panel = !self.show_usb_panel;
-                        }
-                        if ui.small_button("Folders").clicked() {
-                            self.show_webdav_panel = !self.show_webdav_panel;
-                        }
-                        if ui.small_button("Screenshot").clicked() {
-                            self.open_screenshot_dialog();
-                        }
+                        egui::menu::menu_button(ui, "☰", |ui| {
+                            ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
+                            ui.checkbox(&mut self.show_usb_panel, "USB");
+                            ui.checkbox(&mut self.show_webdav_panel, "Folders");
+                            if ui
+                                .add(egui::Button::new("Screenshot").shortcut_text("F8"))
+                                .clicked()
+                            {
+                                self.open_screenshot_dialog();
+                                ui.close_menu();
+                            }
+                            if ui.button("Report").clicked() {
+                                self.show_bug_dialog = true;
+                                self.bug_report_type = BugReportType::Display;
+                                self.bug_description.clear();
+                                self.begin_trigger_snapshot();
+                                ui.close_menu();
+                            }
+                        });
                         let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
                         let gap_label = format!("Gaps: {}", gap_count);
                         let gap_response = if gap_count > 0 {
@@ -1598,13 +1605,6 @@ impl eframe::App for RyllApp {
                                  — click to list.\nPass --pedantic to write \
                                  a bug report per gap.",
                             );
-                        }
-
-                        if ui.small_button("Report").clicked() {
-                            self.show_bug_dialog = true;
-                            self.bug_report_type = BugReportType::Display;
-                            self.bug_description.clear();
-                            self.begin_trigger_snapshot();
                         }
 
                         // Transient status message from bug report

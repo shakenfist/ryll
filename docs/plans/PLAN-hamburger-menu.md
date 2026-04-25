@@ -130,7 +130,7 @@ Single phase, executed inline (no separate phase file).
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Migrate buttons to hamburger | (inline below) | Not started |
+| 1. Migrate buttons to hamburger | [Phase 1](PLAN-hamburger-menu-phase-01-migrate.md) | Complete |
 
 **Brief for sub-agent (medium effort, sonnet, no
 isolation)**:
