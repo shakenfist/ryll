@@ -329,6 +329,14 @@ pub struct RyllApp {
 
     /// Whether the "Protocol gaps" floating window is currently open.
     gaps_popup_open: bool,
+
+    /// Whether paste-as-keystrokes is enabled.
+    #[allow(dead_code)] // used in Phase 3 (GUI paste button)
+    enable_paste: bool,
+
+    /// Inter-character delay for paste-as-keystrokes in milliseconds.
+    #[allow(dead_code)] // used in Phase 3 (GUI paste button)
+    paste_char_delay_ms: u32,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -383,6 +391,8 @@ impl RyllApp {
         cc: &eframe::CreationContext<'_>,
         config: Config,
         cadence: bool,
+        enable_paste: bool,
+        paste_char_delay_ms: u32,
         virtual_disks: Vec<VirtualDiskConfig>,
         share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
@@ -488,6 +498,8 @@ impl RyllApp {
                     monitors,
                     resize_rx_for_conn,
                     vol_for_conn,
+                    enable_paste,
+                    paste_char_delay_ms,
                 )
                 .await
                 {
@@ -576,6 +588,8 @@ impl RyllApp {
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
             gaps_popup_open: false,
+            enable_paste,
+            paste_char_delay_ms,
         }
     }
 
@@ -858,6 +872,20 @@ impl RyllApp {
                     error!("app: WebDAV error: {}", err);
                     self.webdav_error_message = Some(err);
                     self.webdav_error_time = Some(Instant::now());
+                }
+
+                ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                    info!("app: paste complete: {} chars in {}ms", chars, elapsed_ms);
+                    self.bug_status_message = Some((
+                        format!("Pasted {} chars ({}ms)", chars, elapsed_ms),
+                        Instant::now(),
+                    ));
+                }
+
+                ChannelEvent::PasteFailed { reason } => {
+                    error!("app: paste failed: {}", reason);
+                    self.bug_status_message =
+                        Some((format!("Paste failed: {}", reason), Instant::now()));
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -2602,6 +2630,8 @@ async fn run_connection(
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
+    enable_paste: bool,
+    paste_char_delay_ms: u32,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2729,6 +2759,8 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.inputs.clone(),
+                    enable_paste,
+                    paste_char_delay_ms,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -2826,9 +2858,13 @@ async fn run_connection(
 }
 
 /// Run in headless mode (no GUI)
+#[allow(clippy::too_many_arguments)]
 pub async fn run_headless(
     config: Config,
     cadence: bool,
+    paste_text: Option<String>,
+    paste_char_delay_ms: u32,
+    enable_paste: bool,
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
@@ -2903,11 +2939,16 @@ pub async fn run_headless(
             monitors,
             resize_rx,
             VolumeControl::new(),
+            enable_paste,
+            paste_char_delay_ms,
         )
         .await
     });
     // Pin the handle so it can be polled multiple times in the select loop
     tokio::pin!(connection_handle);
+
+    // Clone input_tx before cadence moves it, so the paste trigger can also use it.
+    let paste_input_tx = input_tx.clone();
 
     // Cadence task if enabled
     let cadence_handle = if cadence {
@@ -2922,9 +2963,27 @@ pub async fn run_headless(
         None
     };
 
+    // Paste trigger task if --paste-text was provided
+    let paste_handle = if let Some(text) = paste_text {
+        let delay_ms = paste_char_delay_ms;
+        Some(tokio::spawn(async move {
+            // Wait for the inputs channel to be ready.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = paste_input_tx
+                .send(InputEvent::PasteText {
+                    text,
+                    char_delay_ms: delay_ms,
+                })
+                .await;
+        }))
+    } else {
+        None
+    };
+
     // Process events
     let mut stats = Statistics::default();
     let mut last_stats_print = Instant::now();
+    let mut paste_failed = false;
 
     loop {
         tokio::select! {
@@ -2967,6 +3026,16 @@ pub async fn run_headless(
                     ChannelEvent::WebdavError(err) => {
                         error!("headless: WebDAV error: {}", err);
                     }
+                    ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                        info!(
+                            "headless: paste complete: {} chars in {}ms",
+                            chars, elapsed_ms
+                        );
+                    }
+                    ChannelEvent::PasteFailed { reason } => {
+                        error!("headless: paste failed: {}", reason);
+                        paste_failed = true;
+                    }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);
                     }
@@ -2999,10 +3068,17 @@ pub async fn run_headless(
     if let Some(handle) = cadence_handle {
         handle.abort();
     }
+    if let Some(handle) = paste_handle {
+        handle.abort();
+    }
 
     // Close capture session (flushes MP4 moov atom)
     if let Some(ref capture) = capture_for_shutdown {
         capture.close();
+    }
+
+    if paste_failed {
+        anyhow::bail!("paste-as-keystrokes failed");
     }
 
     info!("Headless mode finished");

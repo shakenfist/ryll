@@ -16,6 +16,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
+- **Paste-as-keystrokes** - Type arbitrary text into guests without vdagent by translating characters into US-QWERTY scancode sequences. Cooperative timer-driven state machine keeps the inputs channel responsive during long pastes. CLI flags: `--enable-paste-as-keystrokes`, `--paste-text TEXT`, `--paste-char-delay-ms N`
 - **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
 - **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
@@ -162,6 +163,9 @@ Options:
   --monitors <N>         Number of monitors (default 1)
   --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
+  --enable-paste-as-keystrokes  Enable paste-as-keystrokes fallback
+  --paste-text <TEXT>    Type TEXT as keystrokes in headless mode
+  --paste-char-delay-ms <N>  Inter-character delay in ms (default 16)
   -h, --help             Print help
   -V, --version          Print version
 ```

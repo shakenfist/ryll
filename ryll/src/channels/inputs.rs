@@ -3,9 +3,9 @@ use anyhow::Result;
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use crate::app::ByteCounter;
 use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
@@ -27,6 +27,33 @@ const MOTION_ACK_BUNCH: u32 = 4;
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
 
+/// Maximum characters for a single paste-as-keystrokes sequence.
+const PASTE_MAX_CHARS: usize = 4096;
+
+/// Sub-step within a single character of a paste sequence.
+#[derive(Debug, Clone, Copy)]
+enum PasteSubStep {
+    /// Send shift-down (if needed) + key-down, then wait half the delay.
+    Press,
+    /// Send key-up + shift-up (if needed), then wait the remaining half.
+    Release,
+}
+
+/// State for an in-progress paste-as-keystrokes sequence.
+#[derive(Debug)]
+struct PasteState {
+    keys: Vec<PasteKey>,
+    index: usize,
+    sub_step: PasteSubStep,
+    half_delay: Duration,
+    start: Instant,
+    next_fire: Instant,
+    /// Modifier state saved at paste start, restored at paste end.
+    saved_ctrl: bool,
+    saved_shift: bool,
+    saved_alt: bool,
+}
+
 pub struct InputsChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -43,6 +70,13 @@ pub struct InputsChannel {
     recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
+    enable_paste: bool,
+    #[allow(dead_code)] // stored for future use (Phase 3 GUI default)
+    paste_char_delay_ms: u32,
+    ctrl_held: bool,
+    shift_held: bool,
+    alt_held: bool,
+    paste_state: Option<PasteState>,
 }
 
 impl InputsChannel {
@@ -56,6 +90,8 @@ impl InputsChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
+        enable_paste: bool,
+        paste_char_delay_ms: u32,
     ) -> Self {
         InputsChannel {
             stream,
@@ -73,6 +109,12 @@ impl InputsChannel {
             recent_events: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
+            enable_paste,
+            paste_char_delay_ms,
+            ctrl_held: false,
+            shift_held: false,
+            alt_held: false,
+            paste_state: None,
         }
     }
 
@@ -92,6 +134,8 @@ impl InputsChannel {
             let input_rx = &mut self.input_rx;
             let capture = &self.capture;
             let byte_counter = &self.byte_counter;
+
+            let paste_next = self.paste_state.as_ref().map(|s| s.next_fire);
 
             // Create read future inline
             let read_fut = async {
@@ -196,6 +240,18 @@ impl InputsChannel {
                             i += 1;
                         }
                     }
+                }
+
+                // Paste state machine: fire when the next step is due.
+                _ = async {
+                    match paste_next {
+                        Some(t) => tokio::time::sleep_until(
+                            tokio::time::Instant::from_std(t)
+                        ).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.advance_paste().await?;
                 }
             }
         }
@@ -357,6 +413,13 @@ impl InputsChannel {
 
                 debug!("inputs: key down: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
+
+                match scancode {
+                    0x1D => self.ctrl_held = true,
+                    0x2A => self.shift_held = true,
+                    0x38 => self.alt_held = true,
+                    _ => {}
+                }
             }
 
             InputEvent::KeyUp(scancode) => {
@@ -375,6 +438,13 @@ impl InputsChannel {
 
                 debug!("inputs: key up: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_UP, &msg).await?;
+
+                match scancode {
+                    0x9D => self.ctrl_held = false,
+                    0xAA => self.shift_held = false,
+                    0xB8 => self.alt_held = false,
+                    _ => {}
+                }
             }
 
             InputEvent::MouseMove { x, y } => {
@@ -516,6 +586,104 @@ impl InputsChannel {
                 self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
                     .await?;
             }
+
+            InputEvent::PasteText {
+                text,
+                char_delay_ms,
+            } => {
+                if !self.enable_paste {
+                    warn!("inputs: paste-as-keystrokes not enabled, ignoring");
+                    return Ok(());
+                }
+                if self.paste_state.is_some() {
+                    warn!("inputs: paste already in progress, ignoring");
+                    return Ok(());
+                }
+
+                // Enforce character cap
+                let mut text = text;
+                if text.chars().count() > PASTE_MAX_CHARS {
+                    let original_len = text.chars().count();
+                    text = text.chars().take(PASTE_MAX_CHARS).collect();
+                    warn!(
+                        "inputs: paste truncated from {} to {} characters",
+                        original_len, PASTE_MAX_CHARS
+                    );
+                }
+
+                // Translate
+                let keys = match translate_paste(&text) {
+                    Ok(k) => k,
+                    Err(PasteError::Unrepresentable { count, sample }) => {
+                        let sample_str: String = sample
+                            .iter()
+                            .map(|c| format!("U+{:04X}", *c as u32))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let reason = format!(
+                            "cannot paste: {} unrepresentable character(s): {}",
+                            count, sample_str
+                        );
+                        error!("inputs: {}", reason);
+                        self.event_tx
+                            .send(ChannelEvent::PasteFailed { reason })
+                            .await
+                            .ok();
+                        self.repaint_notify.notify_one();
+                        return Ok(());
+                    }
+                };
+
+                if keys.is_empty() {
+                    self.event_tx
+                        .send(ChannelEvent::PasteCompleted {
+                            chars: 0,
+                            elapsed_ms: 0,
+                        })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                    return Ok(());
+                }
+
+                let delay = Duration::from_millis(char_delay_ms as u64);
+                info!(
+                    "inputs: starting paste of {} characters (delay={}ms)",
+                    keys.len(),
+                    char_delay_ms
+                );
+
+                // Save and release held modifiers
+                let saved_ctrl = self.ctrl_held;
+                let saved_shift = self.shift_held;
+                let saved_alt = self.alt_held;
+
+                if self.ctrl_held {
+                    self.send_key_up(0x9D).await?;
+                    self.ctrl_held = false;
+                }
+                if self.shift_held {
+                    self.send_key_up(0xAA).await?;
+                    self.shift_held = false;
+                }
+                if self.alt_held {
+                    self.send_key_up(0xB8).await?;
+                    self.alt_held = false;
+                }
+
+                let now = Instant::now();
+                self.paste_state = Some(PasteState {
+                    keys,
+                    index: 0,
+                    sub_step: PasteSubStep::Press,
+                    half_delay: delay / 2,
+                    start: now,
+                    next_fire: now, // fire immediately
+                    saved_ctrl,
+                    saved_shift,
+                    saved_alt,
+                });
+            }
         }
 
         Ok(())
@@ -566,6 +734,90 @@ impl InputsChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        Ok(())
+    }
+
+    /// Send a raw key-down without event recording or modifier tracking.
+    async fn send_key_down(&mut self, scancode: u32) -> Result<()> {
+        let mut payload = Vec::new();
+        KeyEvent { scancode }.write(&mut payload)?;
+        let msg = make_message(inputs_client::KEY_DOWN, &payload);
+        self.send_with_log(inputs_client::KEY_DOWN, &msg).await
+    }
+
+    /// Send a raw key-up without event recording or modifier tracking.
+    async fn send_key_up(&mut self, scancode: u32) -> Result<()> {
+        let mut payload = Vec::new();
+        KeyEvent { scancode }.write(&mut payload)?;
+        let msg = make_message(inputs_client::KEY_UP, &payload);
+        self.send_with_log(inputs_client::KEY_UP, &msg).await
+    }
+
+    /// Advance the paste state machine by one sub-step.
+    async fn advance_paste(&mut self) -> Result<()> {
+        let state = self.paste_state.as_mut().unwrap();
+        let key = state.keys[state.index];
+
+        match state.sub_step {
+            PasteSubStep::Press => {
+                if key.shift {
+                    self.send_key_down(0x2A).await?;
+                }
+                self.send_key_down(key.press).await?;
+                let state = self.paste_state.as_mut().unwrap();
+                state.sub_step = PasteSubStep::Release;
+                state.next_fire = Instant::now() + state.half_delay;
+            }
+            PasteSubStep::Release => {
+                self.send_key_up(key.release).await?;
+                if key.shift {
+                    self.send_key_up(0xAA).await?;
+                }
+
+                let state = self.paste_state.as_mut().unwrap();
+                state.index += 1;
+
+                if state.index >= state.keys.len() {
+                    // Paste complete
+                    let chars = state.keys.len();
+                    let elapsed_ms = state.start.elapsed().as_millis() as u64;
+
+                    // Restore modifiers
+                    let saved_ctrl = state.saved_ctrl;
+                    let saved_shift = state.saved_shift;
+                    let saved_alt = state.saved_alt;
+
+                    self.paste_state = None;
+
+                    if saved_ctrl {
+                        self.send_key_down(0x1D).await?;
+                        self.ctrl_held = true;
+                    }
+                    if saved_shift {
+                        self.send_key_down(0x2A).await?;
+                        self.shift_held = true;
+                    }
+                    if saved_alt {
+                        self.send_key_down(0x38).await?;
+                        self.alt_held = true;
+                    }
+
+                    info!(
+                        "inputs: paste complete: {} chars in {}ms",
+                        chars, elapsed_ms
+                    );
+                    self.event_tx
+                        .send(ChannelEvent::PasteCompleted { chars, elapsed_ms })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                } else {
+                    state.sub_step = PasteSubStep::Press;
+                    state.next_fire = Instant::now() + state.half_delay;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -700,7 +952,6 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
 /// `press` and `release` are SPICE wire-format scancodes
 /// (output of `make_scancode`). `shift` indicates whether
 /// Left Shift must be held for this character.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PasteKey {
     pub press: u32,
@@ -709,7 +960,6 @@ pub struct PasteKey {
 }
 
 /// Errors from paste text translation.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasteError {
     /// The input contains characters that cannot be represented as US-QWERTY scancodes.
@@ -725,7 +975,6 @@ pub enum PasteError {
 ///
 /// Returns `(base_scancode, needs_shift)` or `None` if the character has no US-QWERTY
 /// representation.
-#[allow(dead_code)]
 fn char_to_scancode(c: char) -> Option<(u32, bool)> {
     match c {
         // Lowercase letters (unshifted)
@@ -850,7 +1099,6 @@ fn char_to_scancode(c: char) -> Option<(u32, bool)> {
 /// mapped, nothing is returned and the error reports which characters failed.
 ///
 /// This function does not enforce the 4096-character cap (that is the caller's responsibility).
-#[allow(dead_code)]
 pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
     // Pre-validation pass: collect unrepresentable characters.
     let mut bad_chars: Vec<char> = Vec::new();

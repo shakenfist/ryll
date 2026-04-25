@@ -945,6 +945,37 @@ Each row shows: relative timestamp, channel name, direction arrow
 
 F11 is consumed by ryll and not forwarded to the SPICE server.
 
+## Paste-as-Keystrokes
+
+The inputs channel includes a cooperative paste state machine for
+typing text into guests that lack a vdagent clipboard channel.
+Characters are translated to US-QWERTY AT scancodes via
+`char_to_scancode()` and `translate_paste()` (both in `inputs.rs`),
+capped at 4096 characters per paste.
+
+The state machine (`PasteState`) runs as a conditional third arm in
+the inputs channel's `tokio::select!` loop. A `tokio::time::sleep_until`
+future fires on schedule; each firing sends one sub-step (press or
+release) and yields back to the loop so the other two arms (server
+reads and UI input events) remain responsive.
+
+Per-character event sequence:
+1. If shifted: KeyDown(Left Shift)
+2. KeyDown(scancode)
+3. Sleep half the inter-character delay
+4. KeyUp(scancode)
+5. If shifted: KeyUp(Left Shift)
+6. Sleep the remaining half
+
+At paste start, held modifier keys (Ctrl, Shift, Alt) are released
+and saved; at paste end they are restored. Translation errors
+(non-ASCII characters) emit `ChannelEvent::PasteFailed` and cause
+a non-zero exit in headless mode.
+
+CLI flags: `--enable-paste-as-keystrokes` (master gate),
+`--paste-text TEXT` (headless trigger, implies enable),
+`--paste-char-delay-ms N` (default 16ms).
+
 ## Keyboard Scancodes
 
 Ryll maps egui key events to AT keyboard scancodes for the SPICE protocol.
