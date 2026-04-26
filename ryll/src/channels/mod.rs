@@ -8,7 +8,8 @@ pub mod webdav;
 
 pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
-pub use inputs::InputsChannel;
+#[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
+pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::MainChannel;
 pub use playback::{PlaybackChannel, VolumeControl};
 pub use usbredir::UsbredirChannel;
@@ -154,6 +155,20 @@ pub enum ChannelEvent {
         sample_ms: f32,
     },
 
+    /// Paste-as-keystrokes sequence completed.
+    PasteCompleted {
+        chars: usize,
+        elapsed_ms: u64,
+    },
+
+    /// Paste-as-keystrokes failed (unrepresentable characters).
+    PasteFailed {
+        reason: String,
+    },
+
+    /// vdagent connection state changed.
+    AgentConnected(bool),
+
     /// Connection error
     Error(String),
 
@@ -213,6 +228,9 @@ pub enum InputEvent {
 
     /// Mouse button released
     MouseUp { button: u32, x: u32, y: u32 },
+
+    /// Paste a string as synthetic keystrokes (US-QWERTY).
+    PasteText { text: String, char_delay_ms: u32 },
 }
 
 /// Commands sent from the app to the webdav channel.

@@ -333,6 +333,10 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(self.agent_connected))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
@@ -549,12 +553,20 @@ impl MainChannel {
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(true))
+                    .await
+                    .ok();
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(false))
+                    .await
+                    .ok();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
             }

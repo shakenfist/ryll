@@ -546,7 +546,7 @@ a QEMU instance with USB redirection enabled.
 
 ### GUI Components
 
-The USB panel is a right-side panel toggled by the "USB" status bar button,
+The USB panel is a right-side panel toggled by Menu → USB,
 rendered alongside the traffic viewer panel (both use `egui::SidePanel::right`
 with different IDs).
 
@@ -672,8 +672,9 @@ a QEMU instance with WebDAV enabled.
 
 ### GUI Components
 
-The Folders panel is a right-side panel toggled by the "Folders" status bar
-button. It mirrors the USB panel structure: channel status indicator, active
+The Folders panel is a right-side panel toggled by
+Menu → Folders. It mirrors the USB panel structure:
+channel status indicator, active
 share display with elapsed timer, error display with auto-clear, read-only
 checkbox, and native directory picker via `rfd::FileDialog::pick_folder`.
 
@@ -872,8 +873,8 @@ only includes the PNG when the user actually submits as Display.
 
 ## Bug Report Dialog
 
-Pressing **F12** or clicking the **Report** button in the status
-bar opens a centred modal dialog for generating bug reports.  The
+Pressing **F12** or using **Menu → Report** opens a
+centred modal dialog for generating bug reports.  The
 dialog contains:
 
 1. A privacy warning about sensitive data in reports.
@@ -927,8 +928,8 @@ during selection.  Coordinates are clamped to the surface bounds.
 
 ## Live Traffic Viewer
 
-Pressing **F11** or clicking the **Traffic** button in the status
-bar toggles a right-side panel showing a live feed of recent SPICE
+Pressing **F11** or using **Menu → Traffic** toggles a
+right-side panel showing a live feed of recent SPICE
 protocol messages from the ring buffer.
 
 The viewer collects entries from all four channels via
@@ -947,6 +948,48 @@ Each row shows: relative timestamp, channel name, direction arrow
 (sent/received), message name, and wire size.
 
 F11 is consumed by ryll and not forwarded to the SPICE server.
+
+## Paste-as-Keystrokes
+
+The inputs channel includes a cooperative paste state machine for
+typing text into guests that lack a vdagent clipboard channel.
+Characters are translated to US-QWERTY AT scancodes via
+`char_to_scancode()` and `translate_paste()` (both in `inputs.rs`),
+capped at 4096 characters per paste.
+
+The state machine (`PasteState`) runs as a conditional third arm in
+the inputs channel's `tokio::select!` loop. A `tokio::time::sleep_until`
+future fires on schedule; each firing sends one sub-step (press or
+release) and yields back to the loop so the other two arms (server
+reads and UI input events) remain responsive.
+
+Per-character event sequence:
+1. If shifted: KeyDown(Left Shift)
+2. KeyDown(scancode)
+3. Sleep half the inter-character delay
+4. KeyUp(scancode)
+5. If shifted: KeyUp(Left Shift)
+6. Sleep the remaining half
+
+At paste start, held modifier keys (Ctrl, Shift, Alt) are released
+and saved; at paste end they are restored. Translation errors
+(non-ASCII characters) emit `ChannelEvent::PasteFailed` and cause
+a non-zero exit in headless mode.
+
+CLI flags: `--enable-paste-as-keystrokes` (master gate),
+`--paste-text TEXT` (headless trigger, implies enable),
+`--paste-char-delay-ms N` (default 16ms).
+
+GUI surface: When enabled, a "Paste" entry appears in the hamburger
+menu with "Ctrl+Alt+V" shortcut text. The entry is disabled (greyed
+out) when vdagent is connected, with a tooltip explaining to use
+normal Ctrl+V. The Ctrl+Alt+V shortcut is detected before
+`handle_input()` to prevent the V keypress from reaching the guest.
+Pre-validation via `translate_paste()` catches unrepresentable
+characters and shows an error dialog listing up to three sample
+codepoints. The clipboard is read via `arboard::Clipboard` (lazily
+initialised in `RyllApp::clipboard()`, separate from the
+`MainChannel` instance).
 
 ## Keyboard Scancodes
 

@@ -170,11 +170,18 @@ fn run_headless(
 ) -> Result<()> {
     info!("Running in headless mode");
 
+    let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
+    let paste_text = args.paste_text.clone();
+    let paste_char_delay_ms = args.paste_char_delay_ms;
+
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         app::run_headless(
             config,
             args.cadence,
+            paste_text,
+            paste_char_delay_ms,
+            enable_paste,
             virtual_disks,
             share_dir,
             capture,
@@ -204,6 +211,8 @@ fn run_gui(
 
     let cadence = args.cadence;
     let monitors = args.monitors;
+    let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
+    let paste_char_delay_ms = args.paste_char_delay_ms;
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -212,6 +221,8 @@ fn run_gui(
                 cc,
                 config,
                 cadence,
+                enable_paste,
+                paste_char_delay_ms,
                 virtual_disks,
                 share_dir,
                 capture,

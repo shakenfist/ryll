@@ -136,13 +136,28 @@ Ryll uses:
     `VecDeque` for the resampler. This eliminates mutex contention in the
     real-time cpal callback.
 
-15. **Mouse mode negotiation** - On session init, ryll requests client mouse
+15. **Paste-as-keystrokes: cooperative state machine in the select! loop** -
+    The paste feature translates text to US-QWERTY scancodes and types them
+    as synthetic key events. A `PasteState` struct tracks the current
+    character index and sub-step (Press/Release). A conditional third arm in
+    the inputs channel's `select!` loop uses `tokio::time::sleep_until` to
+    fire at the right moment; between firings the other two arms (server reads
+    and UI events) run normally. The `advance_paste` method sends one sub-step
+    per invocation and updates the next-fire time. Modifier keys (Ctrl, Shift,
+    Alt) are tracked via `KeyDown`/`KeyUp` observations and saved/restored
+    around the paste. The `send_key_down`/`send_key_up` helpers bypass event
+    recording and modifier tracking for synthetic paste events. Public API:
+    `translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError>`,
+    `PasteKey` (struct with press, release, shift fields), `PasteError`
+    (enum with Unrepresentable variant).
+
+16. **Mouse mode negotiation** - On session init, ryll requests client mouse
     mode (absolute positioning) via `MOUSE_MODE_REQUEST` if the server
     supports it. If the server remains in server mode (e.g. no SPICE agent),
     ryll sends relative `MOUSE_MOTION` messages instead of absolute
     `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
 
-16. **Event-driven egui repaints via `repaint_notify`** - egui only repaints
+17. **Event-driven egui repaints via `repaint_notify`** - egui only repaints
     when something asks it to. Channel handlers run on the tokio runtime
     and have no direct access to `egui::Context`. Every channel handler
     therefore holds an `Arc<tokio::sync::Notify>` (`repaint_notify`)
@@ -156,7 +171,7 @@ Ryll uses:
     handlers must accept `Arc<tokio::sync::Notify>` in their constructor
     and follow this pairing convention or idle CPU will silently regress.
 
-17. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
+18. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
     skipped** - Every implemented `DRAW_*` opcode on the display channel
     follows the same shape: a pure `fn decode_<op>(payload) ->
     io::Result<<Op>Outcome>` classifier that parses the phase-1 wire
@@ -173,7 +188,7 @@ Ryll uses:
     protocol gaps" for the full convention (key format, test
     discipline, append-only contract).
 
-18. **Colour conversion in the channel, not the surface** - SPICE
+19. **Colour conversion in the channel, not the surface** - SPICE
     colour fields (brush colours, chroma keys, BGRX image pixels) are
     BGRX on the wire; `DisplaySurface` stores pixels as RGBA. The
     conversion lives exclusively in the channel handler (before event
@@ -184,7 +199,7 @@ Ryll uses:
     c&0xff, 0xff]` for a wire `u32` colour. Do NOT add BGRX handling
     inside `DisplaySurface` — surfaces are RGBA-only.
 
-19. **`--pedantic` mode: registry observer pattern** - The warn_once
+20. **`--pedantic` mode: registry observer pattern** - The warn_once
     registry is a process-global `HashSet<&'static str>` with a
     `register_gap_observer(Fn(&'static str))` hook. The observer fires
     once per newly-inserted key (with replay-on-late-registration so
@@ -246,7 +261,9 @@ ryll/src/
 │   ├── cursor.rs        # Cursor position tracking
 │   ├── inputs.rs        # Keyboard scancodes (with E0 extended
 │   │                    #   prefix for nav cluster), mouse events,
-│   │                    #   motion coalescing to prevent channel backpressure
+│   │                    #   motion coalescing to prevent channel
+│   │                    #   backpressure, paste-as-keystrokes state
+│   │                    #   machine
 │   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
 │   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
