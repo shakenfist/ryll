@@ -71,8 +71,6 @@ pub struct InputsChannel {
     bytes_in: u64,
     bytes_out: u64,
     enable_paste: bool,
-    #[allow(dead_code)] // stored for future use (Phase 3 GUI default)
-    paste_char_delay_ms: u32,
     ctrl_held: bool,
     shift_held: bool,
     alt_held: bool,
@@ -91,7 +89,6 @@ impl InputsChannel {
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
         enable_paste: bool,
-        paste_char_delay_ms: u32,
     ) -> Self {
         InputsChannel {
             stream,
@@ -110,7 +107,6 @@ impl InputsChannel {
             bytes_in: 0,
             bytes_out: 0,
             enable_paste,
-            paste_char_delay_ms,
             ctrl_held: false,
             shift_held: false,
             alt_held: false,
@@ -602,12 +598,12 @@ impl InputsChannel {
 
                 // Enforce character cap
                 let mut text = text;
-                if text.chars().count() > PASTE_MAX_CHARS {
-                    let original_len = text.chars().count();
+                let char_count = text.chars().count();
+                if char_count > PASTE_MAX_CHARS {
                     text = text.chars().take(PASTE_MAX_CHARS).collect();
                     warn!(
                         "inputs: paste truncated from {} to {} characters",
-                        original_len, PASTE_MAX_CHARS
+                        char_count, PASTE_MAX_CHARS
                     );
                 }
 
@@ -964,7 +960,7 @@ pub struct PasteKey {
 pub enum PasteError {
     /// The input contains characters that cannot be represented as US-QWERTY scancodes.
     Unrepresentable {
-        /// Number of unrepresentable characters.
+        /// Number of distinct unrepresentable codepoints.
         count: usize,
         /// Up to three sample characters for diagnostics.
         sample: Vec<char>,

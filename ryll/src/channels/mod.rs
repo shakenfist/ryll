@@ -8,7 +8,7 @@ pub mod webdav;
 
 pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
-#[allow(unused_imports)] // PasteKey is part of translate_paste's return type
+#[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::MainChannel;
 pub use playback::{PlaybackChannel, VolumeControl};

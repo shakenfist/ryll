@@ -507,7 +507,6 @@ impl RyllApp {
                     resize_rx_for_conn,
                     vol_for_conn,
                     enable_paste,
-                    paste_char_delay_ms,
                 )
                 .await
                 {
@@ -2772,7 +2771,6 @@ async fn run_connection(
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
-    paste_char_delay_ms: u32,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2901,7 +2899,6 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.inputs.clone(),
                     enable_paste,
-                    paste_char_delay_ms,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -3081,7 +3078,6 @@ pub async fn run_headless(
             resize_rx,
             VolumeControl::new(),
             enable_paste,
-            paste_char_delay_ms,
         )
         .await
     });

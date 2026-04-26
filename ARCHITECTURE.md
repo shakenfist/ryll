@@ -672,7 +672,9 @@ a QEMU instance with WebDAV enabled.
 
 ### GUI Components
 
-The Folders panel is a right-side panel toggled by Menu → Folders. It mirrors the USB panel structure: channel status indicator, active
+The Folders panel is a right-side panel toggled by
+Menu → Folders. It mirrors the USB panel structure:
+channel status indicator, active
 share display with elapsed timer, error display with auto-clear, read-only
 checkbox, and native directory picker via `rfd::FileDialog::pick_folder`.
 
@@ -871,7 +873,8 @@ only includes the PNG when the user actually submits as Display.
 
 ## Bug Report Dialog
 
-Pressing **F12** or using **Menu → Report** opens a centred modal dialog for generating bug reports.  The
+Pressing **F12** or using **Menu → Report** opens a
+centred modal dialog for generating bug reports.  The
 dialog contains:
 
 1. A privacy warning about sensitive data in reports.
@@ -925,7 +928,8 @@ during selection.  Coordinates are clamped to the surface bounds.
 
 ## Live Traffic Viewer
 
-Pressing **F11** or using **Menu → Traffic** toggles a right-side panel showing a live feed of recent SPICE
+Pressing **F11** or using **Menu → Traffic** toggles a
+right-side panel showing a live feed of recent SPICE
 protocol messages from the ring buffer.
 
 The viewer collects entries from all four channels via
