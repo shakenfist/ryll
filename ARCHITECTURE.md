@@ -492,9 +492,10 @@ fold into the most recent entry's `count`, incrementing the `[N×]`
 suffix the side panel renders.
 
 The bell glyph in the status-bar right-edge cluster tints by the
-highest-severity unread entry's colour (sky-blue for Info, amber for
-Warn, muted red for Error). Low-visibility SPICE entries are excluded
-from the bell colour calculation — they record but do not flash.
+highest-severity unread entry's colour (default text colour for Info,
+amber for Warn, muted red for Error). Low-visibility SPICE entries are
+excluded from the bell colour calculation — they record but do not
+flash.
 Clicking the bell toggles a right-side Notifications panel that lists
 entries newest first; closing the panel marks every visible entry
 read.

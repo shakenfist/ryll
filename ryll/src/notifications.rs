@@ -273,7 +273,7 @@ pub fn format_relative(when: SystemTime) -> String {
 /// Returns (glyph, optional colour). `None` colour means "default text colour".
 pub(crate) fn severity_visuals(s: NotifySeverity) -> (&'static str, Option<egui::Color32>) {
     match s {
-        NotifySeverity::Info => ("\u{2139}", Some(egui::Color32::from_rgb(120, 170, 230))),
+        NotifySeverity::Info => ("\u{2139}", None),
         NotifySeverity::Warn => ("\u{26A0}", Some(egui::Color32::from_rgb(255, 180, 80))),
         NotifySeverity::Error => ("\u{2716}", Some(egui::Color32::from_rgb(220, 90, 90))),
     }

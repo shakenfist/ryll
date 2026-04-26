@@ -272,9 +272,6 @@ pub struct RyllApp {
     traffic: Arc<TrafficBuffers>,
 
     // In-app notification store (shared with all channels and producers).
-    // Producers push entries; the GUI consumer is wired in Phase 4, so
-    // the field reads as dead until then.
-    #[allow(dead_code)]
     notifications: SharedNotifications,
 
     // Channel state snapshots (always active, for bug reports)
@@ -435,7 +432,7 @@ impl RyllApp {
         let traffic = Arc::new(TrafficBuffers::new());
 
         // In-app notification store (always active; all channels push,
-        // GUI consumes in Phase 4).
+        // GUI bell + side panel consume).
         let notifications: SharedNotifications =
             Arc::new(std::sync::Mutex::new(NotificationStore::new()));
 
@@ -1440,7 +1437,6 @@ impl RyllApp {
 
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
-    /// Opens a native save dialog and writes the current surface(s) as PNG(s).
     /// If the dialog is cancelled, nothing happens.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.is_empty() {
@@ -1741,13 +1737,15 @@ impl eframe::App for RyllApp {
                             }
                         }
                         let bell_button = ui.add(egui::Button::new(bell_text));
-                        if unread_count > 0 {
-                            bell_button.clone().on_hover_text(format!(
+                        let bell_button = if unread_count > 0 {
+                            bell_button.on_hover_text(format!(
                                 "{} unread notification{}",
                                 unread_count,
                                 if unread_count == 1 { "" } else { "s" },
-                            ));
-                        }
+                            ))
+                        } else {
+                            bell_button
+                        };
                         if bell_button.clicked() {
                             self.show_notifications_panel = !self.show_notifications_panel;
                         }
