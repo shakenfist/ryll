@@ -412,10 +412,10 @@ impl InputsChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.notifications
-                    .lock()
-                    .expect("notifications lock poisoned")
-                    .push(entry);
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
 
             _ => {

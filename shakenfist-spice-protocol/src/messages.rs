@@ -179,6 +179,13 @@ impl SetAck {
     }
 }
 
+/// Maximum NOTIFY message body length accepted by the parser.
+/// libspice-server caps NOTIFY at 1 MiB; 64 KiB is well above any
+/// legitimate operator-facing notify text and prevents an attacker-
+/// claimed `msg_len` from triggering a multi-gigabyte allocation
+/// attempt before the existing buffer bound check fails.
+pub const NOTIFY_MAX_MESSAGE_LEN: u32 = 64 * 1024;
+
 /// Notify message
 ///
 /// Wire format: timestamp(u64) + severity(u32) + visibility(u32) +
@@ -209,7 +216,17 @@ impl Notify {
         let severity_raw = cursor.read_u32::<LittleEndian>()?;
         let visibility_raw = cursor.read_u32::<LittleEndian>()?;
         let what = cursor.read_u32::<LittleEndian>()?;
-        let msg_len = cursor.read_u32::<LittleEndian>()? as usize;
+        let msg_len = cursor.read_u32::<LittleEndian>()?;
+        if msg_len > NOTIFY_MAX_MESSAGE_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Notify msg_len {} exceeds cap {}",
+                    msg_len, NOTIFY_MAX_MESSAGE_LEN
+                ),
+            ));
+        }
+        let msg_len = msg_len as usize;
 
         if data.len() < 24 + msg_len {
             return Err(io::Error::new(
@@ -1676,5 +1693,19 @@ mod tests {
             "expected U+FFFD replacement char in message, got: {:?}",
             msg.message,
         );
+    }
+
+    #[test]
+    fn notify_parse_oversized_msg_len_rejected() {
+        // Build a header claiming msg_len just above the cap; expect Err(InvalidData).
+        let bad_len: u32 = NOTIFY_MAX_MESSAGE_LEN + 1;
+        let mut buf = Vec::with_capacity(24);
+        buf.extend_from_slice(&0u64.to_le_bytes()); // timestamp
+        buf.extend_from_slice(&0u32.to_le_bytes()); // severity
+        buf.extend_from_slice(&0u32.to_le_bytes()); // visibility
+        buf.extend_from_slice(&0u32.to_le_bytes()); // what
+        buf.extend_from_slice(&bad_len.to_le_bytes()); // msg_len
+        let err = Notify::read(&buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

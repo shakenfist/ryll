@@ -507,6 +507,9 @@ observer coexist independently.
 Bug-report zips include a `notifications.json` with the full store
 snapshot at submit time, alongside the existing `metadata.json`,
 `session.json`, `channel-state.json`, and `runtime-metrics.json`.
+Operators handing zips to third parties should be aware that
+notification messages can include server-side text such as
+hostnames, paths, and error strings.
 
 ## Configuration
 

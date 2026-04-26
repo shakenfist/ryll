@@ -834,4 +834,27 @@ mod tests {
         let when = SystemTime::now() + Duration::from_secs(1);
         assert_eq!(format_relative(when), "now");
     }
+
+    #[test]
+    fn format_relative_minutes() {
+        let when = SystemTime::now() - Duration::from_secs(125);
+        let s = format_relative(when);
+        // 125s = 2m; ±1s host-pause race → either "2m ago" or "3m ago" if 5+ second pause.
+        // The minutes branch divides by 60, so accept "2m ago" only — host pause within 60s.
+        assert!(s == "2m ago" || s == "3m ago", "got {:?}", s);
+    }
+
+    #[test]
+    fn format_relative_hours() {
+        let when = SystemTime::now() - Duration::from_secs(7200); // 2 hours
+        let s = format_relative(when);
+        assert!(s == "2h ago" || s == "3h ago", "got {:?}", s);
+    }
+
+    #[test]
+    fn format_relative_days() {
+        let when = SystemTime::now() - Duration::from_secs(259200); // 3 days
+        let s = format_relative(when);
+        assert!(s == "3d ago" || s == "4d ago", "got {:?}", s);
+    }
 }
