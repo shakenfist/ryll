@@ -15,6 +15,7 @@ use tracing::debug;
 #[cfg(feature = "capture")]
 use crate::capture;
 use crate::metrics::RuntimeMetrics;
+use crate::notifications::{NotificationStore, SharedNotifications};
 
 /// Direction of a protocol message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -794,6 +795,8 @@ pub struct BugReport {
     screenshot_region_png: Option<Vec<u8>>,
     /// Runtime process and per-thread CPU metrics.
     runtime_metrics: RuntimeMetrics,
+    /// Pretty-printed notifications.json content (Vec<NotificationEntry>).
+    notifications_json: String,
 }
 
 impl BugReport {
@@ -814,6 +817,7 @@ impl BugReport {
         traffic: &TrafficBuffers,
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
         surface_pixels: Option<(&[u8], u32, u32)>,
         trigger: Option<TriggerTimestamps>,
         precomputed_screenshot_png: Option<Vec<u8>>,
@@ -833,6 +837,7 @@ impl BugReport {
             traffic,
             channel_snapshots,
             app_snapshot,
+            notifications,
             surface_pixels,
             runtime_metrics,
             trigger,
@@ -855,6 +860,7 @@ impl BugReport {
         traffic: &TrafficBuffers,
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
         surface_pixels: Option<(&[u8], u32, u32)>,
         runtime_metrics: RuntimeMetrics,
         trigger: Option<TriggerTimestamps>,
@@ -916,11 +922,18 @@ impl BugReport {
             }
         };
 
-        // 3. Pcap traffic for the affected channel
+        // 3. Notifications snapshot
+        let notifications_snapshot = notifications
+            .lock()
+            .map(|s| s.snapshot())
+            .unwrap_or_default();
+        let notifications_json = serde_json::to_string_pretty(&notifications_snapshot)?;
+
+        // 4. Pcap traffic for the affected channel
         let channel_name = report_type.channel_name();
         let pcap_bytes = traffic.drain_channel_pcap_bytes(channel_name);
 
-        // 4. PNG screenshot (display reports only). Prefer a
+        // 5. PNG screenshot (display reports only). Prefer a
         //    precomputed PNG from the trigger-time encoder thread
         //    over re-encoding the live surface at submit time; fall
         //    back to a live encode when the background thread was
@@ -943,7 +956,7 @@ impl BugReport {
             None
         };
 
-        // 4b. Region crop PNG (Display reports with a non-empty
+        // 5b. Region crop PNG (Display reports with a non-empty
         //     region only). Cropped from the submit-time surface
         //     pixels, deliberately *not* from the precomputed
         //     trigger PNG — the trigger surface may have been a
@@ -958,7 +971,7 @@ impl BugReport {
             None
         };
 
-        // 5. Report metadata. When the caller did not supply explicit
+        // 6. Report metadata. When the caller did not supply explicit
         //    trigger timestamps, substitute the submit-time values so
         //    downstream tooling can treat the fields as always present.
         //    Single `chrono_now()` call means the fallback string is
@@ -994,6 +1007,7 @@ impl BugReport {
             screenshot_png,
             screenshot_region_png,
             runtime_metrics,
+            notifications_json,
         })
     }
 
@@ -1037,6 +1051,9 @@ impl BugReport {
             zip.write_all(png)?;
         }
 
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(self.notifications_json.as_bytes())?;
+
         let metrics_json = serde_json::to_string_pretty(&self.runtime_metrics)?;
         zip.start_file("runtime-metrics.json", opts)?;
         zip.write_all(metrics_json.as_bytes())?;
@@ -1062,6 +1079,7 @@ impl BugReport {
         traffic: &TrafficBuffers,
         channel_snapshots: &ChannelSnapshots,
         app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
         runtime_metrics: RuntimeMetrics,
         trigger: Option<TriggerTimestamps>,
     ) -> anyhow::Result<std::path::PathBuf> {
@@ -1084,6 +1102,7 @@ impl BugReport {
             traffic,
             channel_snapshots,
             app_snapshot,
+            notifications,
             None,
             runtime_metrics,
             trigger,
@@ -1123,6 +1142,9 @@ impl BugReport {
             zip.write_all(pcap)?;
         }
 
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(report.notifications_json.as_bytes())?;
+
         let metrics_json = serde_json::to_string_pretty(&report.runtime_metrics)?;
         zip.start_file("runtime-metrics.json", opts)?;
         zip.write_all(metrics_json.as_bytes())?;
@@ -1150,6 +1172,7 @@ impl BugReport {
         traffic: Arc<TrafficBuffers>,
         channel_snapshots: ChannelSnapshots, // cheap Clone (4 Arcs)
         app_snapshot: Arc<Mutex<AppSnapshot>>,
+        notifications: SharedNotifications,
     ) {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1170,6 +1193,7 @@ impl BugReport {
                 let traffic = traffic.clone();
                 let snaps = channel_snapshots.clone();
                 let app_snap = app_snapshot.clone();
+                let notifs = notifications.clone();
                 let key_str = key.to_string();
                 tokio::spawn(async move {
                     // metrics::sample blocks for its sample window; run it on a
@@ -1195,6 +1219,7 @@ impl BugReport {
                         &traffic,
                         &snaps,
                         &app_snap,
+                        &notifs,
                         metrics,
                         None,
                     ) {
@@ -1217,6 +1242,7 @@ impl BugReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notifications::NotificationStore;
 
     #[test]
     fn test_ring_buffer_push_and_evict() {
@@ -1462,6 +1488,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         // 2x2 red RGBA pixels
         let pixels = vec![
@@ -1482,6 +1509,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             Some((&pixels, 2, 2)),
             stub_metrics(),
             None,
@@ -1535,6 +1563,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Input,
@@ -1545,6 +1574,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -1569,6 +1599,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let trigger = TriggerTimestamps {
             triggered_at: "2020-01-01T00:00:00Z".to_string(),
@@ -1584,6 +1615,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             Some(trigger),
@@ -1609,6 +1641,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Input,
@@ -1619,6 +1652,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             Some(TriggerTimestamps {
@@ -1658,6 +1692,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         // Raw 2x2 RGBA that would produce a very different PNG if
         // re-encoded vs. the sentinel bytes we hand in.
@@ -1677,6 +1712,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             Some((&raw, 2, 2)),
             stub_metrics(),
             None,
@@ -1696,6 +1732,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let raw = vec![
             255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
@@ -1710,6 +1747,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             Some((&raw, 2, 2)),
             stub_metrics(),
             None,
@@ -1731,6 +1769,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let sentinel = b"sentinel-precomputed-png-bytes".to_vec();
 
@@ -1743,6 +1782,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -1795,6 +1835,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         // 2x2 RGBA — enough to produce a non-empty crop.
         let pixels = vec![
@@ -1815,6 +1856,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             Some((&pixels, 2, 2)),
             stub_metrics(),
             None,
@@ -1848,6 +1890,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let pixels = vec![
             255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
@@ -1862,6 +1905,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             Some((&pixels, 2, 2)),
             stub_metrics(),
             None,
@@ -1881,6 +1925,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Input,
@@ -1896,6 +1941,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -2010,6 +2056,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Input,
@@ -2020,6 +2067,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -2081,6 +2129,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Cursor,
@@ -2091,6 +2140,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -2127,6 +2177,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let report = BugReport::assemble(
             BugReportType::Connection,
@@ -2137,6 +2188,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             stub_metrics(),
             None,
@@ -2176,6 +2228,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
 
         let metrics = RuntimeMetrics::unavailable("stub metrics for testing");
         let report = BugReport::assemble(
@@ -2187,6 +2240,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             None,
             metrics,
             None,
@@ -2312,6 +2366,7 @@ mod tests {
         let traffic = TrafficBuffers::new();
         let snapshots = ChannelSnapshots::new();
         let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
         let metrics = stub_metrics();
 
         let tmp = std::env::temp_dir().join("ryll-test-bugreport-pedantic");
@@ -2325,6 +2380,7 @@ mod tests {
             &traffic,
             &snapshots,
             &app_snap,
+            &notifications,
             metrics,
             None,
         )
@@ -2373,5 +2429,69 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bug_report_zip_includes_notifications_json() {
+        use crate::notifications::{NotificationEntry, NotificationSource};
+        use shakenfist_spice_protocol::{ChannelType, NotifySeverity};
+
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+
+        // Push two distinct entries into the store.
+        let notifications = Mutex::new(NotificationStore::new());
+        {
+            let mut s = notifications.lock().unwrap();
+            s.push(NotificationEntry::new(
+                NotifySeverity::Warn,
+                NotificationSource::Gap,
+                "first-gap-key",
+            ));
+            s.push(NotificationEntry::new(
+                NotifySeverity::Info,
+                NotificationSource::Spice {
+                    channel: ChannelType::Main,
+                    what: 0,
+                },
+                "second-spice-message",
+            ));
+        }
+
+        let report = BugReport::assemble(
+            BugReportType::Connection,
+            "notifications zip test".to_string(),
+            None,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            None,
+            stub_metrics(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = report.write_zip(tmp.path()).unwrap();
+
+        // Read the zip back, find notifications.json, deserialise.
+        let f = std::fs::File::open(&path).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let mut nf = zip
+            .by_name("notifications.json")
+            .expect("notifications.json missing from zip");
+        let mut json = String::new();
+        use std::io::Read;
+        nf.read_to_string(&mut json).unwrap();
+        let entries: Vec<NotificationEntry> = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].message, "first-gap-key");
+        assert_eq!(entries[1].message, "second-spice-message");
     }
 }

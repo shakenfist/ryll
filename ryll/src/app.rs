@@ -460,6 +460,7 @@ impl RyllApp {
                 traffic.clone(),
                 channel_snapshots.clone(),
                 app_snapshot.clone(),
+                notifications.clone(),
             );
         }
         register_gap_notification_observer(notifications.clone());
@@ -1238,6 +1239,7 @@ impl RyllApp {
             &self.traffic,
             &self.channel_snapshots,
             &self.app_snapshot,
+            &self.notifications,
             surface_data,
             trigger,
             precomputed_screenshot_png,
@@ -3176,6 +3178,7 @@ pub async fn run_headless(
             traffic.clone(),
             snapshots.clone(),
             app_snapshot,
+            notifications.clone(),
         );
     }
     register_gap_notification_observer(notifications.clone());

@@ -467,6 +467,47 @@ loop {
 }
 ```
 
+## Notifications
+
+Ryll surfaces three categories of operator-relevant events through a
+unified in-memory store and a single GUI surface:
+
+1. **Protocol gaps** — distinct `warn_once!` keys registered in
+   `shakenfist-spice-protocol/src/logging.rs`. Each new key produces
+   one Warn-severity Gap entry via the gap observer registered in
+   `notifications.rs`.
+
+2. **SPICE_MSG_NOTIFY** — opcode 7 messages parsed on every channel
+   handler; each is pushed as a Spice-source entry tagged with the
+   receiving channel and the SPICE `what` enum value.
+
+3. **Internal status** — bug-report writer success/failure,
+   screenshot Ok/Err/no-surface, paste-completed.
+
+The store (`ryll/src/notifications.rs`) is a 500-entry
+`VecDeque<NotificationEntry>` behind `Arc<Mutex<NotificationStore>>`.
+Pushes apply a 30-second deduplication window: identical
+`(source, severity, message, visibility)` tuples within the window
+fold into the most recent entry's `count`, incrementing the `[N×]`
+suffix the side panel renders.
+
+The bell glyph in the status-bar right-edge cluster tints by the
+highest-severity unread entry's colour (sky-blue for Info, amber for
+Warn, muted red for Error). Low-visibility SPICE entries are excluded
+from the bell colour calculation — they record but do not flash.
+Clicking the bell toggles a right-side Notifications panel that lists
+entries newest first; closing the panel marks every visible entry
+read.
+
+The `register_gap_observer` hook in
+`shakenfist-spice-protocol/src/logging.rs` supports multiple
+observers, so the `--pedantic` zip writer and the notifications
+observer coexist independently.
+
+Bug-report zips include a `notifications.json` with the full store
+snapshot at submit time, alongside the existing `metadata.json`,
+`session.json`, `channel-state.json`, and `runtime-metrics.json`.
+
 ## Configuration
 
 ### .vv File Format
