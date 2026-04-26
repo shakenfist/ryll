@@ -1,14 +1,11 @@
 //! In-app notification store. See `docs/plans/PLAN-notifications-phase-01-store.md`.
-//!
-//! Phase 1 ships only the store and its tests; producers (Phase 3) and the
-//! GUI consumer (Phase 4) wire in later, so the public surface is dead code
-//! until then.
-#![allow(dead_code)]
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
+
+use eframe::egui;
 
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceVisibility};
@@ -147,6 +144,7 @@ impl NotificationStore {
     }
 
     /// Mark a single entry read. No-op if id is unknown.
+    #[allow(dead_code)]
     pub fn mark_read(&mut self, id: u64) {
         for e in self.entries.iter_mut() {
             if e.id == id {
@@ -179,11 +177,13 @@ impl NotificationStore {
     }
 
     /// True when the store is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Iterate unread entries, newest first.
+    #[allow(dead_code)]
     pub fn iter_unread(&self) -> impl Iterator<Item = &NotificationEntry> {
         self.entries.iter().rev().filter(|e| !e.read)
     }
@@ -195,6 +195,7 @@ impl NotificationStore {
 
     /// Highest severity among unread entries, or `None` when there are no
     /// unread entries.
+    #[allow(dead_code)]
     pub fn highest_unread_severity(&self) -> Option<NotifySeverity> {
         self.entries
             .iter()
@@ -204,8 +205,27 @@ impl NotificationStore {
     }
 
     /// Snapshot the entries for serialisation.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> Vec<NotificationEntry> {
         self.entries.iter().cloned().collect()
+    }
+
+    /// Remove the entry with the given id. No-op if id is unknown.
+    pub fn remove(&mut self, id: u64) {
+        self.entries.retain(|e| e.id != id);
+    }
+
+    /// Highest severity among unread entries that should flash the bell.
+    /// Excludes entries with `visibility == Some(SpiceVisibility::Low)` per
+    /// master-plan Q4 — low-visibility is informational and must not pull
+    /// the operator's eye.
+    pub fn highest_bell_severity(&self) -> Option<NotifySeverity> {
+        self.entries
+            .iter()
+            .filter(|e| !e.read)
+            .filter(|e| e.visibility != Some(SpiceVisibility::Low))
+            .map(|e| e.severity)
+            .max()
     }
 }
 
@@ -217,6 +237,47 @@ impl Default for NotificationStore {
 
 /// Convenience type alias for the shared store.
 pub type SharedNotifications = Arc<Mutex<NotificationStore>>;
+
+impl NotificationSource {
+    /// Compact human label for the side panel.
+    pub fn label(&self) -> String {
+        match self {
+            NotificationSource::Gap => "Gap".to_string(),
+            NotificationSource::BugReport => "BugReport".to_string(),
+            NotificationSource::Internal => "Internal".to_string(),
+            NotificationSource::Spice { channel, .. } => {
+                format!("SPICE/{}", channel.name())
+            }
+        }
+    }
+}
+
+/// Format a `SystemTime` as a human-readable relative timestamp.
+pub fn format_relative(when: SystemTime) -> String {
+    let now = SystemTime::now();
+    let delta = now.duration_since(when).unwrap_or(Duration::ZERO);
+    let secs = delta.as_secs();
+    if secs < 1 {
+        "now".to_string()
+    } else if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+/// Returns (glyph, optional colour). `None` colour means "default text colour".
+pub(crate) fn severity_visuals(s: NotifySeverity) -> (&'static str, Option<egui::Color32>) {
+    match s {
+        NotifySeverity::Info => ("\u{2139}", Some(egui::Color32::from_rgb(120, 170, 230))),
+        NotifySeverity::Warn => ("\u{26A0}", Some(egui::Color32::from_rgb(255, 180, 80))),
+        NotifySeverity::Error => ("\u{2716}", Some(egui::Color32::from_rgb(220, 90, 90))),
+    }
+}
 
 /// Register a gap-observer callback that pushes a Warn-severity Gap
 /// notification for each new warn_once! key.
@@ -659,5 +720,118 @@ mod tests {
             has_b,
             "expected entry with message 'phase3_test:distinct_b'"
         );
+    }
+
+    #[test]
+    fn remove_drops_entry() {
+        let mut s = NotificationStore::with_config(10, Duration::ZERO);
+        let id1 = s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "a",
+            at(0),
+        ));
+        let id2 = s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "b",
+            at(60),
+        ));
+        let id3 = s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "c",
+            at(120),
+        ));
+        let _ = (id1, id3);
+        s.remove(id2);
+        assert_eq!(s.len(), 2);
+        assert!(!s.entries.iter().any(|e| e.id == id2));
+    }
+
+    #[test]
+    fn remove_unknown_id_is_noop() {
+        let mut s = NotificationStore::with_config(10, Duration::ZERO);
+        s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "a",
+            at(0),
+        ));
+        s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "b",
+            at(60),
+        ));
+        s.push(entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "c",
+            at(120),
+        ));
+        s.remove(999);
+        assert_eq!(s.len(), 3);
+    }
+
+    #[test]
+    fn highest_bell_severity_skips_low_visibility() {
+        let mut s = NotificationStore::with_config(10, Duration::ZERO);
+        let mut warn_low = entry(
+            NotifySeverity::Warn,
+            NotificationSource::Gap,
+            "warn-low",
+            at(0),
+        );
+        warn_low.visibility = Some(SpiceVisibility::Low);
+        let mut info_high = entry(
+            NotifySeverity::Info,
+            NotificationSource::Gap,
+            "info-high",
+            at(60),
+        );
+        info_high.visibility = Some(SpiceVisibility::High);
+        let mut err_low = entry(
+            NotifySeverity::Error,
+            NotificationSource::Gap,
+            "err-low",
+            at(120),
+        );
+        err_low.visibility = Some(SpiceVisibility::Low);
+        s.push(warn_low);
+        s.push(info_high);
+        s.push(err_low);
+        assert_eq!(s.highest_bell_severity(), Some(NotifySeverity::Info));
+    }
+
+    #[test]
+    fn source_label_static_variants() {
+        assert_eq!(NotificationSource::Gap.label(), "Gap");
+        assert_eq!(NotificationSource::BugReport.label(), "BugReport");
+        assert_eq!(NotificationSource::Internal.label(), "Internal");
+    }
+
+    #[test]
+    fn source_label_spice_variant() {
+        let src = NotificationSource::Spice {
+            channel: ChannelType::Display,
+            what: 0,
+        };
+        assert_eq!(src.label(), "SPICE/display");
+    }
+
+    #[test]
+    fn format_relative_seconds() {
+        let when = SystemTime::now()
+            .checked_sub(Duration::from_secs(5))
+            .unwrap();
+        let s = format_relative(when);
+        assert!(s == "5s ago" || s == "6s ago", "unexpected result: {s}");
+    }
+
+    #[test]
+    fn format_relative_in_future_returns_now() {
+        let when = SystemTime::now() + Duration::from_secs(1);
+        assert_eq!(format_relative(when), "now");
     }
 }

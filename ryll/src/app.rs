@@ -24,8 +24,8 @@ use crate::channels::{
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
 use crate::notifications::{
-    register_gap_notification_observer, NotificationEntry, NotificationSource, NotificationStore,
-    SharedNotifications,
+    self as notifications, register_gap_notification_observer, NotificationEntry,
+    NotificationSource, NotificationStore, SharedNotifications,
 };
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_protocol::{
@@ -338,6 +338,10 @@ pub struct RyllApp {
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
 
+    // Notifications panel state
+    show_notifications_panel: bool,
+    notifications_panel_was_open_last_frame: bool,
+
     /// Whether paste-as-keystrokes is enabled.
     enable_paste: bool,
 
@@ -610,6 +614,8 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
+            show_notifications_panel: false,
+            notifications_panel_was_open_last_frame: false,
             enable_paste,
             paste_char_delay_ms,
             agent_connected: false,
@@ -1718,6 +1724,32 @@ impl eframe::App for RyllApp {
                             }
                         }
 
+                        // Bell notification button
+                        let (unread_count, bell_severity) = self
+                            .notifications
+                            .lock()
+                            .map(|s| (s.unread_count(), s.highest_bell_severity()))
+                            .unwrap_or((0, None));
+
+                        let mut bell_text = egui::RichText::new("\u{1F514}");
+                        if let Some(sev) = bell_severity {
+                            let (_, colour) = notifications::severity_visuals(sev);
+                            if let Some(c) = colour {
+                                bell_text = bell_text.color(c);
+                            }
+                        }
+                        let bell_button = ui.add(egui::Button::new(bell_text));
+                        if unread_count > 0 {
+                            bell_button.clone().on_hover_text(format!(
+                                "{} unread notification{}",
+                                unread_count,
+                                if unread_count == 1 { "" } else { "s" },
+                            ));
+                        }
+                        if bell_button.clicked() {
+                            self.show_notifications_panel = !self.show_notifications_panel;
+                        }
+
                         ui.separator();
                         egui::menu::menu_button(ui, "☰", |ui| {
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
@@ -1730,7 +1762,10 @@ impl eframe::App for RyllApp {
                                 self.open_screenshot_dialog();
                                 ui.close_menu();
                             }
-                            if ui.button("Report").clicked() {
+                            if ui
+                                .add(egui::Button::new("Report").shortcut_text("F12"))
+                                .clicked()
+                            {
                                 self.show_bug_dialog = true;
                                 self.bug_report_type = BugReportType::Display;
                                 self.bug_description.clear();
@@ -1846,6 +1881,107 @@ impl eframe::App for RyllApp {
                         });
                 });
         }
+
+        // Notifications side panel (conditional)
+        if self.show_notifications_panel {
+            egui::SidePanel::right("notifications")
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    // Header: title + actions
+                    ui.horizontal(|ui| {
+                        ui.heading("Notifications");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Clear all").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.clear();
+                                }
+                            }
+                            if ui.small_button("Mark all read").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.mark_all_read();
+                                }
+                            }
+                        });
+                    });
+
+                    // Snapshot the state under one lock so rendering is off-lock
+                    let (total, unread, snapshot) = match self.notifications.lock() {
+                        Ok(s) => (
+                            s.len(),
+                            s.unread_count(),
+                            s.iter_newest_first().cloned().collect::<Vec<_>>(),
+                        ),
+                        Err(_) => (0, 0, Vec::new()),
+                    };
+                    ui.label(format!("{} total / {} unread", total, unread));
+                    ui.separator();
+
+                    let mut to_remove: Vec<u64> = Vec::new();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if snapshot.is_empty() {
+                            ui.label("No notifications.");
+                        }
+                        for entry in &snapshot {
+                            ui.horizontal(|ui| {
+                                let (glyph, colour) =
+                                    notifications::severity_visuals(entry.severity);
+                                let mut g = egui::RichText::new(glyph);
+                                if let Some(c) = colour {
+                                    g = g.color(c);
+                                }
+                                if entry.read {
+                                    g = g.weak();
+                                }
+                                ui.label(g);
+
+                                ui.monospace(notifications::format_relative(entry.when));
+
+                                ui.colored_label(egui::Color32::GRAY, entry.source.label());
+
+                                let mut msg_text = egui::RichText::new(&entry.message);
+                                if entry.read {
+                                    msg_text = msg_text.weak();
+                                }
+                                ui.label(msg_text);
+
+                                if entry.count > 1 {
+                                    ui.label(
+                                        egui::RichText::new(format!("[{}\u{00D7}]", entry.count))
+                                            .weak(),
+                                    );
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Dismiss").clicked() {
+                                            to_remove.push(entry.id);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+
+                    if !to_remove.is_empty() {
+                        if let Ok(mut s) = self.notifications.lock() {
+                            for id in to_remove {
+                                s.remove(id);
+                            }
+                        }
+                    }
+                });
+        }
+
+        // Mark all read on the panel-open → panel-closed transition,
+        // so the bell dot clears and the user gets one chance to triage
+        // before the unread state resets.
+        if !self.show_notifications_panel && self.notifications_panel_was_open_last_frame {
+            if let Ok(mut s) = self.notifications.lock() {
+                s.mark_all_read();
+            }
+        }
+        self.notifications_panel_was_open_last_frame = self.show_notifications_panel;
 
         // USB device management panel (conditional)
         if self.show_usb_panel {
