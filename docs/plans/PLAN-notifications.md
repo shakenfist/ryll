@@ -478,6 +478,29 @@ should verify:
 
 (To be filled in as the work proceeds.)
 
+### Discoveries during this work
+
+* **Phase 1 planning, 2026-04-26**: the master plan's
+  premise that "Ryll does not parse SPICE_MSG_NOTIFY at
+  all today" is wrong. `shakenfist-spice-protocol` already
+  defines a `Notify` wire-format parser
+  (`messages.rs:182`) and a `NotifySeverity` enum
+  (`constants.rs:389`), and `ryll/src/channels/main_channel.rs`
+  (around line 520) already matches `main_server::NOTIFY`,
+  parses the message, and routes it by severity into
+  `tracing::warn!` / `info!`. The other six channels still
+  drop the message. Phase 2's brief should be revised
+  before that phase is planned: the wire-format parser
+  exists, the main-channel handler exists, and Phase 2's
+  real scope is (a) push the existing main-channel
+  handler's parsed `Notify` into the notification store,
+  (b) add the same NOTIFY arm to display / inputs /
+  cursor / playback / usbredir / webdav, (c) tighten
+  `Notify::visibility` from raw `u32` to
+  `Option<SpiceVisibility>`. Phase 1 reuses the existing
+  `NotifySeverity` rather than defining a parallel
+  `NotificationSeverity`.
+
 ### Documentation index maintenance
 
 When this master plan is created, add a row to

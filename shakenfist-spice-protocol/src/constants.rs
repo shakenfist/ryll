@@ -1,12 +1,14 @@
 //! SPICE protocol constants and enums
 
+use serde::{Deserialize, Serialize};
+
 // Protocol magic and version
 pub const SPICE_MAGIC: &[u8; 4] = b"REDQ";
 pub const SPICE_VERSION_MAJOR: u32 = 2;
 pub const SPICE_VERSION_MINOR: u32 = 2;
 
 /// Channel types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ChannelType {
     Main = 1,
@@ -382,7 +384,7 @@ pub mod brush {
 }
 
 /// Notify severity levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum NotifySeverity {
     Info = 0,
@@ -398,5 +400,52 @@ impl NotifySeverity {
             2 => NotifySeverity::Error,
             _ => NotifySeverity::Info,
         }
+    }
+}
+
+/// SPICE notify-visibility levels
+/// (`SPICE_NOTIFY_VISIBILITY_LOW/MEDIUM/HIGH` in protocol.h).
+/// The wire format encodes this as a u32.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum SpiceVisibility {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+}
+
+impl SpiceVisibility {
+    /// Return the variant for a wire value, or `None` for any
+    /// value outside 0–2.
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(SpiceVisibility::Low),
+            1 => Some(SpiceVisibility::Medium),
+            2 => Some(SpiceVisibility::High),
+            _ => None,
+        }
+    }
+
+    /// Human-readable lowercase name used in log output and
+    /// bug-report JSON.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SpiceVisibility::Low => "low",
+            SpiceVisibility::Medium => "medium",
+            SpiceVisibility::High => "high",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spice_visibility_from_u32_round_trips() {
+        assert_eq!(SpiceVisibility::from_u32(0), Some(SpiceVisibility::Low));
+        assert_eq!(SpiceVisibility::from_u32(1), Some(SpiceVisibility::Medium));
+        assert_eq!(SpiceVisibility::from_u32(2), Some(SpiceVisibility::High));
+        assert_eq!(SpiceVisibility::from_u32(99), None);
     }
 }

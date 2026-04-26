@@ -3,6 +3,7 @@ mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod metrics;
+mod notifications;
 #[cfg(not(feature = "capture"))]
 mod capture {
     /// Stub CaptureSession when capture feature is disabled.
