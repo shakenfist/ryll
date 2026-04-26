@@ -218,9 +218,25 @@ impl Default for NotificationStore {
 /// Convenience type alias for the shared store.
 pub type SharedNotifications = Arc<Mutex<NotificationStore>>;
 
+/// Register a gap-observer callback that pushes a Warn-severity Gap
+/// notification for each new warn_once! key.
+pub fn register_gap_notification_observer(notifications: SharedNotifications) {
+    shakenfist_spice_protocol::logging::register_gap_observer(Arc::new(
+        move |key: &'static str| {
+            let entry = NotificationEntry::new(NotifySeverity::Warn, NotificationSource::Gap, key);
+            if let Ok(mut guard) = notifications.lock() {
+                guard.push(entry);
+            }
+            // Lock poison is unrecoverable here; observer is best-effort,
+            // matching the --pedantic observer's stance in bugreport.rs.
+        },
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shakenfist_spice_protocol::warn_once;
 
     fn at(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -591,5 +607,57 @@ mod tests {
         let json = serde_json::to_string(&entries).expect("serialize");
         let round: Vec<NotificationEntry> = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(round, entries);
+    }
+
+    #[test]
+    fn gap_observer_pushes_warn_entry() {
+        let store: SharedNotifications = Arc::new(Mutex::new(NotificationStore::new()));
+        register_gap_notification_observer(store.clone());
+        warn_once!("phase3_test:k1", "msg");
+        let guard = store.lock().unwrap();
+        let found = guard.iter_newest_first().any(|e| {
+            e.message == "phase3_test:k1"
+                && e.severity == NotifySeverity::Warn
+                && e.source == NotificationSource::Gap
+        });
+        assert!(
+            found,
+            "expected a Warn/Gap entry with message 'phase3_test:k1'"
+        );
+    }
+
+    #[test]
+    fn gap_observer_replay_pushes_existing_keys() {
+        warn_once!("phase3_test:k_replay", "pre-registration key");
+        let store: SharedNotifications = Arc::new(Mutex::new(NotificationStore::new()));
+        register_gap_notification_observer(store.clone());
+        let guard = store.lock().unwrap();
+        let found = guard
+            .iter_newest_first()
+            .any(|e| e.message == "phase3_test:k_replay");
+        assert!(found, "expected replay to push 'phase3_test:k_replay'");
+    }
+
+    #[test]
+    fn gap_observer_distinct_keys_produce_distinct_entries() {
+        let store: SharedNotifications = Arc::new(Mutex::new(NotificationStore::new()));
+        register_gap_notification_observer(store.clone());
+        warn_once!("phase3_test:distinct_a", "msg a");
+        warn_once!("phase3_test:distinct_b", "msg b");
+        let guard = store.lock().unwrap();
+        let has_a = guard
+            .iter_newest_first()
+            .any(|e| e.message == "phase3_test:distinct_a");
+        let has_b = guard
+            .iter_newest_first()
+            .any(|e| e.message == "phase3_test:distinct_b");
+        assert!(
+            has_a,
+            "expected entry with message 'phase3_test:distinct_a'"
+        );
+        assert!(
+            has_b,
+            "expected entry with message 'phase3_test:distinct_b'"
+        );
     }
 }

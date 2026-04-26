@@ -23,9 +23,14 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
-use crate::notifications::{NotificationStore, SharedNotifications};
+use crate::notifications::{
+    register_gap_notification_observer, NotificationEntry, NotificationSource, NotificationStore,
+    SharedNotifications,
+};
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{
+    ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER,
+};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -284,7 +289,6 @@ pub struct RyllApp {
     show_bug_dialog: bool,
     bug_report_type: BugReportType,
     bug_description: String,
-    bug_status_message: Option<(String, Instant)>,
 
     // Snapshot of the display surface captured the moment a
     // bug-report dialog opens. Encoding runs in a background
@@ -333,9 +337,6 @@ pub struct RyllApp {
     traffic_filter_cursor: bool,
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
-
-    /// Whether the "Protocol gaps" floating window is currently open.
-    gaps_popup_open: bool,
 
     /// Whether paste-as-keystrokes is enabled.
     enable_paste: bool,
@@ -457,6 +458,7 @@ impl RyllApp {
                 app_snapshot.clone(),
             );
         }
+        register_gap_notification_observer(notifications.clone());
 
         // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
@@ -577,7 +579,6 @@ impl RyllApp {
             show_bug_dialog: false,
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
-            bug_status_message: None,
             pending_trigger: None,
             region_select_active: false,
             region_drag_start: None,
@@ -609,7 +610,6 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
-            gaps_popup_open: false,
             enable_paste,
             paste_char_delay_ms,
             agent_connected: false,
@@ -901,10 +901,11 @@ impl RyllApp {
 
                 ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
                     info!("app: paste complete: {} chars in {}ms", chars, elapsed_ms);
-                    self.bug_status_message = Some((
+                    self.push_notification(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
                         format!("Pasted {} chars ({}ms)", chars, elapsed_ms),
-                        Instant::now(),
-                    ));
+                    );
                 }
 
                 ChannelEvent::PasteFailed { reason } => {
@@ -1245,6 +1246,19 @@ impl RyllApp {
         report.write_zip(&output_dir)
     }
 
+    /// Push a notification entry into the shared store.
+    fn push_notification(
+        &self,
+        severity: NotifySeverity,
+        source: NotificationSource,
+        message: impl Into<String>,
+    ) {
+        let entry = NotificationEntry::new(severity, source, message);
+        if let Ok(mut guard) = self.notifications.lock() {
+            guard.push(entry);
+        }
+    }
+
     /// Run a bug report and set the status bar message from the result.
     fn finish_bug_report(
         &mut self,
@@ -1257,12 +1271,12 @@ impl RyllApp {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Info, NotificationSource::BugReport, msg);
             }
             Err(e) => {
                 let msg = format!("Bug report failed: {}", e);
                 error!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Error, NotificationSource::BugReport, msg);
             }
         }
     }
@@ -1418,14 +1432,15 @@ impl RyllApp {
 
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
-    /// Sets `self.bug_status_message` with a success or failure message.
+    /// Opens a native save dialog and writes the current surface(s) as PNG(s).
     /// If the dialog is cancelled, nothing happens.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.is_empty() {
-            self.bug_status_message = Some((
-                "No display surface to capture yet".to_string(),
-                Instant::now(),
-            ));
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::Internal,
+                "No display surface to capture yet",
+            );
             return;
         }
 
@@ -1449,12 +1464,16 @@ impl RyllApp {
                         format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
                     };
                     info!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(NotifySeverity::Info, NotificationSource::Internal, msg);
                 }
                 Err(e) => {
                     let msg = format!("Screenshot failed: {}", e);
                     error!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(
+                        NotifySeverity::Error,
+                        NotificationSource::Internal,
+                        msg,
+                    );
                 }
             }
         }
@@ -1504,13 +1523,6 @@ impl eframe::App for RyllApp {
 
         // Tick the bandwidth tracker
         self.bandwidth.tick();
-
-        // Expire old status messages
-        if let Some((_, created)) = &self.bug_status_message {
-            if created.elapsed() >= Duration::from_secs(5) {
-                self.bug_status_message = None;
-            }
-        }
 
         // Escape during region selection: skip and generate without region
         if self.region_select_active {
@@ -1741,34 +1753,6 @@ impl eframe::App for RyllApp {
                                 }
                             }
                         });
-                        let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
-                        let gap_label = format!("Gaps: {}", gap_count);
-                        let gap_response = if gap_count > 0 {
-                            ui.add(egui::Button::new(
-                                egui::RichText::new(&gap_label)
-                                    .color(egui::Color32::from_rgb(200, 80, 80)),
-                            ))
-                        } else {
-                            ui.add(egui::Button::new(&gap_label))
-                        };
-                        if gap_response.clicked() {
-                            self.gaps_popup_open = !self.gaps_popup_open;
-                        }
-                        if gap_response.hovered() {
-                            gap_response.on_hover_text(
-                                "Distinct protocol gaps seen this session \
-                                 — click to list.\nPass --pedantic to write \
-                                 a bug report per gap.",
-                            );
-                        }
-
-                        // Transient status message from bug report
-                        if let Some((ref msg, created)) = self.bug_status_message {
-                            if created.elapsed() < Duration::from_secs(5) {
-                                ui.separator();
-                                ui.label(msg);
-                            }
-                        }
                     });
                 });
             });
@@ -2661,28 +2645,6 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Protocol gaps floating window (toggled by the Gaps: N button)
-        egui::Window::new("Protocol gaps")
-            .open(&mut self.gaps_popup_open)
-            .resizable(true)
-            .default_width(400.0)
-            .default_height(300.0)
-            .show(ctx, |ui| {
-                let mut keys = shakenfist_spice_protocol::logging::warn_once_keys();
-                keys.sort();
-                if keys.is_empty() {
-                    ui.label("No protocol gaps seen this session.");
-                } else {
-                    ui.label(format!("{} distinct gaps:", keys.len()));
-                    ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for key in &keys {
-                            ui.monospace(*key);
-                        }
-                    });
-                }
-            });
-
         if self.show_disconnect_dialog {
             let reason = self
                 .disconnect_reason
@@ -3080,6 +3042,7 @@ pub async fn run_headless(
             app_snapshot,
         );
     }
+    register_gap_notification_observer(notifications.clone());
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
