@@ -403,6 +403,7 @@ pub mod message_names {
             display_server::GL_DRAW => "gl_draw",
             display_server::SET_ACK => "set_ack",
             display_server::PING => "ping",
+            display_server::NOTIFY => "notify",
             _ => "unknown",
         }
     }
@@ -423,6 +424,7 @@ pub mod message_names {
             inputs_server::MOUSE_MOTION_ACK => "mouse_motion_ack",
             inputs_server::SET_ACK => "set_ack",
             inputs_server::PING => "ping",
+            inputs_server::NOTIFY => "notify",
             _ => "unknown",
         }
     }
@@ -455,6 +457,7 @@ pub mod message_names {
             cursor_server::INVALIDATE_ALL => "invalidate_all",
             cursor_server::SET_ACK => "set_ack",
             cursor_server::PING => "ping",
+            cursor_server::NOTIFY => "notify",
             _ => "unknown",
         }
     }
@@ -475,6 +478,7 @@ pub mod message_names {
             playback_server::LATENCY => "latency",
             playback_server::SET_ACK => "set_ack",
             playback_server::PING => "ping",
+            playback_server::NOTIFY => "notify",
             _ => "unknown",
         }
     }
@@ -490,6 +494,7 @@ pub mod message_names {
             spicevmc_server::COMPRESSED_DATA => "vmc_compressed_data",
             spicevmc_server::SET_ACK => "set_ack",
             spicevmc_server::PING => "ping",
+            spicevmc_server::NOTIFY => "notify",
             _ => "unknown",
         }
     }

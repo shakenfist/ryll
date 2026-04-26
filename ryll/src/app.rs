@@ -23,6 +23,7 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
+use crate::notifications::{NotificationStore, SharedNotifications};
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient, MOUSE_MODE_SERVER};
 
@@ -265,6 +266,12 @@ pub struct RyllApp {
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
 
+    // In-app notification store (shared with all channels and producers).
+    // Producers push entries; the GUI consumer is wired in Phase 4, so
+    // the field reads as dead until then.
+    #[allow(dead_code)]
+    notifications: SharedNotifications,
+
     // Channel state snapshots (always active, for bug reports)
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
@@ -422,6 +429,11 @@ impl RyllApp {
         // Traffic ring buffers (always active)
         let traffic = Arc::new(TrafficBuffers::new());
 
+        // In-app notification store (always active; all channels push,
+        // GUI consumes in Phase 4).
+        let notifications: SharedNotifications =
+            Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
@@ -470,6 +482,7 @@ impl RyllApp {
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
+        let notifications_clone = notifications.clone();
         let snaps_for_conn = ChannelSnapshots {
             display: channel_snapshots.display.clone(),
             inputs: channel_snapshots.inputs.clone(),
@@ -507,6 +520,7 @@ impl RyllApp {
                     resize_rx_for_conn,
                     vol_for_conn,
                     enable_paste,
+                    notifications_clone,
                 )
                 .await
                 {
@@ -555,6 +569,7 @@ impl RyllApp {
             usb_device_description: None,
             usb_connected_at: None,
             traffic,
+            notifications,
             channel_snapshots,
             app_snapshot,
             target_host,
@@ -2771,6 +2786,7 @@ async fn run_connection(
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
+    notifications: SharedNotifications,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2791,6 +2807,7 @@ async fn run_connection(
         snapshots.main,
         resize_rx,
         monitors,
+        notifications.clone(),
     );
 
     // Spawn main channel task
@@ -2865,6 +2882,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2881,6 +2899,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.cursor.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2899,6 +2918,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.inputs.clone(),
                     enable_paste,
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -2918,6 +2938,7 @@ async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2941,6 +2962,7 @@ async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2962,6 +2984,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -3026,6 +3049,11 @@ pub async fn run_headless(
     // Traffic ring buffers (always active)
     let traffic = Arc::new(TrafficBuffers::new());
 
+    // In-app notification store (headless still produces and stores
+    // notifications even though no GUI consumes them).
+    let notifications: SharedNotifications =
+        Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
 
@@ -3078,6 +3106,7 @@ pub async fn run_headless(
             resize_rx,
             VolumeControl::new(),
             enable_paste,
+            notifications,
         )
         .await
     });

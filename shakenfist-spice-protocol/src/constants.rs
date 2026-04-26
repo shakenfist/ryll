@@ -215,6 +215,7 @@ pub mod display_server {
     // Common
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
+    pub const NOTIFY: u16 = 7;
 }
 
 /// Display channel message types (client -> server)
@@ -244,6 +245,7 @@ pub mod inputs_server {
     pub const MOUSE_MOTION_ACK: u16 = 111;
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
+    pub const NOTIFY: u16 = 7;
 }
 
 /// Cursor channel message types (server -> client)
@@ -258,6 +260,7 @@ pub mod cursor_server {
     pub const INVALIDATE_ALL: u16 = 108;
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
+    pub const NOTIFY: u16 = 7;
 }
 
 /// Cursor channel message types (client -> server)
@@ -277,6 +280,7 @@ pub mod playback_server {
     pub const LATENCY: u16 = 107;
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
+    pub const NOTIFY: u16 = 7;
 }
 
 /// SpiceVMC channel message types (server -> client)
@@ -288,6 +292,7 @@ pub mod spicevmc_server {
     pub const COMPRESSED_DATA: u16 = 102;
     pub const SET_ACK: u16 = 3;
     pub const PING: u16 = 4;
+    pub const NOTIFY: u16 = 7;
 }
 
 /// SpiceVMC channel message types (client -> server)

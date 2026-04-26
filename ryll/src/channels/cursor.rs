@@ -8,13 +8,15 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{CursorCacheEntry, CursorSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, CursorInit, CursorSet, MessageHeader, Ping, SetAck, SpiceCursorHeader,
+    make_message, CursorInit, CursorSet, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+    SpiceCursorHeader,
 };
-use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType};
+use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
 
 use super::{ChannelEvent, CursorImage};
 
@@ -27,6 +29,7 @@ pub struct CursorChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<CursorSnapshot>>,
     ack_generation: u32,
     ack_window: u32,
@@ -37,6 +40,7 @@ pub struct CursorChannel {
 }
 
 impl CursorChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
@@ -45,6 +49,7 @@ impl CursorChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<CursorSnapshot>>,
+        notifications: SharedNotifications,
     ) -> Self {
         CursorChannel {
             stream,
@@ -55,6 +60,7 @@ impl CursorChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             ack_generation: 0,
             ack_window: 0,
@@ -303,6 +309,42 @@ impl CursorChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(cursor_client::PONG, &pong_payload);
                 self.send_with_log(cursor_client::PONG, &response).await?;
+            }
+
+            cursor_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("cursor: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("cursor: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("cursor: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Cursor,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                self.notifications
+                    .lock()
+                    .expect("notifications lock poisoned")
+                    .push(entry);
             }
 
             _ => {

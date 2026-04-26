@@ -16,13 +16,16 @@ use tracing::{debug, error, info, warn};
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::config::ShareDirConfig;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
 use crate::webdav::server::WebdavServer;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
-use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType};
+use shakenfist_spice_protocol::messages::{
+    make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+};
+use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 
 use super::{ChannelEvent, WebdavCommand};
 
@@ -53,6 +56,7 @@ pub struct WebdavChannel {
     buffer: Vec<u8>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    notifications: SharedNotifications,
 
     // BaseChannel ACK state
     ack_generation: u32,
@@ -90,6 +94,7 @@ impl WebdavChannel {
         auto_share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        notifications: SharedNotifications,
     ) -> Self {
         let (response_tx, response_rx) = mpsc::channel(256);
         WebdavChannel {
@@ -100,6 +105,7 @@ impl WebdavChannel {
             buffer: Vec::with_capacity(65536),
             capture,
             byte_counter,
+            notifications,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -287,6 +293,41 @@ impl WebdavChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(spicevmc_client::PONG, &pong_payload);
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
+            }
+            spicevmc_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("webdav: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("webdav: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("webdav: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Webdav,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                self.notifications
+                    .lock()
+                    .expect("notifications lock poisoned")
+                    .push(entry);
             }
             _ => {
                 logging::log_unknown_once("webdav", msg_type, payload);

@@ -2,6 +2,8 @@
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{self, Cursor, Read};
 
+use crate::constants::{NotifySeverity, SpiceVisibility};
+
 /// Message header (6 bytes in mini-header mode)
 #[derive(Debug, Clone)]
 pub struct MessageHeader {
@@ -178,12 +180,17 @@ impl SetAck {
 }
 
 /// Notify message
+///
+/// Wire format: timestamp(u64) + severity(u32) + visibility(u32) +
+/// what(u32) + msg_len(u32) + message bytes. `severity` is parsed
+/// into a [`NotifySeverity`]; `visibility` is parsed into
+/// `Option<SpiceVisibility>` (`None` for any value outside 0–2).
 #[derive(Debug, Clone)]
 pub struct Notify {
     #[allow(dead_code)]
     pub timestamp: u64,
-    pub severity: u32,
-    pub visibility: u32,
+    pub severity: NotifySeverity,
+    pub visibility: Option<SpiceVisibility>,
     pub what: u32,
     pub message: String,
 }
@@ -199,10 +206,17 @@ impl Notify {
 
         let mut cursor = Cursor::new(data);
         let timestamp = cursor.read_u64::<LittleEndian>()?;
-        let severity = cursor.read_u32::<LittleEndian>()?;
-        let visibility = cursor.read_u32::<LittleEndian>()?;
+        let severity_raw = cursor.read_u32::<LittleEndian>()?;
+        let visibility_raw = cursor.read_u32::<LittleEndian>()?;
         let what = cursor.read_u32::<LittleEndian>()?;
         let msg_len = cursor.read_u32::<LittleEndian>()? as usize;
+
+        if data.len() < 24 + msg_len {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Notify message body shorter than declared length",
+            ));
+        }
 
         let mut msg_bytes = vec![0u8; msg_len];
         cursor.read_exact(&mut msg_bytes)?;
@@ -210,8 +224,8 @@ impl Notify {
 
         Ok(Notify {
             timestamp,
-            severity,
-            visibility,
+            severity: NotifySeverity::from_u32(severity_raw),
+            visibility: SpiceVisibility::from_u32(visibility_raw),
             what,
             message,
         })
@@ -1537,6 +1551,130 @@ mod tests {
         assert!(
             result.is_err(),
             "Expected error for too-short SpiceAlphaBlend input"
+        );
+    }
+
+    // --- Notify tests ---
+
+    fn build_notify(severity: u32, visibility: u32, what: u32, message: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(24 + message.len());
+        buf.extend_from_slice(&0u64.to_le_bytes()); // timestamp
+        buf.extend_from_slice(&severity.to_le_bytes());
+        buf.extend_from_slice(&visibility.to_le_bytes());
+        buf.extend_from_slice(&what.to_le_bytes());
+        buf.extend_from_slice(&(message.len() as u32).to_le_bytes());
+        buf.extend_from_slice(message);
+        buf
+    }
+
+    #[test]
+    fn notify_parse_minimum_valid() {
+        // 24-byte buffer: header with msg_len=0, no message body.
+        let buf = build_notify(0, 0, 42, &[]);
+        assert_eq!(buf.len(), 24);
+        let msg = Notify::read(&buf).expect("minimum valid Notify failed");
+        assert_eq!(msg.severity, NotifySeverity::Info);
+        assert_eq!(msg.visibility, Some(SpiceVisibility::Low));
+        assert_eq!(msg.what, 42);
+        assert_eq!(msg.message, "");
+    }
+
+    #[test]
+    fn notify_parse_each_severity() {
+        let cases = [
+            (0u32, NotifySeverity::Info),
+            (1u32, NotifySeverity::Warn),
+            (2u32, NotifySeverity::Error),
+        ];
+        for (raw, expected) in cases {
+            let buf = build_notify(raw, 0, 0, &[]);
+            let msg = Notify::read(&buf).unwrap_or_else(|_| panic!("severity={raw} failed"));
+            assert_eq!(msg.severity, expected, "severity raw={raw}");
+        }
+    }
+
+    #[test]
+    fn notify_parse_each_visibility() {
+        let cases = [
+            (0u32, Some(SpiceVisibility::Low)),
+            (1u32, Some(SpiceVisibility::Medium)),
+            (2u32, Some(SpiceVisibility::High)),
+        ];
+        for (raw, expected) in cases {
+            let buf = build_notify(0, raw, 0, &[]);
+            let msg = Notify::read(&buf).unwrap_or_else(|_| panic!("visibility={raw} failed"));
+            assert_eq!(msg.visibility, expected, "visibility raw={raw}");
+        }
+    }
+
+    #[test]
+    fn notify_parse_unknown_visibility_is_none() {
+        let buf = build_notify(0, 99, 0, &[]);
+        let msg = Notify::read(&buf).expect("unknown visibility should not error");
+        assert_eq!(msg.visibility, None);
+    }
+
+    #[test]
+    fn notify_parse_unknown_severity_defaults_info() {
+        let buf = build_notify(99, 0, 0, &[]);
+        let msg = Notify::read(&buf).expect("unknown severity should not error");
+        assert_eq!(msg.severity, NotifySeverity::Info);
+    }
+
+    #[test]
+    fn notify_parse_with_500_byte_message() {
+        let payload: Vec<u8> = (0u8..=127u8).cycle().take(500).collect();
+        let expected_str = String::from_utf8(payload.clone()).expect("test payload is valid ASCII");
+        let buf = build_notify(1, 2, 7, &payload);
+        assert_eq!(buf.len(), 524);
+        let msg = Notify::read(&buf).expect("500-byte message parse failed");
+        assert_eq!(msg.message, expected_str);
+        assert_eq!(msg.severity, NotifySeverity::Warn);
+        assert_eq!(msg.visibility, Some(SpiceVisibility::High));
+    }
+
+    #[test]
+    fn notify_parse_truncated_header() {
+        // 23 bytes — one short of the 24-byte fixed header.
+        let buf = vec![0u8; 23];
+        let result = Notify::read(&buf);
+        assert!(result.is_err(), "expected Err for 23-byte buffer");
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn notify_parse_message_body_shorter_than_declared() {
+        // Build a header claiming msg_len=100 but only append 50 bytes.
+        let mut buf = Vec::with_capacity(24 + 50);
+        buf.extend_from_slice(&0u64.to_le_bytes()); // timestamp
+        buf.extend_from_slice(&0u32.to_le_bytes()); // severity
+        buf.extend_from_slice(&0u32.to_le_bytes()); // visibility
+        buf.extend_from_slice(&0u32.to_le_bytes()); // what
+        buf.extend_from_slice(&100u32.to_le_bytes()); // msg_len = 100
+        buf.extend_from_slice(&[0u8; 50]); // only 50 bytes follow
+        let result = Notify::read(&buf);
+        assert!(
+            result.is_err(),
+            "expected Err for body shorter than declared"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            err.to_string().contains("shorter than declared"),
+            "error message should mention 'shorter than declared', got: {err}",
+        );
+    }
+
+    #[test]
+    fn notify_parse_invalid_utf8_replaced() {
+        // Non-UTF-8 bytes should be replaced lossily; the call must return Ok.
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0xFD];
+        let buf = build_notify(0, 0, 0, bad_bytes);
+        let msg = Notify::read(&buf).expect("invalid UTF-8 should return Ok (lossy)");
+        assert!(
+            msg.message.contains('\u{FFFD}'),
+            "expected U+FFFD replacement char in message, got: {:?}",
+            msg.message,
         );
     }
 }
