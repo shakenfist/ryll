@@ -480,6 +480,27 @@ should verify:
 
 ### Discoveries during this work
 
+* **Phase 2 smoke test, 2026-04-26**: against `make
+  test-qemu` (a default `-spice
+  port=5900,disable-ticketing=on,plaintext-channel=all`
+  config) only the **main** channel receives NOTIFY
+  messages. Master plan Q5's premise that "each channel
+  emits its own [insecure] warning" is wrong for QEMU;
+  the SPICE server emits a single notification per
+  affected channel **on the main channel**, with the
+  affected channel name in the message text (e.g.
+  `keyboard channel is insecure`). Phase 2's per-channel
+  NOTIFY arms still earn their keep against non-QEMU
+  SPICE servers (Kerbside proxy, future servers) and
+  against any future QEMU notifications that aren't
+  insecure-channel reports, but typical QEMU sessions
+  will produce a small number of `Spice { channel: Main,
+  what: N }` entries with distinct messages — never
+  exercising cross-channel dedup. Phase 4's GUI should
+  render these as separate entries in the side panel
+  with the message text doing the per-affected-channel
+  disambiguation.
+
 * **Phase 1 planning, 2026-04-26**: the master plan's
   premise that "Ryll does not parse SPICE_MSG_NOTIFY at
   all today" is wrong. `shakenfist-spice-protocol` already
