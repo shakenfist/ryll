@@ -928,19 +928,30 @@ against `RyllApp::reconnect` if in doubt.
 ### Threading and runtime lifecycle
 
 Each reconnect spawns a fresh OS thread with a fresh
-`tokio::runtime::Runtime`. The previous attempt's runtime
-is **not** explicitly stopped: the previous socket
-eventually times out, the connection task returns an
-error, and the runtime collapses with no live tasks.
+`tokio::runtime::Runtime`. The previous attempt is
+explicitly cancelled before the new thread spawns:
+`RyllApp` holds an `Arc<AtomicBool>` per attempt
+(`connection_cancel`); `reconnect()` raises the previous
+flag via `prev.store(true, Ordering::Relaxed)`, allocates
+a fresh flag, and passes it to the new `run_connection`.
 
-In the common case — an actual disconnect followed by a
-single Reconnect press against a reachable server — this
-is invisible. In the failure case where Reconnect is
-spammed against an unresponsive server, threads and
-runtimes accumulate until the previous sockets time out.
-The cancellation-token follow-up tracked as item 6 of
-["Should consider"](docs/plans/PLAN-pr31-followup.md) is
-the targeted fix.
+Inside `run_connection`, a small cancel-watcher task
+polls the flag every 100 ms and calls `abort()` on the
+`AbortHandle` of every channel `JoinHandle` once the flag
+is set. The wait loop sees the channel tasks complete
+with cancelled `JoinError`s, returns from
+`run_connection`, the spawned thread's `block_on`
+returns, and the tokio runtime is dropped. End to end,
+a superseded attempt exits within roughly 100 ms of the
+flag being raised, regardless of whether the underlying
+TCP socket is responsive — well inside human reaction
+time, so spamming Reconnect no longer accumulates threads
+or sockets.
+
+This mirrors the cooperative-cancel pattern used for
+`SHUTDOWN_REQUESTED` (the global SIGINT flag). Both
+signals share the same 100 ms poll cadence; both rely on
+the runtime drop to release the underlying sockets.
 
 ## Statistics and Instrumentation
 
