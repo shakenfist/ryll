@@ -3008,6 +3008,7 @@ impl eframe::App for RyllApp {
         if self.cursor_image.is_some()
             && !self.region_select_active
             && self.surface_rect != egui::Rect::NOTHING
+            && !ctx.wants_pointer_input()
             && ctx.input(|i| {
                 i.pointer
                     .hover_pos()
