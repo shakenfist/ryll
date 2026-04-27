@@ -103,10 +103,10 @@ communication between tasks.
   accumulates MouseMotion deltas) to prevent the channel from filling
   during network stalls, which would cause the producer's `try_send` to
   silently drop critical button events. Mouse events are dispatched based
-  on the server's mouse mode: client mode (2) sends absolute
-  MOUSE_POSITION, server mode (1) sends relative MOUSE_MOTION. At session
-  startup, ryll requests client mode via MOUSE_MODE_REQUEST if the server
-  supports it
+  on the server's current mouse mode (SERVER → relative MOUSE_MOTION,
+  CLIENT → absolute MOUSE_POSITION). See "Mouse-Mode Negotiation" under
+  the SPICE Protocol section for the full negotiation flow including the
+  post-reboot recovery path
 
 ### TCP Keepalive
 
@@ -151,11 +151,81 @@ All SPICE messages use a 6-byte mini-header:
 |---------|---------|------------------|
 | Main (1) | Session control | init, channels_list, ping/pong |
 | Display (2) | Graphics | surface_create, draw_fill, draw_copy, draw_blackness, draw_whiteness, draw_invers, copy_bits, draw_opaque, draw_blend, draw_transparent, draw_alpha_blend, mark |
-| Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion |
+| Inputs (3) | User input | key_down, key_up, mouse_position, mouse_motion (see "Mouse-Mode Negotiation" below) |
 | Cursor (4) | Pointer | cursor_set, cursor_move, cursor_hide |
 | Playback (5) | Audio playback | playback_start, playback_data, playback_mode, playback_stop |
 | Usbredir (9) | USB redirection | vmc_data, vmc_compressed_data (SpiceVMC transport) |
 | WebDAV (11) | Folder sharing | vmc_data, vmc_compressed_data (SpiceVMC transport) |
+
+### Mouse-Mode Negotiation
+
+The SPICE server can drive input dispatch in either of two
+mouse modes, and which mode is in effect changes how ryll
+sends pointer events:
+
+- **SERVER mode (1, "relative")** — the server expects
+  `MOUSE_MOTION` messages with `(dx, dy)` deltas. Common
+  on minimal setups without a guest agent.
+- **CLIENT mode (2, "absolute")** — the server expects
+  `MOUSE_POSITION` messages with `(x, y)` in screen
+  coordinates. Required for the cursor to track a
+  windowed client cleanly. CLIENT is what ryll asks for
+  whenever the server says it is supported.
+
+#### Wire format
+
+Both directions use 16-bit fields, even though the
+in-memory C struct is `u32` — `spice.proto` declares
+`mouse_mode` as `flags16`, and the marshaller narrows it
+on the wire. Misreading the wire as `u32` produces
+nonsense values like 131075 (`0x00020003` for
+supported=3 / current=2) which fail every mode check.
+
+| Direction | Message | Payload |
+|-----------|---------|---------|
+| Server → client | `MAIN_MOUSE_MODE` (`SpiceMsgMainMouseMode`) | Two little-endian u16: `supported_modes`, then `current_mode` |
+| Client → server | `MAIN_MOUSE_MODE_REQUEST` (`SpiceMsgcMainMouseModeRequest`) | One little-endian u16: requested mode flags |
+
+`parse_mouse_mode_payload` and
+`build_mouse_mode_request_payload` in
+[`ryll/src/channels/main_channel.rs`](ryll/src/channels/main_channel.rs)
+own the read and write sides; both have unit tests next
+to them.
+
+#### Negotiation flow
+
+1. **At session INIT**, the server announces both
+   `supported_modes` (a bitmask) and `current_mode`. Ryll
+   calls `maybe_request_client_mouse_mode`, which sends a
+   `MOUSE_MODE_REQUEST(CLIENT)` if CLIENT is supported but
+   not current.
+2. **On any subsequent `MAIN_MOUSE_MODE`** — typically
+   triggered by guest events such as a guest reboot
+   (which often reverts the server to SERVER/relative
+   while the agent reattaches) — ryll re-evaluates the
+   same predicate. This is the recovery path that keeps
+   absolute pointer events working without a manual
+   reconnect.
+
+#### Request-loop guard
+
+`MainChannel::mouse_mode_request_pending` tracks whether
+a `MOUSE_MODE_REQUEST` is outstanding.
+`maybe_request_client_mouse_mode` skips sending if this
+flag is already set, and the flag clears when a
+subsequent `MAIN_MOUSE_MODE` arrives announcing
+`current_mode == CLIENT`. This caps outbound requests at
+one per round trip, so a flappy or buggy server that
+never honours the request cannot amplify its
+`MAIN_MOUSE_MODE` traffic into a storm of client-side
+requests.
+
+The predicate `should_request_client_mouse_mode` and the
+encoder `build_mouse_mode_request_payload` are pure
+functions with their own tests — three branches and a
+byte-shape assertion respectively — so a regression in
+either the negotiation logic or the wire format fails
+loudly during `cargo test`.
 
 ## Image Types and Compression
 
@@ -791,6 +861,86 @@ to `File` without `BufWriter`. This means every packet is persisted to disk
 immediately, so pcap data is never lost if the process is interrupted by
 SIGINT or any other signal. The MP4 video writer also uses unbuffered `File`
 I/O for the same reason.
+
+## Reconnection
+
+When the SPICE main channel closes or any secondary channel
+reports an unrecoverable error, ryll surfaces a "Disconnected"
+dialog with two buttons: Close and Reconnect. The Reconnect
+path is implemented in
+[`RyllApp::reconnect`](ryll/src/app.rs) and is a user gesture
+— ryll never auto-reconnects.
+
+### What is recreated
+
+Every reconnect allocates a fresh copy of the per-session
+machinery. This is what makes a reconnect equivalent to a
+clean session against the same target rather than a
+"resume":
+
+- All five mpsc channels (`event`, `input`, `usb`, `webdav`,
+  `resize`).
+- A new `tokio::runtime::Runtime` inside a freshly spawned
+  `std::thread::spawn`, with its own repaint-bridge task.
+- A new `Arc<Notify>` for repaint wake-ups, a new
+  `ByteCounter`, new `TrafficBuffers`, new
+  `ChannelSnapshots`, a new `BandwidthTracker`, and a new
+  `VolumeControl`.
+
+Per-session UI state is reset in place: surfaces, cursor
+position / visibility / image / texture, the cached
+surface rectangle, statistics, last-cadence-key timestamp,
+mouse mode, mouse-button state, modifier state,
+last-sent resize, pending resize, USB connection state
+(channel-ready, connecting / disconnecting flags, error
+message, device description, connected-at), WebDAV
+connection state (channel-ready, shared-dir, sharing
+flag, connected-at, error message), and the disconnect
+dialog itself.
+
+### What survives
+
+A reader investigating "did my settings carry over?" wants
+this list first. The reconnect path **does not** touch:
+
+- The parsed CLI configuration (target host, port, TLS,
+  monitor count).
+- The configured virtual-disk list and the configured
+  shared folder. Both are stashed in
+  `RyllApp::reconnect_virtual_disks` and
+  `reconnect_share_dir` at construction so they survive
+  the reset.
+- The paste-as-keystrokes toggle and inter-character
+  delay.
+- The in-app notification store (history of past
+  notifications). The store is an `Arc<Mutex<…>>` and
+  the same `Arc` is handed to the new connection.
+- The egui `Context`, which means window position and
+  size, dock layouts, and any open side panels survive
+  the reconnect — the Reconnect button feels like the
+  same window resuming, not a new one.
+- The active capture session, if any.
+
+Anything not in either list above is unintentional and
+should be considered a documentation bug; cross-check
+against `RyllApp::reconnect` if in doubt.
+
+### Threading and runtime lifecycle
+
+Each reconnect spawns a fresh OS thread with a fresh
+`tokio::runtime::Runtime`. The previous attempt's runtime
+is **not** explicitly stopped: the previous socket
+eventually times out, the connection task returns an
+error, and the runtime collapses with no live tasks.
+
+In the common case — an actual disconnect followed by a
+single Reconnect press against a reachable server — this
+is invisible. In the failure case where Reconnect is
+spammed against an unresponsive server, threads and
+runtimes accumulate until the previous sockets time out.
+The cancellation-token follow-up tracked as item 6 of
+["Should consider"](docs/plans/PLAN-pr31-followup.md) is
+the targeted fix.
 
 ## Statistics and Instrumentation
 

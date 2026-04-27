@@ -68,34 +68,33 @@ All blocking items from the original review have been resolved:
    `build_mouse_mode_request_payload` so the byte shape
    can be asserted without constructing a `MainChannel`.
 
-3. **README: reconnect button + window persistence.** PR 31
-   added user-visible features that aren't documented.
-   Update `README.md` to describe the Reconnect button in
-   the disconnect dialog and the eframe window persistence
-   (window position/size restored on next launch). Mention
-   that persistence pulls in ~4 transitive crates (audited
-   when the PR landed).
+3. ~~**README: reconnect button + window persistence.**~~
+   Landed in Phase 2 — see
+   [PLAN-pr31-followup-phase-02-docs.md](PLAN-pr31-followup-phase-02-docs.md).
+   Two new Features bullets (Reconnect on disconnect,
+   Window persistence) cover the user-visible behaviour;
+   the persistence bullet names the per-platform config
+   directory rather than counting transitive crates,
+   which turned out to be the more useful detail.
 
-4. **ARCHITECTURE: reconnect flow.** `ARCHITECTURE.md` does
-   not yet describe how `reconnect()` tears down channels,
-   spawns a fresh tokio runtime, and rebuilds the
-   `SpiceClient`. The block belongs alongside the existing
-   "Connection lifecycle" section. Note the relationship
-   to `RyllApp::reconnect_virtual_disks` /
-   `reconnect_share_dir` for state preservation across
-   reconnects.
+4. ~~**ARCHITECTURE: reconnect flow.**~~ Landed in Phase 2 —
+   see
+   [PLAN-pr31-followup-phase-02-docs.md](PLAN-pr31-followup-phase-02-docs.md).
+   New top-level `## Reconnection` section after Graceful
+   Shutdown, structured as Trigger / What is recreated /
+   What survives / Threading and runtime. Cross-links to
+   item 6 below for the cancellation-token follow-up.
 
-5. **ARCHITECTURE: mouse-mode model.** The mouse-mode model
-   was significantly expanded by `10f19477` and PR 31's
-   reconnect flow interacts with it. Document:
-   - The two modes (SERVER / relative, CLIENT / absolute).
-   - The negotiation: server sends supported + current at
-     INIT, client requests CLIENT mode if supported but
-     not current.
-   - The `mouse_mode_request_pending` guard preventing
-     request-loop storms.
-   - The post-reboot recovery via the MOUSE_MODE handler
-     calling `maybe_request_client_mouse_mode` again.
+5. ~~**ARCHITECTURE: mouse-mode model.**~~ Landed in Phase 2
+   — see
+   [PLAN-pr31-followup-phase-02-docs.md](PLAN-pr31-followup-phase-02-docs.md).
+   New `### Mouse-Mode Negotiation` subsection under
+   `## SPICE Protocol` covers the two modes, both wire-
+   format directions, the negotiation flow at INIT and
+   on subsequent server-driven mode changes, and the
+   `mouse_mode_request_pending` guard. The previous
+   inline mention in the input-channel bullet is now a
+   pointer to the canonical text.
 
 ## Should consider
 
@@ -183,10 +182,12 @@ at `ryll/src/channels/main_channel.rs:998-1046`.
 Items in this plan are independent and can be picked up in
 any order. Suggested batching for follow-up PRs:
 
-- **One PR for items 1-2** (regression tests). Small,
-  self-contained, no behaviour change.
-- **One PR for items 3-5** (docs sweep). README +
-  ARCHITECTURE updates only.
+- ~~**One PR for items 1-2** (regression tests).~~ Phase 1
+  landed; see
+  [PLAN-pr31-followup-phase-01-tests.md](PLAN-pr31-followup-phase-01-tests.md).
+- ~~**One PR for items 3-5** (docs sweep).~~ Phase 2
+  landed; see
+  [PLAN-pr31-followup-phase-02-docs.md](PLAN-pr31-followup-phase-02-docs.md).
 - **One PR per item in Should consider** (6, 7, 8, 9).
   Each has independent failure modes and should be
   reviewable on its own.
