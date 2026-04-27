@@ -10,8 +10,9 @@ use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info};
 
 use crate::bugreport::{
-    format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots, PedanticConfig,
-    ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
+    PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
+    TriggerTimestamps,
 };
 use crate::capture::CaptureSession;
 use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
@@ -22,8 +23,12 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
+use crate::notifications::{
+    self as notifications, register_gap_notification_observer, NotificationEntry,
+    NotificationSource, NotificationStore, SharedNotifications,
+};
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::{ChannelType, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -164,6 +169,31 @@ impl LatencyTracker {
     }
 }
 
+/// Captured on the UI thread when a bug-report dialog opens.
+///
+/// The raw RGBA is cloned and handed to a background
+/// `std::thread` that PNG-encodes into `png_slot`; the UI
+/// thread holds another clone of the `Arc` and consumes the
+/// bytes at submit time (or drops the `Arc` on cancel, letting
+/// the worker write into what becomes garbage).
+///
+/// Timestamps are recorded synchronously on the UI thread at
+/// dialog-open — they never depend on the encoder thread
+/// finishing — so they always make it into metadata.json even
+/// when the surface is missing or encoding fails.
+struct TriggerSnapshot {
+    /// ISO 8601 UTC timestamp of when the dialog opened. Same
+    /// format as `ReportMetadata::timestamp`.
+    triggered_at: String,
+    /// Session uptime in seconds at the moment of dialog open.
+    /// Same units as `AppSnapshot::uptime_secs`.
+    triggered_uptime_secs: f64,
+    /// Slot the encoder thread fills with either the PNG bytes
+    /// or an `Err` on encode failure. `None` while the worker is
+    /// still running.
+    png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
+
 /// The egui application
 pub struct RyllApp {
     // Communication channels
@@ -239,6 +269,9 @@ pub struct RyllApp {
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
 
+    // In-app notification store (shared with all channels and producers).
+    notifications: SharedNotifications,
+
     // Channel state snapshots (always active, for bug reports)
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
@@ -251,7 +284,13 @@ pub struct RyllApp {
     show_bug_dialog: bool,
     bug_report_type: BugReportType,
     bug_description: String,
-    bug_status_message: Option<(String, Instant)>,
+
+    // Snapshot of the display surface captured the moment a
+    // bug-report dialog opens. Encoding runs in a background
+    // thread; `take_trigger_for_submit` consumes both the
+    // timestamps and (if ready) the PNG bytes at submit time.
+    // `discard_trigger_snapshot` drops it on cancel.
+    pending_trigger: Option<TriggerSnapshot>,
 
     // Region selection state (Display bug reports)
     region_select_active: bool,
@@ -297,6 +336,26 @@ pub struct RyllApp {
 
     /// Whether the "Protocol gaps" floating window is currently open.
     gaps_popup_open: bool,
+
+    // Notifications panel state
+    show_notifications_panel: bool,
+    notifications_panel_was_open_last_frame: bool,
+
+    /// Whether paste-as-keystrokes is enabled.
+    enable_paste: bool,
+
+    /// Inter-character delay for paste-as-keystrokes in milliseconds.
+    paste_char_delay_ms: u32,
+
+    /// Whether the guest has a vdagent connected (disables
+    /// paste-as-keystrokes in favour of the clipboard path).
+    agent_connected: bool,
+
+    /// Cached clipboard instance for reading host clipboard.
+    cached_clipboard: Option<arboard::Clipboard>,
+
+    /// Error message for the paste error dialog (None = hidden).
+    paste_error_message: Option<String>,
 
     // Reconnection state
     config: Config,
@@ -358,6 +417,8 @@ impl RyllApp {
         cc: &eframe::CreationContext<'_>,
         config: Config,
         cadence: bool,
+        enable_paste: bool,
+        paste_char_delay_ms: u32,
         virtual_disks: Vec<VirtualDiskConfig>,
         share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<CaptureSession>>,
@@ -374,6 +435,13 @@ impl RyllApp {
 
         let byte_counter = Arc::new(ByteCounter::new());
         let traffic = Arc::new(TrafficBuffers::new());
+
+        // In-app notification store (always active; all channels push,
+        // GUI bell + side panel consume).
+        let notifications: SharedNotifications =
+            Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+
+        // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
         let target_host = config.host.clone();
@@ -392,8 +460,10 @@ impl RyllApp {
                 traffic.clone(),
                 channel_snapshots.clone(),
                 app_snapshot.clone(),
+                notifications.clone(),
             );
         }
+        register_gap_notification_observer(notifications.clone());
 
         // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
@@ -417,6 +487,7 @@ impl RyllApp {
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
+        let notifications_clone = notifications.clone();
         let snaps_for_conn = ChannelSnapshots {
             display: channel_snapshots.display.clone(),
             inputs: channel_snapshots.inputs.clone(),
@@ -455,6 +526,8 @@ impl RyllApp {
                     monitors,
                     resize_rx_for_conn,
                     vol_for_conn,
+                    enable_paste,
+                    notifications_clone,
                 )
                 .await
                 {
@@ -502,6 +575,7 @@ impl RyllApp {
             usb_device_description: None,
             usb_connected_at: None,
             traffic,
+            notifications,
             channel_snapshots,
             app_snapshot,
             target_host,
@@ -509,7 +583,7 @@ impl RyllApp {
             show_bug_dialog: false,
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
-            bug_status_message: None,
+            pending_trigger: None,
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
@@ -542,6 +616,13 @@ impl RyllApp {
             traffic_filter_webdav: true,
             traffic_filter_playback: true,
             gaps_popup_open: false,
+            show_notifications_panel: false,
+            notifications_panel_was_open_last_frame: false,
+            enable_paste,
+            paste_char_delay_ms,
+            agent_connected: false,
+            cached_clipboard: None,
+            paste_error_message: None,
             config,
             monitors,
             reconnect_virtual_disks: virtual_disks,
@@ -624,6 +705,8 @@ impl RyllApp {
         let virtual_disks = self.reconnect_virtual_disks.clone();
         let share_dir = self.reconnect_share_dir.clone();
         let vol_for_conn = volume_control;
+        let enable_paste = self.enable_paste;
+        let notifications_clone = self.notifications.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -653,6 +736,8 @@ impl RyllApp {
                     monitors,
                     resize_rx,
                     vol_for_conn,
+                    enable_paste,
+                    notifications_clone,
                 )
                 .await
                 {
@@ -950,6 +1035,25 @@ impl RyllApp {
                     self.webdav_error_time = Some(Instant::now());
                 }
 
+                ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                    info!("app: paste complete: {} chars in {}ms", chars, elapsed_ms);
+                    self.push_notification(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
+                        format!("Pasted {} chars ({}ms)", chars, elapsed_ms),
+                    );
+                }
+
+                ChannelEvent::PasteFailed { reason } => {
+                    error!("app: paste failed: {}", reason);
+                    self.paste_error_message = Some(reason);
+                }
+
+                ChannelEvent::AgentConnected(connected) => {
+                    info!("app: vdagent connected={}", connected);
+                    self.agent_connected = connected;
+                }
+
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
 
@@ -1011,6 +1115,75 @@ impl RyllApp {
         self.usb_disconnecting = false;
     }
 
+    /// Get or create the cached clipboard instance.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.cached_clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.cached_clipboard = Some(cb),
+                Err(e) => {
+                    tracing::warn!("app: failed to open clipboard: {}", e);
+                    return None;
+                }
+            }
+        }
+        self.cached_clipboard.as_mut()
+    }
+
+    /// Attempt to paste the host clipboard as keystrokes.
+    /// Returns true if a paste was triggered (or an error
+    /// dialog was shown), false if there was nothing to do.
+    fn trigger_paste(&mut self) -> bool {
+        use crate::channels::{translate_paste, PasteError};
+
+        if !self.enable_paste || self.agent_connected {
+            return false;
+        }
+
+        // Read clipboard
+        let text = match self.clipboard() {
+            Some(cb) => match cb.get_text() {
+                Ok(t) if !t.is_empty() => t,
+                Ok(_) => return false, // empty clipboard
+                Err(e) => {
+                    self.paste_error_message = Some(format!("Failed to read clipboard: {}", e));
+                    return true;
+                }
+            },
+            None => {
+                self.paste_error_message = Some("No clipboard available".to_string());
+                return true;
+            }
+        };
+
+        // Pre-validate with the translator
+        match translate_paste(&text) {
+            Ok(_) => {
+                // Translation will succeed — send to the inputs channel.
+                if let Some(tx) = &self.input_tx {
+                    let _ = tx.try_send(InputEvent::PasteText {
+                        text,
+                        char_delay_ms: self.paste_char_delay_ms,
+                    });
+                }
+            }
+            Err(PasteError::Unrepresentable { count, sample }) => {
+                let sample_str: String = sample
+                    .iter()
+                    .map(|c| format!("U+{:04X}", *c as u32))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.paste_error_message = Some(format!(
+                    "The clipboard contains {} character(s) that have no \
+                     US-QWERTY scancode mapping: {}",
+                    count, sample_str,
+                ));
+                return true;
+            }
+        }
+
+        true
+    }
+
     /// Sync app-level state to the shared snapshot.
     fn update_app_snapshot(&self) {
         let mut snap = self.app_snapshot.lock().unwrap();
@@ -1049,15 +1222,141 @@ impl RyllApp {
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
     }
 
+    /// Clone the largest surface's RGBA pixels, capture trigger
+    /// timestamps, and spawn a background thread to PNG-encode.
+    ///
+    /// Called from every dialog-open path. Idempotent — a no-op
+    /// when a snapshot is already pending, so call sites can
+    /// fire it unconditionally without worrying about a second
+    /// open stomping the first.
+    ///
+    /// The operator's rule is to always capture here, regardless
+    /// of which report type the dialog was opened with, so the
+    /// artefact survives the form-filling delay. The decision to
+    /// *include* the resulting PNG in the zip happens at submit
+    /// time in `BugReport::assemble`, which drops it for
+    /// non-Display submissions.
+    fn begin_trigger_snapshot(&mut self) {
+        if self.pending_trigger.is_some() {
+            return;
+        }
+        let triggered_at = chrono_now();
+        let triggered_uptime_secs = self.traffic.elapsed().as_secs_f64();
+
+        // Pre-first-SURFACE_CREATE: no surface to snap. Record
+        // timestamps anyway and seed an Err into the slot so the
+        // submit path falls back cleanly to live encoding (which
+        // will also produce None when there's no surface).
+        let Some(surface) = self
+            .surfaces
+            .values()
+            .max_by_key(|s| (s.width as u64) * (s.height as u64))
+        else {
+            let slot = Arc::new(std::sync::Mutex::new(Some(Err(anyhow::anyhow!(
+                "no surface available at trigger time"
+            )))));
+            self.pending_trigger = Some(TriggerSnapshot {
+                triggered_at,
+                triggered_uptime_secs,
+                png_slot: slot,
+            });
+            return;
+        };
+
+        let pixels: Vec<u8> = surface.pixels().to_vec();
+        let width = surface.width;
+        let height = surface.height;
+        let slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_for_thread = Arc::clone(&slot);
+
+        let spawned = std::thread::Builder::new()
+            .name("ryll-bugreport-png".to_string())
+            .spawn(move || {
+                let result = encode_png(&pixels, width, height);
+                // If the Mutex is poisoned the UI thread panicked;
+                // nothing to write and the process is already
+                // tearing down.
+                if let Ok(mut guard) = slot_for_thread.lock() {
+                    *guard = Some(result);
+                }
+            });
+        if let Err(e) = spawned {
+            // Thread spawn failed (OS resource pressure); leave
+            // the slot empty so the submit path falls back to
+            // live encoding.
+            debug!("app: failed to spawn PNG encoder thread: {}", e);
+        }
+
+        self.pending_trigger = Some(TriggerSnapshot {
+            triggered_at,
+            triggered_uptime_secs,
+            png_slot: slot,
+        });
+    }
+
+    /// Drop the pending snapshot without consuming it. The
+    /// encoder thread (if still running) keeps its Arc clone and
+    /// eventually writes into a Mutex whose last reference it
+    /// holds, which is then dropped. Safe when no snapshot is
+    /// pending.
+    fn discard_trigger_snapshot(&mut self) {
+        let _ = self.pending_trigger.take();
+    }
+
+    /// Called from `finish_bug_report`. Returns the captured
+    /// trigger timestamps (if any) and the encoded PNG bytes (if
+    /// the worker has finished with `Ok`). Uses `try_lock` so a
+    /// still-running encoder on a large surface can't block the
+    /// UI thread — `None` falls back to live encoding inside
+    /// `BugReport::assemble`.
+    fn take_trigger_for_submit(&mut self) -> (Option<TriggerTimestamps>, Option<Vec<u8>>) {
+        let Some(snap) = self.pending_trigger.take() else {
+            return (None, None);
+        };
+        // The `.ok()` intentionally discards any `Err` written
+        // by the encoder thread: an encode failure (or the
+        // no-surface-at-trigger-time sentinel seeded by
+        // `begin_trigger_snapshot`) is indistinguishable here
+        // from "the worker hadn't finished yet", and in both
+        // cases we want the submit path to fall back to live
+        // encoding of the submit-time surface. If we ever need
+        // to surface the error to the user, it has to be logged
+        // here *and* handled in the live-encode fallback.
+        let png = match snap.png_slot.try_lock() {
+            Ok(mut guard) => guard.take().and_then(|r| r.ok()),
+            Err(_) => None,
+        };
+        let trigger = TriggerTimestamps {
+            triggered_at: snap.triggered_at,
+            triggered_uptime_secs: snap.triggered_uptime_secs,
+        };
+        (Some(trigger), png)
+    }
+
     /// Generate a bug report and write it to disk.
     /// Returns the path of the written zip file.
+    ///
+    /// `trigger` carries the trigger-time timestamps captured
+    /// when the dialog opened; `precomputed_screenshot_png`
+    /// carries the PNG that the background encoder produced
+    /// from the trigger-time surface. Both are `None` if the
+    /// dialog wasn't open when this was called (e.g. the
+    /// dev-only F8 path used to trigger reports without a
+    /// dialog, though that doesn't exist today) — `BugReport`
+    /// falls back to the submit-time behaviour in that case.
     pub fn generate_bug_report(
         &self,
         report_type: BugReportType,
         description: String,
         region: Option<ReportRegion>,
+        trigger: Option<TriggerTimestamps>,
+        precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<std::path::PathBuf> {
-        // Get surface pixels for display reports
+        // Keep the live surface-pixels fallback path. It's the
+        // safety net when the background encoder wasn't spawned
+        // or hasn't finished; phase 3 will also reuse this to
+        // produce the submit-time region crop.
         let surface_data = if report_type == BugReportType::Display {
             self.surfaces
                 .values()
@@ -1067,7 +1366,6 @@ impl RyllApp {
             None
         };
 
-        // Assemble the report
         let report = BugReport::new(
             report_type,
             description,
@@ -1077,7 +1375,10 @@ impl RyllApp {
             &self.traffic,
             &self.channel_snapshots,
             &self.app_snapshot,
+            &self.notifications,
             surface_data,
+            trigger,
+            precomputed_screenshot_png,
         )?;
 
         // Determine output directory
@@ -1089,6 +1390,19 @@ impl RyllApp {
         report.write_zip(&output_dir)
     }
 
+    /// Push a notification entry into the shared store.
+    fn push_notification(
+        &self,
+        severity: NotifySeverity,
+        source: NotificationSource,
+        message: impl Into<String>,
+    ) {
+        let entry = NotificationEntry::new(severity, source, message);
+        if let Ok(mut guard) = self.notifications.lock() {
+            guard.push(entry);
+        }
+    }
+
     /// Run a bug report and set the status bar message from the result.
     fn finish_bug_report(
         &mut self,
@@ -1096,16 +1410,17 @@ impl RyllApp {
         description: String,
         region: Option<ReportRegion>,
     ) {
-        match self.generate_bug_report(report_type, description, region) {
+        let (trigger, precomputed_png) = self.take_trigger_for_submit();
+        match self.generate_bug_report(report_type, description, region, trigger, precomputed_png) {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Info, NotificationSource::BugReport, msg);
             }
             Err(e) => {
                 let msg = format!("Bug report failed: {}", e);
                 error!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Error, NotificationSource::BugReport, msg);
             }
         }
     }
@@ -1262,14 +1577,14 @@ impl RyllApp {
 
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
-    /// Sets `self.bug_status_message` with a success or failure message.
     /// If the dialog is cancelled, nothing happens.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.is_empty() {
-            self.bug_status_message = Some((
-                "No display surface to capture yet".to_string(),
-                Instant::now(),
-            ));
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::Internal,
+                "No display surface to capture yet",
+            );
             return;
         }
 
@@ -1293,12 +1608,16 @@ impl RyllApp {
                         format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
                     };
                     info!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(NotifySeverity::Info, NotificationSource::Internal, msg);
                 }
                 Err(e) => {
                     let msg = format!("Screenshot failed: {}", e);
                     error!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(
+                        NotifySeverity::Error,
+                        NotificationSource::Internal,
+                        msg,
+                    );
                 }
             }
         }
@@ -1349,13 +1668,6 @@ impl eframe::App for RyllApp {
         // Tick the bandwidth tracker
         self.bandwidth.tick();
 
-        // Expire old status messages
-        if let Some((_, created)) = &self.bug_status_message {
-            if created.elapsed() >= Duration::from_secs(5) {
-                self.bug_status_message = None;
-            }
-        }
-
         // Escape during region selection: skip and generate without region
         if self.region_select_active {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -1373,10 +1685,14 @@ impl eframe::App for RyllApp {
         if !self.region_select_active {
             let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
             if f12_pressed {
-                self.show_bug_dialog = !self.show_bug_dialog;
                 if self.show_bug_dialog {
+                    self.show_bug_dialog = false;
+                    self.discard_trigger_snapshot();
+                } else {
+                    self.show_bug_dialog = true;
                     self.bug_report_type = BugReportType::Display;
                     self.bug_description.clear();
+                    self.begin_trigger_snapshot();
                 }
             }
         }
@@ -1402,11 +1718,26 @@ impl eframe::App for RyllApp {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
                 self.show_bug_dialog = false;
+                self.discard_trigger_snapshot();
             }
         }
 
-        // Handle input
-        self.handle_input(ctx);
+        // Ctrl+Alt+V triggers paste-as-keystrokes (not during
+        // region selection or dialogs)
+        let mut paste_triggered = false;
+        if !self.region_select_active && !self.show_bug_dialog && self.paste_error_message.is_none()
+        {
+            let ctrl_alt_v =
+                ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::V));
+            if ctrl_alt_v {
+                paste_triggered = self.trigger_paste();
+            }
+        }
+
+        // Handle input (skip if paste was triggered this frame)
+        if !paste_triggered {
+            self.handle_input(ctx);
+        }
 
         // Handle cadence mode
         self.handle_cadence();
@@ -1535,53 +1866,72 @@ impl eframe::App for RyllApp {
                             }
                         }
 
-                        ui.separator();
-                        if ui.small_button("Traffic").clicked() {
-                            self.show_traffic_viewer = !self.show_traffic_viewer;
-                        }
-                        if ui.small_button("USB").clicked() {
-                            self.show_usb_panel = !self.show_usb_panel;
-                        }
-                        if ui.small_button("Folders").clicked() {
-                            self.show_webdav_panel = !self.show_webdav_panel;
-                        }
-                        if ui.small_button("Screenshot").clicked() {
-                            self.open_screenshot_dialog();
-                        }
-                        let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
-                        let gap_label = format!("Gaps: {}", gap_count);
-                        let gap_response = if gap_count > 0 {
-                            ui.add(egui::Button::new(
-                                egui::RichText::new(&gap_label)
-                                    .color(egui::Color32::from_rgb(200, 80, 80)),
-                            ))
-                        } else {
-                            ui.add(egui::Button::new(&gap_label))
-                        };
-                        if gap_response.clicked() {
-                            self.gaps_popup_open = !self.gaps_popup_open;
-                        }
-                        if gap_response.hovered() {
-                            gap_response.on_hover_text(
-                                "Distinct protocol gaps seen this session \
-                                 — click to list.\nPass --pedantic to write \
-                                 a bug report per gap.",
-                            );
-                        }
+                        // Bell notification button
+                        let (unread_count, bell_severity) = self
+                            .notifications
+                            .lock()
+                            .map(|s| (s.unread_count(), s.highest_bell_severity()))
+                            .unwrap_or((0, None));
 
-                        if ui.small_button("Report").clicked() {
-                            self.show_bug_dialog = true;
-                            self.bug_report_type = BugReportType::Display;
-                            self.bug_description.clear();
-                        }
-
-                        // Transient status message from bug report
-                        if let Some((ref msg, created)) = self.bug_status_message {
-                            if created.elapsed() < Duration::from_secs(5) {
-                                ui.separator();
-                                ui.label(msg);
+                        let mut bell_text = egui::RichText::new("\u{1F514}");
+                        if let Some(sev) = bell_severity {
+                            let (_, colour) = notifications::severity_visuals(sev);
+                            if let Some(c) = colour {
+                                bell_text = bell_text.color(c);
                             }
                         }
+                        let bell_button = ui.add(egui::Button::new(bell_text));
+                        let bell_button = if unread_count > 0 {
+                            bell_button.on_hover_text(format!(
+                                "{} unread notification{}",
+                                unread_count,
+                                if unread_count == 1 { "" } else { "s" },
+                            ))
+                        } else {
+                            bell_button
+                        };
+                        if bell_button.clicked() {
+                            self.show_notifications_panel = !self.show_notifications_panel;
+                        }
+
+                        ui.separator();
+                        egui::menu::menu_button(ui, "☰", |ui| {
+                            ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
+                            ui.checkbox(&mut self.show_usb_panel, "USB");
+                            ui.checkbox(&mut self.show_webdav_panel, "Folders");
+                            if ui
+                                .add(egui::Button::new("Screenshot").shortcut_text("F8"))
+                                .clicked()
+                            {
+                                self.open_screenshot_dialog();
+                                ui.close_menu();
+                            }
+                            if ui
+                                .add(egui::Button::new("Report").shortcut_text("F12"))
+                                .clicked()
+                            {
+                                self.show_bug_dialog = true;
+                                self.bug_report_type = BugReportType::Display;
+                                self.bug_description.clear();
+                                self.begin_trigger_snapshot();
+                                ui.close_menu();
+                            }
+                            if self.enable_paste {
+                                ui.separator();
+                                let label = egui::Button::new("Paste").shortcut_text("Ctrl+Alt+V");
+                                let enabled = !self.agent_connected;
+                                let response = ui.add_enabled(enabled, label);
+                                if response.clicked() {
+                                    self.trigger_paste();
+                                    ui.close_menu();
+                                }
+                                if !enabled {
+                                    response.on_disabled_hover_text(
+                                        "vdagent is connected — use Ctrl+V instead",
+                                    );
+                                }
+                            }
+                        });
                     });
                 });
             });
@@ -1677,6 +2027,107 @@ impl eframe::App for RyllApp {
                         });
                 });
         }
+
+        // Notifications side panel (conditional)
+        if self.show_notifications_panel {
+            egui::SidePanel::right("notifications")
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    // Header: title + actions
+                    ui.horizontal(|ui| {
+                        ui.heading("Notifications");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Clear all").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.clear();
+                                }
+                            }
+                            if ui.small_button("Mark all read").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.mark_all_read();
+                                }
+                            }
+                        });
+                    });
+
+                    // Snapshot the state under one lock so rendering is off-lock
+                    let (total, unread, snapshot) = match self.notifications.lock() {
+                        Ok(s) => (
+                            s.len(),
+                            s.unread_count(),
+                            s.iter_newest_first().cloned().collect::<Vec<_>>(),
+                        ),
+                        Err(_) => (0, 0, Vec::new()),
+                    };
+                    ui.label(format!("{} total / {} unread", total, unread));
+                    ui.separator();
+
+                    let mut to_remove: Vec<u64> = Vec::new();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if snapshot.is_empty() {
+                            ui.label("No notifications.");
+                        }
+                        for entry in &snapshot {
+                            ui.horizontal(|ui| {
+                                let (glyph, colour) =
+                                    notifications::severity_visuals(entry.severity);
+                                let mut g = egui::RichText::new(glyph);
+                                if let Some(c) = colour {
+                                    g = g.color(c);
+                                }
+                                if entry.read {
+                                    g = g.weak();
+                                }
+                                ui.label(g);
+
+                                ui.monospace(notifications::format_relative(entry.when));
+
+                                ui.colored_label(egui::Color32::GRAY, entry.source.label());
+
+                                let mut msg_text = egui::RichText::new(&entry.message);
+                                if entry.read {
+                                    msg_text = msg_text.weak();
+                                }
+                                ui.label(msg_text);
+
+                                if entry.count > 1 {
+                                    ui.label(
+                                        egui::RichText::new(format!("[{}\u{00D7}]", entry.count))
+                                            .weak(),
+                                    );
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Dismiss").clicked() {
+                                            to_remove.push(entry.id);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+
+                    if !to_remove.is_empty() {
+                        if let Ok(mut s) = self.notifications.lock() {
+                            for id in to_remove {
+                                s.remove(id);
+                            }
+                        }
+                    }
+                });
+        }
+
+        // Mark all read on the panel-open → panel-closed transition,
+        // so the bell dot clears and the user gets one chance to triage
+        // before the unread state resets.
+        if !self.show_notifications_panel && self.notifications_panel_was_open_last_frame {
+            if let Ok(mut s) = self.notifications.lock() {
+                s.mark_all_read();
+            }
+        }
+        self.notifications_panel_was_open_last_frame = self.show_notifications_panel;
 
         // USB device management panel (conditional)
         if self.show_usb_panel {
@@ -1921,6 +2372,7 @@ impl eframe::App for RyllApp {
                 self.show_bug_dialog = true;
                 self.bug_report_type = BugReportType::Usb;
                 self.bug_description = self.usb_error_message.clone().unwrap_or_default();
+                self.begin_trigger_snapshot();
             }
         }
 
@@ -2193,6 +2645,7 @@ impl eframe::App for RyllApp {
             self.show_bug_dialog = true;
             self.bug_report_type = BugReportType::Connection;
             self.bug_description = self.error_message.clone().unwrap_or_default();
+            self.begin_trigger_snapshot();
         }
 
         // Bug report dialog (two-pass: render then act)
@@ -2280,8 +2733,37 @@ impl eframe::App for RyllApp {
             }
             Some(false) => {
                 self.show_bug_dialog = false;
+                self.discard_trigger_snapshot();
             }
             None => {}
+        }
+
+        // Paste error dialog (two-pass: render then act)
+        let mut paste_dialog_action = None;
+        if let Some(ref msg) = self.paste_error_message {
+            egui::Window::new("Cannot paste as keystrokes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(350.0);
+                    ui.label(msg);
+                    ui.add_space(8.0);
+                    if ui.button("OK").clicked() {
+                        paste_dialog_action = Some(());
+                    }
+                });
+        }
+        if paste_dialog_action.is_some() {
+            self.paste_error_message = None;
+        }
+
+        // Escape also dismisses the paste error dialog
+        if self.paste_error_message.is_some() {
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                self.paste_error_message = None;
+            }
         }
 
         // Region selection mode: crosshair, drag tracking, overlays
@@ -2590,6 +3072,8 @@ async fn run_connection(
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
+    enable_paste: bool,
+    notifications: SharedNotifications,
 ) -> Result<()> {
     let client = SpiceClient::new((&config).into())?;
 
@@ -2610,6 +3094,7 @@ async fn run_connection(
         snapshots.main,
         resize_rx,
         monitors,
+        notifications.clone(),
     );
 
     // Spawn main channel task
@@ -2684,6 +3169,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2700,6 +3186,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.cursor.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2717,6 +3204,8 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.inputs.clone(),
+                    enable_paste,
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -2736,6 +3225,7 @@ async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2759,6 +3249,7 @@ async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2780,6 +3271,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2814,9 +3306,13 @@ async fn run_connection(
 }
 
 /// Run in headless mode (no GUI)
+#[allow(clippy::too_many_arguments)]
 pub async fn run_headless(
     config: Config,
     cadence: bool,
+    paste_text: Option<String>,
+    paste_char_delay_ms: u32,
+    enable_paste: bool,
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
@@ -2839,6 +3335,11 @@ pub async fn run_headless(
 
     // Traffic ring buffers (always active)
     let traffic = Arc::new(TrafficBuffers::new());
+
+    // In-app notification store (headless still produces and stores
+    // notifications even though no GUI consumes them).
+    let notifications: SharedNotifications =
+        Arc::new(std::sync::Mutex::new(NotificationStore::new()));
 
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
@@ -2864,8 +3365,10 @@ pub async fn run_headless(
             traffic.clone(),
             snapshots.clone(),
             app_snapshot,
+            notifications.clone(),
         );
     }
+    register_gap_notification_observer(notifications.clone());
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
@@ -2891,10 +3394,15 @@ pub async fn run_headless(
             monitors,
             resize_rx,
             VolumeControl::new(),
+            enable_paste,
+            notifications,
         )
         .await
     });
     tokio::pin!(connection_handle);
+
+    // Clone input_tx before cadence moves it, so the paste trigger can also use it.
+    let paste_input_tx = input_tx.clone();
 
     // Cadence task if enabled
     let cadence_handle = if cadence {
@@ -2909,9 +3417,27 @@ pub async fn run_headless(
         None
     };
 
+    // Paste trigger task if --paste-text was provided
+    let paste_handle = if let Some(text) = paste_text {
+        let delay_ms = paste_char_delay_ms;
+        Some(tokio::spawn(async move {
+            // Wait for the inputs channel to be ready.
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let _ = paste_input_tx
+                .send(InputEvent::PasteText {
+                    text,
+                    char_delay_ms: delay_ms,
+                })
+                .await;
+        }))
+    } else {
+        None
+    };
+
     // Process events
     let mut stats = Statistics::default();
     let mut last_stats_print = Instant::now();
+    let mut paste_failed = false;
 
     loop {
         tokio::select! {
@@ -2954,6 +3480,19 @@ pub async fn run_headless(
                     ChannelEvent::WebdavError(err) => {
                         error!("headless: WebDAV error: {}", err);
                     }
+                    ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                        info!(
+                            "headless: paste complete: {} chars in {}ms",
+                            chars, elapsed_ms
+                        );
+                    }
+                    ChannelEvent::PasteFailed { reason } => {
+                        error!("headless: paste failed: {}", reason);
+                        paste_failed = true;
+                    }
+                    ChannelEvent::AgentConnected(connected) => {
+                        info!("headless: vdagent connected={}", connected);
+                    }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);
                     }
@@ -2986,10 +3525,17 @@ pub async fn run_headless(
     if let Some(handle) = cadence_handle {
         handle.abort();
     }
+    if let Some(handle) = paste_handle {
+        handle.abort();
+    }
 
     // Close capture session (flushes MP4 moov atom)
     if let Some(ref capture) = capture_for_shutdown {
         capture.close();
+    }
+
+    if paste_failed {
+        anyhow::bail!("paste-as-keystrokes failed");
     }
 
     info!("Headless mode finished");

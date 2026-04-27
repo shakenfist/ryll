@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{MainSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -21,6 +22,30 @@ use shakenfist_spice_protocol::{
 };
 
 use super::ChannelEvent;
+
+/// Parse a SpiceMsgMainMouseMode payload. The SPICE wire format
+/// is two little-endian `uint16`s — `supported_modes` followed by
+/// `current_mode`. (Historical misreads of this as a single `u32`
+/// produce nonsense values like 131075 when current_mode=2 and
+/// supported_modes=3.) Returns `None` if the payload is shorter
+/// than 4 bytes.
+pub(crate) fn parse_mouse_mode_payload(payload: &[u8]) -> Option<(u16, u16)> {
+    if payload.len() < 4 {
+        return None;
+    }
+    let supported = u16::from_le_bytes([payload[0], payload[1]]);
+    let current = u16::from_le_bytes([payload[2], payload[3]]);
+    Some((supported, current))
+}
+
+/// True when the server supports CLIENT (absolute) mouse mode but
+/// is currently in a different mode. Used to decide whether to
+/// send a `MOUSE_MODE_REQUEST(CLIENT)` after INIT or after a
+/// MOUSE_MODE change (e.g. after the guest reboots, the server
+/// often reverts to SERVER/relative mode).
+pub(crate) fn should_request_client_mouse_mode(supported: u32, current: u32) -> bool {
+    supported & MOUSE_MODE_CLIENT != 0 && current != MOUSE_MODE_CLIENT
+}
 
 const VD_AGENT_PROTOCOL: u32 = 1;
 
@@ -68,10 +93,17 @@ pub struct MainChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
     last_ping_at: Option<Instant>,
+    /// True after `maybe_request_client_mouse_mode` sends a
+    /// `MOUSE_MODE_REQUEST(CLIENT)` and until a MOUSE_MODE
+    /// message confirms we're in CLIENT mode. Stops a flappy
+    /// or hostile server from amplifying outbound requests
+    /// 1:1 on inbound MOUSE_MODE messages.
+    mouse_mode_request_pending: bool,
 }
 
 impl MainChannel {
@@ -86,6 +118,7 @@ impl MainChannel {
         snapshot: Arc<Mutex<MainSnapshot>>,
         monitors_config_rx: mpsc::Receiver<(u32, u32)>,
         monitors: u8,
+        notifications: SharedNotifications,
     ) -> Self {
         MainChannel {
             stream,
@@ -107,10 +140,12 @@ impl MainChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             bytes_in: 0,
             bytes_out: 0,
             last_ping_at: None,
+            mouse_mode_request_pending: false,
         }
     }
 
@@ -312,9 +347,97 @@ impl MainChannel {
                     .send(ChannelEvent::SessionInitialized(init.session_id))
                     .await
                     .ok();
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(self.agent_connected))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
-                self.set_mouse_mode(init.supported_mouse_modes, init.current_mouse_mode)
-                    .await?;
+                let mode_name = match init.current_mouse_mode {
+                    1 => "server (relative)",
+                    2 => "client (absolute)",
+                    other => {
+                        warn!("main: unknown mouse mode {}", other);
+                        "unknown"
+                    }
+                };
+                info!(
+                    "main: mouse mode={} ({}), supported_modes={}",
+                    init.current_mouse_mode, mode_name, init.supported_mouse_modes
+                );
+                self.event_tx
+                    .send(ChannelEvent::MouseMode(init.current_mouse_mode))
+                    .await
+                    .ok();
+                self.repaint_notify.notify_one();
+
+                // Request client mouse mode (absolute positioning) if
+                // the server supports it. Client mode allows absolute
+                // MOUSE_POSITION messages; without it the server
+                // expects relative MOUSE_MOTION which ryll does not
+                // yet implement.
+                self.maybe_request_client_mouse_mode(
+                    init.supported_mouse_modes,
+                    init.current_mouse_mode,
+                )
+                .await?;
+            }
+
+            main_server::MOUSE_MODE => {
+                // Server notifies us of a mouse mode change (may be
+                // in response to our MOUSE_MODE_REQUEST, or
+                // unprompted after a guest reboot).
+                //
+                // Wire format is two u16s: supported_modes then
+                // current_mode. Parsing it as a u32 produces garbage
+                // like 131075 (=0x00020003 when supported=3 and
+                // current=2) which then fails every mode check.
+                if let Some((supported, current)) = parse_mouse_mode_payload(payload) {
+                    let mode_name = match current {
+                        1 => "server (relative)",
+                        2 => "client (absolute)",
+                        _ => "unknown",
+                    };
+                    info!(
+                        "main: mouse mode changed to {} ({}), supported_modes={}",
+                        current, mode_name, supported
+                    );
+                    // Clearing happens regardless of whether the
+                    // server's MOUSE_MODE was a direct response to
+                    // our request — if we're now in CLIENT mode,
+                    // there's nothing left to ask for.
+                    if current as u32 == MOUSE_MODE_CLIENT {
+                        self.mouse_mode_request_pending = false;
+                    }
+                    self.event_tx
+                        .send(ChannelEvent::MouseMode(current as u32))
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+
+                    // The server often reverts to SERVER mode after a
+                    // guest reboot; re-request CLIENT mode so the
+                    // absolute MOUSE_POSITION path keeps working.
+                    self.maybe_request_client_mouse_mode(supported as u32, current as u32)
+                        .await?;
+                } else {
+                    warn!("main: short MOUSE_MODE payload ({} bytes)", payload.len());
+                }
+            }
+
+            main_server::MULTI_MEDIA_TIME => {
+                // Periodic multimedia-time tick for audio/video sync.
+                // Not wired into playback yet; accept the payload so
+                // --pedantic doesn't flag it as an unknown opcode.
+                if payload.len() >= 4 {
+                    let mm_time =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    debug!("main: multi_media_time={}", mm_time);
+                } else {
+                    debug!(
+                        "main: short MULTI_MEDIA_TIME payload ({} bytes)",
+                        payload.len()
+                    );
+                }
             }
 
             main_server::CHANNELS_LIST => {
@@ -410,26 +533,36 @@ impl MainChannel {
 
             main_server::NOTIFY => {
                 let notify = Notify::read(payload)?;
-                let severity = NotifySeverity::from_u32(notify.severity);
-
                 if settings::is_verbose() {
                     logging::log_detail(&format!(
-                        "severity={:?}, visibility={}, what={}, message=\"{}\"",
-                        severity, notify.visibility, notify.what, notify.message
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
                     ));
                 }
-
-                match severity {
+                match notify.severity {
                     NotifySeverity::Error => {
-                        warn!("main: server notify (error): {}", notify.message);
+                        warn!("main: server notify (error): {}", notify.message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("main: server notify (warn): {}", notify.message);
+                        warn!("main: server notify (warn): {}", notify.message)
                     }
-                    NotifySeverity::Info => {
-                        info!("main: server notify: {}", notify.message);
-                    }
+                    NotifySeverity::Info => info!("main: server notify: {}", notify.message),
                 }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Main,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
 
             main_server::DISCONNECTING => {
@@ -441,38 +574,23 @@ impl MainChannel {
                 self.repaint_notify.notify_one();
             }
 
-            main_server::MOUSE_MODE => {
-                // SPICE_MSG_MAIN_MOUSE_MODE: wire format uses u16 per field
-                // (the C struct uses u32 but the marshaller shrinks to u16)
-                if payload.len() >= 4 {
-                    let supported = u16::from_le_bytes([payload[0], payload[1]]) as u32;
-                    let current = u16::from_le_bytes([payload[2], payload[3]]) as u32;
-                    info!(
-                        "main: mouse mode changed: supported={}, current={} ({})",
-                        supported,
-                        current,
-                        if current == 1 { "server" } else { "client" }
-                    );
-                    self.set_mouse_mode(supported, current).await?;
-                }
-            }
-
-            main_server::MULTI_MEDIA_TIME => {
-                if payload.len() >= 4 {
-                    let time = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    debug!("main: multi_media_time={}", time);
-                }
-            }
-
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(true))
+                    .await
+                    .ok();
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
+                self.event_tx
+                    .send(ChannelEvent::AgentConnected(false))
+                    .await
+                    .ok();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
             }
@@ -529,38 +647,43 @@ impl MainChannel {
         snap.bytes_out = self.bytes_out;
     }
 
-    /// Mirror of spice-gtk's set_mouse_mode(): broadcast the current mode
-    /// and, if client mode is supported but not yet active, request it.
-    async fn set_mouse_mode(&mut self, supported: u32, current: u32) -> Result<()> {
-        self.event_tx
-            .send(ChannelEvent::MouseMode(current))
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
-
-        if current != MOUSE_MODE_CLIENT && (supported & MOUSE_MODE_CLIENT) != 0 {
-            info!(
-                "main: requesting client mouse mode (current={}, supported={})",
-                current, supported
-            );
-            self.request_mouse_mode(MOUSE_MODE_CLIENT).await?;
-        }
-        Ok(())
-    }
-
-    /// Send SPICE_MSGC_MAIN_MOUSE_MODE_REQUEST to ask the server
-    /// to switch to the given mouse mode.
-    async fn request_mouse_mode(&mut self, mode: u32) -> Result<()> {
-        let mut payload = Vec::with_capacity(4);
-        payload.write_u32::<LittleEndian>(mode)?;
-        let msg = make_message(main_client::MOUSE_MODE_REQUEST, &payload);
-        self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
-            .await
-    }
-
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports
+    /// CLIENT (absolute) mode but is currently in another mode.
+    /// Called from both the INIT handler at session start and the
+    /// MOUSE_MODE handler so a guest reboot — which typically
+    /// reverts the server to SERVER mode — can recover absolute
+    /// positioning without a reconnect.
+    ///
+    /// Skips sending if a prior request is already outstanding
+    /// (`mouse_mode_request_pending`). This caps outbound request
+    /// volume at one per round-trip, so a flappy or hostile
+    /// server toggling `current_mode` can't amplify its MOUSE_MODE
+    /// messages into a storm of client-side requests.
+    async fn maybe_request_client_mouse_mode(
+        &mut self,
+        supported_modes: u32,
+        current_mode: u32,
+    ) -> Result<()> {
+        if !should_request_client_mouse_mode(supported_modes, current_mode) {
+            return Ok(());
+        }
+        if self.mouse_mode_request_pending {
+            debug!("main: client mouse mode request already pending; skipping");
+            return Ok(());
+        }
+        info!("main: requesting client mouse mode");
+        let mut mode_payload = Vec::new();
+        mode_payload.write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)?;
+        let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
+        self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
+            .await?;
+        self.mouse_mode_request_pending = true;
+        Ok(())
     }
 
     async fn connect_agent(&mut self) -> Result<()> {
@@ -854,5 +977,65 @@ impl MainChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_mouse_mode_payload, should_request_client_mouse_mode};
+    use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
+
+    // Payload bytes observed in the 2026-04-23 macbook bug-report
+    // main.pcap. Parsing these as a single little-endian u32 yields
+    // 131075 / 65537 / 65539 — which failed every mode check in the
+    // GUI and left clicks broken after a guest reboot.
+    #[test]
+    fn parse_mouse_mode_splits_supported_and_current() {
+        // supported=3 (both), current=2 (CLIENT) — initial negotiation.
+        assert_eq!(
+            parse_mouse_mode_payload(&[0x03, 0x00, 0x02, 0x00]),
+            Some((3, 2))
+        );
+        // supported=1 (server only), current=1 (SERVER) — right after
+        // guest reboot, agent gone.
+        assert_eq!(
+            parse_mouse_mode_payload(&[0x01, 0x00, 0x01, 0x00]),
+            Some((1, 1))
+        );
+        // supported=3 (both), current=1 (SERVER) — agent back but
+        // server still in SERVER mode; this is the case that must
+        // trigger a CLIENT re-request.
+        assert_eq!(
+            parse_mouse_mode_payload(&[0x03, 0x00, 0x01, 0x00]),
+            Some((3, 1))
+        );
+    }
+
+    #[test]
+    fn parse_mouse_mode_rejects_short_payload() {
+        assert_eq!(parse_mouse_mode_payload(&[]), None);
+        assert_eq!(parse_mouse_mode_payload(&[0x03, 0x00, 0x01]), None);
+    }
+
+    #[test]
+    fn should_request_client_when_server_supports_it_but_is_in_server_mode() {
+        // supported=3 (bitmask covering CLIENT), current=1 (SERVER):
+        // this is the post-guest-reboot case the macbook report hit.
+        assert!(should_request_client_mouse_mode(3, MOUSE_MODE_SERVER));
+    }
+
+    #[test]
+    fn should_not_request_client_when_already_in_client_mode() {
+        assert!(!should_request_client_mouse_mode(3, MOUSE_MODE_CLIENT));
+    }
+
+    #[test]
+    fn should_not_request_client_when_server_does_not_support_it() {
+        // supported=1 (SERVER only); no point asking for something
+        // the server can't do.
+        assert!(!should_request_client_mouse_mode(
+            MOUSE_MODE_SERVER,
+            MOUSE_MODE_SERVER
+        ));
     }
 }

@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::capture::CaptureSession;
 use crate::config::VirtualDiskConfig;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 #[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
@@ -22,8 +23,10 @@ use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
-use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType};
+use shakenfist_spice_protocol::messages::{
+    make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+};
+use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 use shakenfist_spice_usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use shakenfist_spice_usbredir::messages::{
     make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
@@ -41,6 +44,7 @@ pub struct UsbredirChannel {
     buffer: Vec<u8>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
+    notifications: SharedNotifications,
 
     // BaseChannel ACK state
     ack_generation: u32,
@@ -76,6 +80,7 @@ impl UsbredirChannel {
         auto_connect_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<CaptureSession>>,
         byte_counter: Arc<ByteCounter>,
+        notifications: SharedNotifications,
     ) -> Self {
         let (interrupt_tx, interrupt_rx) = mpsc::channel(64);
         UsbredirChannel {
@@ -86,6 +91,7 @@ impl UsbredirChannel {
             buffer: Vec::with_capacity(65536),
             capture,
             byte_counter,
+            notifications,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -241,6 +247,41 @@ impl UsbredirChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(spicevmc_client::PONG, &pong_payload);
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
+            }
+            spicevmc_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("usbredir: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("usbredir: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("usbredir: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Usbredir,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
             _ => {
                 logging::log_unknown_once("usbredir", msg_type, payload);

@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{DecodeResult, DisplaySnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
@@ -19,13 +20,14 @@ use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Ping, SetAck,
-    SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
+    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Notify as NotifyMessage,
+    Ping, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
     SpiceTransparent, SurfaceCreate,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
-    display_client, display_server, warn_once, ChannelType, ImageType, IMAGE_FLAGS_CACHE_ME,
+    display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
+    IMAGE_FLAGS_CACHE_ME,
 };
 
 use super::ChannelEvent;
@@ -517,6 +519,7 @@ pub struct DisplayChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<DisplaySnapshot>>,
     recent_decodes: VecDeque<DecodeResult>,
     ack_generation: u32,
@@ -543,6 +546,7 @@ impl DisplayChannel {
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<DisplaySnapshot>>,
         glz_dictionary: SharedGlzDictionary,
+        notifications: SharedNotifications,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -556,6 +560,7 @@ impl DisplayChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             recent_decodes: VecDeque::new(),
             ack_generation: 0,
@@ -877,6 +882,42 @@ impl DisplayChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(display_client::PONG, &pong_payload);
                 self.send_with_log(display_client::PONG, &response).await?;
+            }
+
+            display_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("display: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("display: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("display: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Display,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
 
             display_server::INVALIDATE_LIST => {

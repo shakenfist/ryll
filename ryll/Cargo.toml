@@ -1,6 +1,6 @@
 [package]
 name = "ryll"
-version = "0.1.3"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -55,21 +55,13 @@ reqwest = { version = "0.12", features = ["blocking"] }
 # SPICE image LZ4 lives in shakenfist-spice-compression below.
 lz4_flex = "0.11"
 
-# Extracted SPICE codecs (workspace member; placeholder name
-# reservation is on crates.io as 0.0.0, real release will follow
-# as 0.1.0 once API polish is complete). The path dependency has
-# no `version` qualifier yet because the local crate is still at
-# 0.0.0 to match the published placeholder; the dual-spec idiom
-# only works once the local version reaches 0.1.0.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression" }
-
-# Extracted SPICE protocol primitives (same dual-spec caveat
-# as above: no `version` qualifier until the local crate
-# reaches 0.1.0).
-shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol" }
-
-# Extracted SPICE USB redirection protocol types (same caveat).
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir" }
+# Extracted SPICE codecs. Path+version dual-spec: cargo uses the
+# path when building locally and the published crate when resolving
+# from crates.io. Versions are kept in lockstep with ryll via
+# cargo-release; see tools/cut-release.sh.
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.4" }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.4" }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.4" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"

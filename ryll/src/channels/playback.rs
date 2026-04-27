@@ -9,11 +9,14 @@ use tracing::{debug, info, warn};
 
 use crate::app::ByteCounter;
 use crate::bugreport::TrafficBuffers;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
-use shakenfist_spice_protocol::messages::{make_message, MessageHeader, Ping, SetAck};
-use shakenfist_spice_protocol::{main_client, playback_server, ChannelType};
+use shakenfist_spice_protocol::messages::{
+    make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+};
+use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
 
 use super::ChannelEvent;
 
@@ -303,6 +306,7 @@ pub struct PlaybackChannel {
     buffer: Vec<u8>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -319,6 +323,7 @@ pub struct PlaybackChannel {
 }
 
 impl PlaybackChannel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
@@ -326,6 +331,7 @@ impl PlaybackChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         volume_control: Arc<VolumeControl>,
+        notifications: SharedNotifications,
     ) -> Self {
         PlaybackChannel {
             stream,
@@ -334,6 +340,7 @@ impl PlaybackChannel {
             buffer: Vec::with_capacity(65536),
             byte_counter,
             traffic,
+            notifications,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -459,6 +466,41 @@ impl PlaybackChannel {
                     ping.write_pong(&mut pong_payload)?;
                     let response = make_message(main_client::PONG, &pong_payload);
                     self.send_with_log(main_client::PONG, &response).await?;
+                }
+                playback_server::NOTIFY => {
+                    let notify = NotifyMessage::read(&payload)?;
+                    if settings::is_verbose() {
+                        logging::log_detail(&format!(
+                            "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                            notify.severity, notify.visibility, notify.what, notify.message,
+                        ));
+                    }
+                    match notify.severity {
+                        NotifySeverity::Error => {
+                            warn!("playback: server notify (error): {}", notify.message)
+                        }
+                        NotifySeverity::Warn => {
+                            warn!("playback: server notify (warn): {}", notify.message)
+                        }
+                        NotifySeverity::Info => {
+                            info!("playback: server notify: {}", notify.message)
+                        }
+                    }
+                    let mut entry = NotificationEntry::new(
+                        notify.severity,
+                        NotificationSource::Spice {
+                            channel: ChannelType::Playback,
+                            what: notify.what,
+                        },
+                        notify.message.clone(),
+                    );
+                    if let Some(v) = notify.visibility {
+                        entry = entry.with_visibility(v);
+                    }
+                    if let Ok(mut guard) = self.notifications.lock() {
+                        guard.push(entry);
+                    }
+                    self.repaint_notify.notify_one();
                 }
                 playback_server::START => {
                     if payload.len() >= 14 {

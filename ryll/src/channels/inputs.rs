@@ -3,21 +3,24 @@ use anyhow::Result;
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 
 use crate::app::ByteCounter;
 use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
-    MousePosition, Ping, SetAck,
+    MousePosition, Notify as NotifyMessage, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
+use shakenfist_spice_protocol::{
+    inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
+};
 
 use super::{ChannelEvent, InputEvent};
 
@@ -26,6 +29,33 @@ const MOTION_ACK_BUNCH: u32 = 4;
 
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
+
+/// Maximum characters for a single paste-as-keystrokes sequence.
+const PASTE_MAX_CHARS: usize = 4096;
+
+/// Sub-step within a single character of a paste sequence.
+#[derive(Debug, Clone, Copy)]
+enum PasteSubStep {
+    /// Send shift-down (if needed) + key-down, then wait half the delay.
+    Press,
+    /// Send key-up + shift-up (if needed), then wait the remaining half.
+    Release,
+}
+
+/// State for an in-progress paste-as-keystrokes sequence.
+#[derive(Debug)]
+struct PasteState {
+    keys: Vec<PasteKey>,
+    index: usize,
+    sub_step: PasteSubStep,
+    half_delay: Duration,
+    start: Instant,
+    next_fire: Instant,
+    /// Modifier state saved at paste start, restored at paste end.
+    saved_ctrl: bool,
+    saved_shift: bool,
+    saved_alt: bool,
+}
 
 pub struct InputsChannel {
     stream: SpiceStream,
@@ -39,10 +69,16 @@ pub struct InputsChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<InputsSnapshot>>,
     recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
     bytes_out: u64,
+    enable_paste: bool,
+    ctrl_held: bool,
+    shift_held: bool,
+    alt_held: bool,
+    paste_state: Option<PasteState>,
 }
 
 impl InputsChannel {
@@ -56,6 +92,8 @@ impl InputsChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
+        enable_paste: bool,
+        notifications: SharedNotifications,
     ) -> Self {
         InputsChannel {
             stream,
@@ -69,10 +107,16 @@ impl InputsChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             recent_events: VecDeque::new(),
             bytes_in: 0,
             bytes_out: 0,
+            enable_paste,
+            ctrl_held: false,
+            shift_held: false,
+            alt_held: false,
+            paste_state: None,
         }
     }
 
@@ -92,6 +136,8 @@ impl InputsChannel {
             let input_rx = &mut self.input_rx;
             let capture = &self.capture;
             let byte_counter = &self.byte_counter;
+
+            let paste_next = self.paste_state.as_ref().map(|s| s.next_fire);
 
             // Create read future inline
             let read_fut = async {
@@ -196,6 +242,18 @@ impl InputsChannel {
                             i += 1;
                         }
                     }
+                }
+
+                // Paste state machine: fire when the next step is due.
+                _ = async {
+                    match paste_next {
+                        Some(t) => tokio::time::sleep_until(
+                            tokio::time::Instant::from_std(t)
+                        ).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    self.advance_paste().await?;
                 }
             }
         }
@@ -324,6 +382,42 @@ impl InputsChannel {
                 self.send_with_log(3, &response).await?;
             }
 
+            inputs_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("inputs: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("inputs: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("inputs: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Inputs,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
+            }
+
             _ => {
                 // Unknown opcode — log hex once per msg_type, silent on repeat.
                 logging::log_unknown_once("inputs", msg_type, payload);
@@ -357,6 +451,13 @@ impl InputsChannel {
 
                 debug!("inputs: key down: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_DOWN, &msg).await?;
+
+                match scancode {
+                    0x1D => self.ctrl_held = true,
+                    0x2A => self.shift_held = true,
+                    0x38 => self.alt_held = true,
+                    _ => {}
+                }
             }
 
             InputEvent::KeyUp(scancode) => {
@@ -375,6 +476,13 @@ impl InputsChannel {
 
                 debug!("inputs: key up: scancode={:#x}", scancode);
                 self.send_with_log(inputs_client::KEY_UP, &msg).await?;
+
+                match scancode {
+                    0x9D => self.ctrl_held = false,
+                    0xAA => self.shift_held = false,
+                    0xB8 => self.alt_held = false,
+                    _ => {}
+                }
             }
 
             InputEvent::MouseMove { x, y } => {
@@ -516,6 +624,104 @@ impl InputsChannel {
                 self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
                     .await?;
             }
+
+            InputEvent::PasteText {
+                text,
+                char_delay_ms,
+            } => {
+                if !self.enable_paste {
+                    warn!("inputs: paste-as-keystrokes not enabled, ignoring");
+                    return Ok(());
+                }
+                if self.paste_state.is_some() {
+                    warn!("inputs: paste already in progress, ignoring");
+                    return Ok(());
+                }
+
+                // Enforce character cap
+                let mut text = text;
+                let char_count = text.chars().count();
+                if char_count > PASTE_MAX_CHARS {
+                    text = text.chars().take(PASTE_MAX_CHARS).collect();
+                    warn!(
+                        "inputs: paste truncated from {} to {} characters",
+                        char_count, PASTE_MAX_CHARS
+                    );
+                }
+
+                // Translate
+                let keys = match translate_paste(&text) {
+                    Ok(k) => k,
+                    Err(PasteError::Unrepresentable { count, sample }) => {
+                        let sample_str: String = sample
+                            .iter()
+                            .map(|c| format!("U+{:04X}", *c as u32))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let reason = format!(
+                            "cannot paste: {} unrepresentable character(s): {}",
+                            count, sample_str
+                        );
+                        error!("inputs: {}", reason);
+                        self.event_tx
+                            .send(ChannelEvent::PasteFailed { reason })
+                            .await
+                            .ok();
+                        self.repaint_notify.notify_one();
+                        return Ok(());
+                    }
+                };
+
+                if keys.is_empty() {
+                    self.event_tx
+                        .send(ChannelEvent::PasteCompleted {
+                            chars: 0,
+                            elapsed_ms: 0,
+                        })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                    return Ok(());
+                }
+
+                let delay = Duration::from_millis(char_delay_ms as u64);
+                info!(
+                    "inputs: starting paste of {} characters (delay={}ms)",
+                    keys.len(),
+                    char_delay_ms
+                );
+
+                // Save and release held modifiers
+                let saved_ctrl = self.ctrl_held;
+                let saved_shift = self.shift_held;
+                let saved_alt = self.alt_held;
+
+                if self.ctrl_held {
+                    self.send_key_up(0x9D).await?;
+                    self.ctrl_held = false;
+                }
+                if self.shift_held {
+                    self.send_key_up(0xAA).await?;
+                    self.shift_held = false;
+                }
+                if self.alt_held {
+                    self.send_key_up(0xB8).await?;
+                    self.alt_held = false;
+                }
+
+                let now = Instant::now();
+                self.paste_state = Some(PasteState {
+                    keys,
+                    index: 0,
+                    sub_step: PasteSubStep::Press,
+                    half_delay: delay / 2,
+                    start: now,
+                    next_fire: now, // fire immediately
+                    saved_ctrl,
+                    saved_shift,
+                    saved_alt,
+                });
+            }
         }
 
         Ok(())
@@ -566,6 +772,90 @@ impl InputsChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        Ok(())
+    }
+
+    /// Send a raw key-down without event recording or modifier tracking.
+    async fn send_key_down(&mut self, scancode: u32) -> Result<()> {
+        let mut payload = Vec::new();
+        KeyEvent { scancode }.write(&mut payload)?;
+        let msg = make_message(inputs_client::KEY_DOWN, &payload);
+        self.send_with_log(inputs_client::KEY_DOWN, &msg).await
+    }
+
+    /// Send a raw key-up without event recording or modifier tracking.
+    async fn send_key_up(&mut self, scancode: u32) -> Result<()> {
+        let mut payload = Vec::new();
+        KeyEvent { scancode }.write(&mut payload)?;
+        let msg = make_message(inputs_client::KEY_UP, &payload);
+        self.send_with_log(inputs_client::KEY_UP, &msg).await
+    }
+
+    /// Advance the paste state machine by one sub-step.
+    async fn advance_paste(&mut self) -> Result<()> {
+        let state = self.paste_state.as_mut().unwrap();
+        let key = state.keys[state.index];
+
+        match state.sub_step {
+            PasteSubStep::Press => {
+                if key.shift {
+                    self.send_key_down(0x2A).await?;
+                }
+                self.send_key_down(key.press).await?;
+                let state = self.paste_state.as_mut().unwrap();
+                state.sub_step = PasteSubStep::Release;
+                state.next_fire = Instant::now() + state.half_delay;
+            }
+            PasteSubStep::Release => {
+                self.send_key_up(key.release).await?;
+                if key.shift {
+                    self.send_key_up(0xAA).await?;
+                }
+
+                let state = self.paste_state.as_mut().unwrap();
+                state.index += 1;
+
+                if state.index >= state.keys.len() {
+                    // Paste complete
+                    let chars = state.keys.len();
+                    let elapsed_ms = state.start.elapsed().as_millis() as u64;
+
+                    // Restore modifiers
+                    let saved_ctrl = state.saved_ctrl;
+                    let saved_shift = state.saved_shift;
+                    let saved_alt = state.saved_alt;
+
+                    self.paste_state = None;
+
+                    if saved_ctrl {
+                        self.send_key_down(0x1D).await?;
+                        self.ctrl_held = true;
+                    }
+                    if saved_shift {
+                        self.send_key_down(0x2A).await?;
+                        self.shift_held = true;
+                    }
+                    if saved_alt {
+                        self.send_key_down(0x38).await?;
+                        self.alt_held = true;
+                    }
+
+                    info!(
+                        "inputs: paste complete: {} chars in {}ms",
+                        chars, elapsed_ms
+                    );
+                    self.event_tx
+                        .send(ChannelEvent::PasteCompleted { chars, elapsed_ms })
+                        .await
+                        .ok();
+                    self.repaint_notify.notify_one();
+                } else {
+                    state.sub_step = PasteSubStep::Press;
+                    state.next_fire = Instant::now() + state.half_delay;
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -695,6 +985,201 @@ pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
         .map(|&code| (make_scancode(code, false), make_scancode(code, true)))
 }
 
+/// A single key event in a paste-as-keystrokes sequence.
+///
+/// `press` and `release` are SPICE wire-format scancodes
+/// (output of `make_scancode`). `shift` indicates whether
+/// Left Shift must be held for this character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasteKey {
+    pub press: u32,
+    pub release: u32,
+    pub shift: bool,
+}
+
+/// Errors from paste text translation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasteError {
+    /// The input contains characters that cannot be represented as US-QWERTY scancodes.
+    Unrepresentable {
+        /// Number of distinct unrepresentable codepoints.
+        count: usize,
+        /// Up to three sample characters for diagnostics.
+        sample: Vec<char>,
+    },
+}
+
+/// Map a character to its US-QWERTY AT scancode.
+///
+/// Returns `(base_scancode, needs_shift)` or `None` if the character has no US-QWERTY
+/// representation.
+fn char_to_scancode(c: char) -> Option<(u32, bool)> {
+    match c {
+        // Lowercase letters (unshifted)
+        'a' => Some((0x1E, false)),
+        'b' => Some((0x30, false)),
+        'c' => Some((0x2E, false)),
+        'd' => Some((0x20, false)),
+        'e' => Some((0x12, false)),
+        'f' => Some((0x21, false)),
+        'g' => Some((0x22, false)),
+        'h' => Some((0x23, false)),
+        'i' => Some((0x17, false)),
+        'j' => Some((0x24, false)),
+        'k' => Some((0x25, false)),
+        'l' => Some((0x26, false)),
+        'm' => Some((0x32, false)),
+        'n' => Some((0x31, false)),
+        'o' => Some((0x18, false)),
+        'p' => Some((0x19, false)),
+        'q' => Some((0x10, false)),
+        'r' => Some((0x13, false)),
+        's' => Some((0x1F, false)),
+        't' => Some((0x14, false)),
+        'u' => Some((0x16, false)),
+        'v' => Some((0x2F, false)),
+        'w' => Some((0x11, false)),
+        'x' => Some((0x2D, false)),
+        'y' => Some((0x15, false)),
+        'z' => Some((0x2C, false)),
+
+        // Uppercase letters (shifted)
+        'A' => Some((0x1E, true)),
+        'B' => Some((0x30, true)),
+        'C' => Some((0x2E, true)),
+        'D' => Some((0x20, true)),
+        'E' => Some((0x12, true)),
+        'F' => Some((0x21, true)),
+        'G' => Some((0x22, true)),
+        'H' => Some((0x23, true)),
+        'I' => Some((0x17, true)),
+        'J' => Some((0x24, true)),
+        'K' => Some((0x25, true)),
+        'L' => Some((0x26, true)),
+        'M' => Some((0x32, true)),
+        'N' => Some((0x31, true)),
+        'O' => Some((0x18, true)),
+        'P' => Some((0x19, true)),
+        'Q' => Some((0x10, true)),
+        'R' => Some((0x13, true)),
+        'S' => Some((0x1F, true)),
+        'T' => Some((0x14, true)),
+        'U' => Some((0x16, true)),
+        'V' => Some((0x2F, true)),
+        'W' => Some((0x11, true)),
+        'X' => Some((0x2D, true)),
+        'Y' => Some((0x15, true)),
+        'Z' => Some((0x2C, true)),
+
+        // Digits (unshifted)
+        '0' => Some((0x0B, false)),
+        '1' => Some((0x02, false)),
+        '2' => Some((0x03, false)),
+        '3' => Some((0x04, false)),
+        '4' => Some((0x05, false)),
+        '5' => Some((0x06, false)),
+        '6' => Some((0x07, false)),
+        '7' => Some((0x08, false)),
+        '8' => Some((0x09, false)),
+        '9' => Some((0x0A, false)),
+
+        // Shifted digit-row symbols
+        '!' => Some((0x02, true)),
+        '@' => Some((0x03, true)),
+        '#' => Some((0x04, true)),
+        '$' => Some((0x05, true)),
+        '%' => Some((0x06, true)),
+        '^' => Some((0x07, true)),
+        '&' => Some((0x08, true)),
+        '*' => Some((0x09, true)),
+        '(' => Some((0x0A, true)),
+        ')' => Some((0x0B, true)),
+
+        // Unshifted punctuation
+        '-' => Some((0x0C, false)),
+        '=' => Some((0x0D, false)),
+        '[' => Some((0x1A, false)),
+        ']' => Some((0x1B, false)),
+        '\\' => Some((0x2B, false)),
+        ';' => Some((0x27, false)),
+        '\'' => Some((0x28, false)),
+        '`' => Some((0x29, false)),
+        ',' => Some((0x33, false)),
+        '.' => Some((0x34, false)),
+        '/' => Some((0x35, false)),
+
+        // Shifted punctuation
+        '_' => Some((0x0C, true)),
+        '+' => Some((0x0D, true)),
+        '{' => Some((0x1A, true)),
+        '}' => Some((0x1B, true)),
+        '|' => Some((0x2B, true)),
+        ':' => Some((0x27, true)),
+        '"' => Some((0x28, true)),
+        '~' => Some((0x29, true)),
+        '<' => Some((0x33, true)),
+        '>' => Some((0x34, true)),
+        '?' => Some((0x35, true)),
+
+        // Whitespace
+        ' ' => Some((0x39, false)),
+        '\t' => Some((0x0F, false)),
+        '\n' => Some((0x1C, false)),
+
+        _ => None,
+    }
+}
+
+/// Translate a string into a sequence of scancode triples for typing on a US-QWERTY keyboard.
+///
+/// Returns one `PasteKey` per typeable character. CRLF sequences are collapsed to a single Enter.
+/// Bare `\r` is also treated as Enter. The input is pre-validated: if any character cannot be
+/// mapped, nothing is returned and the error reports which characters failed.
+///
+/// This function does not enforce the 4096-character cap (that is the caller's responsibility).
+pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
+    // Pre-validation pass: collect unrepresentable characters.
+    let mut bad_chars: Vec<char> = Vec::new();
+    for c in text.chars() {
+        if c == '\r' {
+            continue; // handled by CRLF collapsing
+        }
+        if char_to_scancode(c).is_none() && !bad_chars.contains(&c) {
+            bad_chars.push(c);
+        }
+    }
+    if !bad_chars.is_empty() {
+        let count = bad_chars.len();
+        let sample = bad_chars.into_iter().take(3).collect();
+        return Err(PasteError::Unrepresentable { count, sample });
+    }
+
+    // Translation pass: convert characters to PasteKey triples.
+    let mut keys = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let effective = if c == '\r' {
+            // Collapse \r\n to single \n; bare \r becomes \n.
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            '\n'
+        } else {
+            c
+        };
+
+        // Safe to unwrap: pre-validation guarantees all characters are representable.
+        let (base, shift) = char_to_scancode(effective).unwrap();
+        keys.push(PasteKey {
+            press: make_scancode(base, false),
+            release: make_scancode(base, true),
+            shift,
+        });
+    }
+
+    Ok(keys)
+}
+
 /// Map mouse button to SPICE button flag
 pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
     match button {
@@ -708,7 +1193,7 @@ pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::key_to_scancode;
+    use super::{key_to_scancode, translate_paste, PasteError, PasteKey};
     use eframe::egui;
 
     // make_scancode logic for reference:
@@ -772,5 +1257,739 @@ mod tests {
         // Key::F13 is not in SCANCODE_MAP (only F1–F12 are mapped)
         let result = key_to_scancode(egui::Key::F13);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn paste_empty_string() {
+        let result = translate_paste("");
+        assert_eq!(result, Ok(vec![]));
+    }
+
+    #[test]
+    fn paste_lowercase_letters() {
+        let result = translate_paste("abc").unwrap();
+        assert_eq!(result.len(), 3);
+        // a: base 0x1E
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        );
+        // b: base 0x30
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        );
+        // c: base 0x2E
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x2E,
+                release: 0xAE,
+                shift: false
+            }
+        );
+    }
+
+    #[test]
+    fn paste_uppercase_letters() {
+        let result = translate_paste("ABC").unwrap();
+        assert_eq!(result.len(), 3);
+        // A: base 0x1E (same as 'a'), shifted
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: true
+            }
+        );
+        // B: base 0x30 (same as 'b'), shifted
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: true
+            }
+        );
+        // C: base 0x2E (same as 'c'), shifted
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x2E,
+                release: 0xAE,
+                shift: true
+            }
+        );
+    }
+
+    #[test]
+    fn paste_mixed_case() {
+        let result = translate_paste("Hello").unwrap();
+        assert_eq!(result.len(), 5);
+        // H: base 0x23, shifted
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x23,
+                release: 0xA3,
+                shift: true
+            }
+        );
+        // e: base 0x12, unshifted
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x12,
+                release: 0x92,
+                shift: false
+            }
+        );
+        // l: base 0x26, unshifted
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x26,
+                release: 0xA6,
+                shift: false
+            }
+        );
+        assert_eq!(
+            result[3],
+            PasteKey {
+                press: 0x26,
+                release: 0xA6,
+                shift: false
+            }
+        );
+        // o: base 0x18, unshifted
+        assert_eq!(
+            result[4],
+            PasteKey {
+                press: 0x18,
+                release: 0x98,
+                shift: false
+            }
+        );
+    }
+
+    #[test]
+    fn paste_digits() {
+        let result = translate_paste("0123456789").unwrap();
+        assert_eq!(result.len(), 10);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x0B,
+                release: 0x8B,
+                shift: false
+            }
+        ); // 0
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x02,
+                release: 0x82,
+                shift: false
+            }
+        ); // 1
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x03,
+                release: 0x83,
+                shift: false
+            }
+        ); // 2
+        assert_eq!(
+            result[3],
+            PasteKey {
+                press: 0x04,
+                release: 0x84,
+                shift: false
+            }
+        ); // 3
+        assert_eq!(
+            result[4],
+            PasteKey {
+                press: 0x05,
+                release: 0x85,
+                shift: false
+            }
+        ); // 4
+        assert_eq!(
+            result[5],
+            PasteKey {
+                press: 0x06,
+                release: 0x86,
+                shift: false
+            }
+        ); // 5
+        assert_eq!(
+            result[6],
+            PasteKey {
+                press: 0x07,
+                release: 0x87,
+                shift: false
+            }
+        ); // 6
+        assert_eq!(
+            result[7],
+            PasteKey {
+                press: 0x08,
+                release: 0x88,
+                shift: false
+            }
+        ); // 7
+        assert_eq!(
+            result[8],
+            PasteKey {
+                press: 0x09,
+                release: 0x89,
+                shift: false
+            }
+        ); // 8
+        assert_eq!(
+            result[9],
+            PasteKey {
+                press: 0x0A,
+                release: 0x8A,
+                shift: false
+            }
+        ); // 9
+    }
+
+    #[test]
+    fn paste_shifted_digit_symbols() {
+        let result = translate_paste("!@#$%^&*()").unwrap();
+        assert_eq!(result.len(), 10);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x02,
+                release: 0x82,
+                shift: true
+            }
+        ); // ! (1)
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x03,
+                release: 0x83,
+                shift: true
+            }
+        ); // @ (2)
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x04,
+                release: 0x84,
+                shift: true
+            }
+        ); // # (3)
+        assert_eq!(
+            result[3],
+            PasteKey {
+                press: 0x05,
+                release: 0x85,
+                shift: true
+            }
+        ); // $ (4)
+        assert_eq!(
+            result[4],
+            PasteKey {
+                press: 0x06,
+                release: 0x86,
+                shift: true
+            }
+        ); // % (5)
+        assert_eq!(
+            result[5],
+            PasteKey {
+                press: 0x07,
+                release: 0x87,
+                shift: true
+            }
+        ); // ^ (6)
+        assert_eq!(
+            result[6],
+            PasteKey {
+                press: 0x08,
+                release: 0x88,
+                shift: true
+            }
+        ); // & (7)
+        assert_eq!(
+            result[7],
+            PasteKey {
+                press: 0x09,
+                release: 0x89,
+                shift: true
+            }
+        ); // * (8)
+        assert_eq!(
+            result[8],
+            PasteKey {
+                press: 0x0A,
+                release: 0x8A,
+                shift: true
+            }
+        ); // ( (9)
+        assert_eq!(
+            result[9],
+            PasteKey {
+                press: 0x0B,
+                release: 0x8B,
+                shift: true
+            }
+        ); // ) (0)
+    }
+
+    #[test]
+    fn paste_unshifted_punctuation() {
+        let result = translate_paste("-=[]\\;',./ ").unwrap();
+        assert_eq!(result.len(), 11);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x0C,
+                release: 0x8C,
+                shift: false
+            }
+        ); // -
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x0D,
+                release: 0x8D,
+                shift: false
+            }
+        ); // =
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x1A,
+                release: 0x9A,
+                shift: false
+            }
+        ); // [
+        assert_eq!(
+            result[3],
+            PasteKey {
+                press: 0x1B,
+                release: 0x9B,
+                shift: false
+            }
+        ); // ]
+        assert_eq!(
+            result[4],
+            PasteKey {
+                press: 0x2B,
+                release: 0xAB,
+                shift: false
+            }
+        ); // \
+        assert_eq!(
+            result[5],
+            PasteKey {
+                press: 0x27,
+                release: 0xA7,
+                shift: false
+            }
+        ); // ;
+        assert_eq!(
+            result[6],
+            PasteKey {
+                press: 0x28,
+                release: 0xA8,
+                shift: false
+            }
+        ); // '
+        assert_eq!(
+            result[7],
+            PasteKey {
+                press: 0x33,
+                release: 0xB3,
+                shift: false
+            }
+        ); // ,
+        assert_eq!(
+            result[8],
+            PasteKey {
+                press: 0x34,
+                release: 0xB4,
+                shift: false
+            }
+        ); // .
+        assert_eq!(
+            result[9],
+            PasteKey {
+                press: 0x35,
+                release: 0xB5,
+                shift: false
+            }
+        ); // /
+        assert_eq!(
+            result[10],
+            PasteKey {
+                press: 0x39,
+                release: 0xB9,
+                shift: false
+            }
+        ); // space (added for test)
+    }
+
+    #[test]
+    fn paste_shifted_punctuation() {
+        let result = translate_paste("_+{}|:\"<>?").unwrap();
+        assert_eq!(result.len(), 10);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x0C,
+                release: 0x8C,
+                shift: true
+            }
+        ); // _
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x0D,
+                release: 0x8D,
+                shift: true
+            }
+        ); // +
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x1A,
+                release: 0x9A,
+                shift: true
+            }
+        ); // {
+        assert_eq!(
+            result[3],
+            PasteKey {
+                press: 0x1B,
+                release: 0x9B,
+                shift: true
+            }
+        ); // }
+        assert_eq!(
+            result[4],
+            PasteKey {
+                press: 0x2B,
+                release: 0xAB,
+                shift: true
+            }
+        ); // |
+        assert_eq!(
+            result[5],
+            PasteKey {
+                press: 0x27,
+                release: 0xA7,
+                shift: true
+            }
+        ); // :
+        assert_eq!(
+            result[6],
+            PasteKey {
+                press: 0x28,
+                release: 0xA8,
+                shift: true
+            }
+        ); // "
+        assert_eq!(
+            result[7],
+            PasteKey {
+                press: 0x33,
+                release: 0xB3,
+                shift: true
+            }
+        ); // <
+        assert_eq!(
+            result[8],
+            PasteKey {
+                press: 0x34,
+                release: 0xB4,
+                shift: true
+            }
+        ); // >
+        assert_eq!(
+            result[9],
+            PasteKey {
+                press: 0x35,
+                release: 0xB5,
+                shift: true
+            }
+        ); // ?
+    }
+
+    #[test]
+    fn paste_backtick_and_tilde() {
+        // Backtick unshifted
+        let result = translate_paste("`").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x29,
+                release: 0xA9,
+                shift: false
+            }
+        );
+
+        // Tilde shifted
+        let result = translate_paste("~").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x29,
+                release: 0xA9,
+                shift: true
+            }
+        );
+    }
+
+    #[test]
+    fn paste_whitespace() {
+        let result = translate_paste("a b").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        ); // a
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x39,
+                release: 0xB9,
+                shift: false
+            }
+        ); // space
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        ); // b
+    }
+
+    #[test]
+    fn paste_tab() {
+        let result = translate_paste("a\tb").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        ); // a
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x0F,
+                release: 0x8F,
+                shift: false
+            }
+        ); // tab
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        ); // b
+    }
+
+    #[test]
+    fn paste_newline() {
+        let result = translate_paste("a\nb").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        ); // a
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x1C,
+                release: 0x9C,
+                shift: false
+            }
+        ); // enter
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        ); // b
+    }
+
+    #[test]
+    fn paste_crlf_collapsed() {
+        let result = translate_paste("a\r\nb").unwrap();
+        assert_eq!(result.len(), 3); // Not 4 — CRLF collapsed to single Enter
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        ); // a
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x1C,
+                release: 0x9C,
+                shift: false
+            }
+        ); // enter
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        ); // b
+    }
+
+    #[test]
+    fn paste_bare_cr() {
+        let result = translate_paste("a\rb").unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(
+            result[0],
+            PasteKey {
+                press: 0x1E,
+                release: 0x9E,
+                shift: false
+            }
+        ); // a
+        assert_eq!(
+            result[1],
+            PasteKey {
+                press: 0x1C,
+                release: 0x9C,
+                shift: false
+            }
+        ); // enter
+        assert_eq!(
+            result[2],
+            PasteKey {
+                press: 0x30,
+                release: 0xB0,
+                shift: false
+            }
+        ); // b
+    }
+
+    #[test]
+    fn paste_non_ascii_rejected() {
+        let result = translate_paste("café");
+        assert!(result.is_err());
+        match result {
+            Err(PasteError::Unrepresentable { count, sample }) => {
+                assert_eq!(count, 1);
+                assert_eq!(sample, vec!['é']);
+            }
+            _ => panic!("Expected Unrepresentable error"),
+        }
+    }
+
+    #[test]
+    fn paste_multiple_non_ascii() {
+        let result = translate_paste("αβγδ hello");
+        assert!(result.is_err());
+        match result {
+            Err(PasteError::Unrepresentable { count, sample }) => {
+                assert_eq!(count, 4);
+                assert_eq!(sample, vec!['α', 'β', 'γ']);
+            }
+            _ => panic!("Expected Unrepresentable error"),
+        }
+    }
+
+    #[test]
+    fn paste_all_printable_ascii() {
+        for code in 0x20u8..=0x7Eu8 {
+            let c = code as char;
+            let s = c.to_string();
+            let result = translate_paste(&s);
+            assert!(
+                result.is_ok(),
+                "Character '{}' (0x{:02X}) should be translatable",
+                c,
+                code
+            );
+            assert_eq!(
+                result.unwrap().len(),
+                1,
+                "Character '{}' should produce exactly one PasteKey",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn paste_scancode_values_match_key_to_scancode() {
+        // For representative characters, verify that translate_paste produces the same
+        // press/release codes as key_to_scancode for the corresponding egui::Key.
+
+        // 'a' -> Key::A
+        let paste_result = translate_paste("a").unwrap();
+        let key_result = key_to_scancode(egui::Key::A).unwrap();
+        assert_eq!(paste_result[0].press, key_result.0);
+        assert_eq!(paste_result[0].release, key_result.1);
+
+        // '1' -> Key::Num1
+        let paste_result = translate_paste("1").unwrap();
+        let key_result = key_to_scancode(egui::Key::Num1).unwrap();
+        assert_eq!(paste_result[0].press, key_result.0);
+        assert_eq!(paste_result[0].release, key_result.1);
+
+        // ' ' -> Key::Space
+        let paste_result = translate_paste(" ").unwrap();
+        let key_result = key_to_scancode(egui::Key::Space).unwrap();
+        assert_eq!(paste_result[0].press, key_result.0);
+        assert_eq!(paste_result[0].release, key_result.1);
+
+        // '\t' -> Key::Tab
+        let paste_result = translate_paste("\t").unwrap();
+        let key_result = key_to_scancode(egui::Key::Tab).unwrap();
+        assert_eq!(paste_result[0].press, key_result.0);
+        assert_eq!(paste_result[0].release, key_result.1);
+
+        // '\n' -> Key::Enter
+        let paste_result = translate_paste("\n").unwrap();
+        let key_result = key_to_scancode(egui::Key::Enter).unwrap();
+        assert_eq!(paste_result[0].press, key_result.0);
+        assert_eq!(paste_result[0].release, key_result.1);
     }
 }

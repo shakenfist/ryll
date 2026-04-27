@@ -1,15 +1,16 @@
 [package]
 name = "shakenfist-spice-protocol"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, SpiceClient, and logging helpers. Extracted from the ryll SPICE client. Reserved crate name; the first published release will follow as 0.1.0 once the API has stabilised."
+description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, SpiceClient, and logging helpers. Extracted from the ryll SPICE client."
 readme = "README.md"
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 byteorder = "1"
 rand = "0.8"
 rsa = "0.9"

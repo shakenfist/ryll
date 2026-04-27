@@ -16,19 +16,21 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Cursor rendering** - Server cursor shapes with fallback default arrow
 - **Headless mode** - Run without GUI for automated testing and benchmarking
 - **Cadence mode** - Automatic keystroke injection every 2 seconds for latency testing
+- **Paste-as-keystrokes** - Type arbitrary text into guests without vdagent by translating characters into US-QWERTY scancode sequences. Cooperative timer-driven state machine keeps the inputs channel responsive during long pastes. Triggered via Ctrl+Alt+V shortcut or Menu → Paste in the GUI (when enabled). Automatically disabled when vdagent is connected. Characters are mapped to US-QWERTY scancodes; guests with a different keyboard layout will see different characters. Maximum paste length is 4096 characters. CLI flags: `--enable-paste-as-keystrokes`, `--paste-text TEXT`, `--paste-char-delay-ms N`
 - **Display channel capabilities** - Advertises COMPOSITE, MONITORS_CONFIG, SIZED_STREAM, and A8_SURFACE so the guest QXL driver uses efficient rendering paths instead of falling back to slow software blits
 - **Statistics tracking** - Sliding-window FPS (from MARK boundaries), throughput, and latency measurements
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
-- **Screenshot capture** - Press F8 or click "Screenshot" in the status bar to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
+- **Screenshot capture** - Press F8 or use Menu → Screenshot to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
 - **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
 - **Protocol-gap counter** - `Gaps: N` button in the status bar tracks the number of distinct protocol edge cases seen this session (unknown opcodes, deferred ops, recoverable decode failures). Highlights red when N > 0; click to open a floating window listing the keys. Complements `--pedantic` mode.
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
 - **Unbuffered pcap I/O** - Packet writes go directly to disk so pcap data survives abrupt termination
-- **Bug reports** - Press F12 or click "Report" to capture a self-contained zip with metadata, channel state, pcap traffic, screenshots, and runtime metrics (process and per-thread CPU, RSS) for diagnosing performance reports; Display reports include interactive region selection to highlight corruption
-- **Live traffic viewer** - Press F11 or click "Traffic" for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
-- **USB device management** - Click "USB" in the status bar for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
-- **Folder sharing** - Click "Folders" in the status bar for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
+- **Bug reports** - Press F12 or use Menu → Report to capture a self-contained zip with metadata, channel state, pcap traffic, runtime metrics, and a screenshot taken the moment the dialog opened so transient display artefacts survive the form-filling delay; Display reports with a region selection also include a crop of the submit-time surface
+- **Live traffic viewer** - Press F11 or use Menu → Traffic for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
+- **USB device management** - Use Menu → USB for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
+- **Folder sharing** - Use Menu → Folders for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
+- **In-app notifications panel** - Surfaces protocol gaps, bug-report status, and SPICE_MSG_NOTIFY messages (e.g. QEMU's "channel is insecure" warnings) on a single bell + side-panel surface
 
 ## Installation
 
@@ -162,6 +164,9 @@ Options:
   --monitors <N>         Number of monitors (default 1)
   --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
+  --enable-paste-as-keystrokes  Enable paste-as-keystrokes fallback
+  --paste-text <TEXT>    Type TEXT as keystrokes in headless mode
+  --paste-char-delay-ms <N>  Inter-character delay in ms (default 16)
   -h, --help             Print help
   -V, --version          Print version
 ```
@@ -215,6 +220,13 @@ doesn't write.
 ryll --file connection.vv --pedantic
 ryll --file connection.vv --pedantic --pedantic-dir /tmp/my-gaps
 ```
+
+### Notifications
+
+A bell icon in the status bar shows unread notifications. Click it to
+open the side panel; closing the panel marks everything read. The bell
+tints amber or red when there are unread Warn or Error-severity entries
+(such as SPICE "channel is insecure" warnings from QEMU).
 
 ## Architecture
 

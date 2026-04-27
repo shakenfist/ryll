@@ -467,6 +467,51 @@ loop {
 }
 ```
 
+## Notifications
+
+Ryll surfaces three categories of operator-relevant events through a
+unified in-memory store and a single GUI surface:
+
+1. **Protocol gaps** — distinct `warn_once!` keys registered in
+   `shakenfist-spice-protocol/src/logging.rs`. Each new key produces
+   one Warn-severity Gap entry via the gap observer registered in
+   `notifications.rs`.
+
+2. **SPICE_MSG_NOTIFY** — opcode 7 messages parsed on every channel
+   handler; each is pushed as a Spice-source entry tagged with the
+   receiving channel and the SPICE `what` enum value.
+
+3. **Internal status** — bug-report writer success/failure,
+   screenshot Ok/Err/no-surface, paste-completed.
+
+The store (`ryll/src/notifications.rs`) is a 500-entry
+`VecDeque<NotificationEntry>` behind `Arc<Mutex<NotificationStore>>`.
+Pushes apply a 30-second deduplication window: identical
+`(source, severity, message, visibility)` tuples within the window
+fold into the most recent entry's `count`, incrementing the `[N×]`
+suffix the side panel renders.
+
+The bell glyph in the status-bar right-edge cluster tints by the
+highest-severity unread entry's colour (default text colour for Info,
+amber for Warn, muted red for Error). Low-visibility SPICE entries are
+excluded from the bell colour calculation — they record but do not
+flash.
+Clicking the bell toggles a right-side Notifications panel that lists
+entries newest first; closing the panel marks every visible entry
+read.
+
+The `register_gap_observer` hook in
+`shakenfist-spice-protocol/src/logging.rs` supports multiple
+observers, so the `--pedantic` zip writer and the notifications
+observer coexist independently.
+
+Bug-report zips include a `notifications.json` with the full store
+snapshot at submit time, alongside the existing `metadata.json`,
+`session.json`, `channel-state.json`, and `runtime-metrics.json`.
+Operators handing zips to third parties should be aware that
+notification messages can include server-side text such as
+hostnames, paths, and error strings.
+
 ## Configuration
 
 ### .vv File Format
@@ -546,7 +591,7 @@ a QEMU instance with USB redirection enabled.
 
 ### GUI Components
 
-The USB panel is a right-side panel toggled by the "USB" status bar button,
+The USB panel is a right-side panel toggled by Menu → USB,
 rendered alongside the traffic viewer panel (both use `egui::SidePanel::right`
 with different IDs).
 
@@ -672,8 +717,9 @@ a QEMU instance with WebDAV enabled.
 
 ### GUI Components
 
-The Folders panel is a right-side panel toggled by the "Folders" status bar
-button. It mirrors the USB panel structure: channel status indicator, active
+The Folders panel is a right-side panel toggled by
+Menu → Folders. It mirrors the USB panel structure:
+channel status indicator, active
 share display with elapsed timer, error display with auto-clear, read-only
 checkbox, and native directory picker via `rfd::FileDialog::pick_folder`.
 
@@ -828,10 +874,15 @@ zip contains:
 ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
 ├── metadata.json         # report type, description, ryll version,
 │                         #   platform, target host/port, timestamp
+│                         #   (submit), triggered_at (dialog-open),
+│                         #   session_uptime_secs (submit),
+│                         #   triggered_uptime_secs (dialog-open)
 ├── session.json          # AppSnapshot (FPS, bandwidth, surfaces)
 ├── channel-state.json    # snapshot of the affected channel
 ├── traffic.pcap          # ring buffer pcap (capture feature only)
-├── screenshot.png        # display reports only (RGBA → PNG)
+├── screenshot.png        # trigger-time full surface (Display only)
+├── screenshot-region.png # submit-time crop at the selected region
+│                         #   (Display only, when a region was drawn)
 └── runtime-metrics.json  # process and per-thread CPU%, RSS, VmSize
                           #   sampled over a 2-second window at
                           #   report-creation time (Linux only;
@@ -839,10 +890,11 @@ ryll-bugreport-YYYY-MM-DDTHH-MM-SSZ.zip
                           #   available:false with a reason)
 ```
 
-Report types are `Display`, `Input`, `Cursor`, and `Connection`,
-each mapping to one SPICE channel.  `BugReport::new()` samples
-runtime metrics over a 2-second window (blocking the caller), then
-gathers and serialises all data synchronously.  `BugReport::write_zip()`
+Report types are `Display`, `Input`, `Cursor`, `Connection`, `Usb`,
+and `Pedantic`, each mapping to one SPICE channel or the
+--pedantic observer path.  `BugReport::new()` samples runtime
+metrics over a 2-second window (blocking the caller), then gathers
+and serialises all data synchronously.  `BugReport::write_zip()`
 writes the zip to the capture directory's `bug-reports/`
 subdirectory (if `--capture` is active) or the current working
 directory.
@@ -851,10 +903,23 @@ directory.
 that collects surface pixels, constructs the `BugReport`, and
 writes the zip.
 
+Display bug reports carry two PNGs. `screenshot.png` is the
+surface captured the moment the dialog opens — a background
+`std::thread` PNG-encodes the cloned RGBA while the user types a
+description. `screenshot-region.png` (when a region was drawn) is
+a crop of the submit-time surface at the selected rectangle,
+encoded on the UI thread after the user finishes the drag. The
+two images are deliberately different moments in time.
+
+Non-Display submissions drop the precomputed PNG even if one was
+captured — the dialog captures unconditionally on open (so an
+artefact doesn't fade while the user decides what to submit), but
+only includes the PNG when the user actually submits as Display.
+
 ## Bug Report Dialog
 
-Pressing **F12** or clicking the **Report** button in the status
-bar opens a centred modal dialog for generating bug reports.  The
+Pressing **F12** or using **Menu → Report** opens a
+centred modal dialog for generating bug reports.  The
 dialog contains:
 
 1. A privacy warning about sensitive data in reports.
@@ -891,13 +956,25 @@ closes and the app enters **region selection mode**:
    coordinates in the metadata.
 5. Pressing Escape skips selection and generates without a region.
 
+### Trigger-time snapshot
+
+On dialog open, `RyllApp::begin_trigger_snapshot` clones the
+largest surface's RGBA and spawns a named `std::thread`
+(`ryll-bugreport-png`) that PNG-encodes into a shared
+`Arc<Mutex<Option<Result<Vec<u8>>>>>`. The submit path
+(`finish_bug_report` → `take_trigger_for_submit`) consumes the
+encoded bytes via `try_lock`, falling back to a live encode if
+the encoder hasn't finished. Close-without-submit paths (Escape,
+Cancel, F12 toggle-off) drop the `Arc`; the thread finishes into
+what becomes garbage.
+
 Keyboard and mouse input is not forwarded to the SPICE server
 during selection.  Coordinates are clamped to the surface bounds.
 
 ## Live Traffic Viewer
 
-Pressing **F11** or clicking the **Traffic** button in the status
-bar toggles a right-side panel showing a live feed of recent SPICE
+Pressing **F11** or using **Menu → Traffic** toggles a
+right-side panel showing a live feed of recent SPICE
 protocol messages from the ring buffer.
 
 The viewer collects entries from all four channels via
@@ -916,6 +993,48 @@ Each row shows: relative timestamp, channel name, direction arrow
 (sent/received), message name, and wire size.
 
 F11 is consumed by ryll and not forwarded to the SPICE server.
+
+## Paste-as-Keystrokes
+
+The inputs channel includes a cooperative paste state machine for
+typing text into guests that lack a vdagent clipboard channel.
+Characters are translated to US-QWERTY AT scancodes via
+`char_to_scancode()` and `translate_paste()` (both in `inputs.rs`),
+capped at 4096 characters per paste.
+
+The state machine (`PasteState`) runs as a conditional third arm in
+the inputs channel's `tokio::select!` loop. A `tokio::time::sleep_until`
+future fires on schedule; each firing sends one sub-step (press or
+release) and yields back to the loop so the other two arms (server
+reads and UI input events) remain responsive.
+
+Per-character event sequence:
+1. If shifted: KeyDown(Left Shift)
+2. KeyDown(scancode)
+3. Sleep half the inter-character delay
+4. KeyUp(scancode)
+5. If shifted: KeyUp(Left Shift)
+6. Sleep the remaining half
+
+At paste start, held modifier keys (Ctrl, Shift, Alt) are released
+and saved; at paste end they are restored. Translation errors
+(non-ASCII characters) emit `ChannelEvent::PasteFailed` and cause
+a non-zero exit in headless mode.
+
+CLI flags: `--enable-paste-as-keystrokes` (master gate),
+`--paste-text TEXT` (headless trigger, implies enable),
+`--paste-char-delay-ms N` (default 16ms).
+
+GUI surface: When enabled, a "Paste" entry appears in the hamburger
+menu with "Ctrl+Alt+V" shortcut text. The entry is disabled (greyed
+out) when vdagent is connected, with a tooltip explaining to use
+normal Ctrl+V. The Ctrl+Alt+V shortcut is detected before
+`handle_input()` to prevent the V keypress from reaching the guest.
+Pre-validation via `translate_paste()` catches unrepresentable
+characters and shows an error dialog listing up to three sample
+codepoints. The clipboard is read via `arboard::Clipboard` (lazily
+initialised in `RyllApp::clipboard()`, separate from the
+`MainChannel` instance).
 
 ## Keyboard Scancodes
 

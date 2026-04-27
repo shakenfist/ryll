@@ -77,6 +77,18 @@ pub struct Args {
     /// if missing.
     #[arg(long, default_value = "./ryll-pedantic-reports")]
     pub pedantic_dir: std::path::PathBuf,
+
+    /// Enable paste-as-keystrokes fallback for guests without vdagent
+    #[arg(long)]
+    pub enable_paste_as_keystrokes: bool,
+
+    /// String to type as keystrokes in headless mode (implies --enable-paste-as-keystrokes)
+    #[arg(long = "paste-text")]
+    pub paste_text: Option<String>,
+
+    /// Inter-character delay for paste-as-keystrokes in milliseconds
+    #[arg(long = "paste-char-delay-ms", default_value_t = 16)]
+    pub paste_char_delay_ms: u32,
 }
 
 /// SPICE connection configuration
