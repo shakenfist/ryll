@@ -677,8 +677,14 @@ impl MainChannel {
             return Ok(());
         }
         info!("main: requesting client mouse mode");
+        // SpiceMsgcMainMouseModeRequest: spice.proto declares
+        // mouse_mode as flags16, so the body is one little-endian
+        // u16. Writing u32 here ships two extra zero bytes, which
+        // some servers tolerate and others reject as a malformed
+        // request — matching MOUSE_MODE on the read side
+        // (parse_mouse_mode_payload) which is already u16-aware.
         let mut mode_payload = Vec::new();
-        mode_payload.write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)?;
+        mode_payload.write_u16::<LittleEndian>(MOUSE_MODE_CLIENT as u16)?;
         let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
         self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
             .await?;
