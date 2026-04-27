@@ -3,7 +3,7 @@ use anyhow::Result;
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
@@ -363,6 +363,14 @@ pub struct RyllApp {
     reconnect_virtual_disks: Vec<VirtualDiskConfig>,
     reconnect_share_dir: Option<ShareDirConfig>,
     egui_ctx: egui::Context,
+
+    /// Per-connection cancel flag. `reconnect()` sets the previous
+    /// attempt's flag before spawning the next, so a stale
+    /// `run_connection` sees the flag in its 100 ms poll branch and
+    /// exits cleanly, dropping its tokio runtime when the thread
+    /// returns. Mirrors the cooperative-cancel shape of the global
+    /// `SHUTDOWN_REQUESTED` flag, scoped per attempt.
+    connection_cancel: Option<Arc<AtomicBool>>,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -498,6 +506,8 @@ impl RyllApp {
         let vol_for_conn = volume_control.clone();
         let vd_clone = virtual_disks.clone();
         let sd_clone = share_dir.clone();
+        let connection_cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_conn = connection_cancel.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
@@ -528,6 +538,7 @@ impl RyllApp {
                     vol_for_conn,
                     enable_paste,
                     notifications_clone,
+                    cancel_for_conn,
                 )
                 .await
                 {
@@ -628,10 +639,19 @@ impl RyllApp {
             reconnect_virtual_disks: virtual_disks,
             reconnect_share_dir: share_dir,
             egui_ctx: cc.egui_ctx.clone(),
+            connection_cancel: Some(connection_cancel),
         }
     }
 
     fn reconnect(&mut self) {
+        // Signal the previous attempt (if any) to exit before
+        // spawning the next. The previous run_connection sees the
+        // flag in its 100 ms select branch and breaks out, which
+        // drops its tokio runtime when the spawned thread returns.
+        if let Some(prev) = self.connection_cancel.take() {
+            prev.store(true, Ordering::Relaxed);
+        }
+
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
@@ -707,6 +727,9 @@ impl RyllApp {
         let vol_for_conn = volume_control;
         let enable_paste = self.enable_paste;
         let notifications_clone = self.notifications.clone();
+        let connection_cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_conn = connection_cancel.clone();
+        self.connection_cancel = Some(connection_cancel);
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -738,6 +761,7 @@ impl RyllApp {
                     vol_for_conn,
                     enable_paste,
                     notifications_clone,
+                    cancel_for_conn,
                 )
                 .await
                 {
@@ -2984,6 +3008,7 @@ impl eframe::App for RyllApp {
         if self.cursor_image.is_some()
             && !self.region_select_active
             && self.surface_rect != egui::Rect::NOTHING
+            && !ctx.wants_pointer_input()
             && ctx.input(|i| {
                 i.pointer
                     .hover_pos()
@@ -3074,6 +3099,7 @@ async fn run_connection(
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
     notifications: SharedNotifications,
+    cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let client = SpiceClient::new((&config).into())?;
 
@@ -3286,9 +3312,38 @@ async fn run_connection(
         }
     }
 
+    // Cancel watcher: when RyllApp::reconnect raises the
+    // per-connection cancel flag (a fresh Reconnect supersedes
+    // this attempt), abort every channel task so the wait loop
+    // below returns promptly. The watcher polls at the same
+    // 100 ms cadence as the headless SHUTDOWN_REQUESTED check;
+    // that latency is well inside human reaction time and avoids
+    // adding any awaitable signalling primitive.
+    let cancel_watcher = {
+        let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if cancel.load(Ordering::Relaxed) {
+                    info!(
+                        "app: connection cancelled (superseded), aborting {} channel tasks",
+                        abort_handles.len()
+                    );
+                    for ah in &abort_handles {
+                        ah.abort();
+                    }
+                    break;
+                }
+            }
+        })
+    };
+
     // Wait for all channel tasks
     for handle in handles {
         match handle.await {
+            Err(e) if e.is_cancelled() => {
+                // Aborted by the cancel watcher; not an error.
+            }
             Err(e) => {
                 error!("Channel task panic: {}", e);
             }
@@ -3301,6 +3356,11 @@ async fn run_connection(
             Ok(Ok(())) => {}
         }
     }
+
+    // Stop the watcher if the connection ended for any other
+    // reason (main channel disconnect, secondary channel error).
+    // Safe to call even if it already exited via the cancel path.
+    cancel_watcher.abort();
 
     Ok(())
 }
@@ -3376,7 +3436,10 @@ pub async fn run_headless(
     // no waker if no waiters) so this is harmless.
     let repaint_notify = Arc::new(Notify::new());
 
-    // Spawn connection task
+    // Spawn connection task. Headless mode has no Reconnect
+    // button, so the per-connection cancel flag is never raised
+    // here; we pass a fresh always-false Arc to satisfy the
+    // signature shared with the GUI path.
     let connection_handle = tokio::spawn(async move {
         run_connection(
             config,
@@ -3396,6 +3459,7 @@ pub async fn run_headless(
             VolumeControl::new(),
             enable_paste,
             notifications,
+            Arc::new(AtomicBool::new(false)),
         )
         .await
     });

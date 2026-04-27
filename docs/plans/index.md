@@ -30,6 +30,7 @@ reviewing and merging external contributor PRs see `MERGE-TEMPLATE.md`.
 | 2026-04-25 | [Paste-as-keystrokes fallback](PLAN-paste-as-keystrokes.md) | Synthesise SPICE keystrokes for the contents of a string when no vdagent is available, so guests like uncalibrated-sextant can be driven without an in-guest agent | Complete | [1. Translator](PLAN-paste-as-keystrokes-phase-01-translator.md), [2. Channel + CLI](PLAN-paste-as-keystrokes-phase-02-channel-cli.md), [3. GUI gesture](PLAN-paste-as-keystrokes-phase-03-gui.md), [4. Docs](PLAN-paste-as-keystrokes-phase-04-docs.md) |
 | 2026-04-25 | [Hamburger menu](PLAN-hamburger-menu.md) | Replace the status-bar action-button row with a single hamburger menu so the row returns to glanceable state | Complete | [1. Migrate](PLAN-hamburger-menu-phase-01-migrate.md) |
 | 2026-04-25 | [Notifications system](PLAN-notifications.md) | In-app notifications surface for protocol gaps, bug-report status, and SPICE_MSG_NOTIFY messages that ryll currently drops on the floor | Complete | [1. Store](PLAN-notifications-phase-01-store.md), [2. SPICE_MSG_NOTIFY](PLAN-notifications-phase-02-spice-notify.md), [3. Existing sources](PLAN-notifications-phase-03-existing-sources.md), [4. GUI](PLAN-notifications-phase-04-gui.md), [5. Docs](PLAN-notifications-phase-05-docs.md) |
+| 2026-04-27 | [PR #31 follow-up](PLAN-pr31-followup.md) | Tests, docs, and polish items deferred when landing PR 31 (UI improvements, reconnect, protocol fixes) | Complete | [1. Tests](PLAN-pr31-followup-phase-01-tests.md), [2. Docs](PLAN-pr31-followup-phase-02-docs.md), [3. Polish](PLAN-pr31-followup-phase-03-polish.md) |
 
 ## Standalone plans
 
@@ -45,7 +46,6 @@ execution.
 | 2026-04-18 | [Supply-chain scanning](PLAN-supply-chain-scanning.md) | Deterministic scanners for dependencies, secrets, and Unicode-based attacks |
 | 2026-04-18 | [Supply-chain follow-ups](PLAN-supply-chain-followups.md) | Tracked advisory ignores and unmaintained-crate debt surfaced when landing scanners |
 | 2026-04-23 | [Macbook bug-report fixes](PLAN-macbook-bugreport-fixes.md) | MOUSE_MODE wire format, client-mode re-request after guest reboot, and MULTI_MEDIA_TIME handler |
-| 2026-04-27 | [PR #31 follow-up](PLAN-pr31-followup.md) | Tests, docs, and polish items deferred when landing PR 31 (UI improvements, reconnect, protocol fixes) |
 
 ## Consolidation plans
 
