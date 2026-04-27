@@ -47,6 +47,31 @@ pub(crate) fn should_request_client_mouse_mode(supported: u32, current: u32) -> 
     supported & MOUSE_MODE_CLIENT != 0 && current != MOUSE_MODE_CLIENT
 }
 
+/// Normalise text so the clipboard echo dedup is invariant
+/// under line-ending munging during host-clipboard round
+/// trips. Windows and some Wayland compositors flip
+/// `\n` ↔ `\r\n` and trim or append trailing whitespace, so
+/// the raw text we sent and the raw text we read back differ
+/// even though the user-visible content is identical.
+fn normalize_clipboard(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim_end()
+        .to_string()
+}
+
+/// Hash the normalised clipboard text. Storing the hash
+/// instead of the text keeps clipboard contents — which can
+/// include passwords — out of the long-lived per-channel
+/// state.
+fn hash_clipboard(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    normalize_clipboard(text).hash(&mut h);
+    h.finish()
+}
+
 /// Build the body of a `SPICE_MSGC_MAIN_MOUSE_MODE_REQUEST`.
 ///
 /// `spice.proto` declares `mouse_mode` as `flags16`, so the body
@@ -104,7 +129,7 @@ pub struct MainChannel {
     monitors_config_rx: mpsc::Receiver<(u32, u32)>,
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
-    last_clipboard_text: Option<String>,
+    last_clipboard_hash: Option<u64>,
     cached_clipboard: Option<arboard::Clipboard>,
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
@@ -151,7 +176,7 @@ impl MainChannel {
             last_sent_monitors_config: None,
             guest_caps_received: false,
             channels_requested: false,
-            last_clipboard_text: None,
+            last_clipboard_hash: None,
             cached_clipboard: None,
             capture,
             byte_counter,
@@ -875,8 +900,11 @@ impl MainChannel {
                                 }
                             }
                         }
-                        // Record so poll_host_clipboard won't re-grab what we just set
-                        self.last_clipboard_text = Some(text);
+                        // Record so poll_host_clipboard won't re-grab what we just set.
+                        // Storing the normalised hash makes the dedup
+                        // invariant under CRLF / LF and trailing-whitespace
+                        // munging during the host clipboard round trip.
+                        self.last_clipboard_hash = Some(hash_clipboard(&text));
                     }
                 }
             }
@@ -930,8 +958,9 @@ impl MainChannel {
             return Ok(());
         }
 
-        let changed = match &self.last_clipboard_text {
-            Some(prev) => prev != &text,
+        let new_hash = hash_clipboard(&text);
+        let changed = match self.last_clipboard_hash {
+            Some(prev) => prev != new_hash,
             None => true,
         };
 
@@ -939,7 +968,7 @@ impl MainChannel {
             // Log byte count only — clipboard content may contain
             // passwords or sensitive data.
             info!("main: host clipboard changed ({} bytes)", text.len());
-            self.last_clipboard_text = Some(text);
+            self.last_clipboard_hash = Some(new_hash);
             self.send_clipboard_grab().await?;
         }
 
@@ -998,7 +1027,7 @@ impl MainChannel {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_mouse_mode_request_payload, parse_mouse_mode_payload,
+        build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
         should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD,
         VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
         VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
@@ -1103,5 +1132,33 @@ mod tests {
             build_mouse_mode_request_payload(MOUSE_MODE_SERVER),
             vec![0x01, 0x00],
         );
+    }
+
+    #[test]
+    fn clipboard_hash_invariant_under_crlf_lf() {
+        // Round-tripping through Windows or some Wayland
+        // compositors can flip LF to CRLF (or back). The dedup
+        // hash must collapse those forms so the echo guard does
+        // not fire on a no-op round trip.
+        assert_eq!(hash_clipboard("foo\nbar"), hash_clipboard("foo\r\nbar"));
+        assert_eq!(hash_clipboard("a\nb\nc"), hash_clipboard("a\r\nb\r\nc"));
+        assert_eq!(hash_clipboard("only\rcr"), hash_clipboard("only\ncr"));
+    }
+
+    #[test]
+    fn clipboard_hash_invariant_under_trailing_whitespace() {
+        // Trailing whitespace likewise gets trimmed or appended
+        // inconsistently across clipboard providers.
+        assert_eq!(hash_clipboard("foo"), hash_clipboard("foo\n"));
+        assert_eq!(hash_clipboard("foo"), hash_clipboard("foo  "));
+        assert_eq!(hash_clipboard("foo"), hash_clipboard("foo\r\n"));
+    }
+
+    #[test]
+    fn clipboard_hash_distinguishes_different_content() {
+        // Sanity check: the dedup must still notice when the
+        // user actually copies something different.
+        assert_ne!(hash_clipboard("foo"), hash_clipboard("bar"));
+        assert_ne!(hash_clipboard("foo\nbar"), hash_clipboard("foo\nbaz"));
     }
 }
