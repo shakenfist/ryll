@@ -53,25 +53,20 @@ All blocking items from the original review have been resolved:
 
 ## Should fix
 
-1. **ANNOUNCE_CAPABILITIES = 6 regression test.** Develop
-   carried `VD_AGENT_ANNOUNCE_CAPABILITIES = 1` for some
-   time, which collided with `VD_AGENT_MOUSE_STATE = 1`
-   and broke capability negotiation. PR 31 corrected the
-   constant to 6 but added no regression guard. Add a unit
-   test in `shakenfist-spice-protocol/src/constants.rs`
-   that asserts `VD_AGENT_ANNOUNCE_CAPABILITIES != VD_AGENT_MOUSE_STATE`
-   and that the constant value matches the spec
-   (`spice-protocol/spice/vd_agent.h`).
+1. ~~**ANNOUNCE_CAPABILITIES = 6 regression test.**~~
+   Landed in Phase 1 — see
+   [PLAN-pr31-followup-phase-01-tests.md](PLAN-pr31-followup-phase-01-tests.md).
+   Test lives next to the constants in
+   `ryll/src/channels/main_channel.rs` rather than the
+   shared protocol crate (constants are still file-private
+   in main_channel.rs; rationale in the phase plan).
 
-2. **`MOUSE_MODE_REQUEST` wire-format regression test.**
-   The blocking #3 fix is a one-liner that's easy to
-   silently revert during a future refactor. Add a test in
-   `ryll/src/channels/main_channel.rs` that builds a
-   `MOUSE_MODE_REQUEST` payload via the same path
-   `maybe_request_client_mouse_mode` uses and asserts the
-   body is exactly 2 bytes. The existing
-   `parse_mouse_mode_payload` tests cover the read side;
-   this covers the write side.
+2. ~~**`MOUSE_MODE_REQUEST` wire-format regression test.**~~
+   Landed in Phase 1 — see
+   [PLAN-pr31-followup-phase-01-tests.md](PLAN-pr31-followup-phase-01-tests.md).
+   Encoding extracted into
+   `build_mouse_mode_request_payload` so the byte shape
+   can be asserted without constructing a `MainChannel`.
 
 3. **README: reconnect button + window persistence.** PR 31
    added user-visible features that aren't documented.
