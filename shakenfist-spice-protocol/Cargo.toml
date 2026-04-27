@@ -10,6 +10,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 byteorder = "1"
 rand = "0.8"
 rsa = "0.9"

@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{MainSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -82,6 +83,7 @@ pub struct MainChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
@@ -106,6 +108,7 @@ impl MainChannel {
         snapshot: Arc<Mutex<MainSnapshot>>,
         monitors_config_rx: mpsc::Receiver<(u32, u32)>,
         monitors: u8,
+        notifications: SharedNotifications,
     ) -> Self {
         MainChannel {
             stream,
@@ -127,6 +130,7 @@ impl MainChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             bytes_in: 0,
             bytes_out: 0,
@@ -519,26 +523,36 @@ impl MainChannel {
 
             main_server::NOTIFY => {
                 let notify = Notify::read(payload)?;
-                let severity = NotifySeverity::from_u32(notify.severity);
-
                 if settings::is_verbose() {
                     logging::log_detail(&format!(
-                        "severity={:?}, visibility={}, what={}, message=\"{}\"",
-                        severity, notify.visibility, notify.what, notify.message
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
                     ));
                 }
-
-                match severity {
+                match notify.severity {
                     NotifySeverity::Error => {
-                        warn!("main: server notify (error): {}", notify.message);
+                        warn!("main: server notify (error): {}", notify.message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("main: server notify (warn): {}", notify.message);
+                        warn!("main: server notify (warn): {}", notify.message)
                     }
-                    NotifySeverity::Info => {
-                        info!("main: server notify: {}", notify.message);
-                    }
+                    NotifySeverity::Info => info!("main: server notify: {}", notify.message),
                 }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Main,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
 
             main_server::DISCONNECTING => {

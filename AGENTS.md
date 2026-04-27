@@ -214,6 +214,20 @@ Ryll uses:
     matters because the traffic pcap is what makes a pedantic report
     actionable for debugging.
 
+21. **Notifications go through the unified store, not direct UI
+    calls** - The notification store at `ryll/src/notifications.rs`
+    is the single producer boundary. Channel handlers, the bug-report
+    writer, the screenshot dialog, and the gap observer all push
+    `NotificationEntry` values via `Arc<Mutex<NotificationStore>>`; the
+    GUI side panel and the status-bar bell read from the same store.
+    Adding a new notification producer means: build a
+    `NotificationEntry::new(severity, source, message)` (optionally
+    `.with_visibility(v)`), then `notifications.lock().push(entry)`.
+    New `NotificationSource` variants are added to the enum in
+    `notifications.rs`; the side panel's `NotificationSource::label()`
+    impl dictates how the new variant renders. Bug-report zips
+    automatically include any new entries via `notifications.json`.
+
 ## Code Organisation
 
 The repository is a Cargo workspace. Ryll itself lives at

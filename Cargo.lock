@@ -4519,6 +4519,7 @@ dependencies = [
  "rand 0.8.5",
  "rsa",
  "rustls-pemfile",
+ "serde",
  "sha1",
  "socket2",
  "tokio",

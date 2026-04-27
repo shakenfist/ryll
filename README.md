@@ -30,6 +30,7 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Live traffic viewer** - Press F11 or use Menu → Traffic for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Use Menu → USB for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 - **Folder sharing** - Use Menu → Folders for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
+- **In-app notifications panel** - Surfaces protocol gaps, bug-report status, and SPICE_MSG_NOTIFY messages (e.g. QEMU's "channel is insecure" warnings) on a single bell + side-panel surface
 
 ## Installation
 
@@ -219,6 +220,13 @@ doesn't write.
 ryll --file connection.vv --pedantic
 ryll --file connection.vv --pedantic --pedantic-dir /tmp/my-gaps
 ```
+
+### Notifications
+
+A bell icon in the status bar shows unread notifications. Click it to
+open the side panel; closing the panel marks everything read. The bell
+tints amber or red when there are unread Warn or Error-severity entries
+(such as SPICE "channel is insecure" warnings from QEMU).
 
 ## Architecture
 

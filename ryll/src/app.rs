@@ -23,8 +23,14 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
+use crate::notifications::{
+    self as notifications, register_gap_notification_observer, NotificationEntry,
+    NotificationSource, NotificationStore, SharedNotifications,
+};
 use crate::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{
+    ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER,
+};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -265,6 +271,9 @@ pub struct RyllApp {
     // Traffic ring buffers (always active, for bug reports and traffic viewer)
     traffic: Arc<TrafficBuffers>,
 
+    // In-app notification store (shared with all channels and producers).
+    notifications: SharedNotifications,
+
     // Channel state snapshots (always active, for bug reports)
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
@@ -277,7 +286,6 @@ pub struct RyllApp {
     show_bug_dialog: bool,
     bug_report_type: BugReportType,
     bug_description: String,
-    bug_status_message: Option<(String, Instant)>,
 
     // Snapshot of the display surface captured the moment a
     // bug-report dialog opens. Encoding runs in a background
@@ -327,8 +335,9 @@ pub struct RyllApp {
     traffic_filter_usbredir: bool,
     traffic_filter_webdav: bool,
 
-    /// Whether the "Protocol gaps" floating window is currently open.
-    gaps_popup_open: bool,
+    // Notifications panel state
+    show_notifications_panel: bool,
+    notifications_panel_was_open_last_frame: bool,
 
     /// Whether paste-as-keystrokes is enabled.
     enable_paste: bool,
@@ -422,6 +431,11 @@ impl RyllApp {
         // Traffic ring buffers (always active)
         let traffic = Arc::new(TrafficBuffers::new());
 
+        // In-app notification store (always active; all channels push,
+        // GUI bell + side panel consume).
+        let notifications: SharedNotifications =
+            Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
@@ -443,8 +457,10 @@ impl RyllApp {
                 traffic.clone(),
                 channel_snapshots.clone(),
                 app_snapshot.clone(),
+                notifications.clone(),
             );
         }
+        register_gap_notification_observer(notifications.clone());
 
         // Retain virtual disk paths for UI re-enumeration
         let usb_virtual_disks: Vec<(PathBuf, bool)> = virtual_disks
@@ -470,6 +486,7 @@ impl RyllApp {
         let capture_clone = capture.clone();
         let counter_clone = byte_counter.clone();
         let traffic_clone = traffic.clone();
+        let notifications_clone = notifications.clone();
         let snaps_for_conn = ChannelSnapshots {
             display: channel_snapshots.display.clone(),
             inputs: channel_snapshots.inputs.clone(),
@@ -507,6 +524,7 @@ impl RyllApp {
                     resize_rx_for_conn,
                     vol_for_conn,
                     enable_paste,
+                    notifications_clone,
                 )
                 .await
                 {
@@ -555,6 +573,7 @@ impl RyllApp {
             usb_device_description: None,
             usb_connected_at: None,
             traffic,
+            notifications,
             channel_snapshots,
             app_snapshot,
             target_host,
@@ -562,7 +581,6 @@ impl RyllApp {
             show_bug_dialog: false,
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
-            bug_status_message: None,
             pending_trigger: None,
             region_select_active: false,
             region_drag_start: None,
@@ -594,7 +612,8 @@ impl RyllApp {
             traffic_filter_cursor: true,
             traffic_filter_usbredir: true,
             traffic_filter_webdav: true,
-            gaps_popup_open: false,
+            show_notifications_panel: false,
+            notifications_panel_was_open_last_frame: false,
             enable_paste,
             paste_char_delay_ms,
             agent_connected: false,
@@ -886,10 +905,11 @@ impl RyllApp {
 
                 ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
                     info!("app: paste complete: {} chars in {}ms", chars, elapsed_ms);
-                    self.bug_status_message = Some((
+                    self.push_notification(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
                         format!("Pasted {} chars ({}ms)", chars, elapsed_ms),
-                        Instant::now(),
-                    ));
+                    );
                 }
 
                 ChannelEvent::PasteFailed { reason } => {
@@ -1216,6 +1236,7 @@ impl RyllApp {
             &self.traffic,
             &self.channel_snapshots,
             &self.app_snapshot,
+            &self.notifications,
             surface_data,
             trigger,
             precomputed_screenshot_png,
@@ -1230,6 +1251,19 @@ impl RyllApp {
         report.write_zip(&output_dir)
     }
 
+    /// Push a notification entry into the shared store.
+    fn push_notification(
+        &self,
+        severity: NotifySeverity,
+        source: NotificationSource,
+        message: impl Into<String>,
+    ) {
+        let entry = NotificationEntry::new(severity, source, message);
+        if let Ok(mut guard) = self.notifications.lock() {
+            guard.push(entry);
+        }
+    }
+
     /// Run a bug report and set the status bar message from the result.
     fn finish_bug_report(
         &mut self,
@@ -1242,12 +1276,12 @@ impl RyllApp {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Info, NotificationSource::BugReport, msg);
             }
             Err(e) => {
                 let msg = format!("Bug report failed: {}", e);
                 error!("app: {}", msg);
-                self.bug_status_message = Some((msg, Instant::now()));
+                self.push_notification(NotifySeverity::Error, NotificationSource::BugReport, msg);
             }
         }
     }
@@ -1403,14 +1437,14 @@ impl RyllApp {
 
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
-    /// Sets `self.bug_status_message` with a success or failure message.
     /// If the dialog is cancelled, nothing happens.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.is_empty() {
-            self.bug_status_message = Some((
-                "No display surface to capture yet".to_string(),
-                Instant::now(),
-            ));
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::Internal,
+                "No display surface to capture yet",
+            );
             return;
         }
 
@@ -1434,12 +1468,16 @@ impl RyllApp {
                         format!("Saved {} screenshots to {}", paths.len(), names.join(", "))
                     };
                     info!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(NotifySeverity::Info, NotificationSource::Internal, msg);
                 }
                 Err(e) => {
                     let msg = format!("Screenshot failed: {}", e);
                     error!("app: {}", msg);
-                    self.bug_status_message = Some((msg, Instant::now()));
+                    self.push_notification(
+                        NotifySeverity::Error,
+                        NotificationSource::Internal,
+                        msg,
+                    );
                 }
             }
         }
@@ -1489,13 +1527,6 @@ impl eframe::App for RyllApp {
 
         // Tick the bandwidth tracker
         self.bandwidth.tick();
-
-        // Expire old status messages
-        if let Some((_, created)) = &self.bug_status_message {
-            if created.elapsed() >= Duration::from_secs(5) {
-                self.bug_status_message = None;
-            }
-        }
 
         // Escape during region selection: skip and generate without region
         if self.region_select_active {
@@ -1691,6 +1722,34 @@ impl eframe::App for RyllApp {
                             }
                         }
 
+                        // Bell notification button
+                        let (unread_count, bell_severity) = self
+                            .notifications
+                            .lock()
+                            .map(|s| (s.unread_count(), s.highest_bell_severity()))
+                            .unwrap_or((0, None));
+
+                        let mut bell_text = egui::RichText::new("\u{1F514}");
+                        if let Some(sev) = bell_severity {
+                            let (_, colour) = notifications::severity_visuals(sev);
+                            if let Some(c) = colour {
+                                bell_text = bell_text.color(c);
+                            }
+                        }
+                        let bell_button = ui.add(egui::Button::new(bell_text));
+                        let bell_button = if unread_count > 0 {
+                            bell_button.on_hover_text(format!(
+                                "{} unread notification{}",
+                                unread_count,
+                                if unread_count == 1 { "" } else { "s" },
+                            ))
+                        } else {
+                            bell_button
+                        };
+                        if bell_button.clicked() {
+                            self.show_notifications_panel = !self.show_notifications_panel;
+                        }
+
                         ui.separator();
                         egui::menu::menu_button(ui, "☰", |ui| {
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
@@ -1703,7 +1762,10 @@ impl eframe::App for RyllApp {
                                 self.open_screenshot_dialog();
                                 ui.close_menu();
                             }
-                            if ui.button("Report").clicked() {
+                            if ui
+                                .add(egui::Button::new("Report").shortcut_text("F12"))
+                                .clicked()
+                            {
                                 self.show_bug_dialog = true;
                                 self.bug_report_type = BugReportType::Display;
                                 self.bug_description.clear();
@@ -1726,34 +1788,6 @@ impl eframe::App for RyllApp {
                                 }
                             }
                         });
-                        let gap_count = shakenfist_spice_protocol::logging::warn_once_count();
-                        let gap_label = format!("Gaps: {}", gap_count);
-                        let gap_response = if gap_count > 0 {
-                            ui.add(egui::Button::new(
-                                egui::RichText::new(&gap_label)
-                                    .color(egui::Color32::from_rgb(200, 80, 80)),
-                            ))
-                        } else {
-                            ui.add(egui::Button::new(&gap_label))
-                        };
-                        if gap_response.clicked() {
-                            self.gaps_popup_open = !self.gaps_popup_open;
-                        }
-                        if gap_response.hovered() {
-                            gap_response.on_hover_text(
-                                "Distinct protocol gaps seen this session \
-                                 — click to list.\nPass --pedantic to write \
-                                 a bug report per gap.",
-                            );
-                        }
-
-                        // Transient status message from bug report
-                        if let Some((ref msg, created)) = self.bug_status_message {
-                            if created.elapsed() < Duration::from_secs(5) {
-                                ui.separator();
-                                ui.label(msg);
-                            }
-                        }
                     });
                 });
             });
@@ -1847,6 +1881,107 @@ impl eframe::App for RyllApp {
                         });
                 });
         }
+
+        // Notifications side panel (conditional)
+        if self.show_notifications_panel {
+            egui::SidePanel::right("notifications")
+                .default_width(360.0)
+                .show(ctx, |ui| {
+                    // Header: title + actions
+                    ui.horizontal(|ui| {
+                        ui.heading("Notifications");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Clear all").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.clear();
+                                }
+                            }
+                            if ui.small_button("Mark all read").clicked() {
+                                if let Ok(mut s) = self.notifications.lock() {
+                                    s.mark_all_read();
+                                }
+                            }
+                        });
+                    });
+
+                    // Snapshot the state under one lock so rendering is off-lock
+                    let (total, unread, snapshot) = match self.notifications.lock() {
+                        Ok(s) => (
+                            s.len(),
+                            s.unread_count(),
+                            s.iter_newest_first().cloned().collect::<Vec<_>>(),
+                        ),
+                        Err(_) => (0, 0, Vec::new()),
+                    };
+                    ui.label(format!("{} total / {} unread", total, unread));
+                    ui.separator();
+
+                    let mut to_remove: Vec<u64> = Vec::new();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        if snapshot.is_empty() {
+                            ui.label("No notifications.");
+                        }
+                        for entry in &snapshot {
+                            ui.horizontal(|ui| {
+                                let (glyph, colour) =
+                                    notifications::severity_visuals(entry.severity);
+                                let mut g = egui::RichText::new(glyph);
+                                if let Some(c) = colour {
+                                    g = g.color(c);
+                                }
+                                if entry.read {
+                                    g = g.weak();
+                                }
+                                ui.label(g);
+
+                                ui.monospace(notifications::format_relative(entry.when));
+
+                                ui.colored_label(egui::Color32::GRAY, entry.source.label());
+
+                                let mut msg_text = egui::RichText::new(&entry.message);
+                                if entry.read {
+                                    msg_text = msg_text.weak();
+                                }
+                                ui.label(msg_text);
+
+                                if entry.count > 1 {
+                                    ui.label(
+                                        egui::RichText::new(format!("[{}\u{00D7}]", entry.count))
+                                            .weak(),
+                                    );
+                                }
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("Dismiss").clicked() {
+                                            to_remove.push(entry.id);
+                                        }
+                                    },
+                                );
+                            });
+                        }
+                    });
+
+                    if !to_remove.is_empty() {
+                        if let Ok(mut s) = self.notifications.lock() {
+                            for id in to_remove {
+                                s.remove(id);
+                            }
+                        }
+                    }
+                });
+        }
+
+        // Mark all read on the panel-open → panel-closed transition,
+        // so the bell dot clears and the user gets one chance to triage
+        // before the unread state resets.
+        if !self.show_notifications_panel && self.notifications_panel_was_open_last_frame {
+            if let Ok(mut s) = self.notifications.lock() {
+                s.mark_all_read();
+            }
+        }
+        self.notifications_panel_was_open_last_frame = self.show_notifications_panel;
 
         // USB device management panel (conditional)
         if self.show_usb_panel {
@@ -2646,28 +2781,6 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Protocol gaps floating window (toggled by the Gaps: N button)
-        egui::Window::new("Protocol gaps")
-            .open(&mut self.gaps_popup_open)
-            .resizable(true)
-            .default_width(400.0)
-            .default_height(300.0)
-            .show(ctx, |ui| {
-                let mut keys = shakenfist_spice_protocol::logging::warn_once_keys();
-                keys.sort();
-                if keys.is_empty() {
-                    ui.label("No protocol gaps seen this session.");
-                } else {
-                    ui.label(format!("{} distinct gaps:", keys.len()));
-                    ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        for key in &keys {
-                            ui.monospace(*key);
-                        }
-                    });
-                }
-            });
-
         if self.show_disconnect_dialog {
             let reason = self
                 .disconnect_reason
@@ -2771,6 +2884,7 @@ async fn run_connection(
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
+    notifications: SharedNotifications,
 ) -> Result<()> {
     let client = SpiceClient::new(ConnectionConfig::from(&config))?;
 
@@ -2791,6 +2905,7 @@ async fn run_connection(
         snapshots.main,
         resize_rx,
         monitors,
+        notifications.clone(),
     );
 
     // Spawn main channel task
@@ -2865,6 +2980,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2881,6 +2997,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.cursor.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -2899,6 +3016,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.inputs.clone(),
                     enable_paste,
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -2918,6 +3036,7 @@ async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2941,6 +3060,7 @@ async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        notifications.clone(),
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -2962,6 +3082,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
+                    notifications.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -3026,6 +3147,11 @@ pub async fn run_headless(
     // Traffic ring buffers (always active)
     let traffic = Arc::new(TrafficBuffers::new());
 
+    // In-app notification store (headless still produces and stores
+    // notifications even though no GUI consumes them).
+    let notifications: SharedNotifications =
+        Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+
     // Channel state snapshots (always active)
     let snapshots = ChannelSnapshots::new();
 
@@ -3050,8 +3176,10 @@ pub async fn run_headless(
             traffic.clone(),
             snapshots.clone(),
             app_snapshot,
+            notifications.clone(),
         );
     }
+    register_gap_notification_observer(notifications.clone());
 
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
@@ -3078,6 +3206,7 @@ pub async fn run_headless(
             resize_rx,
             VolumeControl::new(),
             enable_paste,
+            notifications,
         )
         .await
     });

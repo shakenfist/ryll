@@ -10,14 +10,17 @@ use tracing::{debug, error, info, warn};
 use crate::app::ByteCounter;
 use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
 use crate::capture::CaptureSession;
+use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
 use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
-    MousePosition, Ping, SetAck,
+    MousePosition, Notify as NotifyMessage, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers, ChannelType};
+use shakenfist_spice_protocol::{
+    inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
+};
 
 use super::{ChannelEvent, InputEvent};
 
@@ -66,6 +69,7 @@ pub struct InputsChannel {
     capture: Option<Arc<CaptureSession>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<TrafficBuffers>,
+    notifications: SharedNotifications,
     snapshot: Arc<Mutex<InputsSnapshot>>,
     recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
@@ -89,6 +93,7 @@ impl InputsChannel {
         traffic: Arc<TrafficBuffers>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
         enable_paste: bool,
+        notifications: SharedNotifications,
     ) -> Self {
         InputsChannel {
             stream,
@@ -102,6 +107,7 @@ impl InputsChannel {
             capture,
             byte_counter,
             traffic,
+            notifications,
             snapshot,
             recent_events: VecDeque::new(),
             bytes_in: 0,
@@ -374,6 +380,42 @@ impl InputsChannel {
                 // Inputs channel uses same message type for pong
                 let response = make_message(3, &pong_payload); // PONG
                 self.send_with_log(3, &response).await?;
+            }
+
+            inputs_server::NOTIFY => {
+                let notify = NotifyMessage::read(payload)?;
+                if settings::is_verbose() {
+                    logging::log_detail(&format!(
+                        "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
+                        notify.severity, notify.visibility, notify.what, notify.message,
+                    ));
+                }
+                match notify.severity {
+                    NotifySeverity::Error => {
+                        warn!("inputs: server notify (error): {}", notify.message)
+                    }
+                    NotifySeverity::Warn => {
+                        warn!("inputs: server notify (warn): {}", notify.message)
+                    }
+                    NotifySeverity::Info => {
+                        info!("inputs: server notify: {}", notify.message)
+                    }
+                }
+                let mut entry = NotificationEntry::new(
+                    notify.severity,
+                    NotificationSource::Spice {
+                        channel: ChannelType::Inputs,
+                        what: notify.what,
+                    },
+                    notify.message.clone(),
+                );
+                if let Some(v) = notify.visibility {
+                    entry = entry.with_visibility(v);
+                }
+                if let Ok(mut guard) = self.notifications.lock() {
+                    guard.push(entry);
+                }
+                self.repaint_notify.notify_one();
             }
 
             _ => {
