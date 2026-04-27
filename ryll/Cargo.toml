@@ -13,7 +13,7 @@ capture = ["dep:pcap-file", "dep:etherparse", "dep:openh264", "dep:mp4"]
 
 [dependencies]
 # GUI framework
-eframe = "0.29"
+eframe = { version = "0.29", features = ["persistence"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

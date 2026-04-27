@@ -45,6 +45,7 @@ execution.
 | 2026-04-18 | [Supply-chain scanning](PLAN-supply-chain-scanning.md) | Deterministic scanners for dependencies, secrets, and Unicode-based attacks |
 | 2026-04-18 | [Supply-chain follow-ups](PLAN-supply-chain-followups.md) | Tracked advisory ignores and unmaintained-crate debt surfaced when landing scanners |
 | 2026-04-23 | [Macbook bug-report fixes](PLAN-macbook-bugreport-fixes.md) | MOUSE_MODE wire format, client-mode re-request after guest reboot, and MULTI_MEDIA_TIME handler |
+| 2026-04-27 | [PR #31 follow-up](PLAN-pr31-followup.md) | Tests, docs, and polish items deferred when landing PR 31 (UI improvements, reconnect, protocol fixes) |
 
 ## Consolidation plans
 

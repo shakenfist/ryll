@@ -48,12 +48,22 @@ pub(crate) fn should_request_client_mouse_mode(supported: u32, current: u32) -> 
 }
 
 const VD_AGENT_PROTOCOL: u32 = 1;
-const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 1;
+
+// VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
+#[allow(dead_code)]
+const VD_AGENT_MOUSE_STATE: u32 = 1;
 const VD_AGENT_MONITORS_CONFIG: u32 = 2;
+#[allow(dead_code)]
+const VD_AGENT_REPLY: u32 = 3;
 const VD_AGENT_CLIPBOARD: u32 = 4;
+#[allow(dead_code)]
+const VD_AGENT_DISPLAY_CONFIG: u32 = 5;
+const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 6;
 const VD_AGENT_CLIPBOARD_GRAB: u32 = 7;
 const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8;
 const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9;
+
+// Clipboard format types
 const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1;
 
 const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
@@ -667,8 +677,14 @@ impl MainChannel {
             return Ok(());
         }
         info!("main: requesting client mouse mode");
+        // SpiceMsgcMainMouseModeRequest: spice.proto declares
+        // mouse_mode as flags16, so the body is one little-endian
+        // u16. Writing u32 here ships two extra zero bytes, which
+        // some servers tolerate and others reject as a malformed
+        // request — matching MOUSE_MODE on the read side
+        // (parse_mouse_mode_payload) which is already u16-aware.
         let mut mode_payload = Vec::new();
-        mode_payload.write_u32::<LittleEndian>(MOUSE_MODE_CLIENT)?;
+        mode_payload.write_u16::<LittleEndian>(MOUSE_MODE_CLIENT as u16)?;
         let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
         self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
             .await?;
@@ -822,12 +838,11 @@ impl MainChannel {
         }
         match agent_type {
             VD_AGENT_CLIPBOARD_GRAB => {
-                // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
                     let format =
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
-                        debug!("main: clipboard grab from guest, requesting data");
+                        debug!("main: guest clipboard grab, requesting data");
                         self.send_clipboard_request().await?;
                     }
                 }
@@ -836,17 +851,11 @@ impl MainChannel {
                 // payload: selection(u32) + format(u32) + data
                 let offset = 4;
                 if payload.len() > offset + 4 {
-                    let _format = u32::from_le_bytes([
-                        payload[offset],
-                        payload[offset + 1],
-                        payload[offset + 2],
-                        payload[offset + 3],
-                    ]);
                     let data = &payload[offset + 4..];
                     if !data.is_empty() {
                         let text = String::from_utf8_lossy(data).to_string();
-                        // Log byte count only — clipboard content may
-                        // contain passwords or sensitive data.
+                        // Log byte count only — clipboard content may contain
+                        // passwords or sensitive data.
                         info!("main: clipboard from guest ({} bytes)", text.len());
                         if let Some(cb) = self.clipboard() {
                             match cb.set_text(&text) {
@@ -857,10 +866,13 @@ impl MainChannel {
                                 }
                             }
                         }
+                        // Record so poll_host_clipboard won't re-grab what we just set
+                        self.last_clipboard_text = Some(text);
                     }
                 }
             }
             VD_AGENT_CLIPBOARD_REQUEST => {
+                info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
                 // payload: selection(u32) + format(u32)
                 if payload.len() >= 8 {
                     let format =
@@ -869,6 +881,9 @@ impl MainChannel {
                         debug!("main: clipboard request from guest");
                         let text = self.clipboard().and_then(|cb| cb.get_text().ok());
                         if let Some(text) = text {
+                            // Log byte count only — clipboard content may contain
+                            // passwords or sensitive data.
+                            info!("main: clipboard to guest ({} bytes)", text.len());
                             self.send_clipboard_data(&text).await?;
                         }
                     }
