@@ -249,6 +249,15 @@ pub struct RyllApp {
     // reconnect can re-fit by clearing it.
     last_auto_resize: Option<(u32, u32)>,
 
+    // User-controlled opt-out of the always-fit behaviour.
+    // True (default) => auto-fit the window to every primary
+    // SurfaceCreated. False => leave the window alone; the
+    // surface renders at native pixel size inside whatever
+    // window the user has chosen (may overflow or letterbox).
+    // Toggled live via the hamburger menu; initial value comes
+    // from `--no-obey-guest-size` (inverted).
+    obey_guest_size: bool,
+
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
 
@@ -434,6 +443,7 @@ impl RyllApp {
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
         pedantic_config: Option<PedanticConfig>,
+        obey_guest_size: bool,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -575,6 +585,7 @@ impl RyllApp {
             forwarded_buttons: 0,
             pending_resize: None,
             last_auto_resize: None,
+            obey_guest_size,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
@@ -1681,7 +1692,9 @@ impl eframe::App for RyllApp {
         let is_max = ctx.input(|i| {
             i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
         });
-        if let Some((w, h, aw, ah)) = compute_auto_resize(pending, self.last_auto_resize, is_max) {
+        if let Some((w, h, aw, ah)) =
+            compute_auto_resize(pending, self.last_auto_resize, is_max, self.obey_guest_size)
+        {
             let total_h = h + STATS_BAR_HEIGHT;
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
             // Seed last_sent_resize so maybe_send_monitors_resize
@@ -1925,6 +1938,8 @@ impl eframe::App for RyllApp {
 
                         ui.separator();
                         egui::menu::menu_button(ui, "☰", |ui| {
+                            ui.checkbox(&mut self.obey_guest_size, "Obey guest size hints");
+                            ui.separator();
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
                             ui.checkbox(&mut self.show_usb_panel, "USB");
                             ui.checkbox(&mut self.show_webdav_panel, "Folders");
@@ -3041,7 +3056,9 @@ impl eframe::App for RyllApp {
 /// is the (8-aligned) size of the last auto-resize we
 /// issued, or None if we have not auto-resized yet. `is_max`
 /// is true when the viewport is maximised or fullscreen
-/// and we should not change the inner size.
+/// and we should not change the inner size. `obey` is the
+/// user-controlled toggle: when false the function always
+/// returns None so the window is never auto-fitted.
 ///
 /// Returns Some((width, height, aligned_w, aligned_h))
 /// where `(width, height)` are the values to pass to
@@ -3054,9 +3071,10 @@ fn compute_auto_resize(
     pending: Option<(f32, f32)>,
     last_auto: Option<(u32, u32)>,
     is_max: bool,
+    obey: bool,
 ) -> Option<(f32, f32, u32, u32)> {
     let (w, h) = pending?;
-    if is_max {
+    if !obey || is_max {
         return None;
     }
     let aligned_w = ((w as u32).max(8) / 8) * 8;
@@ -3417,6 +3435,9 @@ pub async fn run_headless(
     capture: Option<Arc<CaptureSession>>,
     monitors: u8,
     pedantic_config: Option<PedanticConfig>,
+    // Headless mode has no window to resize, so this flag is accepted for
+    // CLI symmetry but is not used.
+    _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -3719,37 +3740,52 @@ mod tests {
     #[test]
     fn compute_auto_resize_decisions() {
         // No pending event => no resize.
-        assert_eq!(compute_auto_resize(None, None, false), None);
+        assert_eq!(compute_auto_resize(None, None, false, true), None);
 
         // Pending size, never resized before, not maximised =>
         // resize to the aligned target.
         assert_eq!(
-            compute_auto_resize(Some((1024.0, 768.0)), None, false),
+            compute_auto_resize(Some((1024.0, 768.0)), None, false, true),
             Some((1024.0, 768.0, 1024, 768)),
         );
 
         // Same target as last_auto => skip (dedup).
         assert_eq!(
-            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false,),
+            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false, true),
             None,
         );
 
         // Maximised => skip even when target differs.
         assert_eq!(
-            compute_auto_resize(Some((1024.0, 768.0)), Some((640, 480)), true,),
+            compute_auto_resize(Some((1024.0, 768.0)), Some((640, 480)), true, true),
             None,
         );
 
         // Non-aligned size gets aligned to 8 px boundary.
         assert_eq!(
-            compute_auto_resize(Some((1366.0, 770.0)), None, false),
+            compute_auto_resize(Some((1366.0, 770.0)), None, false, true),
             Some((1366.0, 770.0, 1360, 768)),
         );
 
         // Differs after alignment from last_auto => resize.
         assert_eq!(
-            compute_auto_resize(Some((1280.0, 800.0)), Some((1024, 768)), false,),
+            compute_auto_resize(Some((1280.0, 800.0)), Some((1024, 768)), false, true),
             Some((1280.0, 800.0, 1280, 800)),
+        );
+
+        // obey = false short-circuits even when the target
+        // differs and the window is not maximised.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), None, false, false,),
+            None,
+        );
+
+        // obey = false short-circuits even when the target equals
+        // last_auto (would dedup anyway, but we want the obey
+        // gate to be the reason).
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false, false,),
+            None,
         );
     }
 

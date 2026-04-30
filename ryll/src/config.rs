@@ -89,6 +89,13 @@ pub struct Args {
     /// Inter-character delay for paste-as-keystrokes in milliseconds
     #[arg(long = "paste-char-delay-ms", default_value_t = 16)]
     pub paste_char_delay_ms: u32,
+
+    /// Start with "obey guest size hints" turned off so the
+    /// window does not auto-fit when the guest changes
+    /// resolution. Equivalent to opening the hamburger menu
+    /// and unchecking the checkbox after launch.
+    #[arg(long, default_value_t = false)]
+    pub no_obey_guest_size: bool,
 }
 
 /// SPICE connection configuration

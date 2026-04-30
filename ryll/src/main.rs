@@ -140,6 +140,8 @@ fn main() -> Result<()> {
         None
     };
 
+    let obey_guest_size = !args.no_obey_guest_size;
+
     if args.headless {
         run_headless(
             config,
@@ -148,6 +150,7 @@ fn main() -> Result<()> {
             share_dir,
             capture,
             pedantic_config,
+            obey_guest_size,
         )
     } else {
         run_gui(
@@ -157,6 +160,7 @@ fn main() -> Result<()> {
             share_dir,
             capture,
             pedantic_config,
+            obey_guest_size,
         )
     }
 }
@@ -168,6 +172,7 @@ fn run_headless(
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     pedantic_config: Option<PedanticConfig>,
+    obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -188,6 +193,7 @@ fn run_headless(
             capture,
             args.monitors,
             pedantic_config,
+            obey_guest_size,
         )
         .await
     })
@@ -200,6 +206,7 @@ fn run_gui(
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     pedantic_config: Option<PedanticConfig>,
+    obey_guest_size: bool,
 ) -> Result<()> {
     info!("Starting GUI");
 
@@ -229,6 +236,7 @@ fn run_gui(
                 capture,
                 monitors,
                 pedantic_config,
+                obey_guest_size,
             )))
         }),
     )
