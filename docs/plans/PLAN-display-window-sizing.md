@@ -214,10 +214,11 @@ Concretely:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Always-fit + dedup | PLAN-display-window-sizing-phase-01-always-fit.md | Not started |
+| 1. Always-fit + dedup | PLAN-display-window-sizing-phase-01-always-fit.md | Complete |
 | 2. Hamburger toggle + CLI flag | PLAN-display-window-sizing-phase-02-toggle.md | Not started |
 | 3. Tests | PLAN-display-window-sizing-phase-03-tests.md | Not started |
 | 4. Docs | PLAN-display-window-sizing-phase-04-docs.md | Not started |
+| 5. Resolution-change notifications | PLAN-display-window-sizing-phase-05-notify.md | Not started |
 
 Phase 1 is the bug fix proper. Phase 2 adds the escape
 hatch. Phase 3 covers regression tests for the resize
@@ -226,6 +227,44 @@ state machine (the round-trip between
 `SurfaceCreated` is fiddly enough to deserve a unit test
 that drives both with synthesised events). Phase 4 updates
 ARCHITECTURE.md and README.md.
+
+Phase 5 surfaces guest-driven resolution changes through
+the existing notifications channel
+(`ryll/src/notifications.rs`). The motivation is operator
+visibility: when uncalibrated-sextant cycles through
+`640×480 → 800×600 → 1024×768` during boot the journey is
+informative ("the test actually walked through various
+modes"), but it happens too quickly to read off the screen.
+A short rate-limit caps the chattiness when the user
+drag-resizes the ryll window through many sizes (each drag
+that aligns to a fresh 8-pixel bucket can round-trip
+through the guest and produce a `SURFACE_CREATE`). Sketch:
+
+* Trigger: every primary `SurfaceCreated` (and primary
+  `ImageReady` auto-create) whose `(width, height)` differs
+  from the previous primary surface.
+* Source: `NotificationSource::Internal` at
+  `NotifySeverity::Info`.
+* Message: something like
+  `"Display resolution: WxH"`. Phase 5 settles the wording.
+* Rate limiting: at least one of either (a) coalesce
+  in-flight entries during a short debounce window
+  (~500ms), so a boot-time storm collapses but distinct
+  changes separated by user pauses still all surface, or
+  (b) reuse the existing 30-second dedup window in
+  `notifications.rs:NOTIFICATION_DEDUP_WINDOW` if the
+  message string is shaped so identical resolutions fold
+  naturally. The phase plan picks one and explains the
+  tradeoff. Do **not** notify on user-driven resizes
+  (those originate from `maybe_send_monitors_resize`, not
+  from inbound `SurfaceCreated`) and do **not** notify on
+  ryll's own auto-fit (it does not produce its own
+  `SurfaceCreated`).
+* No notification on the very first `SurfaceCreated` of a
+  session — that is "initial connection", not a "change",
+  and is already implicit from the connection event. Open
+  question for the phase plan: do we want it anyway as a
+  cheap "you are connected at WxH" confirmation?
 
 ## Agent guidance
 
