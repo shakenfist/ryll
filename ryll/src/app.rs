@@ -238,14 +238,16 @@ pub struct RyllApp {
     // forwarding is suppressed (e.g. bug report dialog opens).
     forwarded_buttons: u32,
 
-    // Pending viewport resize from a new surface
+    // Pending viewport resize from a new primary-surface event.
+    // Only set for (display_channel_id, surface_id) == (0, 0).
     pending_resize: Option<(f32, f32)>,
 
-    // Whether the window has been auto-sized to the remote
-    // surface yet.  We do this once on first connection; after
-    // that the user drives window sizing and the guest follows
-    // via VDAgentMonitorsConfig.
-    initial_resize_done: bool,
+    // (8-aligned width, height) of the last auto-resize we
+    // issued. None until the first resize. Used to dedup so we
+    // don't re-issue ViewportCommand::InnerSize every frame
+    // while the window already matches the surface, and so
+    // reconnect can re-fit by clearing it.
+    last_auto_resize: Option<(u32, u32)>,
 
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
@@ -572,7 +574,7 @@ impl RyllApp {
             last_modifiers: None,
             forwarded_buttons: 0,
             pending_resize: None,
-            initial_resize_done: false,
+            last_auto_resize: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
@@ -686,6 +688,7 @@ impl RyllApp {
         self.last_modifiers = None;
         self.forwarded_buttons = 0;
         self.pending_resize = None;
+        self.last_auto_resize = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
         self.usb_tx = Some(usb_tx);
         self.webdav_tx = Some(webdav_tx);
@@ -796,7 +799,9 @@ impl RyllApp {
                         (display_channel_id, surface_id),
                         DisplaySurface::new(surface_id, width, height),
                     );
-                    self.pending_resize = Some((width as f32, height as f32));
+                    if display_channel_id == 0 && surface_id == 0 {
+                        self.pending_resize = Some((width as f32, height as f32));
+                    }
                 }
 
                 ChannelEvent::SurfaceDestroyed {
@@ -832,7 +837,9 @@ impl RyllApp {
                             surface_id, surf_w, surf_h, left, top, width, height
                         );
                         e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
-                        self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                        if display_channel_id == 0 && surface_id == 0 {
+                            self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                        }
                     }
 
                     let surface = self
@@ -1664,27 +1671,25 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
-        // Resize viewport to match the remote surface (plus stats bar)
-        // on first connection only.  After that, window sizing is
-        // user-driven and the guest follows via VDAgentMonitorsConfig.
-        if let Some((w, h)) = self.pending_resize.take() {
-            if !self.initial_resize_done {
-                let total_h = h + STATS_BAR_HEIGHT;
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
-                // Seed last_sent_resize so maybe_send_monitors_resize
-                // doesn't echo our own resize back to the guest as a
-                // VDAgentMonitorsConfig change.  Mirror the alignment
-                // and minimum-size logic from that function.
-                let mut aw = w as u32;
-                let mut ah = h as u32;
-                aw -= aw % 8;
-                ah -= ah % 8;
-                self.last_sent_resize = Some((aw.max(8), ah.max(8)));
-                self.initial_resize_done = true;
-                info!("app: initial window resize to {}x{}", w as u32, h as u32);
-            } else {
-                debug!("app: surface resize {}x{} (window already sized)", w, h);
-            }
+        // Resize viewport to match the remote surface (plus stats
+        // bar) whenever a new primary surface differs from the
+        // size we last fitted to. Maximised/fullscreen windows
+        // are left alone — we cannot meaningfully change their
+        // inner size, and the surface will render at native size
+        // inside the available area.
+        let pending = self.pending_resize.take();
+        let is_max = ctx.input(|i| {
+            i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+        });
+        if let Some((w, h, aw, ah)) = compute_auto_resize(pending, self.last_auto_resize, is_max) {
+            let total_h = h + STATS_BAR_HEIGHT;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+            // Seed last_sent_resize so maybe_send_monitors_resize
+            // doesn't echo our own resize back to the guest as a
+            // VDAgentMonitorsConfig change.
+            self.last_sent_resize = Some((aw, ah));
+            self.last_auto_resize = Some((aw, ah));
+            info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
         }
 
         self.maybe_send_monitors_resize(ctx);
@@ -3028,6 +3033,40 @@ impl eframe::App for RyllApp {
     }
 }
 
+/// Decide whether to issue a `ViewportCommand::InnerSize`
+/// to fit the remote surface, and what size to ask for.
+///
+/// `pending` is the surface size pulled from
+/// `pending_resize` (logical pixels, f32). `last_auto`
+/// is the (8-aligned) size of the last auto-resize we
+/// issued, or None if we have not auto-resized yet. `is_max`
+/// is true when the viewport is maximised or fullscreen
+/// and we should not change the inner size.
+///
+/// Returns Some((width, height, aligned_w, aligned_h))
+/// where `(width, height)` are the values to pass to
+/// `ViewportCommand::InnerSize` (with `STATS_BAR_HEIGHT`
+/// added to the height — see the call site) and
+/// `(aligned_w, aligned_h)` are the values to store in
+/// `last_auto_resize` and seed into `last_sent_resize`.
+/// Returns None when no resize should fire.
+fn compute_auto_resize(
+    pending: Option<(f32, f32)>,
+    last_auto: Option<(u32, u32)>,
+    is_max: bool,
+) -> Option<(f32, f32, u32, u32)> {
+    let (w, h) = pending?;
+    if is_max {
+        return None;
+    }
+    let aligned_w = ((w as u32).max(8) / 8) * 8;
+    let aligned_h = ((h as u32).max(8) / 8) * 8;
+    if last_auto == Some((aligned_w, aligned_h)) {
+        return None;
+    }
+    Some((w, h, aligned_w, aligned_h))
+}
+
 /// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
 fn default_arrow_cursor() -> Vec<u8> {
     #[rustfmt::skip]
@@ -3675,6 +3714,43 @@ mod tests {
         let mut tracker = LatencyTracker::new();
         tracker.record(12.34);
         assert_eq!(tracker.label(), "12.3ms");
+    }
+
+    #[test]
+    fn compute_auto_resize_decisions() {
+        // No pending event => no resize.
+        assert_eq!(compute_auto_resize(None, None, false), None);
+
+        // Pending size, never resized before, not maximised =>
+        // resize to the aligned target.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), None, false),
+            Some((1024.0, 768.0, 1024, 768)),
+        );
+
+        // Same target as last_auto => skip (dedup).
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false,),
+            None,
+        );
+
+        // Maximised => skip even when target differs.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((640, 480)), true,),
+            None,
+        );
+
+        // Non-aligned size gets aligned to 8 px boundary.
+        assert_eq!(
+            compute_auto_resize(Some((1366.0, 770.0)), None, false),
+            Some((1366.0, 770.0, 1360, 768)),
+        );
+
+        // Differs after alignment from last_auto => resize.
+        assert_eq!(
+            compute_auto_resize(Some((1280.0, 800.0)), Some((1024, 768)), false,),
+            Some((1280.0, 800.0, 1280, 800)),
+        );
     }
 
     #[test]
