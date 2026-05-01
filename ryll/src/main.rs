@@ -22,6 +22,7 @@ mod capture {
 mod channels;
 mod config;
 mod display;
+mod display_gui;
 mod input_egui;
 mod settings;
 mod usb;

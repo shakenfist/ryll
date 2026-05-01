@@ -22,7 +22,7 @@ use crate::channels::{
     WebdavCommand,
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
-use crate::display::DisplaySurface;
+use crate::display_gui::GuiSurface;
 use crate::input_egui::{egui_key_to_logical, mouse_button_to_spice};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
@@ -224,7 +224,7 @@ pub struct RyllApp {
     volume_control: Arc<VolumeControl>,
 
     // Display state
-    surfaces: HashMap<(u8, u32), DisplaySurface>,
+    surfaces: HashMap<(u8, u32), GuiSurface>,
 
     // Cursor state
     cursor_pos: (u16, u16),
@@ -853,7 +853,7 @@ impl RyllApp {
                     );
                     self.surfaces.insert(
                         (display_channel_id, surface_id),
-                        DisplaySurface::new(surface_id, width, height),
+                        GuiSurface::new(surface_id, width, height),
                     );
                     if is_primary_surface(display_channel_id, surface_id) {
                         if auto_fit_size_acceptable(width, height) {
@@ -902,7 +902,7 @@ impl RyllApp {
                             "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
                             surface_id, surf_w, surf_h, left, top, width, height
                         );
-                        e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
+                        e.insert(GuiSurface::new(surface_id, surf_w, surf_h));
                         if is_primary_surface(display_channel_id, surface_id) {
                             if auto_fit_size_acceptable(surf_w, surf_h) {
                                 self.pending_resize = Some((surf_w as f32, surf_h as f32));
@@ -921,7 +921,8 @@ impl RyllApp {
                     let surface = self
                         .surfaces
                         .get_mut(&(display_channel_id, surface_id))
-                        .unwrap();
+                        .unwrap()
+                        .surface_mut();
                     surface.blit(left, top, width, height, &pixels);
                     self.stats.frames_received += 1;
                     debug!(
@@ -941,9 +942,15 @@ impl RyllApp {
                     chroma_rgba,
                     ..
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
-                    {
-                        surface.blit_chroma(left, top, width, height, &pixels, chroma_rgba);
+                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
+                        gs.surface_mut().blit_chroma(
+                            left,
+                            top,
+                            width,
+                            height,
+                            &pixels,
+                            chroma_rgba,
+                        );
                         self.stats.frames_received += 1;
                     } else {
                         debug!("app: ImageReadyChroma on unknown surface {}", surface_id);
@@ -961,9 +968,9 @@ impl RyllApp {
                     alpha,
                     ..
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
-                    {
-                        surface.blit_alpha(left, top, width, height, &pixels, alpha);
+                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
+                        gs.surface_mut()
+                            .blit_alpha(left, top, width, height, &pixels, alpha);
                         self.stats.frames_received += 1;
                     } else {
                         debug!("app: ImageReadyAlpha on unknown surface {}", surface_id);
@@ -977,9 +984,9 @@ impl RyllApp {
                     colour,
                     clip,
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
-                    {
-                        surface.fill_rect(left, top, right, bottom, colour, &clip);
+                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
+                        gs.surface_mut()
+                            .fill_rect(left, top, right, bottom, colour, &clip);
                         self.stats.frames_received += 1;
                     } else {
                         debug!("app: FillRect on unknown surface {}", surface_id);
@@ -994,9 +1001,9 @@ impl RyllApp {
                     dest_rect: (left, top, right, bottom),
                     clip,
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
-                    {
-                        surface.copy_bits(src_x, src_y, left, top, right, bottom, &clip);
+                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
+                        gs.surface_mut()
+                            .copy_bits(src_x, src_y, left, top, right, bottom, &clip);
                         self.stats.frames_received += 1;
                     } else {
                         debug!("app: CopyBits on unknown surface {}", surface_id);
@@ -1009,9 +1016,9 @@ impl RyllApp {
                     rect: (left, top, right, bottom),
                     clip,
                 } => {
-                    if let Some(surface) = self.surfaces.get_mut(&(display_channel_id, surface_id))
-                    {
-                        surface.invert_rect(left, top, right, bottom, &clip);
+                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
+                        gs.surface_mut()
+                            .invert_rect(left, top, right, bottom, &clip);
                         self.stats.frames_received += 1;
                     } else {
                         debug!("app: Invert on unknown surface {}", surface_id);
@@ -1031,6 +1038,7 @@ impl RyllApp {
                         if let Some(surface) = self
                             .surfaces
                             .values()
+                            .map(|gs| gs.surface())
                             .max_by_key(|s| (s.width as u64) * (s.height as u64))
                         {
                             capture.frame(0, surface.pixels(), surface.width, surface.height);
@@ -1316,10 +1324,13 @@ impl RyllApp {
         snap.surfaces = self
             .surfaces
             .values()
-            .map(|s| SurfaceInfo {
-                surface_id: s.id,
-                width: s.width,
-                height: s.height,
+            .map(|gs| {
+                let s = gs.surface();
+                SurfaceInfo {
+                    surface_id: s.id,
+                    width: s.width,
+                    height: s.height,
+                }
             })
             .collect();
         snap.cursor_pos = self.cursor_pos;
@@ -1357,6 +1368,7 @@ impl RyllApp {
         let Some(surface) = self
             .surfaces
             .values()
+            .map(|gs| gs.surface())
             .max_by_key(|s| (s.width as u64) * (s.height as u64))
         else {
             let slot = Arc::new(std::sync::Mutex::new(Some(Err(anyhow::anyhow!(
@@ -1467,6 +1479,7 @@ impl RyllApp {
         let surface_data = if report_type == BugReportType::Display {
             self.surfaces
                 .values()
+                .map(|gs| gs.surface())
                 .max_by_key(|s| (s.width as u64) * (s.height as u64))
                 .map(|s| (s.pixels(), s.width, s.height))
         } else {
@@ -1668,7 +1681,8 @@ impl RyllApp {
         let paths = screenshot_paths(&base_path, sorted.len());
 
         let mut written = Vec::new();
-        for ((_, surface), path) in sorted.into_iter().zip(paths) {
+        for ((_, gs), path) in sorted.into_iter().zip(paths) {
+            let surface = gs.surface();
             let png_bytes =
                 crate::bugreport::encode_png(surface.pixels(), surface.width, surface.height)?;
             std::fs::write(&path, &png_bytes)?;
@@ -2669,10 +2683,9 @@ impl eframe::App for RyllApp {
                     .or_else(|| keys.first().copied());
 
                 if let Some(primary_key) = primary_key {
-                    if let Some(surface) = self.surfaces.get_mut(&primary_key) {
-                        let width = surface.width;
-                        let height = surface.height;
-                        let texture = surface.texture(ctx);
+                    if let Some(gs) = self.surfaces.get_mut(&primary_key) {
+                        let (width, height) = (gs.surface().width, gs.surface().height);
+                        let texture = gs.texture(ctx);
                         let size = egui::vec2(width as f32, height as f32);
 
                         let response = ui.add(

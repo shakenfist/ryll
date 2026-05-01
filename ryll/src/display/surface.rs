@@ -1,5 +1,11 @@
-/// Display surface management for egui rendering
-use eframe::egui::{ColorImage, Context, TextureFilter, TextureHandle, TextureOptions};
+/// Display surface: pixel substrate for SPICE draw operations.
+///
+/// Holds an RGBA pixel buffer plus a dirty flag. Consumers (the
+/// GUI texture cache today; the H.264 encoder and WebRTC pipeline
+/// in future) wrap this and bind their own representation. No
+/// rendering-framework imports live here — the wrapper that turns
+/// these pixels into a GUI texture lives in `display_gui.rs`
+/// alongside the rest of the GUI plumbing.
 use tracing::warn;
 
 /// Maximum surface side length. Server-supplied or auto-computed
@@ -9,13 +15,13 @@ use tracing::warn;
 /// 16 384 × 16 384 × 4 = 1 GiB — already past any real display).
 pub(crate) const MAX_SURFACE_DIMENSION: u32 = 16_384;
 
-/// A display surface that holds pixel data and can be rendered by egui
+/// A display surface that holds RGBA pixel data and tracks
+/// whether it has been mutated since the last consumer read.
 pub struct DisplaySurface {
     pub id: u32,
     pub width: u32,
     pub height: u32,
     pixels: Vec<u8>, // RGBA format
-    texture: Option<TextureHandle>,
     dirty: bool,
 }
 
@@ -52,7 +58,6 @@ impl DisplaySurface {
             width,
             height,
             pixels,
-            texture: None,
             dirty: true,
         }
     }
@@ -461,43 +466,27 @@ impl DisplaySurface {
         }
     }
 
-    /// Get the current texture handle, creating/updating if needed
-    pub fn texture(&mut self, ctx: &Context) -> &TextureHandle {
-        if self.texture.is_none() || self.dirty {
-            let image = ColorImage::from_rgba_unmultiplied(
-                [self.width as usize, self.height as usize],
-                &self.pixels,
-            );
-
-            let options = TextureOptions {
-                magnification: TextureFilter::Nearest,
-                minification: TextureFilter::Linear,
-                ..Default::default()
-            };
-
-            if let Some(ref mut tex) = self.texture {
-                tex.set(image, options);
-            } else {
-                let name = format!("surface_{}", self.id);
-                self.texture = Some(ctx.load_texture(name, image, options));
-            }
-
-            self.dirty = false;
-        }
-
-        self.texture.as_ref().unwrap()
-    }
-
     /// Get the surface dimensions
     #[allow(dead_code)]
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// Check if the surface needs to be redrawn
+    /// Check if the surface needs to be redrawn. Non-mutating peek;
+    /// use `consume_dirty()` to read-and-clear the flag.
     #[allow(dead_code)]
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Read the dirty flag and clear it. Returns `true` if the
+    /// pixel buffer was mutated since the last call. Consumers
+    /// (e.g. the GUI texture cache, future video encoder) call
+    /// this to decide whether to refresh their representation.
+    pub fn consume_dirty(&mut self) -> bool {
+        let was_dirty = self.dirty;
+        self.dirty = false;
+        was_dirty
     }
 
     /// Get raw pixel data (for headless mode statistics)
