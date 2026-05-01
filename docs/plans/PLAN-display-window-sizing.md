@@ -215,8 +215,8 @@ Concretely:
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Always-fit + dedup | PLAN-display-window-sizing-phase-01-always-fit.md | Complete |
-| 2. Hamburger toggle + CLI flag | PLAN-display-window-sizing-phase-02-toggle.md | Not started |
-| 3. Tests | PLAN-display-window-sizing-phase-03-tests.md | Not started |
+| 2. Hamburger toggle + CLI flag | PLAN-display-window-sizing-phase-02-toggle.md | Complete |
+| 3. Tests | PLAN-display-window-sizing-phase-03-tests.md | Complete |
 | 4. Docs | PLAN-display-window-sizing-phase-04-docs.md | Not started |
 | 5. Resolution-change notifications | PLAN-display-window-sizing-phase-05-notify.md | Not started |
 
