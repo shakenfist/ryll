@@ -22,6 +22,24 @@ Ryll is a SPICE (Simple Protocol for Independent Computing Environments) client
 implemented in Rust. It connects to SPICE servers (typically QEMU virtual machines)
 and displays their framebuffer, while sending keyboard and mouse input.
 
+Ryll is designed as a **multi-modal SPICE client**: the
+SPICE protocol stack, channel handlers, decompression, audio
+pipeline, and display surface compositing are all frontend-
+agnostic, and each delivery mode is a thin layer over that
+shared core. The supported modes are:
+
+| Mode | Frontend | Status | Primary use |
+|------|----------|--------|-------------|
+| GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
+| Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
+| Web | Browser via WebRTC | Concept plan | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+
+A feature is not considered complete when it works in only
+one mode. Every feature should be reachable from every mode
+that can physically support it; intrinsic mode-specific
+features (egui-only UI panels, browser-only clipboard APIs)
+should be documented as such so the parity gaps are visible.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         ryll                                 │

@@ -61,7 +61,14 @@ Ryll uses:
    efficient.
 
 3. **Headless mode** - Essential for automated testing. Runs the full protocol
-   stack without GUI overhead.
+   stack without GUI overhead. Headless is also the first evidence of the
+   project's broader **multi-modal client** stance: the SPICE stack is
+   frontend-agnostic, and additional frontends (a browser-facing web mode is in
+   concept-plan stage in `docs/plans/PLAN-web-frontend.md`) are intended to be
+   first-class peers of the GUI rather than retrofits. When you add or modify a
+   feature, ask which modes it should be reachable from; if a mode physically
+   cannot host the feature, say so in the docs rather than leaving the gap
+   unstated.
 
 4. **Cadence mode** - Sends automatic keystrokes every 2 seconds to generate
    predictable input→display latency measurements.

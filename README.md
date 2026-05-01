@@ -1,6 +1,8 @@
 # Ryll - A Rust SPICE VDI Test Client
 
-Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Computing Environments) client, designed for testing the Kerbside SPICE proxy. It provides both a GUI mode using egui and a headless mode for automated testing.
+Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Computing Environments) client, designed for testing the Kerbside SPICE proxy.
+
+Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a first-class citizen and shares as much functionality as the mode itself can physically support. The supported modes today are a **GUI** (egui / eframe desktop window) for interactive day-to-day use and a **headless** mode for automated testing, CI, and cadence latency probing. A third **web** mode (browser frontend over WebRTC) is in concept-plan stage as a future replacement for stacks like Kasm + Apache Guacamole; see `docs/plans/PLAN-web-frontend.md`.
 
 ## Features
 

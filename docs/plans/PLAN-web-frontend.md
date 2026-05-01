@@ -116,7 +116,11 @@ done. Specifically:
 - **Headless mode.** Already used for cadence/automated
   testing. Proves the SPICE stack runs without an attached
   GUI; the web transcoder is "headless mode plus an encoder
-  plus a browser-facing transport".
+  plus a browser-facing transport". The mere existence of
+  headless mode is also evidence that ryll has been
+  architected to support more than one frontend, which
+  makes the web frontend a natural extension rather than a
+  retrofit (see *Design philosophy* below).
 - **Reconnect.** The reconnect lifecycle introduced for the
   GUI applies equally to a web session — a transcoder
   process can drop per-session state and re-handshake without
@@ -158,6 +162,72 @@ done. Specifically:
    without dragging in egui/eframe, that code needs to be
    either extracted into a new library crate or hidden
    behind cargo features. See open question (1).
+
+### Design philosophy: ryll is a multi-modal SPICE client
+
+This plan formalises something that has been implicit in the
+codebase since headless mode was introduced: **ryll is
+intended to be a multi-modal SPICE client, not a
+GUI-with-a-test-harness.** The ambition is that every
+delivery mode is a first-class citizen and shares as much
+functionality as the mode itself can physically support.
+
+After this plan lands the supported modes are:
+
+| Mode | Frontend | Primary use |
+|------|----------|-------------|
+| GUI | egui / eframe desktop window | Interactive day-to-day VDI access from the operator's own machine |
+| Headless | none (stdout + metrics) | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
+| Web (planned) | Browser via WebRTC | Interactive VDI access from any browser on the LAN, replacing Kasm + Guacamole |
+
+The implication for design and review work going forward
+is that **a feature is not "done" when it works in the GUI**;
+it should also be reachable from headless and (once it
+exists) from the web frontend, modulo features that are
+intrinsic to one mode (e.g. egui-specific UI panels, or
+browser-only clipboard APIs). When a feature *cannot*
+exist in a given mode, the docs should say so explicitly
+rather than leaving the gap unstated.
+
+Today's codebase does not actually live up to this rule:
+many features grew up GUI-first and have only partial (or
+no) headless equivalents. The web frontend cannot meaningfully
+be planned without first knowing where the GUI/headless
+parity already drifts — otherwise the web frontend will just
+inherit those gaps silently. Hence the dedicated audit
+phase below (Phase 0). The audit produces a feature × mode
+matrix (GUI / headless / web-planned) that:
+
+- becomes input to the web-frontend phase plans (so each
+  feature is delivered to the web alongside any catch-up
+  work the other modes need);
+- doubles as the to-do list for an independent
+  **driving-down-the-gaps** workstream that does not need
+  to wait for the web frontend to land.
+
+Concrete consequences for this plan:
+
+- **Phase 0 (parity audit) runs first.** Its output is a
+  read-only artifact (`docs/multi-mode-parity.md`) that the
+  rest of the plan depends on. Gap-closing work spawned by
+  the audit is tracked outside this plan as its own
+  follow-on plan(s); this plan does not absorb that scope.
+- **Phase 1 (renderer extraction) is non-negotiable.** It
+  turns "GUI vs headless" from a top-level branch in
+  `main.rs` into a thin frontend layered over a shared
+  library. Once extracted, the web frontend becomes "third
+  consumer of the same library" rather than "second copy
+  of the channel handlers".
+- **Feature parity is a planning input, not an
+  afterthought.** Each phase plan should explicitly call
+  out which features it adds to the web frontend, and
+  whether the GUI and headless paths need follow-up work
+  to retain or regain parity. The Phase 0 matrix is the
+  reference.
+- **Documentation always names the mode.** Feature lists
+  in the README, ARCHITECTURE, and AGENTS files should
+  identify which modes a feature is available in, so the
+  parity gaps are visible to operators and contributors.
 
 ### Why not something else
 
@@ -473,6 +543,7 @@ resolve.
 
 | Phase | Plan | Status |
 |-------|------|--------|
+| 0. Multi-mode parity audit (GUI vs headless today) | PLAN-web-frontend-phase-00-parity-audit.md | Not written |
 | 1. Renderer extraction (`shakenfist-spice-renderer` crate) | PLAN-web-frontend-phase-01-extract.md | Not written |
 | 2. Encoder pipeline (framebuffer → H.264/VP8 NAL units) | PLAN-web-frontend-phase-02-encoder.md | Not written |
 | 3. WebRTC plumbing (`webrtc-rs`, video track, audio track, datachannel) | PLAN-web-frontend-phase-03-webrtc.md | Not written |
@@ -481,6 +552,41 @@ resolve.
 | 6. Reconnect + lifecycle | PLAN-web-frontend-phase-06-lifecycle.md | Not written |
 | 7. CI build + packaging + docs | PLAN-web-frontend-phase-07-ci.md | Not written |
 | 8. Operator docs + systemd example + cert recipes | PLAN-web-frontend-phase-08-docs.md | Not written |
+
+### Phase 0: Multi-mode parity audit
+
+Survey the existing codebase and produce a single read-only
+artifact, `docs/multi-mode-parity.md`, that lists every
+user-facing ryll feature in a row and marks for each mode
+(GUI / headless / web-planned) one of:
+
+- **available** — feature is fully reachable in this mode;
+- **partial** — only some of the feature is reachable
+  (e.g. CLI flag exists but no runtime control);
+- **missing** — feature is not reachable today;
+- **n/a — intrinsic** — the feature physically cannot
+  exist in this mode (justification required).
+
+Source material: walk `ryll/src/`, every `--*` CLI flag,
+the menu entries in `app.rs`, the side panels (USB,
+Folders, Notifications, Traffic), the bug-report and
+screenshot hotkeys, the cadence/paste-as-keystrokes
+machinery, and the entries in `README.md`'s features list.
+Cross-check against the ARCHITECTURE.md mode table added
+alongside this plan. For every "missing" or "partial"
+cell, link to the relevant source location so a follow-on
+plan can be written without rediscovering the gap.
+
+The audit deliberately does **not** propose fixes — it is
+a baseline. Closing the gaps is tracked in a separate
+follow-on plan (`PLAN-multi-mode-parity-driveup.md`,
+written after Phase 0 lands) so the web-frontend phases
+do not accidentally absorb headless-feature backlog work.
+The artifact is expected to be a living document: when a
+feature is added, its row is added; when a mode gains a
+feature, the cell is updated; reviewers are expected to
+keep it honest. Acceptance: the matrix exists, every
+README feature appears in it, and every cell has a value.
 
 ### Phase 1: Renderer extraction
 
@@ -607,6 +713,9 @@ We will know the MVP has landed when:
 * The browser tab can be closed and re-opened (same URL)
   within ~30 seconds and the SPICE session resumes
   without a server-side reconnect.
+* `docs/multi-mode-parity.md` (the Phase 0 artifact)
+  exists and every feature listed in `README.md` appears
+  in the matrix with a value in every mode column.
 * `pre-commit run --all-files` still passes.
 * `cargo test --workspace` still passes — the existing
   `ryll` binary continues to work unchanged after the
@@ -616,6 +725,15 @@ We will know the MVP has landed when:
 
 ### Future work
 
+* **Drive down GUI ↔ headless ↔ web parity gaps.** The
+  Phase 0 audit is a baseline, not a fix. Each gap that
+  the audit surfaces should spawn its own follow-on plan
+  (collected under a `PLAN-multi-mode-parity-driveup.md`
+  master plan written after Phase 0 lands). This work
+  proceeds in parallel with the rest of this plan and is
+  *not* a prerequisite for the web frontend MVP — the web
+  frontend deliberately ships with a minimal feature set
+  in MVP and the parity work catches up incrementally.
 * **HTTPS / TLS.** Take a cert+key pair on the CLI; document
   `mkcert` / `step-ca` / Let's Encrypt recipes. Required
   before any feature that wants a secure context (clipboard
