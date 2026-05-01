@@ -61,6 +61,7 @@ lz4_flex = "0.11"
 # cargo-release; see tools/cut-release.sh.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.4" }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.4" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.4" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)

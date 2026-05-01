@@ -1,0 +1,64 @@
+[package]
+name = "shakenfist-spice-renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared SPICE rendering substrate for ryll: software framebuffer, channel handlers, session orchestration."
+readme = "README.md"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+
+# Binary protocol handling
+bytes = "1"
+byteorder = "1"
+
+# Cryptography for SPICE auth
+rsa = "0.9"
+sha1 = "0.10"
+rand = "0.8"
+
+# Audio playback. A dedicated audio thread owns the cpal stream
+# so it never needs to be Send. The rtrb ring buffer provides
+# lock-free sample transfer from the tokio network task.
+cpal = "0.15"
+opus-decoder = "0.1"
+rtrb = "0.3"
+
+# Logging
+tracing = "0.1"
+
+# LZ4 compression/decompression for general data (webdav, usbredir).
+# SPICE image LZ4 lives in shakenfist-spice-compression below.
+lz4_flex = "0.11"
+
+# Extracted SPICE codecs. Path+version dual-spec: cargo uses the
+# path when building locally and the published crate when resolving
+# from crates.io. Versions are kept in lockstep via
+# cargo-release; see tools/cut-release.sh.
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.4" }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.4" }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.4" }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Async channels
+async-channel = "2"
+
+# TCP keepalive configuration (matches spice-gtk behaviour)
+socket2 = { version = "0.6", features = ["all"] }
+
+# USB device access (pure Rust, no libusb)
+nusb = "0.2"
