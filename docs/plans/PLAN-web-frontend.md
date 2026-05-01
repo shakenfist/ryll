@@ -155,13 +155,17 @@ done. Specifically:
    work in non-secure contexts. HTTPS is deferred until a
    feature that demands a secure context lands (clipboard
    sync, Pointer Lock on Chrome — see open question (9)).
-5. **Reusable channel-handling code.** `DisplaySurface`,
-   the channel handlers in `ryll/src/channels/`, and the
-   per-session orchestration today live inside the ryll
-   binary crate. To build a separate `ryll-web` binary
-   without dragging in egui/eframe, that code needs to be
-   either extracted into a new library crate or hidden
-   behind cargo features. See open question (1).
+5. **Cleaner separation between the SPICE substrate and
+   the egui frontend.** `DisplaySurface`, the channel
+   handlers in `ryll/src/channels/`, and the per-session
+   orchestration today live inside the ryll binary crate
+   but are interleaved with egui-frontend code in places
+   (the egui `Context` is threaded through display update
+   paths, for example). Adding a `--web` mode alongside
+   the existing `--headless` and GUI modes wants the
+   substrate to be UI-agnostic so all three frontends can
+   sit on it as peers. See open question (1) for the
+   resulting refactor decision.
 
 ### Design philosophy: ryll is a multi-modal SPICE client
 
@@ -262,10 +266,13 @@ Concrete consequences for this plan:
 Initial deployment is single-user, single-session, LAN
 (or Tailscale) only:
 
-- One `ryll-web` process runs on the desktop being shared.
+- One `ryll` process running in `--web` mode runs on the
+  desktop being shared.
 - It is launched the same way `ryll` is today — a `.vv`
   file (or CLI flags) points at the SPICE server, so the
-  operator-side connection is already authenticated.
+  operator-side connection is already authenticated. The
+  only difference from a normal launch is the `--web`
+  flag (matching the precedent of `--headless`).
 - It listens for one browser at a time on plain HTTP, on a
   random ephemeral port chosen at launch. The full URL
   (`http://<host>:<port>/`) is printed to stdout, the same
@@ -289,21 +296,31 @@ chasing them now would distort the MVP.
 
 ## Mission and problem statement
 
-Produce a `ryll-web` binary (and accompanying browser shell)
-that lets the operator launch ryll-web with a `.vv` file
-(exactly like ryll today), copy the printed
+Add a `--web` mode to the existing `ryll` binary (and ship
+an accompanying browser shell) that lets the operator
+launch `ryll --web session.vv`, copy the printed
 `http://<host>:<port>/` URL into a modern browser, and
 interact with the SPICE-attached desktop with parity to
-the current ryll desktop client for the basics: display,
-audio, keyboard, mouse.
+the GUI mode for the basics: display, audio, keyboard,
+mouse. The single-binary stance is deliberate: GUI,
+headless, and web are all runtime modes of the same
+`ryll` (matching the precedent set by `--headless`),
+keeping with the multi-modal philosophy declared above
+and in `README.md` / `ARCHITECTURE.md`.
 
 MVP scope:
 
-1. New `ryll-web` binary in the workspace, builds on Linux
-   x86_64 with the existing toolchain.
+1. New `--web` mode in the existing `ryll` binary,
+   selected at startup the same way `--headless` is.
+   Builds on Linux x86_64 with the existing toolchain;
+   macOS / Windows builds get the mode "for free" since
+   the binary is shared (cross-platform encoder
+   availability is a separate question — see open
+   question (2)).
 2. Connects to a SPICE server using the same `.vv` /
-   CLI-flag plumbing as `ryll`. The `.vv` file is consumed
-   by `ryll-web` at launch — the browser never sees it.
+   CLI-flag plumbing as the other modes. The `.vv` file
+   is consumed by `ryll` at launch — the browser never
+   sees it.
 3. Listens on plain HTTP on an ephemeral port chosen at
    launch and prints the full URL to stdout. Serves a
    static HTML+JS shell from that endpoint.
@@ -321,8 +338,8 @@ MVP scope:
 7. Reconnect-on-disconnect: if the browser tab closes or
    the PeerConnection drops, re-opening the same URL
    resumes against the same SPICE session.
-8. Documents how to launch ryll-web from a `.vv` file and
-   open the printed URL.
+8. Documents how to launch `ryll --web` from a `.vv` file
+   and open the printed URL.
 
 Out of MVP scope (tracked in Future work):
 
@@ -350,28 +367,43 @@ Out of MVP scope (tracked in Future work):
 Each of these needs to be resolved before the corresponding
 phase plan can be written.
 
-1. **Crate layout.** `DisplaySurface` and the channel
-   handlers currently live in the `ryll` binary crate. Three
-   options:
+1. **Code organisation for the substrate.** `DisplaySurface`
+   and the channel handlers currently live in the `ryll`
+   binary crate, interleaved with the egui frontend. With
+   `--web` shipping inside the same binary as the GUI and
+   headless modes (see Mission), the question is no longer
+   "how do two binaries share code" but "how cleanly do we
+   separate the SPICE substrate from each frontend so all
+   three modes sit on it as peers". Two viable shapes:
    - **(a) Extract a new `shakenfist-spice-renderer` library
      crate** containing `DisplaySurface`, the channel
      handler shells, and the per-session orchestration, with
-     no UI dependencies. `ryll` and `ryll-web` both depend on
-     it. Cleanest long-term, biggest up-front churn. Aligns
-     with the existing `shakenfist-spice-{protocol,
+     no UI dependencies. The `ryll` binary then thin-wraps
+     that crate with whichever frontend(s) it needs at
+     runtime. Cleanest separation, biggest up-front churn,
+     aligns with the existing `shakenfist-spice-{protocol,
      compression, usbredir}` extraction precedent.
-   - **(b) Make egui/eframe optional cargo features** on the
-     existing `ryll` crate and add `ryll-web` as a second
-     binary in the same crate. Less churn, but couples web
-     and desktop builds and forces every contributor to
-     reason about feature combinatorics.
-   - **(c) Copy what we need** into a new `ryll-web` crate
-     and accept duplication. Fastest to MVP, worst for
-     long-term maintenance.
+   - **(b) Refactor in-place** inside the `ryll` crate:
+     move the rendering substrate into UI-agnostic modules
+     that the egui, headless, and web frontends all consume,
+     but don't extract a separate crate. Less ceremony,
+     but the "no UI dependencies" rule is enforced by
+     convention rather than the type system.
    **Proposed: (a)**, in a dedicated extraction phase before
-   any web-specific work begins. Confirm by trying (a) on
-   `DisplaySurface` alone and seeing whether the channel
-   handler split is as clean as it looks.
+   any web-specific work begins. The fact that we ship one
+   binary instead of two doesn't weaken the case for clean
+   separation; the existing `shakenfist-spice-*` crate
+   precedent still applies. If (a) turns out messier than
+   expected, fall back to (b) — that's a refactor we can
+   do as a single commit.
+
+   *Sub-question: cargo features.* Independent of (a) vs (b):
+   should `--gui` (egui), `--web` (webrtc/encoder), and the
+   capture pipeline be cargo-feature-gated so a Linux
+   server build can drop the egui dep tree, and a desktop
+   build can drop the WebRTC dep tree? **Proposed: not in
+   MVP.** Ship one fat binary first; revisit feature gating
+   as a separate cleanup once the dep weight is concrete.
 
 2. **Encoder choice.**
    - **`openh264`** is already a dependency (capture mode);
@@ -469,11 +501,11 @@ phase plan can be written.
    secure-context restrictions do not apply to the headline
    features. Listen on an ephemeral port; print the URL to
    stdout. TLS is deferred until a feature that demands a
-   secure context lands or until ryll-web is exposed
+   secure context lands or until the `--web` mode is exposed
    beyond a trusted LAN. When TLS does land, the proposed
    shape is "take a cert+key pair on the CLI" with operator
    recipes for `mkcert` / `step-ca` / Let's Encrypt; ACME
-   inside ryll-web is further future work.
+   inside the `--web` mode is further future work.
 
 9. **Authentication.** **Proposed: none in MVP.** The
    threat model is "the operator on a trusted LAN copies
@@ -510,13 +542,13 @@ phase plan can be written.
 
 12. **`xspice` vs QEMU+SPICE** as the server side. Both
     speak SPICE; the operator will decide based on the
-    actual desktop being shared. ryll-web is agnostic. The
-    plan does *not* take a position on which the operator
-    runs.
+    actual desktop being shared. The `--web` mode is
+    agnostic. The plan does *not* take a position on which
+    the operator runs.
 
 13. **Lifecycle and process supervision.** Long-running
-    ryll-web processes need to be restarted on crash, on
-    desktop reboot, and across SPICE-server restarts.
+    `ryll --web` processes need to be restarted on crash,
+    on desktop reboot, and across SPICE-server restarts.
     **Proposed: ship a systemd unit example in
     `docs/web-frontend.md`** and otherwise stay out of the
     process-supervision business.
@@ -528,12 +560,14 @@ phase plan can be written.
     if it is a real problem, NVENC support (a future-work
     item) is the answer, not "make the encoder smarter".
 
-15. **Where the renderer lives.** Inside `ryll-web`, or as
-    a separate `ryll-encode` daemon that ryll-web talks to
-    over a Unix socket? The latter would let the operator
+15. **Where the encoder lives.** Inside the `--web` mode
+    process itself, or as a separate process (potentially
+    another mode like `--encode`) that the web mode talks
+    to over a Unix socket? The split would let the operator
     run one encoder per machine and many transports per
-    encoder. **Proposed: monolithic `ryll-web` for MVP**;
-    revisit if multi-tenancy ever becomes interesting.
+    encoder. **Proposed: monolithic for MVP** — `--web` mode
+    does encode + transport in one process; revisit if
+    multi-tenancy ever becomes interesting.
 
 ## Execution
 
@@ -592,14 +626,18 @@ README feature appears in it, and every cell has a value.
 
 Pull `DisplaySurface`, the per-channel handler structs, and
 the per-session orchestration code out of the `ryll` binary
-crate and into a new `shakenfist-spice-renderer` library
-crate. `ryll` becomes a thin egui frontend over the new
-crate. No web-facing code yet — this phase is "prove the
-existing `ryll` binary still works after the move, with all
+crate's egui-coupled paths into a UI-agnostic substrate —
+either a new `shakenfist-spice-renderer` library crate
+(option (a) of open question (1)) or a UI-agnostic module
+tree inside `ryll` (option (b)). The egui frontend continues
+to live in `ryll` but as a thin layer over the substrate;
+the headless mode does the same; the (yet-to-exist) `--web`
+mode will join as a third peer in later phases. No web-
+facing code yet — this phase is "prove the existing GUI and
+headless modes still work after the refactor, with all
 existing tests passing on all three platforms". This phase
-is also the answer to open question (1); if the extraction
-is messier than expected, fall back to feature-flagging
-egui inside `ryll`.
+is also the answer to open question (1); if (a) turns out
+messier than expected, fall back to (b) as a single commit.
 
 ### Phase 2: Encoder pipeline
 
@@ -632,8 +670,8 @@ endpoint for SDP exchange, and hand the resulting
 PeerConnection off to the WebRTC machinery from Phase 3.
 The browser shell is small — `<video>`,
 `RTCPeerConnection`, keyboard/mouse capture. Acceptance:
-launch ryll-web with a `.vv` file, open the printed URL
-in Firefox/Chrome, see the test pattern from Phase 2
+launch `ryll --web` with a `.vv` file, open the printed
+URL in Firefox/Chrome, see the test pattern from Phase 2
 playing in the browser. No TLS, no auth.
 
 ### Phase 5: Inputs + cursor + audio
@@ -660,35 +698,41 @@ in Future work.)
 
 ### Phase 7: CI + packaging
 
-`cargo build -p ryll-web --release` in the existing
-release workflow. Produce a Linux x86_64 binary and ship
-it as a release artifact alongside ryll. macOS and
-Windows builds are nice-to-have but not blocking — the
-operator's deployment target is Linux. `.deb` packaging
-to follow the existing pattern.
+The existing `cargo build -p ryll --release` workflow
+already produces the binary that hosts every mode, so
+packaging-wise this phase mostly verifies that the new
+dependencies (encoder, webrtc-rs, hyper/axum) build
+cleanly on each platform and that the existing `.deb`
+artifact still ships unchanged. macOS and Windows:
+confirm `--web` mode at least *links* on each; runtime
+testing on those platforms is future work since the
+operator's deployment target is Linux.
 
 ### Phase 8: Docs
 
-- New `docs/web-frontend.md` covering: what ryll-web is,
-  how to launch it from a `.vv` file, where to find the
-  printed URL, how to run it as a systemd service,
-  troubleshooting WebRTC connectivity, and a clear
-  *Security* note that the MVP listens on plain HTTP with
-  no authentication and is intended for trusted-LAN use
-  only.
-- `README.md` — add ryll-web to the supported entry
-  points.
-- `ARCHITECTURE.md` — add a section explaining the
-  renderer-crate split and where the encoder/transport
-  sits in the data flow.
-- `AGENTS.md` — note `cargo build -p ryll-web` and any
-  new linting expectations.
-- `docs/portability.md` — record that ryll-web is Linux
-  only for MVP, with a note that the encoder code is
-  portable.
+- New `docs/web-frontend.md` covering: what the `--web`
+  mode is, how to launch it from a `.vv` file, where to
+  find the printed URL, how to run it as a systemd
+  service, troubleshooting WebRTC connectivity, and a
+  clear *Security* note that the MVP listens on plain
+  HTTP with no authentication and is intended for
+  trusted-LAN use only.
+- `README.md` — flip the multi-modal table so the web
+  mode moves from Concept plan to Shipping; add a brief
+  pointer to `docs/web-frontend.md`.
+- `ARCHITECTURE.md` — extend the multi-modal section to
+  explain the renderer extraction (or in-place refactor)
+  and where the encoder + WebRTC transport sit in the
+  data flow.
+- `AGENTS.md` — note any new build-time considerations
+  (encoder dependency setup, WebRTC native libs) and
+  flag `--web` in the modes list.
+- `docs/portability.md` — record that the `--web` mode is
+  verified on Linux only for MVP, with a note that the
+  encoder code is portable.
 - `kerbside/docs/` — review whether kerbside's
-  documentation should mention ryll-web as a deployment
-  pattern.
+  documentation should mention ryll's `--web` mode as a
+  deployment pattern.
 
 ## Administration and logistics
 
@@ -696,9 +740,10 @@ to follow the existing pattern.
 
 We will know the MVP has landed when:
 
-* `cargo build -p ryll-web --release` produces a single
-  binary from a clean checkout.
-* `ryll-web session.vv` (or the equivalent CLI flags)
+* `cargo build -p ryll --release` continues to produce
+  the existing single ryll binary, now with `--web` mode
+  compiled in alongside GUI and headless.
+* `ryll --web session.vv` (or the equivalent CLI flags)
   starts, connects to the SPICE server, and prints a
   `http://<host>:<port>/` URL to stdout.
 * Opening that URL in Firefox or Chrome on a peer machine
@@ -738,7 +783,7 @@ We will know the MVP has landed when:
   `mkcert` / `step-ca` / Let's Encrypt recipes. Required
   before any feature that wants a secure context (clipboard
   sync, Pointer Lock on Chrome) can land. ACME inside
-  ryll-web is further future work.
+  the `--web` mode is further future work.
 * **Browser-side authentication.** Per-launch URL token
   (`?token=…`, jupyter-style) as the first step; login UI,
   OIDC, and mTLS as bigger follow-ups. Natural pairing
@@ -775,7 +820,7 @@ We will know the MVP has landed when:
   `--capture` feature.
 * **Replace Kasm in the operator's deployment.**
   Concretely: bring up xspice on the dev desktop, point
-  ryll-web at it, retire the Kasm container. Treat as
+  `ryll --web` at it, retire the Kasm container. Treat as
   the MVP-acceptance milestone *for the operator*, not a
   general-availability claim.
 
