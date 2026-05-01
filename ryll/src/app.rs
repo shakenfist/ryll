@@ -15,7 +15,7 @@ use crate::bugreport::{
     TriggerTimestamps,
 };
 use crate::capture::CaptureSession;
-use crate::channels::inputs::{key_to_scancode, mouse_button_to_spice};
+use crate::channels::inputs::scancode_for_logical_key;
 use crate::channels::{
     ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
     MainChannel, PlaybackChannel, UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel,
@@ -23,6 +23,7 @@ use crate::channels::{
 };
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display::DisplaySurface;
+use crate::input_egui::{egui_key_to_logical, mouse_button_to_spice};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
@@ -1589,7 +1590,9 @@ impl RyllApp {
                     if lookup_key == egui::Key::F11 || lookup_key == egui::Key::F12 {
                         continue;
                     }
-                    if let Some((down_code, up_code)) = key_to_scancode(lookup_key) {
+                    if let Some((down_code, up_code)) =
+                        egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
+                    {
                         let ev = if *pressed {
                             InputEvent::KeyDown(down_code)
                         } else {

@@ -1,7 +1,6 @@
 /// Inputs channel handler - keyboard and mouse input
 use anyhow::Result;
-use eframe::egui;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
@@ -860,6 +859,187 @@ impl InputsChannel {
     }
 }
 
+/// Arrow-key direction for `LogicalKey::Arrow`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Navigation-cluster key for `LogicalKey::Navigation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NavKey {
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Insert,
+    Delete,
+}
+
+/// Whitespace-adjacent key for `LogicalKey::Whitespace`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WSKey {
+    Space,
+    Tab,
+    Enter,
+    Backspace,
+}
+
+/// Punctuation key for `LogicalKey::Punctuation`.
+///
+/// Variant names match the egui naming convention used in the
+/// original `key_to_scancode` map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PunctKey {
+    Minus,
+    Equals,
+    OpenBracket,
+    CloseBracket,
+    Backslash,
+    Semicolon,
+    Quote,
+    Backtick,
+    Comma,
+    Period,
+    Slash,
+}
+
+/// A frontend-agnostic logical key identity.
+///
+/// The substrate uses this type as the pivot between the GUI adapter
+/// (which maps egui / browser key events → `LogicalKey`) and the
+/// scancode table (which maps `LogicalKey` → SPICE wire codes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogicalKey {
+    /// A letter key; the char is the uppercase form ('A'..='Z').
+    Letter(char),
+    /// A digit key (0..=9).
+    Digit(u8),
+    /// A function key (1..=12 for F1..=F12).
+    Function(u8),
+    /// An arrow key.
+    Arrow(Direction),
+    /// A navigation-cluster key.
+    Navigation(NavKey),
+    /// A whitespace-adjacent key.
+    Whitespace(WSKey),
+    /// A punctuation key.
+    Punctuation(PunctKey),
+    /// The Escape key.
+    Escape,
+}
+
+/// AT keyboard scancode mapping — substrate-facing, egui-agnostic.
+///
+/// Maps `LogicalKey` values to SPICE/PCAT scancodes.  Keys that require
+/// the E0 extended prefix (arrow keys, navigation cluster) use the
+/// 0x1xx convention: the low byte is the base scancode and bit 8
+/// signals "extended".  `make_scancode()` encodes this for the wire.
+///
+/// Returns `(press_code, release_code)` ready for the wire, or `None`
+/// if the key is not in the table (should not happen for well-formed
+/// `LogicalKey` values, but is guarded for forward compatibility).
+pub fn scancode_for_logical_key(key: LogicalKey) -> Option<(u32, u32)> {
+    let base: u32 = match key {
+        // Letters
+        LogicalKey::Letter('A') => 0x1E,
+        LogicalKey::Letter('B') => 0x30,
+        LogicalKey::Letter('C') => 0x2E,
+        LogicalKey::Letter('D') => 0x20,
+        LogicalKey::Letter('E') => 0x12,
+        LogicalKey::Letter('F') => 0x21,
+        LogicalKey::Letter('G') => 0x22,
+        LogicalKey::Letter('H') => 0x23,
+        LogicalKey::Letter('I') => 0x17,
+        LogicalKey::Letter('J') => 0x24,
+        LogicalKey::Letter('K') => 0x25,
+        LogicalKey::Letter('L') => 0x26,
+        LogicalKey::Letter('M') => 0x32,
+        LogicalKey::Letter('N') => 0x31,
+        LogicalKey::Letter('O') => 0x18,
+        LogicalKey::Letter('P') => 0x19,
+        LogicalKey::Letter('Q') => 0x10,
+        LogicalKey::Letter('R') => 0x13,
+        LogicalKey::Letter('S') => 0x1F,
+        LogicalKey::Letter('T') => 0x14,
+        LogicalKey::Letter('U') => 0x16,
+        LogicalKey::Letter('V') => 0x2F,
+        LogicalKey::Letter('W') => 0x11,
+        LogicalKey::Letter('X') => 0x2D,
+        LogicalKey::Letter('Y') => 0x15,
+        LogicalKey::Letter('Z') => 0x2C,
+
+        // Digits
+        LogicalKey::Digit(0) => 0x0B,
+        LogicalKey::Digit(1) => 0x02,
+        LogicalKey::Digit(2) => 0x03,
+        LogicalKey::Digit(3) => 0x04,
+        LogicalKey::Digit(4) => 0x05,
+        LogicalKey::Digit(5) => 0x06,
+        LogicalKey::Digit(6) => 0x07,
+        LogicalKey::Digit(7) => 0x08,
+        LogicalKey::Digit(8) => 0x09,
+        LogicalKey::Digit(9) => 0x0A,
+
+        // Function keys
+        LogicalKey::Function(1) => 0x3B,
+        LogicalKey::Function(2) => 0x3C,
+        LogicalKey::Function(3) => 0x3D,
+        LogicalKey::Function(4) => 0x3E,
+        LogicalKey::Function(5) => 0x3F,
+        LogicalKey::Function(6) => 0x40,
+        LogicalKey::Function(7) => 0x41,
+        LogicalKey::Function(8) => 0x42,
+        LogicalKey::Function(9) => 0x43,
+        LogicalKey::Function(10) => 0x44,
+        LogicalKey::Function(11) => 0x57,
+        LogicalKey::Function(12) => 0x58,
+
+        // Whitespace-adjacent
+        LogicalKey::Whitespace(WSKey::Space) => 0x39,
+        LogicalKey::Whitespace(WSKey::Enter) => 0x1C,
+        LogicalKey::Whitespace(WSKey::Backspace) => 0x0E,
+        LogicalKey::Whitespace(WSKey::Tab) => 0x0F,
+
+        // Escape
+        LogicalKey::Escape => 0x01,
+
+        // Navigation cluster (extended keys, 0x1xx)
+        LogicalKey::Navigation(NavKey::Delete) => 0x153,
+        LogicalKey::Navigation(NavKey::Insert) => 0x152,
+        LogicalKey::Navigation(NavKey::Home) => 0x147,
+        LogicalKey::Navigation(NavKey::End) => 0x14F,
+        LogicalKey::Navigation(NavKey::PageUp) => 0x149,
+        LogicalKey::Navigation(NavKey::PageDown) => 0x151,
+
+        // Arrow keys (extended keys, 0x1xx)
+        LogicalKey::Arrow(Direction::Up) => 0x148,
+        LogicalKey::Arrow(Direction::Down) => 0x150,
+        LogicalKey::Arrow(Direction::Left) => 0x14B,
+        LogicalKey::Arrow(Direction::Right) => 0x14D,
+
+        // Punctuation
+        LogicalKey::Punctuation(PunctKey::Minus) => 0x0C,
+        LogicalKey::Punctuation(PunctKey::Equals) => 0x0D,
+        LogicalKey::Punctuation(PunctKey::OpenBracket) => 0x1A,
+        LogicalKey::Punctuation(PunctKey::CloseBracket) => 0x1B,
+        LogicalKey::Punctuation(PunctKey::Backslash) => 0x2B,
+        LogicalKey::Punctuation(PunctKey::Semicolon) => 0x27,
+        LogicalKey::Punctuation(PunctKey::Quote) => 0x28,
+        LogicalKey::Punctuation(PunctKey::Backtick) => 0x29,
+        LogicalKey::Punctuation(PunctKey::Comma) => 0x33,
+        LogicalKey::Punctuation(PunctKey::Period) => 0x34,
+        LogicalKey::Punctuation(PunctKey::Slash) => 0x35,
+
+        // Catch-all for invalid/future variants
+        _ => return None,
+    };
+    Some((make_scancode(base, false), make_scancode(base, true)))
+}
+
 /// Encode a SPICE scancode for the wire.
 ///
 /// Normal keys use a single-byte scancode in the low byte of the u32.
@@ -875,114 +1055,6 @@ fn make_scancode(base: u32, release: bool) -> u32 {
     } else {
         code
     }
-}
-
-/// AT keyboard scancode mapping.
-///
-/// Maps egui key codes to SPICE/PCAT scancodes.  Keys that require
-/// the E0 extended prefix (arrow keys, navigation cluster) use the
-/// 0x1xx convention: the low byte is the base scancode and bit 8
-/// signals "extended".  `make_scancode()` encodes this for the wire.
-pub fn key_to_scancode(key: egui::Key) -> Option<(u32, u32)> {
-    // Returns (press_code, release_code) ready for the wire
-    static SCANCODE_MAP: std::sync::LazyLock<HashMap<egui::Key, u32>> =
-        std::sync::LazyLock::new(|| {
-            let mut m = HashMap::new();
-
-            // Letters
-            m.insert(egui::Key::A, 0x1E);
-            m.insert(egui::Key::B, 0x30);
-            m.insert(egui::Key::C, 0x2E);
-            m.insert(egui::Key::D, 0x20);
-            m.insert(egui::Key::E, 0x12);
-            m.insert(egui::Key::F, 0x21);
-            m.insert(egui::Key::G, 0x22);
-            m.insert(egui::Key::H, 0x23);
-            m.insert(egui::Key::I, 0x17);
-            m.insert(egui::Key::J, 0x24);
-            m.insert(egui::Key::K, 0x25);
-            m.insert(egui::Key::L, 0x26);
-            m.insert(egui::Key::M, 0x32);
-            m.insert(egui::Key::N, 0x31);
-            m.insert(egui::Key::O, 0x18);
-            m.insert(egui::Key::P, 0x19);
-            m.insert(egui::Key::Q, 0x10);
-            m.insert(egui::Key::R, 0x13);
-            m.insert(egui::Key::S, 0x1F);
-            m.insert(egui::Key::T, 0x14);
-            m.insert(egui::Key::U, 0x16);
-            m.insert(egui::Key::V, 0x2F);
-            m.insert(egui::Key::W, 0x11);
-            m.insert(egui::Key::X, 0x2D);
-            m.insert(egui::Key::Y, 0x15);
-            m.insert(egui::Key::Z, 0x2C);
-
-            // Numbers
-            m.insert(egui::Key::Num0, 0x0B);
-            m.insert(egui::Key::Num1, 0x02);
-            m.insert(egui::Key::Num2, 0x03);
-            m.insert(egui::Key::Num3, 0x04);
-            m.insert(egui::Key::Num4, 0x05);
-            m.insert(egui::Key::Num5, 0x06);
-            m.insert(egui::Key::Num6, 0x07);
-            m.insert(egui::Key::Num7, 0x08);
-            m.insert(egui::Key::Num8, 0x09);
-            m.insert(egui::Key::Num9, 0x0A);
-
-            // Function keys
-            m.insert(egui::Key::F1, 0x3B);
-            m.insert(egui::Key::F2, 0x3C);
-            m.insert(egui::Key::F3, 0x3D);
-            m.insert(egui::Key::F4, 0x3E);
-            m.insert(egui::Key::F5, 0x3F);
-            m.insert(egui::Key::F6, 0x40);
-            m.insert(egui::Key::F7, 0x41);
-            m.insert(egui::Key::F8, 0x42);
-            m.insert(egui::Key::F9, 0x43);
-            m.insert(egui::Key::F10, 0x44);
-            m.insert(egui::Key::F11, 0x57);
-            m.insert(egui::Key::F12, 0x58);
-
-            // Special keys
-            m.insert(egui::Key::Space, 0x39);
-            m.insert(egui::Key::Enter, 0x1C);
-            m.insert(egui::Key::Escape, 0x01);
-            m.insert(egui::Key::Backspace, 0x0E);
-            m.insert(egui::Key::Tab, 0x0F);
-
-            // Navigation cluster — extended keys (E0 prefix, 0x1xx)
-            m.insert(egui::Key::Delete, 0x153);
-            m.insert(egui::Key::Insert, 0x152);
-            m.insert(egui::Key::Home, 0x147);
-            m.insert(egui::Key::End, 0x14F);
-            m.insert(egui::Key::PageUp, 0x149);
-            m.insert(egui::Key::PageDown, 0x151);
-
-            // Arrow keys — extended keys (E0 prefix, 0x1xx)
-            m.insert(egui::Key::ArrowUp, 0x148);
-            m.insert(egui::Key::ArrowDown, 0x150);
-            m.insert(egui::Key::ArrowLeft, 0x14B);
-            m.insert(egui::Key::ArrowRight, 0x14D);
-
-            // Punctuation
-            m.insert(egui::Key::Minus, 0x0C);
-            m.insert(egui::Key::Equals, 0x0D);
-            m.insert(egui::Key::OpenBracket, 0x1A);
-            m.insert(egui::Key::CloseBracket, 0x1B);
-            m.insert(egui::Key::Backslash, 0x2B);
-            m.insert(egui::Key::Semicolon, 0x27);
-            m.insert(egui::Key::Quote, 0x28);
-            m.insert(egui::Key::Backtick, 0x29);
-            m.insert(egui::Key::Comma, 0x33);
-            m.insert(egui::Key::Period, 0x34);
-            m.insert(egui::Key::Slash, 0x35);
-
-            m
-        });
-
-    SCANCODE_MAP
-        .get(&key)
-        .map(|&code| (make_scancode(code, false), make_scancode(code, true)))
 }
 
 /// A single key event in a paste-as-keystrokes sequence.
@@ -1180,21 +1252,12 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
     Ok(keys)
 }
 
-/// Map mouse button to SPICE button flag
-pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
-    match button {
-        egui::PointerButton::Primary => shakenfist_spice_protocol::mouse_buttons::LEFT,
-        egui::PointerButton::Secondary => shakenfist_spice_protocol::mouse_buttons::RIGHT,
-        egui::PointerButton::Middle => shakenfist_spice_protocol::mouse_buttons::MIDDLE,
-        egui::PointerButton::Extra1 => shakenfist_spice_protocol::mouse_buttons::UP,
-        egui::PointerButton::Extra2 => shakenfist_spice_protocol::mouse_buttons::DOWN,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{key_to_scancode, translate_paste, PasteError, PasteKey};
-    use eframe::egui;
+    use super::{
+        scancode_for_logical_key, translate_paste, Direction, LogicalKey, PasteError, PasteKey,
+        WSKey,
+    };
 
     // make_scancode logic for reference:
     //   normal key:   press = base,            release = base | 0x80
@@ -1203,59 +1266,59 @@ mod tests {
 
     #[test]
     fn test_key_a_letter() {
-        // Key::A → base 0x1E (normal key)
-        let result = key_to_scancode(egui::Key::A);
+        // Letter 'A' → base 0x1E (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Letter('A'));
         assert_eq!(result, Some((0x1E, 0x9E)));
     }
 
     #[test]
     fn test_key_num0_digit() {
-        // Key::Num0 → base 0x0B (normal key)
-        let result = key_to_scancode(egui::Key::Num0);
+        // Digit 0 → base 0x0B (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Digit(0));
         assert_eq!(result, Some((0x0B, 0x8B)));
     }
 
     #[test]
     fn test_key_f1_function() {
-        // Key::F1 → base 0x3B (normal key)
-        let result = key_to_scancode(egui::Key::F1);
+        // Function 1 (F1) → base 0x3B (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Function(1));
         assert_eq!(result, Some((0x3B, 0xBB)));
     }
 
     #[test]
     fn test_key_arrow_up_extended() {
-        // Key::ArrowUp → base 0x148 (extended, E0-prefixed)
+        // Arrow::Up → base 0x148 (extended, E0-prefixed)
         // press:   (0x48 << 8) | 0xE0 = 0x48E0
         // release: (0xC8 << 8) | 0xE0 = 0xC8E0
-        let result = key_to_scancode(egui::Key::ArrowUp);
+        let result = scancode_for_logical_key(LogicalKey::Arrow(Direction::Up));
         assert_eq!(result, Some((0x48E0, 0xC8E0)));
     }
 
     #[test]
     fn test_key_space() {
-        // Key::Space → base 0x39 (normal key)
-        let result = key_to_scancode(egui::Key::Space);
+        // Whitespace::Space → base 0x39 (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Space));
         assert_eq!(result, Some((0x39, 0xB9)));
     }
 
     #[test]
     fn test_key_enter() {
-        // Key::Enter → base 0x1C (normal key)
-        let result = key_to_scancode(egui::Key::Enter);
+        // Whitespace::Enter → base 0x1C (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Enter));
         assert_eq!(result, Some((0x1C, 0x9C)));
     }
 
     #[test]
     fn test_key_escape() {
-        // Key::Escape → base 0x01 (normal key)
-        let result = key_to_scancode(egui::Key::Escape);
+        // Escape → base 0x01 (normal key)
+        let result = scancode_for_logical_key(LogicalKey::Escape);
         assert_eq!(result, Some((0x01, 0x81)));
     }
 
     #[test]
     fn test_unmapped_key_returns_none() {
-        // Key::F13 is not in SCANCODE_MAP (only F1–F12 are mapped)
-        let result = key_to_scancode(egui::Key::F13);
+        // Function(13) is not in the table (only F1–F12 are mapped)
+        let result = scancode_for_logical_key(LogicalKey::Function(13));
         assert_eq!(result, None);
     }
 
@@ -1958,37 +2021,37 @@ mod tests {
     }
 
     #[test]
-    fn paste_scancode_values_match_key_to_scancode() {
+    fn paste_scancode_values_match_scancode_for_logical_key() {
         // For representative characters, verify that translate_paste produces the same
-        // press/release codes as key_to_scancode for the corresponding egui::Key.
+        // press/release codes as scancode_for_logical_key for the corresponding LogicalKey.
 
-        // 'a' -> Key::A
+        // 'a' -> LogicalKey::Letter('A')
         let paste_result = translate_paste("a").unwrap();
-        let key_result = key_to_scancode(egui::Key::A).unwrap();
+        let key_result = scancode_for_logical_key(LogicalKey::Letter('A')).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
 
-        // '1' -> Key::Num1
+        // '1' -> LogicalKey::Digit(1)
         let paste_result = translate_paste("1").unwrap();
-        let key_result = key_to_scancode(egui::Key::Num1).unwrap();
+        let key_result = scancode_for_logical_key(LogicalKey::Digit(1)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
 
-        // ' ' -> Key::Space
+        // ' ' -> LogicalKey::Whitespace(WSKey::Space)
         let paste_result = translate_paste(" ").unwrap();
-        let key_result = key_to_scancode(egui::Key::Space).unwrap();
+        let key_result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Space)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
 
-        // '\t' -> Key::Tab
+        // '\t' -> LogicalKey::Whitespace(WSKey::Tab)
         let paste_result = translate_paste("\t").unwrap();
-        let key_result = key_to_scancode(egui::Key::Tab).unwrap();
+        let key_result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Tab)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
 
-        // '\n' -> Key::Enter
+        // '\n' -> LogicalKey::Whitespace(WSKey::Enter)
         let paste_result = translate_paste("\n").unwrap();
-        let key_result = key_to_scancode(egui::Key::Enter).unwrap();
+        let key_result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Enter)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
     }
