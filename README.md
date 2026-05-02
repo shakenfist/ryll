@@ -244,49 +244,57 @@ tints amber or red when there are unread Warn or Error-severity entries
 
 ## Architecture
 
-The repository is a Cargo workspace. Ryll itself lives in
-[`ryll/`](ryll/); future extracted crates (see
-[docs/plans/PLAN-crate-extraction.md](docs/plans/PLAN-crate-extraction.md))
-will sit alongside it as additional workspace members.
+The repository is a Cargo workspace with **6 crates**. The web
+frontend (`--web` mode) is in active development; see
+[docs/plans/PLAN-web-frontend.md](docs/plans/PLAN-web-frontend.md)
+for the master plan. Phases 0–3 (parity audit, renderer
+extraction, encoder pipeline, WebRTC bridge) have landed.
+
+| Crate | Role |
+|-------|------|
+| `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
+| `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
+| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
+| `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
+| `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
+
+See [docs/plans/PLAN-crate-extraction.md](docs/plans/PLAN-crate-extraction.md)
+for the earlier extraction work and
+[docs/plans/PLAN-web-frontend-phase-01-extract.md](docs/plans/PLAN-web-frontend-phase-01-extract.md)
+for the Phase 1 renderer extraction.
+
+After Phase 1 the bulk of what was previously under `ryll/src/`
+moved to `shakenfist-spice-renderer/src/`. The `ryll/src/` tree
+is now thin:
 
 ```
 ryll/src/
-├── main.rs              # CLI entry point, Ctrl+C handler
-├── app.rs               # egui App, bandwidth sparkline
-├── bugreport.rs         # Traffic ring buffer + channel snapshots
-├── capture.rs           # Pcap + MP4 capture session
-├── config.rs            # Configuration parsing
-├── metrics.rs           # /proc-based runtime metrics (Linux only)
-├── protocol/
-│   ├── constants.rs     # SPICE protocol constants, capabilities
-│   ├── messages.rs      # Binary message structures
-│   ├── link.rs          # Handshake, auth, capability negotiation
-│   └── client.rs        # Connection management
-├── channels/
-│   ├── main_channel.rs  # Session management
-│   ├── display.rs       # Display rendering, GLZ dictionary
-│   ├── cursor.rs        # Cursor tracking
-│   ├── inputs.rs        # Keyboard/mouse input
-│   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
-│   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
-│   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
-├── usbredir/
-│   ├── constants.rs     # usbredir message types, capabilities
-│   ├── messages.rs      # Wire format structs, read/write
-│   └── parser.rs        # Byte-stream parser
-├── usb/
-│   ├── mod.rs           # UsbDeviceBackend trait, device enumeration
-│   ├── real.rs          # Physical USB device backend (nusb, Linux only)
-│   └── virtual_msc.rs   # Virtual mass storage (RAW disk images)
-├── webdav/
-│   ├── mod.rs           # WebDAV module
-│   ├── mux.rs           # Mux protocol (client multiplexing)
-│   └── server.rs        # Embedded WebDAV server (dav-server + hyper)
-├── decompression/
-│   ├── glz.rs           # GLZ decompression
-│   └── lz.rs            # LZ decompression
-└── display/
-    └── surface.rs       # Surface buffer management
+├── main.rs              # CLI entry, mode selection, Ctrl+C handler
+├── app.rs               # egui App, event loop, GUI panels
+├── bugreport.rs         # Traffic ring buffer + bug-report ZIP writer
+├── capture.rs           # Pcap + MP4 capture (implements CaptureSink)
+├── clipboard_arboard.rs # Host clipboard via arboard (ClipboardBackend impl)
+├── config.rs            # CLI arg parsing
+├── display_gui.rs       # GuiSurface egui texture wrapper
+├── input_egui.rs        # egui::Key → LogicalKey adapter
+├── notifications.rs     # In-app notification store
+└── settings.rs          # Verbose-flag gate
+```
+
+The SPICE substrate lives in `shakenfist-spice-renderer/src/`:
+
+```
+shakenfist-spice-renderer/src/
+├── channels/            # Per-channel handlers (main, display, cursor,
+│                        #   inputs, playback, usbredir, webdav)
+├── display/             # DisplaySurface pixel buffer + draw-op API
+├── encoder/             # H.264 encoder pipeline (H264Encoder,
+│                        #   EncoderTask, FrameSource, SyntheticFrameSource)
+├── usb/                 # USB device backends (RealDevice, VirtualMsc)
+├── webdav/              # WebDAV mux protocol + embedded server
+├── session.rs           # run_connection / run_headless orchestrators
+└── ... (traits, config, notification data types, snapshots)
 ```
 
 ## Dependencies
@@ -300,9 +308,18 @@ ryll/src/
 - **cpal** - Cross-platform audio output
 - **rtrb** - Lock-free ring buffer for audio sample passing
 - **opus-decoder** - Pure-Rust Opus audio decoding
+- **openh264** - H.264 encoding in `shakenfist-spice-renderer`
+  (the encoder pipeline). Capture mode in ryll consumes it
+  transitively via the renderer.
 - **nusb** - USB device access (pure Rust, no libusb)
 - **dav-server** - WebDAV server (RFC 4918, LocalFs backend)
 - **hyper** - HTTP/1.1 framing for WebDAV byte-stream transport
+- **webrtc = "0.17.1"** - DTLS/SRTP/ICE/SCTP/STUN stack for
+  `shakenfist-spice-webrtc` (browser-bridge crate; also pulls
+  in `rtp = "0.17.1"` for H.264 RTP packetisation)
+- **opus = "0.3"** - libopus bindings for the synthetic Opus
+  pump in the webrtc crate; `audiopus_sys` builds libopus from
+  source in the devcontainer
 - **ctrlc** - Cross-platform Ctrl+C handling for graceful shutdown
 
 ## Comparison with Python version

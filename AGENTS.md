@@ -237,77 +237,154 @@ Ryll uses:
 
 ## Code Organisation
 
-The repository is a Cargo workspace. Ryll itself lives at
-`ryll/`; future extracted reusable crates (see
-`docs/plans/PLAN-crate-extraction.md`) will sit alongside it as
-additional workspace members. Cargo invocations from the
-workspace root should use `-p ryll` to target the ryll package
-specifically (e.g. `cargo build -p ryll`,
+The repository is a Cargo workspace with **6 crates**. Cargo
+invocations from the workspace root should use `-p ryll` to
+target the ryll package specifically (e.g. `cargo build -p ryll`,
 `cargo deb --no-build -p ryll`), or `--workspace` to act on
 every member (e.g. `cargo test --workspace`).
+
+After Phase 1 of the web-frontend plan
+(`docs/plans/PLAN-web-frontend-phase-01-extract.md`), the bulk
+of what used to live in `ryll/src/` now lives in
+`shakenfist-spice-renderer/src/`. The `ryll/src/` tree is thin:
 
 ```
 ryll/src/
 ├── main.rs              # CLI entry, mode selection, SIGINT handler
 ├── app.rs               # egui App, event loop, headless runner,
-│                        #   bandwidth sparkline, bug report dialog,
-│                        #   live traffic viewer panel, USB device
-│                        #   management panel, WebDAV folders panel
+│                        #   GUI panels (traffic viewer, USB,
+│                        #   Folders, Notifications), bug report
+│                        #   dialog, reconnect, thin trait impls
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
-│                        #   TrafficRingBuffer, TrafficBuffers),
-│                        #   channel state snapshots (DisplaySnapshot,
-│                        #   InputsSnapshot, CursorSnapshot,
-│                        #   MainSnapshot, AppSnapshot,
-│                        #   ChannelSnapshots), bug report assembly
-│                        #   (BugReport, BugReportType, ReportMetadata),
-│                        #   traffic viewer (TrafficViewEntry)
+│                        #   TrafficRingBuffer, TrafficBuffers —
+│                        #   implements TrafficSink), bug report
+│                        #   assembly (BugReport, BugReportType,
+│                        #   ReportMetadata), traffic viewer
+│                        #   (TrafficViewEntry)
 ├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
-│                        #   VideoWriter, CaptureSession)
+│                        #   VideoWriter, CaptureSession —
+│                        #   implements CaptureSink); stub when
+│                        #   the `capture` feature is disabled
+├── clipboard_arboard.rs # Host clipboard via arboard
+│                        #   (implements ClipboardBackend)
 ├── config.rs            # .vv file parsing, CLI args
-├── metrics.rs           # /proc-based runtime metrics sampler
-│                        #   (RuntimeMetrics, sample()).  Linux only;
-│                        #   non-Linux returns Unavailable variant.
-│                        #   Embedded in bug reports as
-│                        #   runtime-metrics.json
-├── protocol/            # SPICE protocol implementation
-│   ├── constants.rs     # Enums, message IDs, capability flags
-│   ├── messages.rs      # Binary serialization
-│   ├── link.rs          # Handshake, RSA auth, capability
-│   │                    #   advertisement
-│   └── client.rs        # Connection management
+├── display_gui.rs       # GuiSurface: egui TextureHandle wrapper
+│                        #   around renderer's DisplaySurface
+├── input_egui.rs        # egui::Key → LogicalKey adapter; composed
+│                        #   with renderer's scancode_for_logical_key
+├── notifications.rs     # NotificationStore (in-app store) +
+│                        #   NotificationStoreSink (implements
+│                        #   NotificationSink)
+└── settings.rs          # is_verbose() gate
+```
+
+The SPICE substrate (channels, display, encoder, session) lives
+in `shakenfist-spice-renderer/src/`:
+
+```
+shakenfist-spice-renderer/src/
 ├── channels/            # Per-channel handlers
 │   ├── main_channel.rs  # Session init, ping/pong
 │   ├── display.rs       # Surface management, image decoding,
 │   │                    #   GLZ dictionary eviction
 │   ├── cursor.rs        # Cursor position tracking
-│   ├── inputs.rs        # Keyboard scancodes (with E0 extended
-│   │                    #   prefix for nav cluster), mouse events,
-│   │                    #   motion coalescing to prevent channel
-│   │                    #   backpressure, paste-as-keystrokes state
-│   │                    #   machine
+│   ├── inputs.rs        # Keyboard scancodes (E0 extended prefix),
+│   │                    #   mouse events, motion coalescing,
+│   │                    #   paste-as-keystrokes, LogicalKey enum,
+│   │                    #   scancode_for_logical_key table
 │   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
 │   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
+├── display/
+│   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
+├── encoder/
+│   ├── mod.rs           # Re-exports
+│   ├── frame_source.rs  # FrameSource trait, FrameRef struct,
+│   │                    #   SyntheticFrameSource (test/CI)
+│   ├── h264.rs          # H264Encoder (openh264 wrapper),
+│   │                    #   EncodedFrame, Annex-B NAL output
+│   └── task.rs          # EncoderTask async driver,
+│                        #   EncoderControl (RequestKeyframe/Stop)
+├── usb/                 # USB device backends
+│   ├── mod.rs           # UsbBackend trait, device enumeration
+│   ├── real.rs          # RealDevice (nusb, Linux only)
+│   └── virtual_msc.rs   # VirtualMsc (RAW disk images)
 ├── usbredir/            # usbredir protocol parser
 │   ├── constants.rs     # Message types, capabilities, status codes
 │   ├── messages.rs      # Wire format structs, read/write
 │   └── parser.rs        # Byte-stream parser, unit tests
-├── usb/                 # USB device backend abstraction
-│   ├── mod.rs           # UsbDeviceBackend trait, TransferResult,
-│   │                    #   DeviceSource, UsbDeviceInfo, enumeration
-│   ├── real.rs          # Physical device backend (nusb, Linux only)
-│   └── virtual_msc.rs   # Virtual USB mass storage (RAW images,
-│                        #   BOT protocol, SCSI command set)
-├── webdav/              # WebDAV folder sharing
-│   ├── mod.rs           # Module declaration
-│   ├── mux.rs           # Mux protocol (client multiplexing, unit tests)
+├── webdav/              # WebDAV module
+│   ├── mod.rs           # WebdavBackend trait
+│   ├── mux.rs           # Mux protocol (client multiplexing)
 │   └── server.rs        # Embedded WebDAV server (dav-server + hyper)
-├── decompression/       # Image decompression
-│   ├── glz.rs           # GLZ (dictionary-based, cross-frame refs)
-│   └── lz.rs            # LZ (simpler, single-frame)
-└── display/
-    └── surface.rs       # Pixel buffer for egui rendering
+├── session.rs           # run_connection / run_headless orchestrators
+├── byte_counter.rs      # ByteCounter (per-channel byte/packet counts)
+├── capture_sink.rs      # CaptureSink trait
+├── clipboard.rs         # ClipboardBackend trait
+├── device_config.rs     # VirtualDiskConfig, ShareDirConfig
+├── log_config.rs        # LogConfig value type
+├── metrics.rs           # /proc-based runtime metrics sampler
+├── notification.rs      # NotificationEntry, NotificationSource
+│                        #   (data types; store lives in ryll)
+├── notification_sink.rs # NotificationSink trait
+├── snapshots.rs         # Channel-state snapshot types
+│                        #   (DisplaySnapshot, InputsSnapshot, etc.)
+└── traffic.rs           # TrafficSink trait
+
+shakenfist-spice-webrtc/src/
+└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig
 ```
+
+## Trait / Observer Scheme
+
+Phase 1 introduced a trait surface that lets channel handlers
+(now in the renderer crate) call into host-side concerns without
+importing `ryll`-side modules. Understanding this scheme is
+important when adding new channels or extending existing ones.
+
+### Traits defined in `shakenfist-spice-renderer`
+
+| Trait | What it abstracts | `ryll` impl |
+|-------|-------------------|-------------|
+| `TrafficSink` | Per-channel raw-byte ring buffer for bug reports and the live traffic viewer | `bugreport::TrafficBuffers` |
+| `CaptureSink` | pcap + MP4 frame recording; also has a no-op stub when the `capture` feature is disabled | `capture::CaptureSession` |
+| `NotificationSink` | Pushes `NotificationEntry` into the in-app notification store | `notifications::NotificationStoreSink` |
+| `ClipboardBackend` | Host clipboard read/write | `clipboard_arboard` (via `arboard`) |
+| `UsbBackend` | USB host-side device attachment | Implemented by `usb::RealDevice` (Linux only) and `usb::VirtualMsc` |
+| `WebdavBackend` | WebDAV directory share lifecycle | `webdav::MuxDemuxer` + `webdav::WebdavServer` |
+
+### Dual-spec Cargo dep convention
+
+All extracted crates use the `path + version` dual-spec pattern:
+
+```toml
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
+```
+
+This supports both local development (path wins) and crates.io
+publication readiness (version is required for publishing). All
+extracted crates are at `version.workspace = true` which
+resolves to the single workspace version in the root
+`Cargo.toml`.
+
+### ChannelEvent vs trait: when to use each
+
+- **Use a `ChannelEvent` variant** when the concern is
+  event-shaped: a one-shot notification, a surface lifecycle
+  signal, a latency sample, an image arrival. These are
+  low-frequency, ordered, and the frontend decides what to do.
+- **Use a trait** when the concern is a long-lived sink that
+  the channel writes to continuously (traffic recording, capture
+  frames) or a two-way interface (clipboard, USB I/O). Traits
+  are injected at construction time via `Arc<dyn Trait>`.
+
+Adding a new ryll-side concern that channels need to call into:
+1. Define the trait in `shakenfist-spice-renderer/src/`.
+2. Implement it in `ryll/src/`.
+3. Add the `Arc<dyn YourTrait>` parameter to the relevant
+   channel constructor(s).
+4. Wire up the impl at session start in `session.rs` or the
+   channel's creation site in `run_connection`.
 
 ## Common Tasks
 
@@ -318,14 +395,18 @@ ryll/src/
 
 ### Adding a new statistic
 1. Add variant to `ChannelEvent` enum in
-   `ryll/src/channels/mod.rs`
-2. Send from relevant channel handler
+   `shakenfist-spice-renderer/src/channels/mod.rs`
+2. Send from relevant channel handler in
+   `shakenfist-spice-renderer/src/channels/`
 3. Handle in `process_events()` in `ryll/src/app.rs`
 
 ### Modifying protocol handling
-1. Message definitions in `ryll/src/protocol/messages.rs`
-2. Constants/enums in `ryll/src/protocol/constants.rs`
-3. Channel-specific logic in `ryll/src/channels/*.rs`
+1. Message definitions in
+   `shakenfist-spice-protocol/src/messages.rs`
+2. Constants/enums in
+   `shakenfist-spice-protocol/src/constants.rs`
+3. Channel-specific logic in
+   `shakenfist-spice-renderer/src/channels/*.rs`
 
 ### Inspecting a `--capture` pcap
 
@@ -378,9 +459,35 @@ established structure.
   "How to resume" entry point for picking the work back
   up after a pause. Never committed.
 
+## WebRTC Conventions
+
+The following convention was discovered during Phase 3 and
+applies to all future webrtc-rs work:
+
+- **`on_track` must spawn a task for `read_rtp` loops.**
+  webrtc-rs serialises `on_track` firings on the future returned
+  by each callback. A long-lived `loop { track.read_rtp().await
+  }` inside `on_track` blocks the machinery from firing
+  subsequent callbacks (e.g. the audio track never fires because
+  the video track's callback never returns). Always
+  `tokio::spawn` the `read_rtp` loop inside `on_track` and
+  return immediately. This differs from what intuition suggests
+  and from many webrtc-rs examples; document it explicitly
+  whenever writing receiver-side WebRTC code.
+
 ## Testing
 
 - Unit tests exist for decompression algorithms
+- The encoder smoke test (`shakenfist-spice-renderer/tests/
+  encoder_smoke.rs`) runs for ~3 seconds and writes
+  `target/encoder_smoke.h264`; run `ffplay target/encoder_smoke.h264`
+  to visually verify the encoder output after `make test`
+- The WebRTC H.264 packetiser test (`shakenfist-spice-renderer/
+  tests/webrtc_h264_smoke.rs`) verifies `H264Payloader` accepts
+  the encoder's Annex-B NAL output
+- The loopback integration test (`shakenfist-spice-webrtc/tests/
+  loopback.rs`) creates two in-process `RTCPeerConnection`s and
+  asserts video + audio + datachannel all flow end-to-end
 - Integration testing requires a real SPICE server
 - `make test-qemu` starts a local QEMU instance with SPICE on port 5900
   running the UEFI latency guest (keystrokes change screen colour) for testing
@@ -520,8 +627,10 @@ partial state.
 | tracing-appender | File logging to /tmp/ryll.log |
 | pcap-file | Pcap file writing for --capture mode (optional, `capture` feature) |
 | etherparse | Fake TCP/IP header construction for pcap (optional, `capture` feature) |
-| openh264 | H.264 video encoding for --capture mode (optional, `capture` feature) |
+| openh264 | H.264 video encoding: in `shakenfist-spice-renderer` for the live encoder pipeline; also in `ryll`'s `capture` feature for `--capture` MP4 output |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
+| webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Pinned at `"0.17.1"` which re-exports `rtp = "^0.17.1"` (used for `H264Payloader` packetisation). |
+| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc`. The `audiopus_sys` transitive dep builds libopus from source (via cmake) in the devcontainer if `pkg-config` does not find a system libopus. Phase 5 will reuse this for real PCM → Opus encoding if the SPICE server negotiates an uncompressed playback format. |
 | cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
 | rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |

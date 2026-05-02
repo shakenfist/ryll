@@ -4,12 +4,20 @@ This document describes the technical architecture of ryll.
 
 ## Repository Layout
 
-The repository is a Cargo workspace. Ryll itself lives in
-`ryll/`, with `ryll/src/` containing all the source modules
-described in the rest of this document. Future workspace
-members will be the reusable crates extracted from ryll under
-the `shakenfist-spice-*` prefix; see
-`docs/plans/PLAN-crate-extraction.md` for the extraction plan.
+The repository is a Cargo workspace with **6 crates**:
+
+| Crate | Role |
+|-------|------|
+| `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
+| `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
+| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
+| `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
+| `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
+
+See `docs/plans/PLAN-crate-extraction.md` for the earlier
+extractions and `docs/plans/PLAN-web-frontend-phase-01-extract.md`
+for the Phase 1 renderer extraction.
 
 When invoking cargo from the workspace root, use `-p ryll` to
 target the ryll package (e.g. `cargo build -p ryll`,
@@ -32,7 +40,7 @@ shared core. The supported modes are:
 |------|----------|--------|-------------|
 | GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
-| Web | Browser via WebRTC | Concept plan | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+| Web | Browser via WebRTC | In progress (Phases 0–3 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
 
 A feature is not considered complete when it works in only
 one mode. Every feature should be reachable from every mode
@@ -61,6 +69,239 @@ should be documented as such so the parity gaps are visible.
                     │ SPICE Server│
                     │   (QEMU)    │
                     └─────────────┘
+```
+
+## Renderer-crate Extraction
+
+The SPICE substrate (channel handlers, display surface, encoder,
+session orchestrator) was extracted from the `ryll` binary into
+`shakenfist-spice-renderer` during Phase 1 of the web-frontend
+plan (see `docs/plans/PLAN-web-frontend-phase-01-extract.md`).
+This crate is intentionally **egui-free**: no `eframe` or `egui`
+types appear in its source. The goal is to share the substrate
+across GUI, headless, and (planned) `--web` modes without each
+frontend dragging in the others' dependencies.
+
+### Communication upward: ChannelEvent
+
+Channel handlers communicate state changes upstream via the
+`ChannelEvent` enum (variants for surface lifecycle, image
+arrivals, latency samples, notifications, etc.). Producers send
+on `mpsc::Sender<ChannelEvent>`; the frontend (GUI event loop or
+headless runner) drains the receiver and reacts.
+
+### Trait surface for host-side concerns
+
+Some channel concerns are long-lived sinks that need to be
+injected at construction time rather than emitted as events:
+
+| Trait | Defined in | Implemented in `ryll/src/` | Purpose |
+|-------|-----------|---------------------------|---------|
+| `TrafficSink` | `shakenfist-spice-renderer` | `bugreport::TrafficBuffers` | Per-channel raw-byte ring buffer for bug-report traffic capture and the live traffic viewer |
+| `CaptureSink` | `shakenfist-spice-renderer` | `capture::CaptureSession` | pcap + MP4 frame recording; also has a no-op stub when the `capture` feature is disabled |
+| `NotificationSink` | `shakenfist-spice-renderer` | `notifications::NotificationStoreSink` | Pushes `NotificationEntry` values into the in-app notification store |
+| `ClipboardBackend` | `shakenfist-spice-renderer` | `clipboard_arboard` | Host clipboard read/write via `arboard` |
+| `UsbBackend` | `shakenfist-spice-renderer` | usbredir channel constructor; `RealDevice` / `VirtualMsc` concrete types live in the renderer's `usb/` directory | USB host-side device attachment |
+| `WebdavBackend` | `shakenfist-spice-renderer` | webdav channel constructor; mux + embedded HTTP server live in the renderer's `webdav/` directory | WebDAV directory share lifecycle |
+
+**When to use `ChannelEvent` vs a trait**: prefer a
+`ChannelEvent` variant when the concern is event-shaped
+(a one-shot notification, a surface lifecycle signal, a latency
+sample). Prefer a trait when the concern is a long-lived sink
+that the channel writes to continuously (traffic recording,
+capture frames). This distinction keeps the event channel
+lightweight and the trait surface minimal.
+
+### Value config types
+
+`LogConfig` is passed by value into channel constructors to
+carry protocol-logging gates (primarily the verbose flag) without
+the channels reaching back into global settings state.
+
+## Encoder Module
+
+`shakenfist-spice-renderer/src/encoder/` is the live H.264
+encoder pipeline built in Phase 2
+(`docs/plans/PLAN-web-frontend-phase-02-encoder.md`).
+
+### `H264Encoder`
+
+A stateful wrapper around openh264. Takes an RGBA pixel buffer,
+converts to YUV 4:2:0, encodes to Annex-B framed NAL units
+(each NAL prefixed with the 4-byte start code `00 00 00 01`).
+Every IDR frame is accompanied by SPS (NAL type 7) and PPS
+(NAL type 8) NALs so keyframes are self-contained. Even-dimension
+constraint: width and height are rounded down to even numbers
+before encoding. The `force_keyframe: bool` parameter to
+`encode()` calls openh264's `force_intra_frame()` for the
+next encode.
+
+### `EncoderTask`
+
+Async driver that lives on tokio's blocking pool (openh264 is a
+synchronous C library; `spawn_blocking` keeps it off the async
+executor). The task loop:
+
+- Ticks at a configurable FPS cap (default 30; period ≈ 33 333 µs).
+- On each tick, calls `source.next_frame()`. If `Some`, encodes
+  and sends `EncodedFrame` on the output channel. If `None`,
+  skips the tick — no idle frames are produced.
+- Handles `EncoderControl::RequestKeyframe` by setting a
+  `keyframe_pending` flag consumed on the next encode.
+- Handles `EncoderControl::Stop` by breaking the loop.
+
+### `FrameSource` and `FrameRef`
+
+`FrameSource` is a trait that decouples the encoder from how
+pixels arrive. The implementing type handles dirty tracking and
+synchronisation with concurrent display-channel writers. It
+returns `Option<FrameRef<'_>>` where `FrameRef` carries width,
+height, RGBA bytes, and a `timestamp_us` used to derive RTP
+timestamps in Phase 3. `SyntheticFrameSource` is a test/CI
+source that generates animated gradient frames.
+
+## WebRTC Bridge (`shakenfist-spice-webrtc`)
+
+`shakenfist-spice-webrtc` is a separate crate (not part of the
+renderer) because the webrtc-rs dependency tree (DTLS, SRTP,
+ICE, SCTP, STUN) is heavy and not all SPICE-client consumers
+need it. The renderer stays a pure SPICE substrate; the bridge
+is one specific delivery mechanism.
+
+### `WebrtcBridge`
+
+Wraps an `RTCPeerConnection` and owns:
+
+- A video `TrackLocalStaticRTP` (H.264, 90 kHz clock rate).
+- An audio `TrackLocalStaticRTP` (Opus, 48 kHz clock rate).
+- A "control" `RTCDataChannel` (ordered + reliable).
+- An `mpsc::Sender<EncoderControl>` to request keyframes.
+
+Construction via `WebrtcBridge::new(WebrtcBridgeConfig)`:
+builds the PC via webrtc-rs's `APIBuilder` + `MediaEngine`
+pattern, registers H.264 and Opus codecs, creates both tracks,
+adds them to the PC, creates the control DC, and registers the
+connection-state-change handler.
+
+`WebrtcBridgeConfig` carries the ICE server list (empty for
+LAN-only use) and the `EncoderControl` sender.
+
+### SDP flow
+
+`accept_offer(sdp: String) -> Result<String>` is the single SDP
+entry point for Phase 4's HTTP `/offer` handler. It:
+1. Sets the remote description (browser's offer).
+2. Creates an answer.
+3. Sets the local description.
+4. Waits for ICE gathering to complete.
+5. Returns the fully-resolved answer SDP.
+
+ICE gathering completion is awaited so the answer already
+contains all host candidates — trickle ICE is not needed for
+the LAN-only MVP.
+
+### Video pump
+
+`spawn_video_pump(rx: mpsc::Receiver<EncodedFrame>)` drives the
+video track:
+
+- Consumes `EncodedFrame`s from the encoder output channel.
+- Strips Annex-B start codes from each NAL.
+- Payloads raw NALs via `H264Payloader` (from `rtp::codecs::h264`).
+- Sets the `marker` bit on the last RTP packet of each access unit
+  (per RFC 6184 §5.1 — decoder pacing depends on this).
+- Derives RTP timestamps from `EncodedFrame::timestamp_us` at
+  90 kHz: `rtp_ts = (timestamp_us × 90_000) / 1_000_000`.
+- Sequence numbers increment via `wrapping_add`.
+
+SPS/PPS NALs produce empty payload sets (the `H264Payloader`
+caches them and bundles them as STAP-A with the next IDR slice);
+the pump skips empty sets cleanly.
+
+### Audio pump (synthetic for Phase 3)
+
+`spawn_synthetic_audio_pump()` emits a 440 Hz sine wave encoded
+as Opus at 50 fps (20 ms per frame, 960 samples at 48 kHz).
+Real Opus passthrough from the SPICE playback channel lands in
+Phase 5. The pump uses the same `TrackLocalStaticRTP` consumer
+interface so Phase 5 is a mechanical source swap.
+
+### Control datachannel
+
+Ordered + reliable, labelled "control". Phase 3 implements
+ping/pong for smoke testing. Phase 5 carries input events
+(scancodes, pointer coordinates) and cursor overlay updates.
+`send_control(&[u8])` and `control_rx()` are the public API.
+
+### Keyframe-on-attach
+
+The bridge sends `EncoderControl::RequestKeyframe` when the
+`RTCPeerConnection` transitions to the `Connected` state, so the
+first frame the browser sees is always a full IDR. A PLI
+(Picture Loss Indication) RTCP handler is also registered for
+the same purpose when a viewer requests a refresh.
+
+### webrtc-rs convention: `on_track` must spawn a task
+
+The webrtc-rs `on_track` callback's returned future is awaited
+serially by the ICE/DTLS machinery. A long-lived `read_rtp`
+loop inside the callback blocks subsequent `on_track` firings
+(e.g. audio track never fires if video track's callback loops).
+Always spawn a separate tokio task for the `read_rtp` loop inside
+`on_track`. This is a webrtc-rs idiom that differs from what
+plain intuition suggests; document it explicitly when writing
+any new receiver-side WebRTC code.
+
+## Code Organisation
+
+```
+ryll/src/
+├── main.rs              # CLI entry, mode selection, Ctrl+C handler
+├── app.rs               # egui App, event loop, GUI panels, headless
+│                        #   runner, reconnect, egui trait impls
+├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,
+│                        #   implements TrafficSink), bug-report ZIP
+├── capture.rs           # Pcap + MP4 capture (CaptureSession,
+│                        #   implements CaptureSink)
+├── clipboard_arboard.rs # Host clipboard (implements ClipboardBackend)
+├── config.rs            # CLI args, .vv parsing
+├── display_gui.rs       # GuiSurface: egui TextureHandle wrapper
+│                        #   around DisplaySurface
+├── input_egui.rs        # egui::Key → LogicalKey adapter
+├── notifications.rs     # NotificationStore + NotificationStoreSink
+└── settings.rs          # is_verbose() gate
+
+shakenfist-spice-renderer/src/
+├── channels/            # Per-channel handlers
+│   ├── main_channel.rs  # Session negotiation, ping/pong
+│   ├── display.rs       # Display, GLZ dictionary, draw-op decode
+│   ├── cursor.rs        # Cursor tracking
+│   ├── inputs.rs        # Keyboard/mouse, paste-as-keystrokes,
+│   │                    #   LogicalKey enum, scancode tables
+│   ├── playback.rs      # Audio (PCM/Opus → rtrb → cpal)
+│   ├── usbredir.rs      # USB redirection (SpiceVMC)
+│   └── webdav.rs        # WebDAV sharing (SpiceVMC)
+├── display/
+│   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
+├── encoder/
+│   ├── mod.rs           # Re-exports
+│   ├── frame_source.rs  # FrameSource trait, FrameRef, SyntheticFrameSource
+│   ├── h264.rs          # H264Encoder, EncodedFrame
+│   └── task.rs          # EncoderTask, EncoderControl
+├── usb/                 # USB device backends (RealDevice, VirtualMsc)
+├── webdav/              # WebDAV mux + embedded server
+├── session.rs           # run_connection, run_headless orchestrators
+├── capture_sink.rs      # CaptureSink trait
+├── clipboard.rs         # ClipboardBackend trait
+├── notification.rs      # NotificationEntry, NotificationSource
+├── notification_sink.rs # NotificationSink trait
+├── traffic.rs           # TrafficSink trait
+├── log_config.rs        # LogConfig value type
+├── snapshots.rs         # Channel-state snapshot types
+└── byte_counter.rs      # ByteCounter
+
+shakenfist-spice-webrtc/src/
+└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig
 ```
 
 ## Concurrency Model
