@@ -6,6 +6,7 @@ members = [
     "shakenfist-spice-protocol",
     "shakenfist-spice-renderer",
     "shakenfist-spice-usbredir",
+    "shakenfist-spice-webrtc",
 ]
 
 [workspace.package]

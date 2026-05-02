@@ -1,0 +1,36 @@
+[package]
+name = "shakenfist-spice-webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "WebRTC bridge for the ryll SPICE client: SPICE-encoded video and audio over RTCPeerConnection, with a control datachannel for inputs and cursor overlay."
+readme = "README.md"
+
+[dependencies]
+# WebRTC stack (umbrella crate; pinned to 0.17.1 which re-exports
+# rtp = "^0.17.1", matching the rtp = "0.17.1" used in Phase 2
+# step 2e's H264Payloader pre-flight).
+webrtc = "0.17.1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+
+# Byte utilities (shared with webrtc-rs's RTP packet type)
+bytes = "1"
+
+# Random values (SSRC, initial sequence numbers)
+rand = "0.8"
+
+# Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
+# H264Encoder, and SyntheticFrameSource used for the Phase 3 pumps
+# and integration test.
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }

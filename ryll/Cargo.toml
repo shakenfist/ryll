@@ -63,6 +63,7 @@ shakenfist-spice-compression = { path = "../shakenfist-spice-compression", versi
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.4" }
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.4" }
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.4" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
