@@ -516,9 +516,26 @@ decision is in the pure
 window-fit helpers, and is unit-tested alongside them.
 
 `pending_resize` is only set when the affected surface
-key is `(display_channel_id == 0, surface_id == 0)`, so
-a secondary monitor's surface event cannot resize the
-primary window.
+key is `(display_channel_id == 0, surface_id == 0)`
+(centralised as `is_primary_surface`), so a secondary
+monitor's surface event cannot resize the primary
+window.
+
+Both auto-fit arms additionally refuse to honour
+`SurfaceCreated` dimensions above
+`MAX_AUTO_FIT_DIMENSION` (16384 px per axis,
+`GL_MAX_TEXTURE_SIZE` on common hardware). A hostile
+SPICE server can announce
+`SurfaceCreated { width: u32::MAX, height: u32::MAX }`;
+without the bound, ryll would forward that as
+`ViewportCommand::InnerSize` (platform-dependent
+behaviour, possibly large internal allocations) and
+emit a notification carrying the absurd value. The cap
+is checked at the trigger sites by
+`auto_fit_size_acceptable`, which is unit-tested with
+the other pure helpers; rejected sizes log a `warn!`
+and leave the SPICE renderer's own surface bookkeeping
+untouched.
 
 ## Audio Playback Pipeline
 

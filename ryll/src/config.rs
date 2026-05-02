@@ -337,3 +337,25 @@ fn validate_disk_path(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The "obey guest size hints" toggle defaults to ON;
+    // --no-obey-guest-size flips it OFF. main.rs inverts
+    // the flag (`obey_guest_size = !args.no_obey_guest_size`),
+    // so anchor the bool semantics here at the parse layer
+    // and let the inversion stay implicit.
+    #[test]
+    fn no_obey_guest_size_default_is_false() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900"]);
+        assert!(!args.no_obey_guest_size);
+    }
+
+    #[test]
+    fn no_obey_guest_size_flag_sets_true() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900", "--no-obey-guest-size"]);
+        assert!(args.no_obey_guest_size);
+    }
+}

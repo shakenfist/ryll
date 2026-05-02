@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::bugreport::{
     chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
@@ -42,6 +42,19 @@ const STATS_BAR_HEIGHT: f32 = 20.0;
 /// (boot mode probes, drag-resize storms) collapses to a
 /// single notification carrying the latest resolution.
 const RESOLUTION_NOTIFY_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Upper bound (logical pixels) for a primary surface
+/// dimension that the auto-fit pipeline will honour. A
+/// hostile or buggy SPICE server can announce
+/// `SurfaceCreated { width: u32::MAX, height: u32::MAX }`;
+/// without a bound we would forward that as
+/// `ViewportCommand::InnerSize` to egui (platform-dependent
+/// behaviour, possibly large internal allocations) and
+/// emit a `"Display resolution: 4294967295x4294967295"`
+/// notification. 16384 is `GL_MAX_TEXTURE_SIZE` on most
+/// hardware and is comfortably above any realistic
+/// display resolution.
+const MAX_AUTO_FIT_DIMENSION: u32 = 16384;
 
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
@@ -270,17 +283,19 @@ pub struct RyllApp {
     // notification per quiescent window so the panel does
     // not spam.
     //
-    // pending_resolution_notify is the latest (w, h) we have
-    // seen on a primary SurfaceCreated; pending_resolution_notify_at
-    // is the timestamp of that observation. RyllApp::update
-    // emits when (now - pending_resolution_notify_at) >=
-    // RESOLUTION_NOTIFY_DEBOUNCE and the value differs from
-    // last_notified_resolution. last_notified_resolution
+    // pending_resolution_notify holds the latest (w, h) we
+    // have seen on a primary SurfaceCreated paired with the
+    // timestamp of that observation. The two are always set
+    // and cleared together, so collapsing them into one
+    // Option removes the representable-but-invalid state
+    // where one is Some and the other is None. RyllApp::update
+    // emits when the queued-at timestamp is at least
+    // RESOLUTION_NOTIFY_DEBOUNCE old and the value differs
+    // from last_notified_resolution. last_notified_resolution
     // suppresses re-emitting the same value (e.g. when the
     // guest re-confirms an existing mode after a fullscreen
     // toggle).
-    pending_resolution_notify: Option<(u32, u32)>,
-    pending_resolution_notify_at: Option<Instant>,
+    pending_resolution_notify: Option<((u32, u32), Instant)>,
     last_notified_resolution: Option<(u32, u32)>,
 
     // Bandwidth tracking for the status bar sparkline
@@ -612,7 +627,6 @@ impl RyllApp {
             last_auto_resize: None,
             obey_guest_size,
             pending_resolution_notify: None,
-            pending_resolution_notify_at: None,
             last_notified_resolution: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
@@ -729,7 +743,6 @@ impl RyllApp {
         self.pending_resize = None;
         self.last_auto_resize = None;
         self.pending_resolution_notify = None;
-        self.pending_resolution_notify_at = None;
         self.last_notified_resolution = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
         self.usb_tx = Some(usb_tx);
@@ -841,10 +854,18 @@ impl RyllApp {
                         (display_channel_id, surface_id),
                         DisplaySurface::new(surface_id, width, height),
                     );
-                    if display_channel_id == 0 && surface_id == 0 {
-                        self.pending_resize = Some((width as f32, height as f32));
-                        self.pending_resolution_notify = Some((width, height));
-                        self.pending_resolution_notify_at = Some(Instant::now());
+                    if is_primary_surface(display_channel_id, surface_id) {
+                        if auto_fit_size_acceptable(width, height) {
+                            self.pending_resize = Some((width as f32, height as f32));
+                            self.pending_resolution_notify =
+                                Some(((width, height), Instant::now()));
+                        } else {
+                            warn!(
+                                "app: ignoring oversized primary surface {}x{} for auto-fit \
+                                 (limit {}px per axis)",
+                                width, height, MAX_AUTO_FIT_DIMENSION
+                            );
+                        }
                     }
                 }
 
@@ -881,10 +902,18 @@ impl RyllApp {
                             surface_id, surf_w, surf_h, left, top, width, height
                         );
                         e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
-                        if display_channel_id == 0 && surface_id == 0 {
-                            self.pending_resize = Some((surf_w as f32, surf_h as f32));
-                            self.pending_resolution_notify = Some((surf_w, surf_h));
-                            self.pending_resolution_notify_at = Some(Instant::now());
+                        if is_primary_surface(display_channel_id, surface_id) {
+                            if auto_fit_size_acceptable(surf_w, surf_h) {
+                                self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                                self.pending_resolution_notify =
+                                    Some(((surf_w, surf_h), Instant::now()));
+                            } else {
+                                warn!(
+                                    "app: ignoring oversized auto-created primary surface \
+                                     {}x{} for auto-fit (limit {}px per axis)",
+                                    surf_w, surf_h, MAX_AUTO_FIT_DIMENSION
+                                );
+                            }
                         }
                     }
 
@@ -1737,7 +1766,6 @@ impl eframe::App for RyllApp {
         let now = Instant::now();
         if let Some((w, h)) = resolution_notification_due(
             self.pending_resolution_notify,
-            self.pending_resolution_notify_at,
             self.last_notified_resolution,
             now,
             RESOLUTION_NOTIFY_DEBOUNCE,
@@ -1749,8 +1777,7 @@ impl eframe::App for RyllApp {
             );
             self.last_notified_resolution = Some((w, h));
             self.pending_resolution_notify = None;
-            self.pending_resolution_notify_at = None;
-        } else if let Some(at) = self.pending_resolution_notify_at {
+        } else if let Some((_, at)) = self.pending_resolution_notify {
             // Still inside the debounce window. Ask egui for a
             // repaint right at the deadline so the notification
             // fires promptly even if no other events arrive.
@@ -1762,7 +1789,6 @@ impl eframe::App for RyllApp {
                 // last_notified). Drop the pending state so we
                 // do not keep retrying.
                 self.pending_resolution_notify = None;
-                self.pending_resolution_notify_at = None;
             }
         }
 
@@ -3109,6 +3135,29 @@ impl eframe::App for RyllApp {
     }
 }
 
+/// True when an inbound display-channel surface refers to
+/// the primary surface — i.e. display channel 0, surface
+/// id 0. The phase 1 plan picked this literal pair (rather
+/// than tracking "the renderer's current primary key")
+/// because the primary surface key is fixed by the SPICE
+/// protocol; centralising the check here keeps the trigger
+/// sites in sync if that ever changes.
+fn is_primary_surface(display_channel_id: u8, surface_id: u32) -> bool {
+    display_channel_id == 0 && surface_id == 0
+}
+
+/// True when an announced surface size is small enough to
+/// safely drive the auto-fit and resolution-notification
+/// pipelines. See `MAX_AUTO_FIT_DIMENSION` for the
+/// rationale; the trigger sites use this to refuse to
+/// arm `pending_resize` / `pending_resolution_notify` for
+/// nonsense-sized surfaces (which a hostile server can
+/// announce trivially) without affecting the SPICE
+/// renderer's own surface bookkeeping.
+fn auto_fit_size_acceptable(width: u32, height: u32) -> bool {
+    width <= MAX_AUTO_FIT_DIMENSION && height <= MAX_AUTO_FIT_DIMENSION
+}
+
 /// Decide whether to issue a `ViewportCommand::InnerSize`
 /// to fit the remote surface, and what size to ask for.
 ///
@@ -3175,6 +3224,10 @@ fn compute_outgoing_resize(viewport: (f32, f32), is_max: bool) -> (u32, u32) {
 /// notification has been quiet long enough to emit, and
 /// what value to emit.
 ///
+/// `pending` pairs the latest queued (w, h) with its
+/// observation timestamp; the two are always set and
+/// cleared together at every call site.
+///
 /// Returns Some((w, h)) when:
 /// * a value is pending,
 /// * at least `debounce` has elapsed since the value
@@ -3185,19 +3238,17 @@ fn compute_outgoing_resize(viewport: (f32, f32), is_max: bool) -> (u32, u32) {
 /// Returns None to leave the pending state in place
 /// (still inside the debounce window) or to drop it
 /// silently (matches last_notified — the caller should
-/// also clear the pending fields in that case; see the
+/// also clear the pending field in that case; see the
 /// call site).
 ///
 /// Pure for unit-testability — `now` is injected.
 fn resolution_notification_due(
-    pending: Option<(u32, u32)>,
-    pending_at: Option<Instant>,
+    pending: Option<((u32, u32), Instant)>,
     last_notified: Option<(u32, u32)>,
     now: Instant,
     debounce: Duration,
 ) -> Option<(u32, u32)> {
-    let target = pending?;
-    let queued_at = pending_at?;
+    let (target, queued_at) = pending?;
     if now.saturating_duration_since(queued_at) < debounce {
         return None;
     }
@@ -4038,10 +4089,40 @@ mod tests {
     }
 
     #[test]
+    fn auto_fit_size_acceptable_bounds() {
+        // Anchors the cap so a typo (`>` vs `>=`, `||` vs
+        // `&&`) cannot silently let an attacker-controlled
+        // dimension through. The cap matches
+        // GL_MAX_TEXTURE_SIZE on common hardware and is
+        // comfortably above any realistic display.
+        assert!(auto_fit_size_acceptable(0, 0));
+        assert!(auto_fit_size_acceptable(1024, 768));
+        assert!(auto_fit_size_acceptable(
+            MAX_AUTO_FIT_DIMENSION,
+            MAX_AUTO_FIT_DIMENSION
+        ));
+        assert!(!auto_fit_size_acceptable(MAX_AUTO_FIT_DIMENSION + 1, 768));
+        assert!(!auto_fit_size_acceptable(1024, MAX_AUTO_FIT_DIMENSION + 1));
+        assert!(!auto_fit_size_acceptable(u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn is_primary_surface_only_zero_zero() {
+        // Anchors the gating predicate so a typo
+        // (`||` for `&&`, or a non-zero default) cannot
+        // silently widen the set of surfaces that drive
+        // auto-fit and resolution notifications.
+        assert!(is_primary_surface(0, 0));
+        assert!(!is_primary_surface(0, 1));
+        assert!(!is_primary_surface(1, 0));
+        assert!(!is_primary_surface(1, 1));
+    }
+
+    #[test]
     fn resolution_notification_due_nothing_pending() {
         let now = Instant::now();
         assert_eq!(
-            resolution_notification_due(None, None, None, now, Duration::from_millis(500),),
+            resolution_notification_due(None, None, now, Duration::from_millis(500),),
             None,
         );
     }
@@ -4052,8 +4133,7 @@ mod tests {
         let queued_at = now - Duration::from_millis(100);
         assert_eq!(
             resolution_notification_due(
-                Some((1024, 768)),
-                Some(queued_at),
+                Some(((1024, 768), queued_at)),
                 None,
                 now,
                 Duration::from_millis(500),
@@ -4069,8 +4149,7 @@ mod tests {
         let queued_at = now - Duration::from_millis(600);
         assert_eq!(
             resolution_notification_due(
-                Some((1024, 768)),
-                Some(queued_at),
+                Some(((1024, 768), queued_at)),
                 None,
                 now,
                 Duration::from_millis(500),
@@ -4088,8 +4167,7 @@ mod tests {
         let queued_at = now - Duration::from_millis(600);
         assert_eq!(
             resolution_notification_due(
-                Some((1024, 768)),
-                Some(queued_at),
+                Some(((1024, 768), queued_at)),
                 Some((1024, 768)),
                 now,
                 Duration::from_millis(500),

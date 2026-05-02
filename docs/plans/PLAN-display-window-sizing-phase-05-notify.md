@@ -19,6 +19,16 @@ produce a `SURFACE_CREATE`).
 
 ## Scope
 
+> **Implementation note (post-merge):** the two pending-
+> notification fields below were collapsed into a single
+> `pending_resolution_notify: Option<((u32, u32), Instant)>`
+> during PR review (the value and its timestamp are always
+> set and cleared together, so one Option removes the
+> representable-but-invalid state where one is Some and
+> the other is None). The shipped state is two fields
+> total, not three. The historic three-field design is
+> preserved below for the design record.
+
 In scope:
 
 - Three new fields on `RyllApp` for the debounce state:
@@ -475,6 +485,53 @@ two markdown files.
       notification paragraph.
 - [ ] Master plan phase 5 → Complete; index row →
       Complete.
+
+## Hostile-server bound (post-merge)
+
+The pre-push security review pointed out that without an
+upper bound on the announced surface dimensions, a
+hostile (or buggy) SPICE server can send
+`SurfaceCreated { width: u32::MAX, height: u32::MAX }`,
+which the auto-fit arms would forward as
+`ViewportCommand::InnerSize` and quote verbatim in the
+notification string. Mitigation: `MAX_AUTO_FIT_DIMENSION
+= 16384` (`GL_MAX_TEXTURE_SIZE` on common hardware),
+checked at both trigger sites via the
+`auto_fit_size_acceptable` helper. Oversized surfaces
+log a `warn!` and skip both the auto-fit and the
+notification; the SPICE renderer's own surface
+bookkeeping is untouched (this was a pre-existing
+concern at the renderer layer, out of scope for the
+display-window-sizing master plan).
+
+## Open question — resolved
+
+The master plan asked: do we suppress the very first
+`SurfaceCreated` of a session (it is "initial connection",
+not a "change") or notify anyway as a "you are connected
+at WxH" confirmation?
+
+**Decision: notify.** `last_notified_resolution` starts as
+`None`, so the first primary `SurfaceCreated` after
+connect (or reconnect) emits a notification. Rationale:
+
+- Operator visibility — for the QEMU-pretending-to-be-an-
+  uncalibrated-sextant case the very first `640×480`
+  observation is itself useful (it confirms the mode we
+  came up in, before the boot mode-walk starts).
+- No extra state needed — suppressing the first surface
+  would mean either seeding `last_notified_resolution`
+  before the trigger fires (fragile: requires another
+  hook on connect) or carrying a "have we ever notified
+  this session" flag on `RyllApp`.
+- Debounce already bounds chattiness — one notification
+  per quiescent window, so the worst case for a chatty
+  guest is a single extra "connected at WxH" line in
+  the notification panel.
+
+Reconnect resets the three fields, so a fresh session
+re-notifies on its first surface, which matches the
+operator-visibility argument.
 
 ## Follow-up
 

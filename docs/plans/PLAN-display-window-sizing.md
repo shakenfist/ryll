@@ -260,11 +260,15 @@ through the guest and produce a `SURFACE_CREATE`). Sketch:
   from inbound `SurfaceCreated`) and do **not** notify on
   ryll's own auto-fit (it does not produce its own
   `SurfaceCreated`).
-* No notification on the very first `SurfaceCreated` of a
-  session — that is "initial connection", not a "change",
-  and is already implicit from the connection event. Open
-  question for the phase plan: do we want it anyway as a
-  cheap "you are connected at WxH" confirmation?
+* The very first `SurfaceCreated` of a session was an
+  open question — is it "initial connection", not a
+  "change"? Resolved by phase 5: we **do** notify on the
+  first surface, as a cheap "connected at WxH"
+  confirmation that gives operators visibility into the
+  starting mode (especially useful when a guest then
+  walks through several modes during boot). See
+  `PLAN-display-window-sizing-phase-05-notify.md`
+  ("Open question — resolved") for the rationale.
 
 ## Agent guidance
 
