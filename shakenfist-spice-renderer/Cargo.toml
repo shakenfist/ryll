@@ -88,3 +88,11 @@ http-body-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Phase 2 step 2e pre-flight: smoke-test that webrtc-rs's H.264
+# RTP payloader accepts the NAL output our H264Encoder produces.
+# `rtp` is the standalone crate that the umbrella `webrtc` crate
+# re-exports as `webrtc::rtp`; depending on it directly keeps the
+# test's transitive footprint minimal. Used only by
+# tests/webrtc_h264_smoke.rs.
+rtp = "0.17"
