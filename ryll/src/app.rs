@@ -37,6 +37,12 @@ const INPUT_CHANNEL_SIZE: usize = 256;
 /// Approximate height of the stats bar at the bottom of the window
 const STATS_BAR_HEIGHT: f32 = 20.0;
 
+/// Debounce window for resolution-change notifications.
+/// A burst of SurfaceCreated events within this window
+/// (boot mode probes, drag-resize storms) collapses to a
+/// single notification carrying the latest resolution.
+const RESOLUTION_NOTIFY_DEBOUNCE: Duration = Duration::from_millis(500);
+
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
 
@@ -257,6 +263,25 @@ pub struct RyllApp {
     // Toggled live via the hamburger menu; initial value comes
     // from `--no-obey-guest-size` (inverted).
     obey_guest_size: bool,
+
+    // Resolution-change notification state. The debounce
+    // coalesces a burst of guest-side mode changes (boot
+    // probes, drag-resize storms) into a single user-visible
+    // notification per quiescent window so the panel does
+    // not spam.
+    //
+    // pending_resolution_notify is the latest (w, h) we have
+    // seen on a primary SurfaceCreated; pending_resolution_notify_at
+    // is the timestamp of that observation. RyllApp::update
+    // emits when (now - pending_resolution_notify_at) >=
+    // RESOLUTION_NOTIFY_DEBOUNCE and the value differs from
+    // last_notified_resolution. last_notified_resolution
+    // suppresses re-emitting the same value (e.g. when the
+    // guest re-confirms an existing mode after a fullscreen
+    // toggle).
+    pending_resolution_notify: Option<(u32, u32)>,
+    pending_resolution_notify_at: Option<Instant>,
+    last_notified_resolution: Option<(u32, u32)>,
 
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
@@ -586,6 +611,9 @@ impl RyllApp {
             pending_resize: None,
             last_auto_resize: None,
             obey_guest_size,
+            pending_resolution_notify: None,
+            pending_resolution_notify_at: None,
+            last_notified_resolution: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
@@ -700,6 +728,9 @@ impl RyllApp {
         self.forwarded_buttons = 0;
         self.pending_resize = None;
         self.last_auto_resize = None;
+        self.pending_resolution_notify = None;
+        self.pending_resolution_notify_at = None;
+        self.last_notified_resolution = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
         self.usb_tx = Some(usb_tx);
         self.webdav_tx = Some(webdav_tx);
@@ -812,6 +843,8 @@ impl RyllApp {
                     );
                     if display_channel_id == 0 && surface_id == 0 {
                         self.pending_resize = Some((width as f32, height as f32));
+                        self.pending_resolution_notify = Some((width, height));
+                        self.pending_resolution_notify_at = Some(Instant::now());
                     }
                 }
 
@@ -850,6 +883,8 @@ impl RyllApp {
                         e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
                         if display_channel_id == 0 && surface_id == 0 {
                             self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                            self.pending_resolution_notify = Some((surf_w, surf_h));
+                            self.pending_resolution_notify_at = Some(Instant::now());
                         }
                     }
 
@@ -1697,6 +1732,38 @@ impl eframe::App for RyllApp {
             self.last_sent_resize = Some((aw, ah));
             self.last_auto_resize = Some((aw, ah));
             info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
+        }
+
+        let now = Instant::now();
+        if let Some((w, h)) = resolution_notification_due(
+            self.pending_resolution_notify,
+            self.pending_resolution_notify_at,
+            self.last_notified_resolution,
+            now,
+            RESOLUTION_NOTIFY_DEBOUNCE,
+        ) {
+            self.push_notification(
+                NotifySeverity::Info,
+                NotificationSource::Internal,
+                format!("Display resolution: {}x{}", w, h),
+            );
+            self.last_notified_resolution = Some((w, h));
+            self.pending_resolution_notify = None;
+            self.pending_resolution_notify_at = None;
+        } else if let Some(at) = self.pending_resolution_notify_at {
+            // Still inside the debounce window. Ask egui for a
+            // repaint right at the deadline so the notification
+            // fires promptly even if no other events arrive.
+            let elapsed = now.saturating_duration_since(at);
+            if elapsed < RESOLUTION_NOTIFY_DEBOUNCE {
+                ctx.request_repaint_after(RESOLUTION_NOTIFY_DEBOUNCE - elapsed);
+            } else {
+                // Past the deadline but skipped (target matches
+                // last_notified). Drop the pending state so we
+                // do not keep retrying.
+                self.pending_resolution_notify = None;
+                self.pending_resolution_notify_at = None;
+            }
         }
 
         self.maybe_send_monitors_resize(ctx);
@@ -3104,6 +3171,42 @@ fn compute_outgoing_resize(viewport: (f32, f32), is_max: bool) -> (u32, u32) {
     (aligned_w, aligned_h)
 }
 
+/// Decide whether the pending resolution-change
+/// notification has been quiet long enough to emit, and
+/// what value to emit.
+///
+/// Returns Some((w, h)) when:
+/// * a value is pending,
+/// * at least `debounce` has elapsed since the value
+///   was queued, and
+/// * the value differs from `last_notified` (so we do
+///   not re-emit a confirmation of the existing mode).
+///
+/// Returns None to leave the pending state in place
+/// (still inside the debounce window) or to drop it
+/// silently (matches last_notified — the caller should
+/// also clear the pending fields in that case; see the
+/// call site).
+///
+/// Pure for unit-testability — `now` is injected.
+fn resolution_notification_due(
+    pending: Option<(u32, u32)>,
+    pending_at: Option<Instant>,
+    last_notified: Option<(u32, u32)>,
+    now: Instant,
+    debounce: Duration,
+) -> Option<(u32, u32)> {
+    let target = pending?;
+    let queued_at = pending_at?;
+    if now.saturating_duration_since(queued_at) < debounce {
+        return None;
+    }
+    if last_notified == Some(target) {
+        return None;
+    }
+    Some(target)
+}
+
 /// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
 fn default_arrow_cursor() -> Vec<u8> {
     #[rustfmt::skip]
@@ -3932,5 +4035,66 @@ mod tests {
         assert_eq!(tracker.history.len(), LATENCY_HISTORY_LEN);
         // The first kept value should be the 6th original (index 5)
         assert_eq!(tracker.history[0], 5.0);
+    }
+
+    #[test]
+    fn resolution_notification_due_nothing_pending() {
+        let now = Instant::now();
+        assert_eq!(
+            resolution_notification_due(None, None, None, now, Duration::from_millis(500),),
+            None,
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_inside_debounce() {
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(100);
+        assert_eq!(
+            resolution_notification_due(
+                Some((1024, 768)),
+                Some(queued_at),
+                None,
+                now,
+                Duration::from_millis(500),
+            ),
+            None,
+            "100 ms < 500 ms debounce — must not fire",
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_past_window_emits() {
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(600);
+        assert_eq!(
+            resolution_notification_due(
+                Some((1024, 768)),
+                Some(queued_at),
+                None,
+                now,
+                Duration::from_millis(500),
+            ),
+            Some((1024, 768)),
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_past_window_dedupes() {
+        // Pending value matches last_notified — caller
+        // should suppress so we do not announce the same
+        // resolution twice in a row.
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(600);
+        assert_eq!(
+            resolution_notification_due(
+                Some((1024, 768)),
+                Some(queued_at),
+                Some((1024, 768)),
+                now,
+                Duration::from_millis(500),
+            ),
+            None,
+        );
     }
 }

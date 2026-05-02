@@ -218,7 +218,7 @@ Concretely:
 | 2. Hamburger toggle + CLI flag | PLAN-display-window-sizing-phase-02-toggle.md | Complete |
 | 3. Tests | PLAN-display-window-sizing-phase-03-tests.md | Complete |
 | 4. Docs | PLAN-display-window-sizing-phase-04-docs.md | Complete |
-| 5. Resolution-change notifications | PLAN-display-window-sizing-phase-05-notify.md | Not started |
+| 5. Resolution-change notifications | PLAN-display-window-sizing-phase-05-notify.md | Complete |
 
 Phase 1 is the bug fix proper. Phase 2 adds the escape
 hatch. Phase 3 covers regression tests for the resize

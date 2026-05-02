@@ -499,6 +499,22 @@ it — overflowing or letterboxing as the dimensions
 require. The toggle is a session-level preference and
 is **not** reset across a reconnect.
 
+Every primary-surface mode change is also surfaced as an
+Info notification ("Display resolution: WxH") through the
+existing notification panel, debounced by
+`RESOLUTION_NOTIFY_DEBOUNCE` (500 ms) so a burst of
+events — boot probes that step `640×480 → 800×600 →
+1024×768` over a second, or a drag-resize that steps
+through dozens of 8-pixel-aligned sizes — collapses to a
+single entry carrying the latest resolution. The
+debounce is on top of the 30-second
+`NOTIFICATION_DEDUP_WINDOW` from
+`ryll/src/notifications.rs`, which folds same-resolution
+repeats into a `count++` on the existing entry. The
+decision is in the pure
+`resolution_notification_due` helper next to the
+window-fit helpers, and is unit-tested alongside them.
+
 `pending_resize` is only set when the affected surface
 key is `(display_channel_id == 0, surface_id == 0)`, so
 a secondary monitor's surface event cannot resize the

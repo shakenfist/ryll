@@ -14,7 +14,10 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
   `VDAgentMonitorsConfig`). Maximised or fullscreen windows are left alone, and the surface renders at native
   size inside them. Toggle `Obey guest size hints` in the hamburger menu (or launch with
   `--no-obey-guest-size`) to pin the window — useful for fixed-size capture or for guests that flap between
-  resolutions on their own. The toggle is a session-level preference and survives reconnect.
+  resolutions on their own. The toggle is a session-level preference and survives reconnect. Resolution
+  changes are also surfaced as Info notifications ("Display resolution: WxH"), debounced over 500 ms so a
+  boot-time mode probe storm or a drag-resize through many sizes collapses to a single entry rather than
+  spamming the panel.
 - **Multi-channel support** - Handles main, display, cursor, inputs, playback, usbredir, and webdav channels
 - **USB device redirection** - Forward physical USB devices (Linux only) or present RAW disk images as virtual USB mass storage devices on all platforms. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
 - **WebDAV folder sharing** - Share a local directory with the guest VM via the SPICE WebDAV channel. The guest mounts the share via `spice-webdavd` + `davfs2`. Supports read-write and read-only modes. Interactive "Folders" panel in the GUI for directory selection and share management. CLI flags (`--share-dir`, `--share-dir-ro`) for headless/scripted use
