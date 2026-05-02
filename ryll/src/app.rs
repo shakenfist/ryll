@@ -30,7 +30,11 @@ use shakenfist_spice_renderer::channels::{
     VolumeControl, WebdavChannel,
 };
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
-use shakenfist_spice_renderer::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavCommand};
+use shakenfist_spice_renderer::{
+    ChannelEvent, ClipboardBackend, CursorImage, InputEvent, UsbCommand, WebdavCommand,
+};
+
+use crate::clipboard_arboard::ArboardClipboard;
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -561,6 +565,8 @@ impl RyllApp {
                     }
                 });
 
+                let clipboard: Option<Arc<dyn ClipboardBackend>> =
+                    Some(Arc::new(ArboardClipboard::new()));
                 if let Err(e) = run_connection(
                     config_clone,
                     event_tx_clone,
@@ -580,6 +586,7 @@ impl RyllApp {
                     enable_paste,
                     log_config_clone,
                     cancel_for_conn,
+                    clipboard,
                 )
                 .await
                 {
@@ -794,6 +801,8 @@ impl RyllApp {
                     }
                 });
 
+                let clipboard: Option<Arc<dyn ClipboardBackend>> =
+                    Some(Arc::new(ArboardClipboard::new()));
                 if let Err(e) = run_connection(
                     config_clone,
                     event_tx_clone,
@@ -813,6 +822,7 @@ impl RyllApp {
                     enable_paste,
                     log_config_clone,
                     cancel_for_conn,
+                    clipboard,
                 )
                 .await
                 {
@@ -3345,6 +3355,7 @@ async fn run_connection(
     enable_paste: bool,
     log_config: shakenfist_spice_renderer::LogConfig,
     cancel: Arc<AtomicBool>,
+    clipboard: Option<Arc<dyn ClipboardBackend>>,
 ) -> Result<()> {
     let client = SpiceClient::new((&config).into())?;
 
@@ -3366,6 +3377,7 @@ async fn run_connection(
         resize_rx,
         monitors,
         log_config,
+        clipboard,
     );
 
     // Spawn main channel task
@@ -3713,6 +3725,7 @@ pub async fn run_headless(
             enable_paste,
             log_config,
             Arc::new(AtomicBool::new(false)),
+            None, // headless mode: no clipboard
         )
         .await
     });

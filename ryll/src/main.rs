@@ -29,6 +29,7 @@ mod capture {
         }
     }
 }
+mod clipboard_arboard;
 mod config;
 mod display_gui;
 mod input_egui;

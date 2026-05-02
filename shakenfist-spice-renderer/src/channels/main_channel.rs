@@ -9,7 +9,8 @@ use tracing::{debug, info, warn};
 
 use crate::snapshots::MainSnapshot;
 use crate::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+    ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
+    TrafficSink,
 };
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -129,7 +130,7 @@ pub struct MainChannel {
     pending_monitors_config: Option<(u32, u32)>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_hash: Option<u64>,
-    cached_clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<Arc<dyn ClipboardBackend>>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -159,6 +160,7 @@ impl MainChannel {
         monitors_config_rx: mpsc::Receiver<(u32, u32)>,
         monitors: u8,
         log_config: LogConfig,
+        clipboard: Option<Arc<dyn ClipboardBackend>>,
     ) -> Self {
         MainChannel {
             stream,
@@ -176,7 +178,7 @@ impl MainChannel {
             guest_caps_received: false,
             channels_requested: false,
             last_clipboard_hash: None,
-            cached_clipboard: None,
+            clipboard,
             capture,
             byte_counter,
             traffic,
@@ -192,22 +194,6 @@ impl MainChannel {
     #[allow(dead_code)]
     pub fn session_id(&self) -> Option<u32> {
         self.session_id
-    }
-
-    /// Run the main channel event loop
-    /// Get or create the cached clipboard instance. Returns None
-    /// if the clipboard cannot be opened (e.g. no display server).
-    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
-        if self.cached_clipboard.is_none() {
-            match arboard::Clipboard::new() {
-                Ok(cb) => self.cached_clipboard = Some(cb),
-                Err(e) => {
-                    debug!("main: failed to open clipboard: {}", e);
-                    return None;
-                }
-            }
-        }
-        self.cached_clipboard.as_mut()
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -891,12 +877,11 @@ impl MainChannel {
                         // Log byte count only — clipboard content may contain
                         // passwords or sensitive data.
                         info!("main: clipboard from guest ({} bytes)", text.len());
-                        if let Some(cb) = self.clipboard() {
+                        if let Some(cb) = &self.clipboard {
                             match cb.set_text(&text) {
                                 Ok(()) => debug!("main: host clipboard updated"),
                                 Err(e) => {
                                     debug!("main: clipboard set failed: {}", e);
-                                    self.cached_clipboard = None;
                                 }
                             }
                         }
@@ -916,7 +901,7 @@ impl MainChannel {
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        let text = self.clipboard().and_then(|cb| cb.get_text().ok());
+                        let text = self.clipboard.as_ref().and_then(|cb| cb.get_text());
                         if let Some(text) = text {
                             // Log byte count only — clipboard content may contain
                             // passwords or sensitive data.
@@ -949,7 +934,7 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match self.clipboard().and_then(|cb| cb.get_text().ok()) {
+        let text = match self.clipboard.as_ref().and_then(|cb| cb.get_text()) {
             Some(t) => t,
             None => return Ok(()),
         };

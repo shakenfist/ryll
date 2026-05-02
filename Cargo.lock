@@ -4589,7 +4589,6 @@ name = "shakenfist-spice-renderer"
 version = "0.1.4"
 dependencies = [
  "anyhow",
- "arboard",
  "async-channel",
  "byteorder",
  "bytes",
