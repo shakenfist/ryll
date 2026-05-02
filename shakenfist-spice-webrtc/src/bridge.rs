@@ -20,8 +20,10 @@
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use shakenfist_spice_renderer::EncoderControl;
+use bytes::Bytes;
+use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
@@ -34,10 +36,28 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::rtp::codecs::h264::H264Payloader;
+use webrtc::rtp::header::Header;
+use webrtc::rtp::packet::Packet;
+use webrtc::rtp::packetizer::Payloader;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+use webrtc::track::track_local::TrackLocalWriter;
+
+/// Payload type used for H.264 in our SDP. Reused by both the
+/// MediaEngine registration in [`register_h264`] and the RTP
+/// header construction in the video pump.
+const H264_PAYLOAD_TYPE: u8 = 102;
+
+/// H.264 RTP clock rate per RFC 6184 / RFC 4566.
+const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
+
+/// Maximum RTP packet size handed to the H.264 payloader. 1200 is
+/// a conservative default that fits inside typical browser path
+/// MTU minus UDP+IP+SRTP overhead on a 1500-byte ethernet frame.
+const VIDEO_MTU: usize = 1200;
 
 /// Configuration for [`WebrtcBridge::new`].
 pub struct WebrtcBridgeConfig {
@@ -72,7 +92,6 @@ impl WebrtcBridgeConfig {
 /// `send_control`, `control_rx`) is added in 3c–3e.
 pub struct WebrtcBridge {
     pc: Arc<RTCPeerConnection>,
-    #[allow(dead_code)] // populated for 3c (video pump).
     video_track: Arc<TrackLocalStaticRTP>,
     #[allow(dead_code)] // populated for 3d (audio pump).
     audio_track: Arc<TrackLocalStaticRTP>,
@@ -207,6 +226,22 @@ impl WebrtcBridge {
         Ok(local_desc.sdp)
     }
 
+    /// Spawn the video pump task: consume [`EncodedFrame`]s from
+    /// `rx`, payload each NAL via [`H264Payloader`], and write
+    /// RTP packets to the bridge's video track. The marker bit
+    /// is set on the last RTP packet of each access unit per
+    /// RFC 6184 §5.1. The returned [`JoinHandle`] resolves when
+    /// `rx` is closed (i.e. all senders dropped).
+    ///
+    /// `write_rtp` errors do not stop the loop — the remote
+    /// peer may not have completed ICE/DTLS when the first
+    /// frames arrive, so transient drops are expected and are
+    /// logged at debug level.
+    pub fn spawn_video_pump(&self, rx: mpsc::Receiver<EncodedFrame>) -> JoinHandle<Result<()>> {
+        let track = self.video_track.clone();
+        tokio::spawn(run_video_pump(rx, track))
+    }
+
     /// Close the underlying peer connection. Consumes `self` so
     /// callers cannot accidentally reuse a closed bridge.
     pub async fn close(self) -> Result<()> {
@@ -233,17 +268,106 @@ fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
                 .to_owned(),
             rtcp_feedback: vec![],
         },
-        payload_type: 102,
+        payload_type: H264_PAYLOAD_TYPE,
         ..Default::default()
     };
     media_engine.register_codec(h264, RTPCodecType::Video)?;
     Ok(())
 }
 
+/// Spawned by [`WebrtcBridge::spawn_video_pump`]. Owns the
+/// receiver side of the encoder's [`EncodedFrame`] channel and a
+/// clone of the bridge's video track. Iterates encoded frames,
+/// strips Annex-B start codes, payloads each NAL via
+/// [`H264Payloader`], and writes RTP packets to the track. The
+/// marker bit is set on the last RTP packet of each access unit
+/// per RFC 6184 §5.1.
+///
+/// Errors from `track.write_rtp` are logged at debug and the
+/// loop continues — the receiver may not have negotiated DTLS
+/// yet when the first frames arrive, so dropped packets early on
+/// are normal.
+async fn run_video_pump(
+    mut rx: mpsc::Receiver<EncodedFrame>,
+    track: Arc<TrackLocalStaticRTP>,
+) -> Result<()> {
+    let mut payloader = H264Payloader::default();
+    let mut sequence: u16 = rand::random();
+    let ssrc: u32 = rand::random();
+
+    while let Some(frame) = rx.recv().await {
+        // EncodedFrame::timestamp_us is microseconds; convert to
+        // a 32-bit RTP timestamp at 90 kHz. Use u128 arithmetic
+        // to avoid overflow during the multiply, then truncate.
+        let rtp_ts = ((frame.timestamp_us as u128).saturating_mul(VIDEO_CLOCK_RATE_HZ as u128)
+            / 1_000_000u128) as u32;
+
+        // Collect every RTP packet for this access unit so we can
+        // set the marker bit on the last one only.
+        let mut packets: Vec<Packet> = Vec::new();
+
+        for annex_b_nal in &frame.nal_units {
+            // Defensive: every NAL produced by H264Encoder is
+            // 4-byte-start-code framed (Phase 2 step 2b); skip
+            // anything too short to be a real NAL body.
+            if annex_b_nal.len() < 5 {
+                continue;
+            }
+            // Strip the 4-byte Annex-B start code.
+            let raw_nal = &annex_b_nal[4..];
+
+            let payloads = payloader
+                .payload(VIDEO_MTU, &Bytes::copy_from_slice(raw_nal))
+                .map_err(|e| anyhow!("H264Payloader failed: {}", e))?;
+
+            // SPS (NAL type 7) and PPS (NAL type 8) produce empty
+            // payload sets — they're cached and bundled as a
+            // STAP-A on the next non-parameter NAL per RFC 6184.
+            // Skip empty entries cleanly without special-casing.
+            for payload in payloads {
+                if payload.is_empty() {
+                    continue;
+                }
+                let header = Header {
+                    version: 2,
+                    payload_type: H264_PAYLOAD_TYPE,
+                    sequence_number: sequence,
+                    timestamp: rtp_ts,
+                    ssrc,
+                    marker: false, // updated below for the last packet
+                    ..Default::default()
+                };
+                packets.push(Packet { header, payload });
+                sequence = sequence.wrapping_add(1);
+            }
+        }
+
+        // Mark the last RTP packet of this access unit.
+        if let Some(last) = packets.last_mut() {
+            last.header.marker = true;
+        }
+
+        // Write to the track. Errors here are logged but do not
+        // stop the pump — the remote side may not have completed
+        // ICE/DTLS yet when the first frames arrive.
+        for pkt in packets {
+            if let Err(e) = track.write_rtp(&pkt).await {
+                tracing::debug!("video pump: write_rtp dropped packet: {}", e);
+            }
+        }
+    }
+
+    tracing::debug!("video pump: receiver closed, exiting");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakenfist_spice_renderer::EncoderControl;
+    use shakenfist_spice_renderer::{
+        EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource,
+    };
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
     use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
@@ -336,5 +460,53 @@ mod tests {
 
         client_pc.close().await.expect("client close");
         bridge.close().await.expect("bridge close");
+    }
+
+    /// Smoke test: drive the video pump end-to-end against a real
+    /// `H264Encoder` + `EncoderTask` fed by `SyntheticFrameSource`.
+    /// We don't need a peer connection — `TrackLocalStaticRTP::write_rtp`
+    /// accepts packets even without a connected peer (they're
+    /// buffered/dropped at the transport).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn video_pump_runs_without_errors() {
+        let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: control_tx,
+        })
+        .await
+        .expect("bridge");
+
+        // Encoder pipeline driven by a synthetic source.
+        let encoder = H264Encoder::new(64, 64).expect("encoder init");
+        let source = SyntheticFrameSource::new(64, 64);
+        let (frame_tx, frame_rx) = mpsc::channel(32);
+        let (enc_ctl_tx, enc_ctl_rx) = mpsc::channel(4);
+        let _enc_handle = EncoderTask::spawn(encoder, source, frame_tx, enc_ctl_rx, 30);
+
+        // Spawn the video pump.
+        let pump_handle = bridge.spawn_video_pump(frame_rx);
+
+        // Let it run briefly. ~25 frames at 30 fps in 800 ms is
+        // plenty for a smoke check; debug-build openh264 is
+        // slower than wall-clock but we only need the pipeline
+        // to make progress without errors.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+
+        // Stop the encoder. When the encoder task drops its
+        // `frame_tx`, `frame_rx.recv()` will return None and
+        // the pump exits cleanly.
+        let _ = enc_ctl_tx.send(EncoderControl::Stop).await;
+
+        // The pump exits when frame_rx closes. Give it a few
+        // seconds to drain. The triple unwrap unwraps the
+        // timeout, the JoinHandle, and the pump's Result<()>.
+        tokio::time::timeout(Duration::from_secs(3), pump_handle)
+            .await
+            .expect("pump didn't stop in time")
+            .expect("join")
+            .expect("pump task error");
+
+        bridge.close().await.expect("close");
     }
 }
