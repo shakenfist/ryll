@@ -2,17 +2,11 @@
 //!
 //! This crate hosts the protocol-substrate types shared between
 //! ryll's frontends (GUI, headless, planned `--web`). The display
-//! pixel buffer, channel handlers, and session orchestrator move
-//! in later phases; this phase introduces the trait/event
-//! indirection that lets channel handlers stop reaching into the
-//! ryll-side modules they consume today.
-
-use std::sync::atomic::AtomicBool;
-
-/// Global shutdown flag. Set to `true` by the Ctrl+C handler in the
-/// binary; polled by long-running channel loops so they can exit
-/// cleanly without cancellation tokens.
-pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+//! pixel buffer, channel handlers, and session orchestrator
+//! (`run_connection`, `run_headless`) all live here; the host
+//! crate (`ryll`) is the egui frontend that drives them and a
+//! few host-policy concerns (Ctrl+C handling, the in-app
+//! notification store, pedantic bug-report registration).
 
 pub mod byte_counter;
 pub mod capture_sink;
@@ -23,6 +17,8 @@ pub mod display;
 pub mod log_config;
 pub mod metrics;
 pub mod notification;
+pub mod notification_sink;
+pub mod session;
 pub mod snapshots;
 pub mod traffic;
 pub mod usb;
@@ -36,6 +32,8 @@ pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
 pub use log_config::LogConfig;
 pub use notification::{NotificationEntry, NotificationSource};
+pub use notification_sink::NotificationSink;
+pub use session::{run_connection, run_headless};
 pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot,

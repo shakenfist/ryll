@@ -194,6 +194,22 @@ impl Default for NotificationStore {
 /// Convenience type alias for the shared store.
 pub type SharedNotifications = Arc<Mutex<NotificationStore>>;
 
+/// Newtype wrapper around `SharedNotifications` so the renderer's
+/// `NotificationSink` trait can be implemented for it without
+/// running into the orphan rules. The renderer's headless event
+/// drain calls `push` on each `ChannelEvent::Notification` it
+/// sees; the lock poison case is best-effort, matching the gap
+/// observer elsewhere in this module.
+pub struct NotificationStoreSink(pub SharedNotifications);
+
+impl shakenfist_spice_renderer::NotificationSink for NotificationStoreSink {
+    fn push(&self, entry: NotificationEntry) {
+        if let Ok(mut guard) = self.0.lock() {
+            guard.push(entry);
+        }
+    }
+}
+
 // `NotificationSource::label()` lives on the renderer-side
 // definition in `shakenfist_spice_renderer::notification`.
 

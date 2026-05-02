@@ -317,6 +317,11 @@ pub struct PlaybackChannel {
     audio_thread: Option<AudioThread>,
     opus_decoder: Option<opus_decoder::OpusDecoder>,
     volume_control: Arc<VolumeControl>,
+    /// Per-connection cancel flag. The 100 ms select branch in
+    /// the read loop polls this so the channel exits cleanly when
+    /// the orchestrator's cancel flag flips (Ctrl+C bridge in
+    /// the host, or a fresh Reconnect superseding this attempt).
+    cancel: Arc<AtomicBool>,
 }
 
 impl PlaybackChannel {
@@ -329,6 +334,7 @@ impl PlaybackChannel {
         traffic: Arc<dyn TrafficSink>,
         volume_control: Arc<VolumeControl>,
         log_config: LogConfig,
+        cancel: Arc<AtomicBool>,
     ) -> Self {
         PlaybackChannel {
             stream,
@@ -351,6 +357,7 @@ impl PlaybackChannel {
             audio_thread: None,
             opus_decoder: None,
             volume_control,
+            cancel,
         }
     }
 
@@ -373,8 +380,8 @@ impl PlaybackChannel {
                     }
                 } => Some(result),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if crate::SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
-                        info!("playback: shutdown requested");
+                    if self.cancel.load(Ordering::Relaxed) {
+                        info!("playback: cancelled");
                         break;
                     }
                     None

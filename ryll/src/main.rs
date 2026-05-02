@@ -35,7 +35,7 @@ mod display_gui;
 mod input_egui;
 mod settings;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -45,12 +45,23 @@ use tracing::{info, Level};
 use tracing_subscriber::fmt;
 use tracing_subscriber::prelude::*;
 
-use crate::bugreport::PedanticConfig;
+use crate::bugreport::{AppSnapshot, BugReport, ChannelSnapshots, PedanticConfig, TrafficBuffers};
 use crate::capture::CaptureSession;
 use crate::config::{
     parse_share_dir, parse_virtual_disks, Args, Config, ShareDirConfig, VirtualDiskConfig,
 };
-use shakenfist_spice_renderer::SHUTDOWN_REQUESTED;
+use crate::notifications::{
+    register_gap_notification_observer, NotificationStore, NotificationStoreSink,
+    SharedNotifications,
+};
+
+/// Process-global shutdown flag, raised by the Ctrl+C handler.
+/// Each connection-bearing entry point (`run_gui`, `run_headless`)
+/// bridges this into a per-attempt `Arc<AtomicBool>` cancel flag
+/// that the renderer's session orchestrator polls. The renderer
+/// itself has no business knowing about a process-global signal
+/// flag, so this lives strictly host-side.
+pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> Result<()> {
     // Install Ctrl+C handler so graceful shutdown works on all platforms.
@@ -179,31 +190,117 @@ fn run_headless(
     share_dir: Option<ShareDirConfig>,
     capture: Option<Arc<CaptureSession>>,
     pedantic_config: Option<PedanticConfig>,
-    obey_guest_size: bool,
+    // Headless mode has no window to resize, so this flag is accepted for
+    // CLI symmetry but is not used.
+    _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in headless mode");
 
     let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
     let paste_text = args.paste_text.clone();
     let paste_char_delay_ms = args.paste_char_delay_ms;
+    let cadence = args.cadence;
+    let monitors = args.monitors;
+
+    // Build the host-side scaffolding the renderer's `run_headless`
+    // expects. Notifications, traffic, snapshots, and the byte
+    // counter are owned by the host so it can also wire them into
+    // pedantic bug-report assembly and the gap observer; the
+    // renderer just records into the trait objects we hand it.
+    let byte_counter = Arc::new(shakenfist_spice_renderer::ByteCounter::new());
+    let traffic = Arc::new(TrafficBuffers::new());
+    let notifications: SharedNotifications =
+        Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+    let snapshots = ChannelSnapshots::new();
+
+    // Register the --pedantic gap observer. Traffic is live in headless
+    // so pedantic zips will have a real pcap. Channel-state snapshots
+    // are also live (channel tasks write through the `snapshots` handle
+    // passed into the renderer below). The `app_snapshot`, however,
+    // is only populated by the GUI update loop; in headless it would
+    // stay at its default, so we register with a fresh empty
+    // AppSnapshot and warn the user.
+    if let Some(pedantic) = pedantic_config {
+        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+        tracing::warn!(
+            "pedantic mode in headless: traffic pcap and channel-state are \
+             live, but app-level snapshot (surfaces list, bandwidth, latency) \
+             is not populated — that field is updated by the GUI loop only. \
+             See docs/plans/PLAN-display-draw-ops-phase-09-pedantic-handles.md."
+        );
+        BugReport::register_pedantic_observer(
+            pedantic,
+            config.host.clone(),
+            config.port,
+            traffic.clone(),
+            snapshots.clone(),
+            app_snapshot,
+            notifications.clone(),
+        );
+    }
+    register_gap_notification_observer(notifications.clone());
+
+    let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
+    let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
+        traffic as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
+    let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> = capture
+        .clone()
+        .map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
+    let notifications_sink: Arc<dyn shakenfist_spice_renderer::NotificationSink> =
+        Arc::new(NotificationStoreSink(notifications.clone()));
+    let log_config = settings::log_config();
+
+    // Per-attempt cancel flag. A small bridge task watches the
+    // process-global `SHUTDOWN_REQUESTED` (raised by the Ctrl+C
+    // handler) and flips this flag when it sees one — that wakes
+    // the renderer's 100 ms cancel-poll branch and unwinds every
+    // channel task. The bridge runs only for the lifetime of this
+    // headless session.
+    let cancel = Arc::new(AtomicBool::new(false));
 
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        app::run_headless(
-            config,
-            args.cadence,
+    let result = runtime.block_on(async {
+        let cancel_for_bridge = cancel.clone();
+        let bridge = tokio::spawn(async move {
+            loop {
+                if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+                    cancel_for_bridge.store(true, Ordering::Relaxed);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+
+        let res = shakenfist_spice_renderer::run_headless(
+            connection_config,
+            cadence,
             paste_text,
             paste_char_delay_ms,
             enable_paste,
             virtual_disks,
             share_dir,
-            capture,
-            args.monitors,
-            pedantic_config,
-            obey_guest_size,
+            capture_dyn,
+            monitors,
+            byte_counter,
+            traffic_dyn,
+            snapshots,
+            notifications_sink,
+            log_config,
+            cancel,
         )
-        .await
-    })
+        .await;
+
+        bridge.abort();
+        res
+    });
+
+    // Close capture session (flushes MP4 moov atom) on the host side
+    // since the renderer no longer holds the concrete `CaptureSession`.
+    if let Some(ref capture) = capture {
+        capture.close();
+    }
+
+    result
 }
 
 fn run_gui(

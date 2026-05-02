@@ -1,5 +1,4 @@
-/// Main application - egui App and headless mode
-use anyhow::Result;
+/// Main application - egui App.
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -23,12 +22,9 @@ use crate::notifications::{
     NotificationSource, NotificationStore, SharedNotifications,
 };
 use crate::settings;
-use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
-use shakenfist_spice_renderer::channels::{
-    CursorChannel, DisplayChannel, InputsChannel, MainChannel, PlaybackChannel, UsbredirChannel,
-    VolumeControl, WebdavChannel,
-};
+use shakenfist_spice_renderer::channels::VolumeControl;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
     ChannelEvent, ClipboardBackend, CursorImage, InputEvent, UsbCommand, WebdavCommand,
@@ -527,7 +523,7 @@ impl RyllApp {
         // after each event_tx.send(), so egui sleeps when nothing is happening
         // and wakes immediately when something is.
         let repaint_notify = Arc::new(Notify::new());
-        let config_clone = config.clone();
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
@@ -567,8 +563,8 @@ impl RyllApp {
 
                 let clipboard: Option<Arc<dyn ClipboardBackend>> =
                     Some(Arc::new(ArboardClipboard::new()));
-                if let Err(e) = run_connection(
-                    config_clone,
+                if let Err(e) = shakenfist_spice_renderer::run_connection(
+                    connection_config,
                     event_tx_clone,
                     conn_notify,
                     input_rx,
@@ -760,7 +756,7 @@ impl RyllApp {
         self.webdav_error_time = None;
 
         let repaint_notify = Arc::new(Notify::new());
-        let config_clone = self.config.clone();
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&self.config).into();
         let event_tx_clone = event_tx.clone();
         let ctx = self.egui_ctx.clone();
         let bridge_ctx = self.egui_ctx.clone();
@@ -803,8 +799,8 @@ impl RyllApp {
 
                 let clipboard: Option<Arc<dyn ClipboardBackend>> =
                     Some(Arc::new(ArboardClipboard::new()));
-                if let Err(e) = run_connection(
-                    config_clone,
+                if let Err(e) = shakenfist_spice_renderer::run_connection(
+                    connection_config,
                     event_tx_clone,
                     conn_notify,
                     input_rx,
@@ -1752,10 +1748,15 @@ impl RyllApp {
 impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Graceful shutdown on Ctrl+C: close capture session (flushes
-        // the MP4 moov atom) then ask eframe to exit.
-        if shakenfist_spice_renderer::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
-        {
+        // the MP4 moov atom) then ask eframe to exit. Also flip the
+        // per-connection cancel flag so the renderer's session
+        // orchestrator unwinds its channel tasks promptly instead of
+        // waiting for the read loops to time out.
+        if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
             info!("app: shutdown requested (SIGINT)");
+            if let Some(ref cancel) = self.connection_cancel {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             if let Some(ref capture) = self.capture {
                 capture.close();
             }
@@ -3332,549 +3333,6 @@ fn default_arrow_cursor() -> Vec<u8> {
         }
     }
     pixels
-}
-
-/// Run the SPICE connection in async context
-#[allow(clippy::too_many_arguments)]
-async fn run_connection(
-    config: Config,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
-    input_rx: mpsc::Receiver<InputEvent>,
-    usb_rx: mpsc::Receiver<UsbCommand>,
-    webdav_rx: mpsc::Receiver<WebdavCommand>,
-    virtual_disks: Vec<VirtualDiskConfig>,
-    share_dir: Option<ShareDirConfig>,
-    capture: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>>,
-    byte_counter: Arc<ByteCounter>,
-    traffic: Arc<dyn shakenfist_spice_renderer::TrafficSink>,
-    snapshots: ChannelSnapshots,
-    monitors: u8,
-    resize_rx: mpsc::Receiver<(u32, u32)>,
-    volume_control: Arc<VolumeControl>,
-    enable_paste: bool,
-    log_config: shakenfist_spice_renderer::LogConfig,
-    cancel: Arc<AtomicBool>,
-    clipboard: Option<Arc<dyn ClipboardBackend>>,
-) -> Result<()> {
-    let client = SpiceClient::new((&config).into())?;
-
-    // Wait for session initialization
-
-    // Connect main channel and run until we get session ID and channel list
-    let (event_tx_clone, mut temp_rx) = mpsc::channel(64);
-
-    let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
-
-    let mut main_channel = MainChannel::new(
-        main_stream,
-        event_tx_clone,
-        repaint_notify.clone(),
-        capture.clone(),
-        byte_counter.clone(),
-        traffic.clone(),
-        snapshots.main,
-        resize_rx,
-        monitors,
-        log_config,
-        clipboard,
-    );
-
-    // Spawn main channel task
-    let main_handle = tokio::spawn(async move { main_channel.run().await });
-
-    // Wait for session init and channel list
-    let mut got_session = false;
-    let mut got_channels = false;
-    let mut temp_session_id = 0u32;
-    let mut temp_channels = Vec::new();
-
-    loop {
-        match temp_rx.recv().await {
-            Some(ChannelEvent::SessionInitialized(id)) => {
-                temp_session_id = id;
-                got_session = true;
-                event_tx
-                    .send(ChannelEvent::SessionInitialized(id))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(ChannelEvent::ChannelsAvailable(chs)) => {
-                temp_channels = chs;
-                got_channels = true;
-                event_tx
-                    .send(ChannelEvent::ChannelsAvailable(temp_channels.clone()))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(other) => {
-                event_tx.send(other).await.ok();
-                repaint_notify.notify_one();
-            }
-            None => break,
-        }
-
-        if got_session && got_channels {
-            break;
-        }
-    }
-
-    let session_id = temp_session_id;
-    let channels = temp_channels;
-
-    info!(
-        "Session {} ready with {} channels",
-        session_id,
-        channels.len()
-    );
-
-    // Connect other channels
-    let mut handles = vec![main_handle];
-    let mut usb_rx = Some(usb_rx);
-    let mut webdav_rx = Some(webdav_rx);
-    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
-
-    for (channel_type, channel_id) in channels {
-        match channel_type {
-            ChannelType::Display => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let mut channel = DisplayChannel::new(
-                    channel_id,
-                    stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
-                    capture.clone(),
-                    byte_counter.clone(),
-                    traffic.clone(),
-                    snapshots.display.clone(),
-                    shared_glz_dictionary.clone(),
-                    log_config,
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
-            }
-
-            ChannelType::Cursor => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let mut channel = CursorChannel::new(
-                    stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
-                    capture.clone(),
-                    byte_counter.clone(),
-                    traffic.clone(),
-                    snapshots.cursor.clone(),
-                    log_config,
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
-            }
-
-            ChannelType::Inputs => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let mut channel = InputsChannel::new(
-                    stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
-                    input_rx,
-                    capture.clone(),
-                    byte_counter.clone(),
-                    traffic.clone(),
-                    snapshots.inputs.clone(),
-                    enable_paste,
-                    log_config,
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
-                // input_rx is moved, can't connect more inputs channels
-                break;
-            }
-
-            ChannelType::Usbredir => {
-                if let Some(usb_rx) = usb_rx.take() {
-                    let stream = client
-                        .connect_channel(session_id, channel_type, channel_id)
-                        .await?;
-                    let mut channel = UsbredirChannel::new(
-                        stream,
-                        event_tx.clone(),
-                        repaint_notify.clone(),
-                        usb_rx,
-                        virtual_disks.clone(),
-                        capture.clone(),
-                        byte_counter.clone(),
-                        log_config,
-                    );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
-                } else {
-                    info!(
-                        "Skipping additional usbredir channel (id={}): only one supported",
-                        channel_id
-                    );
-                }
-            }
-
-            ChannelType::Webdav => {
-                if let Some(webdav_rx) = webdav_rx.take() {
-                    let stream = client
-                        .connect_channel(session_id, channel_type, channel_id)
-                        .await?;
-                    let mut channel = WebdavChannel::new(
-                        stream,
-                        event_tx.clone(),
-                        repaint_notify.clone(),
-                        webdav_rx,
-                        share_dir.clone(),
-                        capture.clone(),
-                        byte_counter.clone(),
-                        log_config,
-                    );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
-                } else {
-                    info!(
-                        "Skipping additional webdav channel (id={}): only one supported",
-                        channel_id
-                    );
-                }
-            }
-
-            ChannelType::Playback => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let mut channel = PlaybackChannel::new(
-                    stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
-                    byte_counter.clone(),
-                    traffic.clone(),
-                    volume_control.clone(),
-                    log_config,
-                );
-                handles.push(tokio::spawn(async move { channel.run().await }));
-            }
-
-            _ => {
-                info!(
-                    "Skipping channel: {} (id={})",
-                    channel_type.name(),
-                    channel_id
-                );
-            }
-        }
-    }
-
-    // Cancel watcher: when RyllApp::reconnect raises the
-    // per-connection cancel flag (a fresh Reconnect supersedes
-    // this attempt), abort every channel task so the wait loop
-    // below returns promptly. The watcher polls at the same
-    // 100 ms cadence as the headless SHUTDOWN_REQUESTED check;
-    // that latency is well inside human reaction time and avoids
-    // adding any awaitable signalling primitive.
-    let cancel_watcher = {
-        let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if cancel.load(Ordering::Relaxed) {
-                    info!(
-                        "app: connection cancelled (superseded), aborting {} channel tasks",
-                        abort_handles.len()
-                    );
-                    for ah in &abort_handles {
-                        ah.abort();
-                    }
-                    break;
-                }
-            }
-        })
-    };
-
-    // Wait for all channel tasks
-    for handle in handles {
-        match handle.await {
-            Err(e) if e.is_cancelled() => {
-                // Aborted by the cancel watcher; not an error.
-            }
-            Err(e) => {
-                error!("Channel task panic: {}", e);
-            }
-            Ok(Err(e)) => {
-                let msg = format!("channel error: {}", e);
-                error!("app: {}", msg);
-                event_tx.send(ChannelEvent::Error(msg)).await.ok();
-                repaint_notify.notify_one();
-            }
-            Ok(Ok(())) => {}
-        }
-    }
-
-    // Stop the watcher if the connection ended for any other
-    // reason (main channel disconnect, secondary channel error).
-    // Safe to call even if it already exited via the cancel path.
-    cancel_watcher.abort();
-
-    Ok(())
-}
-
-/// Run in headless mode (no GUI)
-#[allow(clippy::too_many_arguments)]
-pub async fn run_headless(
-    config: Config,
-    cadence: bool,
-    paste_text: Option<String>,
-    paste_char_delay_ms: u32,
-    enable_paste: bool,
-    virtual_disks: Vec<VirtualDiskConfig>,
-    share_dir: Option<ShareDirConfig>,
-    capture: Option<Arc<CaptureSession>>,
-    monitors: u8,
-    pedantic_config: Option<PedanticConfig>,
-    // Headless mode has no window to resize, so this flag is accepted for
-    // CLI symmetry but is not used.
-    _obey_guest_size: bool,
-) -> Result<()> {
-    info!("Running in headless mode");
-
-    // Keep a reference for clean shutdown
-    let capture_for_shutdown = capture.clone();
-    let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> =
-        capture.map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
-
-    let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
-    let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
-    let (_usb_tx, usb_rx) = mpsc::channel(16);
-    let (_webdav_tx, webdav_rx) = mpsc::channel(16);
-    let (_resize_tx, resize_rx) = mpsc::channel(32);
-
-    // Headless mode doesn't display bandwidth, but channels still need the counter
-    let byte_counter = Arc::new(ByteCounter::new());
-
-    // Traffic ring buffers (always active)
-    let traffic = Arc::new(TrafficBuffers::new());
-
-    // In-app notification store (headless still produces and stores
-    // notifications even though no GUI consumes them).
-    let notifications: SharedNotifications =
-        Arc::new(std::sync::Mutex::new(NotificationStore::new()));
-
-    // Channel state snapshots (always active)
-    let snapshots = ChannelSnapshots::new();
-
-    // Register the --pedantic gap observer. Traffic is live in headless so
-    // pedantic zips will have a real pcap. Channel-state snapshots are also
-    // live (channel tasks write through the `snapshots` handle passed into
-    // run_connection below). The `app_snapshot`, however, is only populated
-    // by the GUI update loop; in headless it would stay at its default, so
-    // we register with a fresh empty AppSnapshot and warn the user.
-    if let Some(pedantic) = pedantic_config {
-        let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
-        tracing::warn!(
-            "pedantic mode in headless: traffic pcap and channel-state are \
-             live, but app-level snapshot (surfaces list, bandwidth, latency) \
-             is not populated — that field is updated by the GUI loop only. \
-             See docs/plans/PLAN-display-draw-ops-phase-09-pedantic-handles.md."
-        );
-        BugReport::register_pedantic_observer(
-            pedantic,
-            config.host.clone(),
-            config.port,
-            traffic.clone(),
-            snapshots.clone(),
-            app_snapshot,
-            notifications.clone(),
-        );
-    }
-    register_gap_notification_observer(notifications.clone());
-
-    // Headless mode does not paint anything, but the channel handlers still
-    // call notify_one().  Give them a Notify whose notifications nobody
-    // listens for; tokio::sync::Notify::notify_one is cheap (no allocation,
-    // no waker if no waiters) so this is harmless.
-    let repaint_notify = Arc::new(Notify::new());
-
-    // Spawn connection task. Headless mode has no Reconnect
-    // button, so the per-connection cancel flag is never raised
-    // here; we pass a fresh always-false Arc to satisfy the
-    // signature shared with the GUI path.
-    let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
-        traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
-    let log_config = settings::log_config();
-    let connection_handle = tokio::spawn(async move {
-        run_connection(
-            config,
-            event_tx,
-            repaint_notify,
-            input_rx,
-            usb_rx,
-            webdav_rx,
-            virtual_disks,
-            share_dir,
-            capture_dyn,
-            byte_counter,
-            traffic_dyn,
-            snapshots,
-            monitors,
-            resize_rx,
-            VolumeControl::new(),
-            enable_paste,
-            log_config,
-            Arc::new(AtomicBool::new(false)),
-            None, // headless mode: no clipboard
-        )
-        .await
-    });
-    tokio::pin!(connection_handle);
-
-    // Clone input_tx before cadence moves it, so the paste trigger can also use it.
-    let paste_input_tx = input_tx.clone();
-
-    // Cadence task if enabled
-    let cadence_handle = if cadence {
-        Some(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = input_tx.try_send(InputEvent::KeyDown(0x39));
-                let _ = input_tx.try_send(InputEvent::KeyUp(0xB9));
-            }
-        }))
-    } else {
-        None
-    };
-
-    // Paste trigger task if --paste-text was provided
-    let paste_handle = if let Some(text) = paste_text {
-        let delay_ms = paste_char_delay_ms;
-        Some(tokio::spawn(async move {
-            // Wait for the inputs channel to be ready.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let _ = paste_input_tx
-                .send(InputEvent::PasteText {
-                    text,
-                    char_delay_ms: delay_ms,
-                })
-                .await;
-        }))
-    } else {
-        None
-    };
-
-    // Process events
-    let mut stats = Statistics::default();
-    let mut last_stats_print = Instant::now();
-    let mut paste_failed = false;
-
-    loop {
-        tokio::select! {
-            Some(event) = event_rx.recv() => {
-                match event {
-                    ChannelEvent::SessionInitialized(id) => {
-                        info!("Session {} initialized", id);
-                    }
-                    ChannelEvent::SurfaceCreated { .. } => {
-                    }
-                    ChannelEvent::ImageReady { .. } => {
-                        stats.frames_received += 1;
-                    }
-                    ChannelEvent::Statistics { bytes_in, bytes_out, .. } => {
-                        stats.bytes_in += bytes_in;
-                        stats.bytes_out += bytes_out;
-                    }
-                    ChannelEvent::Disconnected(ChannelType::Main) => {
-                        info!("Main channel disconnected, exiting");
-                        break;
-                    }
-                    ChannelEvent::UsbDeviceConnected(desc) => {
-                        info!("headless: USB device connected: {}", desc);
-                    }
-                    ChannelEvent::UsbDeviceDisconnected => {
-                        info!("headless: USB device disconnected");
-                    }
-                    ChannelEvent::UsbConnectFailed(err) => {
-                        error!("headless: USB connect failed: {}", err);
-                    }
-                    ChannelEvent::WebdavChannelReady => {
-                        info!("headless: WebDAV channel connected");
-                    }
-                    ChannelEvent::WebdavSharingStarted { path, read_only } => {
-                        info!("headless: WebDAV sharing: {} (ro={})", path, read_only);
-                    }
-                    ChannelEvent::WebdavSharingStopped => {
-                        info!("headless: WebDAV sharing stopped");
-                    }
-                    ChannelEvent::WebdavError(err) => {
-                        error!("headless: WebDAV error: {}", err);
-                    }
-                    ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
-                        info!(
-                            "headless: paste complete: {} chars in {}ms",
-                            chars, elapsed_ms
-                        );
-                    }
-                    ChannelEvent::PasteFailed { reason } => {
-                        error!("headless: paste failed: {}", reason);
-                        paste_failed = true;
-                    }
-                    ChannelEvent::AgentConnected(connected) => {
-                        info!("headless: vdagent connected={}", connected);
-                    }
-                    ChannelEvent::Error(msg) => {
-                        error!("Error: {}", msg);
-                    }
-                    ChannelEvent::Notification(entry) => {
-                        if let Ok(mut guard) = notifications.lock() {
-                            guard.push(entry);
-                        }
-                    }
-                    _ => {}
-                }
-
-                // Print stats periodically
-                if last_stats_print.elapsed() >= Duration::from_secs(10) {
-                    info!(
-                        "Stats: frames={}, bytes_in={}, bytes_out={}",
-                        stats.frames_received, stats.bytes_in, stats.bytes_out
-                    );
-                    last_stats_print = Instant::now();
-                }
-            }
-            _ = &mut connection_handle => {
-                info!("Connection task completed");
-                break;
-            }
-            // Poll for Ctrl+C (SIGINT) at a reasonable interval
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if shakenfist_spice_renderer::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
-                    info!("app: shutdown requested (SIGINT)");
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(handle) = cadence_handle {
-        handle.abort();
-    }
-    if let Some(handle) = paste_handle {
-        handle.abort();
-    }
-
-    // Close capture session (flushes MP4 moov atom)
-    if let Some(ref capture) = capture_for_shutdown {
-        capture.close();
-    }
-
-    if paste_failed {
-        anyhow::bail!("paste-as-keystrokes failed");
-    }
-
-    info!("Headless mode finished");
-    Ok(())
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────────────
