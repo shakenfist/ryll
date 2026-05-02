@@ -14,6 +14,7 @@ pub mod channels;
 pub mod clipboard;
 pub mod device_config;
 pub mod display;
+pub mod encoder;
 pub mod log_config;
 pub mod metrics;
 pub mod notification;
@@ -30,6 +31,7 @@ pub use channels::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavComm
 pub use clipboard::ClipboardBackend;
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
+pub use encoder::{EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder};
 pub use log_config::LogConfig;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;

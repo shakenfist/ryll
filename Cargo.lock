@@ -4604,6 +4604,7 @@ dependencies = [
  "libc",
  "lz4_flex",
  "nusb",
+ "openh264",
  "opus-decoder",
  "rand 0.8.5",
  "rsa",
