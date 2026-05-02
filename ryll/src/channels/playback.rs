@@ -7,16 +7,15 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::app::ByteCounter;
-use crate::bugreport::TrafficBuffers;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
+use shakenfist_spice_renderer::{
+    ByteCounter, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+};
 
 use super::ChannelEvent;
 
@@ -305,8 +304,8 @@ pub struct PlaybackChannel {
     repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
-    notifications: SharedNotifications,
+    traffic: Arc<dyn TrafficSink>,
+    log_config: LogConfig,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
@@ -329,9 +328,9 @@ impl PlaybackChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         repaint_notify: Arc<Notify>,
         byte_counter: Arc<ByteCounter>,
-        traffic: Arc<TrafficBuffers>,
+        traffic: Arc<dyn TrafficSink>,
         volume_control: Arc<VolumeControl>,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         PlaybackChannel {
             stream,
@@ -340,7 +339,7 @@ impl PlaybackChannel {
             buffer: Vec::with_capacity(65536),
             byte_counter,
             traffic,
-            notifications,
+            log_config,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -424,7 +423,7 @@ impl PlaybackChannel {
             self.buffer.drain(..total);
             let msg_type = header.message_type;
 
-            if settings::is_verbose() {
+            if self.log_config.verbose {
                 logging::log_message(
                     "received",
                     "playback",
@@ -469,7 +468,7 @@ impl PlaybackChannel {
                 }
                 playback_server::NOTIFY => {
                     let notify = NotifyMessage::read(&payload)?;
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         logging::log_detail(&format!(
                             "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                             notify.severity, notify.visibility, notify.what, notify.message,
@@ -497,9 +496,10 @@ impl PlaybackChannel {
                     if let Some(v) = notify.visibility {
                         entry = entry.with_visibility(v);
                     }
-                    if let Ok(mut guard) = self.notifications.lock() {
-                        guard.push(entry);
-                    }
+                    self.event_tx
+                        .send(ChannelEvent::Notification(entry))
+                        .await
+                        .ok();
                     self.repaint_notify.notify_one();
                 }
                 playback_server::START => {
@@ -636,7 +636,7 @@ impl PlaybackChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let payload_size = data.len().saturating_sub(MessageHeader::SIZE) as u32;
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_message(
                 "sent",
                 "playback",

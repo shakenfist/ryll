@@ -666,3 +666,21 @@ impl Drop for CaptureSession {
         self.close();
     }
 }
+
+/// Bridge `CaptureSession` into the renderer's `CaptureSink`
+/// trait so that channel handlers can receive it as
+/// `Arc<dyn CaptureSink>` without taking a concrete dependency
+/// on this module.
+impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
+    fn packet_sent(&self, channel: &str, data: &[u8]) {
+        CaptureSession::packet_sent(self, channel, data);
+    }
+
+    fn packet_received(&self, channel: &str, data: &[u8]) {
+        CaptureSession::packet_received(self, channel, data);
+    }
+
+    fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) {
+        CaptureSession::frame(self, surface_id, pixels, width, height);
+    }
+}

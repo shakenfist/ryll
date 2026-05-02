@@ -13,19 +13,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
-use crate::app::ByteCounter;
-use crate::capture::CaptureSession;
-use crate::config::ShareDirConfig;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
-use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
-use crate::webdav::server::WebdavServer;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
+use shakenfist_spice_renderer::webdav::mux::{self, MuxDemuxer, MuxFrame};
+use shakenfist_spice_renderer::webdav::server::WebdavServer;
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, ShareDirConfig,
+};
 
 use super::{ChannelEvent, WebdavCommand};
 
@@ -54,9 +52,9 @@ pub struct WebdavChannel {
     repaint_notify: Arc<Notify>,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
     buffer: Vec<u8>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    notifications: SharedNotifications,
+    log_config: LogConfig,
 
     // BaseChannel ACK state
     ack_generation: u32,
@@ -92,9 +90,9 @@ impl WebdavChannel {
         repaint_notify: Arc<Notify>,
         webdav_rx: mpsc::Receiver<WebdavCommand>,
         auto_share_dir: Option<ShareDirConfig>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         let (response_tx, response_rx) = mpsc::channel(256);
         WebdavChannel {
@@ -105,7 +103,7 @@ impl WebdavChannel {
             buffer: Vec::with_capacity(65536),
             capture,
             byte_counter,
-            notifications,
+            log_config,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -246,7 +244,7 @@ impl WebdavChannel {
     }
 
     async fn handle_message(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let msg_type_str = message_names::spicevmc_server(msg_type);
             logging::log_message(
                 "received",
@@ -266,7 +264,7 @@ impl WebdavChannel {
             }
             spicevmc_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -283,7 +281,7 @@ impl WebdavChannel {
             }
             spicevmc_server::PING => {
                 let ping = Ping::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -296,7 +294,7 @@ impl WebdavChannel {
             }
             spicevmc_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -324,9 +322,10 @@ impl WebdavChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
             _ => {
@@ -511,7 +510,7 @@ impl WebdavChannel {
             return Ok(());
         }
 
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_detail(&format!(
                 "type={} uncompressed={} compressed={}",
                 compression_type,
@@ -652,7 +651,7 @@ impl WebdavChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let msg_type_str = message_names::spicevmc_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "webdav", msg_type, msg_type_str, payload_size);

@@ -7,11 +7,6 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
 use tracing::{debug, info, warn};
 
-use crate::app::ByteCounter;
-use crate::bugreport::{MainSnapshot, TrafficBuffers};
-use crate::capture::CaptureSession;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -19,6 +14,10 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
+};
+use shakenfist_spice_renderer::snapshots::MainSnapshot;
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 
 use super::ChannelEvent;
@@ -131,10 +130,10 @@ pub struct MainChannel {
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_hash: Option<u64>,
     cached_clipboard: Option<arboard::Clipboard>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
-    notifications: SharedNotifications,
+    traffic: Arc<dyn TrafficSink>,
+    log_config: LogConfig,
     snapshot: Arc<Mutex<MainSnapshot>>,
     bytes_in: u64,
     bytes_out: u64,
@@ -153,13 +152,13 @@ impl MainChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         repaint_notify: Arc<RepaintNotify>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        traffic: Arc<TrafficBuffers>,
+        traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<MainSnapshot>>,
         monitors_config_rx: mpsc::Receiver<(u32, u32)>,
         monitors: u8,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         MainChannel {
             stream,
@@ -181,7 +180,7 @@ impl MainChannel {
             capture,
             byte_counter,
             traffic,
-            notifications,
+            log_config,
             snapshot,
             bytes_in: 0,
             bytes_out: 0,
@@ -344,7 +343,7 @@ impl MainChannel {
         let msg_type_str = message_names::main_server(msg_type);
 
         // Log all messages in verbose mode
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_message(
                 "received",
                 "main",
@@ -359,7 +358,7 @@ impl MainChannel {
                 let init = MainInit::read(payload)?;
                 info!("main: session initialized: id={}", init.session_id);
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "session_id={}, display_channels_hint={}, mouse_modes={}, \
                          current_mouse_mode={}, agent_connected={}, agent_tokens={}, \
@@ -495,7 +494,7 @@ impl MainChannel {
                     .collect();
 
                 for (ch_type, ch_id) in &channels {
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         logging::log_detail(&format!(
                             "channel: {} (type={}, id={})",
                             ch_type.name(),
@@ -533,7 +532,7 @@ impl MainChannel {
 
                 let ping = Ping::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -557,7 +556,7 @@ impl MainChannel {
             main_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -574,7 +573,7 @@ impl MainChannel {
 
             main_server::NOTIFY => {
                 let notify = Notify::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -600,9 +599,10 @@ impl MainChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
 
@@ -1003,7 +1003,7 @@ impl MainChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let msg_name = message_names::main_client(msg_type);
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "main", msg_type, msg_name, payload_size);
         }

@@ -2,7 +2,6 @@ mod app;
 mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
-mod metrics;
 mod notifications;
 #[cfg(not(feature = "capture"))]
 mod capture {
@@ -18,6 +17,17 @@ mod capture {
         pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) {}
         pub fn close(&self) {}
     }
+    impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
+        fn packet_sent(&self, channel: &str, data: &[u8]) {
+            CaptureSession::packet_sent(self, channel, data);
+        }
+        fn packet_received(&self, channel: &str, data: &[u8]) {
+            CaptureSession::packet_received(self, channel, data);
+        }
+        fn frame(&self, id: u32, px: &[u8], w: u32, h: u32) {
+            CaptureSession::frame(self, id, px, w, h);
+        }
+    }
 }
 mod channels;
 mod config;
@@ -25,8 +35,6 @@ mod display;
 mod display_gui;
 mod input_egui;
 mod settings;
-mod usb;
-mod webdav;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

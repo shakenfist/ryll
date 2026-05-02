@@ -6,6 +6,12 @@ use clap::Parser;
 use configparser::ini::Ini;
 use shakenfist_spice_protocol::ConnectionConfig;
 
+// Device-shaped configuration (the value types passed into the
+// channel constructors) lives in the renderer crate. The
+// CLI-shaped `Args` and `Config` definitions stay here, alongside
+// the path-validation helpers.
+pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskConfig};
+
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -246,13 +252,6 @@ impl Config {
     }
 }
 
-/// Parsed virtual disk configuration from CLI flags.
-#[derive(Debug, Clone)]
-pub struct VirtualDiskConfig {
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
 /// Collect virtual disk configs from CLI args and validate paths.
 pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
     let mut disks = Vec::new();
@@ -283,13 +282,6 @@ pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
     }
 
     Ok(disks)
-}
-
-/// Parsed shared directory configuration from CLI flags.
-#[derive(Debug, Clone)]
-pub struct ShareDirConfig {
-    pub path: PathBuf,
-    pub read_only: bool,
 }
 
 /// Parse shared directory config from CLI args, validating the path.

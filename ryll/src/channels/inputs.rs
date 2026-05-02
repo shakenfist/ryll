@@ -6,11 +6,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
-use crate::app::ByteCounter;
-use crate::bugreport::{InputEventRecord, InputsSnapshot, TrafficBuffers};
-use crate::capture::CaptureSession;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -19,6 +14,10 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
+};
+use shakenfist_spice_renderer::snapshots::{InputEventRecord, InputsSnapshot};
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 
 use super::{ChannelEvent, InputEvent};
@@ -65,10 +64,10 @@ pub struct InputsChannel {
     last_key_time: Option<Instant>,
     button_state: u32,
     motion_count: u32,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
-    notifications: SharedNotifications,
+    traffic: Arc<dyn TrafficSink>,
+    log_config: LogConfig,
     snapshot: Arc<Mutex<InputsSnapshot>>,
     recent_events: VecDeque<InputEventRecord>,
     bytes_in: u64,
@@ -87,12 +86,12 @@ impl InputsChannel {
         event_tx: mpsc::Sender<ChannelEvent>,
         repaint_notify: Arc<Notify>,
         input_rx: mpsc::Receiver<InputEvent>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        traffic: Arc<TrafficBuffers>,
+        traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<InputsSnapshot>>,
         enable_paste: bool,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         InputsChannel {
             stream,
@@ -106,7 +105,7 @@ impl InputsChannel {
             capture,
             byte_counter,
             traffic,
-            notifications,
+            log_config,
             snapshot,
             recent_events: VecDeque::new(),
             bytes_in: 0,
@@ -315,7 +314,7 @@ impl InputsChannel {
         let msg_type_str = message_names::inputs_server(msg_type);
 
         // Log all messages in verbose mode
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_message(
                 "received",
                 "inputs",
@@ -334,7 +333,7 @@ impl InputsChannel {
                 if payload.len() >= 2 {
                     let modifiers = u16::from_le_bytes([payload[0], payload[1]]);
 
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         logging::log_detail(&format!("modifiers={:#x}", modifiers));
                     } else {
                         debug!("inputs: key modifiers from server: {:#x}", modifiers);
@@ -350,7 +349,7 @@ impl InputsChannel {
             inputs_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -367,7 +366,7 @@ impl InputsChannel {
             inputs_server::PING => {
                 let ping = Ping::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -383,7 +382,7 @@ impl InputsChannel {
 
             inputs_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -411,9 +410,10 @@ impl InputsChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
 
@@ -754,7 +754,7 @@ impl InputsChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let msg_name = message_names::inputs_client(msg_type);
-        if settings::is_verbose() || settings::is_intimate() {
+        if self.log_config.verbose || self.log_config.intimate {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "inputs", msg_type, msg_name, payload_size);
         }

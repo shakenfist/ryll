@@ -1,4 +1,9 @@
 //! In-app notification store. See `docs/plans/PLAN-notifications-phase-01-store.md`.
+//!
+//! The store lives ryll-side; the data types
+//! (`NotificationEntry`, `NotificationSource`) live in the
+//! renderer crate and are re-exported here for backwards-
+//! compatible imports across `ryll/src/`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,8 +12,11 @@ use std::time::{Duration, SystemTime};
 
 use eframe::egui;
 
-use serde::{Deserialize, Serialize};
-use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceVisibility};
+#[cfg(test)]
+use shakenfist_spice_protocol::ChannelType;
+use shakenfist_spice_protocol::{NotifySeverity, SpiceVisibility};
+
+pub use shakenfist_spice_renderer::notification::{NotificationEntry, NotificationSource};
 
 /// Maximum entries before FIFO eviction.
 pub const NOTIFICATION_STORE_CAP: usize = 500;
@@ -17,58 +25,6 @@ pub const NOTIFICATION_STORE_CAP: usize = 500;
 /// tuple folds into the most recent matching entry rather than producing a
 /// new one.
 pub const NOTIFICATION_DEDUP_WINDOW: Duration = Duration::from_secs(30);
-
-/// Origin of a notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum NotificationSource {
-    /// Protocol gap registered via `warn_once!`.
-    Gap,
-    /// Bug-report writer success/failure status.
-    BugReport,
-    /// SPICE_MSG_NOTIFY received on a channel.
-    Spice { channel: ChannelType, what: u32 },
-    /// Internally generated notification.
-    Internal,
-}
-
-/// A single notification entry held by the store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotificationEntry {
-    pub id: u64,
-    pub when: SystemTime,
-    pub severity: NotifySeverity,
-    pub source: NotificationSource,
-    pub message: String,
-    pub count: u32,
-    pub visibility: Option<SpiceVisibility>,
-    pub read: bool,
-}
-
-impl NotificationEntry {
-    /// Build a fresh entry. `id` is 0 until [`NotificationStore::push`] stamps it.
-    pub fn new(
-        severity: NotifySeverity,
-        source: NotificationSource,
-        message: impl Into<String>,
-    ) -> Self {
-        Self {
-            id: 0,
-            when: SystemTime::now(),
-            severity,
-            source,
-            message: message.into(),
-            count: 1,
-            visibility: None,
-            read: false,
-        }
-    }
-
-    /// Builder-style setter for SPICE visibility.
-    pub fn with_visibility(mut self, v: SpiceVisibility) -> Self {
-        self.visibility = Some(v);
-        self
-    }
-}
 
 /// Bounded FIFO ring buffer of notifications with deduplication.
 pub struct NotificationStore {
@@ -238,19 +194,8 @@ impl Default for NotificationStore {
 /// Convenience type alias for the shared store.
 pub type SharedNotifications = Arc<Mutex<NotificationStore>>;
 
-impl NotificationSource {
-    /// Compact human label for the side panel.
-    pub fn label(&self) -> String {
-        match self {
-            NotificationSource::Gap => "Gap".to_string(),
-            NotificationSource::BugReport => "BugReport".to_string(),
-            NotificationSource::Internal => "Internal".to_string(),
-            NotificationSource::Spice { channel, .. } => {
-                format!("SPICE/{}", channel.name())
-            }
-        }
-    }
-}
+// `NotificationSource::label()` lives on the renderer-side
+// definition in `shakenfist_spice_renderer::notification`.
 
 /// Format a `SystemTime` as a human-readable relative timestamp.
 pub fn format_relative(when: SystemTime) -> String {

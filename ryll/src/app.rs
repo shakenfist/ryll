@@ -3,7 +3,7 @@ use anyhow::Result;
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
@@ -28,8 +28,9 @@ use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
 };
-use crate::usb::{self, DeviceSource, UsbDeviceInfo};
+use crate::settings;
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -85,25 +86,9 @@ struct Statistics {
     frame_times: Vec<Instant>,
 }
 
-/// Shared byte counter that channels increment from their
-/// read loops. The app polls it to compute bandwidth.
-pub struct ByteCounter(AtomicU64);
-
-impl ByteCounter {
-    pub fn new() -> Self {
-        ByteCounter(AtomicU64::new(0))
-    }
-
-    /// Add bytes (called from channel read loops).
-    pub fn add(&self, bytes: u64) {
-        self.0.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Read and reset the counter (called from the app tick).
-    fn take(&self) -> u64 {
-        self.0.swap(0, Ordering::Relaxed)
-    }
-}
+// `ByteCounter` lives in the renderer crate; the app just
+// re-exports it for backwards-compatible imports inside ryll.
+pub use shakenfist_spice_renderer::ByteCounter;
 
 /// Rolling bandwidth tracker — samples bytes/sec once per second.
 struct BandwidthTracker {
@@ -545,10 +530,13 @@ impl RyllApp {
         let bridge_ctx = cc.egui_ctx.clone();
         let bridge_notify = repaint_notify.clone();
         let conn_notify = repaint_notify.clone();
-        let capture_clone = capture.clone();
+        let capture_clone: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> = capture
+            .clone()
+            .map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
         let counter_clone = byte_counter.clone();
-        let traffic_clone = traffic.clone();
-        let notifications_clone = notifications.clone();
+        let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
+            traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
+        let log_config_clone = settings::log_config();
         let snaps_for_conn = ChannelSnapshots {
             display: channel_snapshots.display.clone(),
             inputs: channel_snapshots.inputs.clone(),
@@ -590,7 +578,7 @@ impl RyllApp {
                     resize_rx_for_conn,
                     vol_for_conn,
                     enable_paste,
-                    notifications_clone,
+                    log_config_clone,
                     cancel_for_conn,
                 )
                 .await
@@ -771,9 +759,13 @@ impl RyllApp {
         let bridge_ctx = self.egui_ctx.clone();
         let bridge_notify = repaint_notify.clone();
         let conn_notify = repaint_notify.clone();
-        let capture_clone = self.capture.clone();
+        let capture_clone: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> = self
+            .capture
+            .clone()
+            .map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
         let counter_clone = byte_counter;
-        let traffic_clone = traffic;
+        let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
+            traffic as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
         let snaps_for_conn = ChannelSnapshots {
             display: self.channel_snapshots.display.clone(),
             inputs: self.channel_snapshots.inputs.clone(),
@@ -785,7 +777,7 @@ impl RyllApp {
         let share_dir = self.reconnect_share_dir.clone();
         let vol_for_conn = volume_control;
         let enable_paste = self.enable_paste;
-        let notifications_clone = self.notifications.clone();
+        let log_config_clone = settings::log_config();
         let connection_cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_conn = connection_cancel.clone();
         self.connection_cancel = Some(connection_cancel);
@@ -819,7 +811,7 @@ impl RyllApp {
                     resize_rx,
                     vol_for_conn,
                     enable_paste,
-                    notifications_clone,
+                    log_config_clone,
                     cancel_for_conn,
                 )
                 .await
@@ -1162,6 +1154,12 @@ impl RyllApp {
                 ChannelEvent::PasteFailed { reason } => {
                     error!("app: paste failed: {}", reason);
                     self.paste_error_message = Some(reason);
+                }
+
+                ChannelEvent::Notification(entry) => {
+                    if let Ok(mut guard) = self.notifications.lock() {
+                        guard.push(entry);
+                    }
                 }
 
                 ChannelEvent::AgentConnected(connected) => {
@@ -3336,15 +3334,15 @@ async fn run_connection(
     webdav_rx: mpsc::Receiver<WebdavCommand>,
     virtual_disks: Vec<VirtualDiskConfig>,
     share_dir: Option<ShareDirConfig>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
+    traffic: Arc<dyn shakenfist_spice_renderer::TrafficSink>,
     snapshots: ChannelSnapshots,
     monitors: u8,
     resize_rx: mpsc::Receiver<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
-    notifications: SharedNotifications,
+    log_config: shakenfist_spice_renderer::LogConfig,
     cancel: Arc<AtomicBool>,
 ) -> Result<()> {
     let client = SpiceClient::new((&config).into())?;
@@ -3366,7 +3364,7 @@ async fn run_connection(
         snapshots.main,
         resize_rx,
         monitors,
-        notifications.clone(),
+        log_config,
     );
 
     // Spawn main channel task
@@ -3441,7 +3439,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
-                    notifications.clone(),
+                    log_config,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -3458,7 +3456,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.cursor.clone(),
-                    notifications.clone(),
+                    log_config,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -3477,7 +3475,7 @@ async fn run_connection(
                     traffic.clone(),
                     snapshots.inputs.clone(),
                     enable_paste,
-                    notifications.clone(),
+                    log_config,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
                 // input_rx is moved, can't connect more inputs channels
@@ -3497,7 +3495,7 @@ async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
-                        notifications.clone(),
+                        log_config,
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -3521,7 +3519,7 @@ async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
-                        notifications.clone(),
+                        log_config,
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
                 } else {
@@ -3543,7 +3541,7 @@ async fn run_connection(
                     byte_counter.clone(),
                     traffic.clone(),
                     volume_control.clone(),
-                    notifications.clone(),
+                    log_config,
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -3632,6 +3630,8 @@ pub async fn run_headless(
 
     // Keep a reference for clean shutdown
     let capture_for_shutdown = capture.clone();
+    let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> =
+        capture.map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -3689,6 +3689,9 @@ pub async fn run_headless(
     // button, so the per-connection cancel flag is never raised
     // here; we pass a fresh always-false Arc to satisfy the
     // signature shared with the GUI path.
+    let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
+        traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
+    let log_config = settings::log_config();
     let connection_handle = tokio::spawn(async move {
         run_connection(
             config,
@@ -3699,15 +3702,15 @@ pub async fn run_headless(
             webdav_rx,
             virtual_disks,
             share_dir,
-            capture,
+            capture_dyn,
             byte_counter,
-            traffic,
+            traffic_dyn,
             snapshots,
             monitors,
             resize_rx,
             VolumeControl::new(),
             enable_paste,
-            notifications,
+            log_config,
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -3808,6 +3811,11 @@ pub async fn run_headless(
                     }
                     ChannelEvent::Error(msg) => {
                         error!("Error: {}", msg);
+                    }
+                    ChannelEvent::Notification(entry) => {
+                        if let Ok(mut guard) = notifications.lock() {
+                            guard.push(entry);
+                        }
                     }
                     _ => {}
                 }

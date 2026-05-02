@@ -12,21 +12,21 @@ use nusb::MaybeFuture;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::app::ByteCounter;
-use crate::capture::CaptureSession;
-use crate::config::VirtualDiskConfig;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
-#[cfg(target_os = "linux")]
-use crate::usb::real::RealDevice;
-use crate::usb::virtual_msc::VirtualMsc;
-use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
+#[cfg(target_os = "linux")]
+use shakenfist_spice_renderer::usb::real::RealDevice;
+use shakenfist_spice_renderer::usb::virtual_msc::VirtualMsc;
+use shakenfist_spice_renderer::usb::{
+    is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend,
+};
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, VirtualDiskConfig,
+};
 use shakenfist_spice_usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use shakenfist_spice_usbredir::messages::{
     make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,
@@ -42,9 +42,9 @@ pub struct UsbredirChannel {
     repaint_notify: Arc<Notify>,
     usb_rx: mpsc::Receiver<UsbCommand>,
     buffer: Vec<u8>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    notifications: SharedNotifications,
+    log_config: LogConfig,
 
     // BaseChannel ACK state
     ack_generation: u32,
@@ -78,9 +78,9 @@ impl UsbredirChannel {
         repaint_notify: Arc<Notify>,
         usb_rx: mpsc::Receiver<UsbCommand>,
         auto_connect_disks: Vec<VirtualDiskConfig>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         let (interrupt_tx, interrupt_rx) = mpsc::channel(64);
         UsbredirChannel {
@@ -91,7 +91,7 @@ impl UsbredirChannel {
             buffer: Vec::with_capacity(65536),
             capture,
             byte_counter,
-            notifications,
+            log_config,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
@@ -200,7 +200,7 @@ impl UsbredirChannel {
     }
 
     async fn handle_message(&mut self, msg_type: u16, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let msg_type_str = message_names::spicevmc_server(msg_type);
             logging::log_message(
                 "received",
@@ -220,7 +220,7 @@ impl UsbredirChannel {
             }
             spicevmc_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -237,7 +237,7 @@ impl UsbredirChannel {
             }
             spicevmc_server::PING => {
                 let ping = Ping::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -250,7 +250,7 @@ impl UsbredirChannel {
             }
             spicevmc_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -278,9 +278,10 @@ impl UsbredirChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
             _ => {
@@ -323,7 +324,7 @@ impl UsbredirChannel {
             return Ok(());
         }
 
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_detail(&format!(
                 "type={} uncompressed={} compressed={}",
                 compression_type,
@@ -510,7 +511,7 @@ impl UsbredirChannel {
 
                     let result = backend.control_transfer(&setup, &data).await?;
 
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         debug!(
                             "usbredir: control {} ep={} req=0x{:02x} rtype=0x{:02x} \
                              val=0x{:04x} idx=0x{:04x} -> status={:?} {}B",
@@ -574,7 +575,7 @@ impl UsbredirChannel {
                         backend.bulk_out(header.endpoint, &data).await?
                     };
 
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         debug!(
                             "usbredir: bulk {} ep={} -> status={:?} {}B",
                             if ep_in { "IN" } else { "OUT" },
@@ -907,7 +908,7 @@ impl UsbredirChannel {
 
     /// Send a usbredir message wrapped in a SPICEVMC_DATA SPICE message.
     async fn send_usbredir(&mut self, usbredir_type: u32, id: u32, payload: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let name = msg_type_name(usbredir_type);
             debug!(
                 "usbredir: sending {} (id={}, {} bytes)",
@@ -934,7 +935,7 @@ impl UsbredirChannel {
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let msg_type_str = message_names::spicevmc_client(msg_type);
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "usbredir", msg_type, msg_type_str, payload_size);

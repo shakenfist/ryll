@@ -1,10 +1,12 @@
 /// Bug report infrastructure — per-channel traffic ring buffer
-/// and channel state snapshots.
+/// and bug-report ZIP assembly.
 ///
-/// Always active regardless of `--capture`.  Retains the most
-/// recent protocol traffic for bug report export and live
-/// traffic viewer display.  Channel snapshots capture mutable
-/// state for JSON serialisation in bug reports.
+/// Always active regardless of `--capture`. Retains the most
+/// recent protocol traffic for bug-report export and the live
+/// traffic viewer. Channel-state snapshot types live in
+/// `shakenfist_spice_renderer::snapshots`; this module re-exports
+/// them so callers in `ryll/` can keep importing them from
+/// `crate::bugreport::*`.
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -14,8 +16,17 @@ use tracing::debug;
 
 #[cfg(feature = "capture")]
 use crate::capture;
-use crate::metrics::RuntimeMetrics;
 use crate::notifications::{NotificationStore, SharedNotifications};
+use shakenfist_spice_renderer::metrics::RuntimeMetrics;
+use shakenfist_spice_renderer::traffic::TrafficSink;
+
+// Re-export channel-state snapshot types for ryll-side callers
+// (e.g. tests in this file and consumers under `app.rs`).
+#[allow(unused_imports)]
+pub use shakenfist_spice_renderer::snapshots::{
+    ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot,
+};
 
 /// Direction of a protocol message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,99 +394,43 @@ impl TrafficBuffers {
     }
 }
 
+/// Bridge `TrafficBuffers` into the renderer's `TrafficSink`
+/// trait so that channel handlers can receive it as
+/// `Arc<dyn TrafficSink>` without taking a concrete dependency
+/// on this module.
+impl TrafficSink for TrafficBuffers {
+    fn record_sent(
+        &self,
+        channel: &'static str,
+        msg_type: u16,
+        msg_name: &'static str,
+        raw: &[u8],
+    ) {
+        TrafficBuffers::record_sent(self, channel, msg_type, msg_name, raw);
+    }
+
+    fn record_received(
+        &self,
+        channel: &'static str,
+        msg_type: u16,
+        msg_name: &'static str,
+        raw: &[u8],
+    ) {
+        TrafficBuffers::record_received(self, channel, msg_type, msg_name, raw);
+    }
+
+    fn elapsed(&self) -> Duration {
+        TrafficBuffers::elapsed(self)
+    }
+}
+
 // ── Channel state snapshots ─────────────────────────────────
-
-/// Result of a single image decode in the display channel.
-#[derive(Debug, Clone, Serialize)]
-pub struct DecodeResult {
-    /// SPICE image type (e.g. "GlzRgb", "Lz4", "Pixmap").
-    pub image_type: String,
-    /// Image ID from the ImageDescriptor.
-    pub image_id: u64,
-    /// Decoded width in pixels.
-    pub width: u32,
-    /// Decoded height in pixels.
-    pub height: u32,
-    /// Whether this was a cache hit (FromCache type).
-    pub from_cache: bool,
-    /// Whether decompression succeeded.
-    pub success: bool,
-    /// Seconds since session start when this decode occurred.
-    pub timestamp_secs: f64,
-}
-
-/// Snapshot of the display channel's mutable state.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct DisplaySnapshot {
-    pub image_cache_entries: usize,
-    pub image_cache_ids: Vec<u64>,
-    pub image_cache_bytes: usize,
-    pub recent_decodes: VecDeque<DecodeResult>,
-    pub ack_generation: u32,
-    pub ack_window: u32,
-    pub message_count: u32,
-    pub last_ack: u32,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
-
-/// A recorded input event for the inputs channel snapshot.
-#[derive(Debug, Clone, Serialize)]
-pub struct InputEventRecord {
-    /// "KeyDown", "KeyUp", "MouseDown", "MouseUp", "MouseMove".
-    pub event_type: String,
-    /// Scancode for key events, 0 for mouse events.
-    pub scancode: u32,
-    /// Mouse position (0,0 for key events).
-    pub x: u32,
-    pub y: u32,
-    /// Button bitmask for mouse press/release events.
-    pub button_mask: u32,
-    /// Seconds since session start.
-    pub timestamp_secs: f64,
-}
-
-/// Snapshot of the inputs channel's mutable state.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct InputsSnapshot {
-    pub button_state: u32,
-    pub motion_count: u32,
-    pub secs_since_last_key: Option<f64>,
-    pub recent_events: VecDeque<InputEventRecord>,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
-
-/// Summary of a cached cursor shape.
-#[derive(Debug, Clone, Serialize)]
-pub struct CursorCacheEntry {
-    pub cursor_id: u64,
-    pub width: u16,
-    pub height: u16,
-    pub hot_spot_x: u16,
-    pub hot_spot_y: u16,
-}
-
-/// Snapshot of the cursor channel's mutable state.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct CursorSnapshot {
-    pub cache_entries: usize,
-    pub cache_contents: Vec<CursorCacheEntry>,
-    pub ack_generation: u32,
-    pub ack_window: u32,
-    pub message_count: u32,
-    pub last_ack: u32,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
-
-/// Snapshot of the main channel's mutable state.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct MainSnapshot {
-    pub session_id: Option<u32>,
-    pub bytes_in: u64,
-    pub bytes_out: u64,
-}
+//
+// `*Snapshot`, `CursorCacheEntry`, `InputEventRecord`, and
+// `DecodeResult` moved to `shakenfist_spice_renderer::snapshots`
+// because they describe channel state rather than bug-report
+// packaging. They are re-exported above as a transitional
+// convenience.
 
 /// Summary of an active display surface.
 #[derive(Debug, Clone, Serialize)]
@@ -522,25 +477,7 @@ impl Default for AppSnapshot {
     }
 }
 
-/// Holds all four per-channel snapshot `Arc<Mutex<T>>`s.
-#[derive(Clone)]
-pub struct ChannelSnapshots {
-    pub display: Arc<Mutex<DisplaySnapshot>>,
-    pub inputs: Arc<Mutex<InputsSnapshot>>,
-    pub cursor: Arc<Mutex<CursorSnapshot>>,
-    pub main: Arc<Mutex<MainSnapshot>>,
-}
-
-impl ChannelSnapshots {
-    pub fn new() -> Self {
-        ChannelSnapshots {
-            display: Arc::new(Mutex::new(DisplaySnapshot::default())),
-            inputs: Arc::new(Mutex::new(InputsSnapshot::default())),
-            cursor: Arc::new(Mutex::new(CursorSnapshot::default())),
-            main: Arc::new(Mutex::new(MainSnapshot::default())),
-        }
-    }
-}
+// `ChannelSnapshots` moved to `shakenfist_spice_renderer::snapshots`.
 
 // ── Timestamp utilities ────────────────────────────────────
 
@@ -827,7 +764,7 @@ impl BugReport {
         //    the CPU% numbers reflect the system state at the moment
         //    the user triggered the report, not after all the JSON
         //    serialisation work has run.
-        let runtime_metrics = crate::metrics::sample(Duration::from_secs(2));
+        let runtime_metrics = shakenfist_spice_renderer::metrics::sample(Duration::from_secs(2));
         Self::assemble(
             report_type,
             description,
@@ -1199,11 +1136,13 @@ impl BugReport {
                     // metrics::sample blocks for its sample window; run it on a
                     // dedicated thread so the tokio executor is not stalled.
                     let metrics = tokio::task::spawn_blocking(|| {
-                        crate::metrics::sample(std::time::Duration::from_secs(1))
+                        shakenfist_spice_renderer::metrics::sample(std::time::Duration::from_secs(
+                            1,
+                        ))
                     })
                     .await
                     .unwrap_or_else(|_| {
-                        crate::metrics::RuntimeMetrics::unavailable(
+                        shakenfist_spice_renderer::metrics::RuntimeMetrics::unavailable(
                             "spawn_blocking panicked during metrics sample",
                         )
                     });

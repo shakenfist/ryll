@@ -5,11 +5,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::app::ByteCounter;
-use crate::bugreport::{CursorCacheEntry, CursorSnapshot, TrafficBuffers};
-use crate::capture::CaptureSession;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -17,6 +12,10 @@ use shakenfist_spice_protocol::messages::{
     SpiceCursorHeader,
 };
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
+use shakenfist_spice_renderer::snapshots::{CursorCacheEntry, CursorSnapshot};
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+};
 
 use super::{ChannelEvent, CursorImage};
 
@@ -26,10 +25,10 @@ pub struct CursorChannel {
     repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     cursor_cache: HashMap<u64, CursorImage>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
-    notifications: SharedNotifications,
+    traffic: Arc<dyn TrafficSink>,
+    log_config: LogConfig,
     snapshot: Arc<Mutex<CursorSnapshot>>,
     ack_generation: u32,
     ack_window: u32,
@@ -45,11 +44,11 @@ impl CursorChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         repaint_notify: Arc<Notify>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        traffic: Arc<TrafficBuffers>,
+        traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<CursorSnapshot>>,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         CursorChannel {
             stream,
@@ -60,7 +59,7 @@ impl CursorChannel {
             capture,
             byte_counter,
             traffic,
-            notifications,
+            log_config,
             snapshot,
             ack_generation: 0,
             ack_window: 0,
@@ -151,7 +150,7 @@ impl CursorChannel {
         let msg_type_str = message_names::cursor_server(msg_type);
 
         // Log all messages in verbose mode
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_message(
                 "received",
                 "cursor",
@@ -277,7 +276,7 @@ impl CursorChannel {
             cursor_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -298,7 +297,7 @@ impl CursorChannel {
             cursor_server::PING => {
                 let ping = Ping::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -313,7 +312,7 @@ impl CursorChannel {
 
             cursor_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -341,9 +340,10 @@ impl CursorChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
 
@@ -456,7 +456,7 @@ impl CursorChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let msg_name = message_names::cursor_client(msg_type);
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "cursor", msg_type, msg_name, payload_size);
         }

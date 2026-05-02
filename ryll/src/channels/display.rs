@@ -7,11 +7,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::app::ByteCounter;
-use crate::bugreport::{DecodeResult, DisplaySnapshot, TrafficBuffers};
-use crate::capture::CaptureSession;
-use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
-use crate::settings;
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
     GlzDictionary,
@@ -28,6 +23,10 @@ use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, re
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
     IMAGE_FLAGS_CACHE_ME,
+};
+use shakenfist_spice_renderer::snapshots::{DecodeResult, DisplaySnapshot};
+use shakenfist_spice_renderer::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 
 use super::ChannelEvent;
@@ -175,8 +174,8 @@ enum FillOutcome {
 /// `decode_*` classifier. Doing it here keeps the nine image- and
 /// mask-bearing handlers from each copy-pasting the same eight
 /// lines.
-fn log_draw_base_if_verbose(payload: &[u8], op_name: &str) {
-    if !settings::is_verbose() {
+fn log_draw_base_if_verbose(log_config: LogConfig, payload: &[u8], op_name: &str) {
+    if !log_config.verbose {
         return;
     }
     if let Ok(base) = DrawBase::read(payload) {
@@ -516,10 +515,10 @@ pub struct DisplayChannel {
     glz_dictionary: SharedGlzDictionary,
     image_cache: HashMap<u64, Vec<u8>>,
     streams: HashMap<u32, StreamState>,
-    capture: Option<Arc<CaptureSession>>,
+    capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
-    traffic: Arc<TrafficBuffers>,
-    notifications: SharedNotifications,
+    traffic: Arc<dyn TrafficSink>,
+    log_config: LogConfig,
     snapshot: Arc<Mutex<DisplaySnapshot>>,
     recent_decodes: VecDeque<DecodeResult>,
     ack_generation: u32,
@@ -541,12 +540,12 @@ impl DisplayChannel {
         stream: SpiceStream,
         event_tx: mpsc::Sender<ChannelEvent>,
         repaint_notify: Arc<Notify>,
-        capture: Option<Arc<CaptureSession>>,
+        capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
-        traffic: Arc<TrafficBuffers>,
+        traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<DisplaySnapshot>>,
         glz_dictionary: SharedGlzDictionary,
-        notifications: SharedNotifications,
+        log_config: LogConfig,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -560,7 +559,7 @@ impl DisplayChannel {
             capture,
             byte_counter,
             traffic,
-            notifications,
+            log_config,
             snapshot,
             recent_decodes: VecDeque::new(),
             ack_generation: 0,
@@ -629,7 +628,7 @@ impl DisplayChannel {
         init.write(&mut payload)?;
         let msg = make_message(display_client::INIT, &payload);
 
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_detail(&format!(
                 "cache_id={}, cache_size={}, glz_dict_id={}, glz_dict_window={}",
                 init.cache_id, init.cache_size, init.glz_dict_id, init.glz_dict_window
@@ -679,7 +678,7 @@ impl DisplayChannel {
         let msg_type_str = message_names::display_server(msg_type);
 
         // Log all messages in verbose mode
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_message(
                 "received",
                 "display",
@@ -697,7 +696,7 @@ impl DisplayChannel {
                     self.channel_id, surface.surface_id, surface.width, surface.height
                 );
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "surface_id={}, width={}, height={}, format={}, flags={}",
                         surface.surface_id,
@@ -725,7 +724,7 @@ impl DisplayChannel {
                     let surface_id = read_u32_le(payload, 0);
                     info!("display: surface destroyed: id={}", surface_id);
 
-                    if settings::is_verbose() {
+                    if self.log_config.verbose {
                         logging::log_detail(&format!("surface_id={}", surface_id));
                     }
 
@@ -850,7 +849,7 @@ impl DisplayChannel {
             display_server::SET_ACK => {
                 let set_ack = SetAck::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "generation={}, window={}",
                         set_ack.generation, set_ack.window
@@ -871,7 +870,7 @@ impl DisplayChannel {
             display_server::PING => {
                 let ping = Ping::read(payload)?;
 
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "ping_id={}, timestamp={}",
                         ping.id, ping.timestamp
@@ -886,7 +885,7 @@ impl DisplayChannel {
 
             display_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
-                if settings::is_verbose() {
+                if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
                         notify.severity, notify.visibility, notify.what, notify.message,
@@ -914,9 +913,10 @@ impl DisplayChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                if let Ok(mut guard) = self.notifications.lock() {
-                    guard.push(entry);
-                }
+                self.event_tx
+                    .send(ChannelEvent::Notification(entry))
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
 
@@ -1138,7 +1138,7 @@ impl DisplayChannel {
         let left = base.left;
         let top = base.top;
 
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             logging::log_detail(&format!(
                 "surface={}, rect=({},{}) to ({},{}), clip_type={}",
                 base.surface_id, left, top, base.right, base.bottom, base.clip_type
@@ -1176,7 +1176,7 @@ impl DisplayChannel {
         let mask_pos_y = read_i32_le(payload, copy_start + 28);
         let mask_bitmap_offset = read_u32_le(payload, copy_start + 32) as usize;
 
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             debug!(
                 "display: draw_copy detail: rop={:#x}, scale={}, mask={:#x}, \
                  pos=({},{}), mask_bmp={}, clip_type={}, clip_rects={}",
@@ -1779,7 +1779,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_fill(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_fill");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_fill");
         let outcome = decode_draw_fill(payload)?;
         match outcome {
             FillOutcome::SkipNonOpPut { rop } => {
@@ -1836,7 +1836,7 @@ impl DisplayChannel {
         mask_warn_key: &'static str,
         colour: [u8; 4],
     ) -> Result<()> {
-        log_draw_base_if_verbose(payload, op_name);
+        log_draw_base_if_verbose(self.log_config, payload, op_name);
         let SolidFillOutcome::Paint {
             base,
             masked_fallback,
@@ -1885,7 +1885,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_invers(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_invers");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_invers");
         // DRAW_INVERS shares its wire format (DrawBase + SpiceQMask) with
         // DRAW_BLACKNESS / DRAW_WHITENESS, so the phase-3 solid-fill
         // decoder slots in unchanged — only the paint semantic differs.
@@ -1916,7 +1916,7 @@ impl DisplayChannel {
     }
 
     async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "copy_bits");
+        log_draw_base_if_verbose(self.log_config, payload, "copy_bits");
         let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
 
         self.event_tx
@@ -1936,7 +1936,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_opaque(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_opaque");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_opaque");
         match decode_draw_opaque(payload)? {
             OpaqueOutcome::SkipNonOpPut { rop } => {
                 warn_once!(
@@ -1971,7 +1971,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_blend(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_blend");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_blend");
         match decode_draw_blend(payload)? {
             BlendOutcome::SkipNonOpPut { rop } => {
                 warn_once!(
@@ -2006,7 +2006,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_transparent(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_transparent");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_transparent");
         let TransparentOutcome::Paint {
             base,
             chroma_rgba,
@@ -2031,7 +2031,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_alpha_blend(&mut self, payload: &[u8]) -> Result<()> {
-        log_draw_base_if_verbose(payload, "draw_alpha_blend");
+        log_draw_base_if_verbose(self.log_config, payload, "draw_alpha_blend");
         match decode_draw_alpha_blend(payload)? {
             AlphaBlendOutcome::SkipZeroAlpha => Ok(()),
             AlphaBlendOutcome::Paint {
@@ -2107,7 +2107,7 @@ impl DisplayChannel {
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
         let msg_name = message_names::display_client(msg_type);
-        if settings::is_verbose() {
+        if self.log_config.verbose {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "display", msg_type, msg_name, payload_size);
         }

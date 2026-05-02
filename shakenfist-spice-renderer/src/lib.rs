@@ -1,5 +1,30 @@
 //! Shared SPICE rendering substrate for ryll.
 //!
-//! This crate is a placeholder skeleton; modules will be moved
-//! into it in Phase 1 step 1d (display + channels) and step 1e
-//! (session orchestrator).
+//! This crate hosts the protocol-substrate types shared between
+//! ryll's frontends (GUI, headless, planned `--web`). The display
+//! pixel buffer, channel handlers, and session orchestrator move
+//! in later phases; this phase introduces the trait/event
+//! indirection that lets channel handlers stop reaching into the
+//! ryll-side modules they consume today.
+
+pub mod byte_counter;
+pub mod capture_sink;
+pub mod device_config;
+pub mod log_config;
+pub mod metrics;
+pub mod notification;
+pub mod snapshots;
+pub mod traffic;
+pub mod usb;
+pub mod webdav;
+
+pub use byte_counter::ByteCounter;
+pub use capture_sink::CaptureSink;
+pub use device_config::{ShareDirConfig, VirtualDiskConfig};
+pub use log_config::LogConfig;
+pub use notification::{NotificationEntry, NotificationSource};
+pub use snapshots::{
+    ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot,
+};
+pub use traffic::TrafficSink;

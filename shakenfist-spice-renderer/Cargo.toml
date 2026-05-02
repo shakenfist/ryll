@@ -62,3 +62,18 @@ socket2 = { version = "0.6", features = ["all"] }
 
 # USB device access (pure Rust, no libusb)
 nusb = "0.2"
+
+# Per-thread CPU metrics via sysconf(_SC_CLK_TCK) (Linux only)
+libc = "0.2"
+
+# WebDAV server (RFC 4918 handler with LocalFs backend)
+dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
+
+# HTTP framing for WebDAV byte-stream transport
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

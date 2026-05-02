@@ -30,6 +30,12 @@ pub struct MuxDemuxer {
     buf: Vec<u8>,
 }
 
+impl Default for MuxDemuxer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MuxDemuxer {
     pub fn new() -> Self {
         MuxDemuxer {

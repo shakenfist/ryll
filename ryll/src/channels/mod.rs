@@ -17,8 +17,9 @@ pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
-use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
+use shakenfist_spice_renderer::usb::UsbDeviceInfo;
+use shakenfist_spice_renderer::NotificationEntry;
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]
@@ -171,6 +172,13 @@ pub enum ChannelEvent {
 
     /// Connection error
     Error(String),
+
+    /// A channel-side notification destined for the host's
+    /// notification store. Replaces the old direct
+    /// `notifications.lock().push(entry)` calls inside channels
+    /// — the host drains the event channel and pushes each
+    /// `NotificationEntry` into its store.
+    Notification(NotificationEntry),
 
     /// A USB redirection channel connected successfully
     UsbChannelReady,
