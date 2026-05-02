@@ -2,9 +2,9 @@
 //! video track, an audio track, and a control datachannel.
 //!
 //! Phase 3 step 3b implements [`WebrtcBridge::new`] and
-//! [`WebrtcBridge::accept_offer`]. Phase 3 steps 3c–3e add the video
-//! pump, synthetic audio pump, and datachannel send/recv. Phase 3f
-//! adds the in-process loopback integration test.
+//! [`WebrtcBridge::accept_offer`]; 3c adds the video pump; 3d adds
+//! the synthetic Opus audio pump; 3e adds the datachannel
+//! send/recv; 3f adds the in-process loopback integration test.
 //!
 //! ## Codec registration
 //!
@@ -37,6 +37,7 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 use webrtc::rtp::codecs::h264::H264Payloader;
+use webrtc::rtp::codecs::opus::OpusPayloader;
 use webrtc::rtp::header::Header;
 use webrtc::rtp::packet::Packet;
 use webrtc::rtp::packetizer::Payloader;
@@ -58,6 +59,37 @@ const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 /// a conservative default that fits inside typical browser path
 /// MTU minus UDP+IP+SRTP overhead on a 1500-byte ethernet frame.
 const VIDEO_MTU: usize = 1200;
+
+/// Payload type used for Opus in our SDP. Matches the value used
+/// by webrtc-rs's [`MediaEngine::register_default_codecs`] (which
+/// the bridge calls in [`WebrtcBridge::new`]).
+const OPUS_PAYLOAD_TYPE: u8 = 111;
+
+/// Opus RTP clock rate per RFC 7587 §4.1: always 48 kHz, even for
+/// narrowband mono streams.
+const AUDIO_SAMPLE_RATE_HZ: u32 = 48_000;
+
+/// One Opus frame per 20 ms RTP packet — the WebRTC default and the
+/// "standard" Opus frame size per RFC 6716 §2.1.4. 50 packets/s.
+const AUDIO_FRAME_DURATION_MS: u64 = 20;
+
+/// 48 kHz × 20 ms = 960 samples per Opus frame, mono.
+const AUDIO_SAMPLES_PER_FRAME: usize =
+    (AUDIO_SAMPLE_RATE_HZ as usize / 1000) * (AUDIO_FRAME_DURATION_MS as usize);
+
+/// Output buffer size for the Opus encoder. Opus packets at 64 kbps
+/// for 20 ms frames are well under 200 bytes, but the libopus API
+/// wants a generously-sized scratch buffer; 1500 fits any
+/// realistic configuration.
+const AUDIO_OPUS_BUF_BYTES: usize = 1500;
+
+/// Synthetic-tone frequency for the Phase 3 audio pump.
+const AUDIO_TONE_HZ: f64 = 440.0;
+
+/// Amplitude for the synthetic sine, expressed as a fraction of
+/// `i16::MAX`. 0.3 leaves headroom and keeps the test tone at a
+/// comfortable listening level.
+const AUDIO_TONE_AMPLITUDE: f64 = 0.3;
 
 /// Configuration for [`WebrtcBridge::new`].
 pub struct WebrtcBridgeConfig {
@@ -86,14 +118,14 @@ impl WebrtcBridgeConfig {
 /// One-PC, one-viewer WebRTC bridge between the SPICE-side encoder
 /// pipeline and a browser-side `RTCPeerConnection`.
 ///
-/// Phase 3 step 3b ships only [`WebrtcBridge::new`],
-/// [`WebrtcBridge::accept_offer`], and [`WebrtcBridge::close`]. The
-/// remaining surface (`spawn_video_pump`, `spawn_synthetic_audio_pump`,
-/// `send_control`, `control_rx`) is added in 3c–3e.
+/// Phase 3 step 3b ships [`WebrtcBridge::new`],
+/// [`WebrtcBridge::accept_offer`], and [`WebrtcBridge::close`]; 3c
+/// adds [`WebrtcBridge::spawn_video_pump`]; 3d adds
+/// [`WebrtcBridge::spawn_synthetic_audio_pump`]. The remaining
+/// surface (`send_control`, `control_rx`) is added in 3e.
 pub struct WebrtcBridge {
     pc: Arc<RTCPeerConnection>,
     video_track: Arc<TrackLocalStaticRTP>,
-    #[allow(dead_code)] // populated for 3d (audio pump).
     audio_track: Arc<TrackLocalStaticRTP>,
     #[allow(dead_code)] // populated for 3e (datachannel send/recv).
     control_dc: Arc<RTCDataChannel>,
@@ -242,6 +274,29 @@ impl WebrtcBridge {
         tokio::spawn(run_video_pump(rx, track))
     }
 
+    /// Spawn the synthetic audio pump task: generate a 440 Hz sine
+    /// wave at 48 kHz mono, encode it via Opus in 20 ms windows
+    /// (960 samples per frame), payload via [`OpusPayloader`], and
+    /// write RTP packets to the bridge's audio track at 50 fps.
+    ///
+    /// Phase 5 will replace this with a real Opus passthrough from
+    /// the SPICE playback channel; Phase 3 ships this synthetic
+    /// path so the audio track is exercised in integration tests
+    /// (3f) and so the browser-side `<audio>` element receives a
+    /// continuous stream as soon as DTLS comes up.
+    ///
+    /// The pump runs forever — there is no natural stop condition
+    /// because the synthetic source has no end-of-stream. Callers
+    /// bound its lifetime by either dropping the
+    /// [`JoinHandle`] / aborting it, or by tearing down the
+    /// surrounding tokio runtime. `track.write_rtp` errors before
+    /// the remote peer completes ICE/DTLS are logged at debug and
+    /// do not stop the loop, mirroring the video pump's behaviour.
+    pub fn spawn_synthetic_audio_pump(&self) -> JoinHandle<Result<()>> {
+        let track = self.audio_track.clone();
+        tokio::spawn(run_synthetic_audio_pump(track))
+    }
+
     /// Close the underlying peer connection. Consumes `self` so
     /// callers cannot accidentally reuse a closed bridge.
     pub async fn close(self) -> Result<()> {
@@ -359,6 +414,120 @@ async fn run_video_pump(
 
     tracing::debug!("video pump: receiver closed, exiting");
     Ok(())
+}
+
+/// Spawned by [`WebrtcBridge::spawn_synthetic_audio_pump`]. Owns
+/// a clone of the bridge's audio track. Generates a 440 Hz sine
+/// wave at 48 kHz mono in 20 ms (960-sample) windows, encodes
+/// each window via libopus (through the `opus` crate), payloads
+/// with [`OpusPayloader`] (which is a passthrough for one
+/// Opus-packet-per-RTP-packet framing per RFC 7587 §4.2), and
+/// writes the resulting RTP packet to the track.
+///
+/// RTP timestamp arithmetic: Opus's RTP clock is the audio
+/// sample rate (48 kHz, RFC 7587 §4.1) regardless of channel
+/// count, so each 20 ms frame advances the timestamp by exactly
+/// `AUDIO_SAMPLES_PER_FRAME` (960). The starting timestamp is
+/// random per RFC 3550 §5.1 (we use 0 here for simplicity since
+/// the SSRC is randomised; the receiver tracks deltas anyway).
+///
+/// `track.write_rtp` errors are logged at debug and the loop
+/// continues — the receiver may not have negotiated DTLS yet
+/// when the pump starts, so dropped packets early on are normal.
+/// The loop never returns `Ok(())` on its own; it exits only
+/// when the spawning task is aborted or the runtime shuts down.
+async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()> {
+    let mut encoder = opus::Encoder::new(
+        AUDIO_SAMPLE_RATE_HZ,
+        opus::Channels::Mono,
+        // 440 Hz pure tone is "music"-like content; Audio is
+        // the right application class. Voip would also work
+        // but optimises for narrowband speech.
+        opus::Application::Audio,
+    )
+    .map_err(|e| anyhow!("Opus encoder init failed: {}", e))?;
+    // 64 kbps is generous for a mono test tone; keeps encoder
+    // CPU low and packets compact (~160 bytes per 20 ms frame).
+    encoder
+        .set_bitrate(opus::Bitrate::Bits(64_000))
+        .map_err(|e| anyhow!("Opus set_bitrate failed: {}", e))?;
+
+    let mut payloader = OpusPayloader;
+    let mut sequence: u16 = rand::random();
+    let ssrc: u32 = rand::random();
+    let mut rtp_timestamp: u32 = 0;
+    // Monotonic sample counter drives the sine-wave phase;
+    // separate from rtp_timestamp because the latter wraps every
+    // ~24 h while this is just a phase clock.
+    let mut sample_clock: u64 = 0;
+
+    let mut pcm: Vec<i16> = vec![0i16; AUDIO_SAMPLES_PER_FRAME];
+    let mut opus_buf: Vec<u8> = vec![0u8; AUDIO_OPUS_BUF_BYTES];
+
+    let mut interval =
+        tokio::time::interval(std::time::Duration::from_millis(AUDIO_FRAME_DURATION_MS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let two_pi_f_over_sr =
+        2.0 * std::f64::consts::PI * AUDIO_TONE_HZ / (AUDIO_SAMPLE_RATE_HZ as f64);
+    let scale = i16::MAX as f64 * AUDIO_TONE_AMPLITUDE;
+
+    loop {
+        interval.tick().await;
+
+        // Fill one frame's worth of 440 Hz sine at the current
+        // phase. sample_clock is monotonic across frames so the
+        // tone is phase-continuous between packets.
+        for (i, slot) in pcm.iter_mut().enumerate() {
+            let n = sample_clock + i as u64;
+            let v = (two_pi_f_over_sr * n as f64).sin();
+            *slot = (v * scale) as i16;
+        }
+        sample_clock = sample_clock.wrapping_add(AUDIO_SAMPLES_PER_FRAME as u64);
+
+        // Encode 960 PCM samples to one Opus packet.
+        let bytes_written = match encoder.encode(&pcm, &mut opus_buf) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("synthetic audio pump: Opus encode failed: {}", e);
+                continue;
+            }
+        };
+        if bytes_written == 0 {
+            continue;
+        }
+
+        // Payload the Opus packet. OpusPayloader returns a single
+        // Bytes equal to the input for any non-empty payload (it
+        // does not fragment), so the inner loop runs exactly once
+        // per encoded frame.
+        let opus_packet = Bytes::copy_from_slice(&opus_buf[..bytes_written]);
+        let payloads = payloader
+            .payload(AUDIO_OPUS_BUF_BYTES, &opus_packet)
+            .map_err(|e| anyhow!("OpusPayloader failed: {}", e))?;
+
+        for payload in payloads {
+            if payload.is_empty() {
+                continue;
+            }
+            let header = Header {
+                version: 2,
+                payload_type: OPUS_PAYLOAD_TYPE,
+                sequence_number: sequence,
+                timestamp: rtp_timestamp,
+                ssrc,
+                marker: false,
+                ..Default::default()
+            };
+            let pkt = Packet { header, payload };
+            sequence = sequence.wrapping_add(1);
+            if let Err(e) = track.write_rtp(&pkt).await {
+                tracing::debug!("synthetic audio pump: write_rtp dropped packet: {}", e);
+            }
+        }
+
+        rtp_timestamp = rtp_timestamp.wrapping_add(AUDIO_SAMPLES_PER_FRAME as u32);
+    }
 }
 
 #[cfg(test)]
@@ -506,6 +675,39 @@ mod tests {
             .expect("pump didn't stop in time")
             .expect("join")
             .expect("pump task error");
+
+        bridge.close().await.expect("close");
+    }
+
+    /// Smoke test: spawn the synthetic audio pump and let it run
+    /// for a few hundred ms. The pump runs forever, so we abort
+    /// after a brief sleep. We don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
+    /// without a connected peer (they're buffered/dropped at the
+    /// transport), and the in-process inspect path is added in
+    /// 3f's loopback test. The Phase 3 success criterion here is
+    /// "no panics, no encoder errors, the track accepts writes".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn synthetic_audio_pump_emits_packets() {
+        let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: control_tx,
+        })
+        .await
+        .expect("bridge");
+
+        let pump = bridge.spawn_synthetic_audio_pump();
+
+        // ~25 packets at 50 fps in 500 ms; plenty for a smoke
+        // check that the encode + payload + write_rtp loop runs.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // The pump runs forever, so abort it. The JoinHandle's
+        // result will be JoinError::Cancelled, which we don't
+        // need to inspect — the assertions are "didn't panic"
+        // and "the bridge can still close cleanly".
+        pump.abort();
 
         bridge.close().await.expect("close");
     }

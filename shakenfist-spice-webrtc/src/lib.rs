@@ -3,9 +3,9 @@
 //! Exposes [`WebrtcBridge`], which owns an
 //! [`webrtc::peer_connection::RTCPeerConnection`] together with a
 //! video track, an audio track, and a control datachannel. Phase 3
-//! step 3b ships the constructor and SDP-answer plumbing; the video
-//! pump (3c), synthetic-audio pump (3d), and datachannel send/recv
-//! (3e) attach later.
+//! step 3b ships the constructor and SDP-answer plumbing; 3c adds
+//! the video pump; 3d adds the synthetic Opus audio pump; the
+//! datachannel send/recv (3e) attaches later.
 
 mod bridge;
 
