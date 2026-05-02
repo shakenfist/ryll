@@ -13,17 +13,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
+use crate::webdav::server::WebdavServer;
+use crate::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, ShareDirConfig,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
-use shakenfist_spice_renderer::webdav::mux::{self, MuxDemuxer, MuxFrame};
-use shakenfist_spice_renderer::webdav::server::WebdavServer;
-use shakenfist_spice_renderer::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, ShareDirConfig,
-};
 
 use super::{ChannelEvent, WebdavCommand};
 

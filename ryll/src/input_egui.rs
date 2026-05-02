@@ -7,7 +7,7 @@
 /// browser mouse-button values without touching this file.
 use eframe::egui;
 
-use crate::channels::inputs::{Direction, LogicalKey, NavKey, PunctKey, WSKey};
+use shakenfist_spice_renderer::channels::inputs::{Direction, LogicalKey, NavKey, PunctKey, WSKey};
 
 /// Convert an egui key event to the substrate-neutral `LogicalKey`.
 ///

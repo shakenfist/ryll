@@ -29,14 +29,12 @@ mod capture {
         }
     }
 }
-mod channels;
 mod config;
-mod display;
 mod display_gui;
 mod input_egui;
 mod settings;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -51,9 +49,7 @@ use crate::capture::CaptureSession;
 use crate::config::{
     parse_share_dir, parse_virtual_disks, Args, Config, ShareDirConfig, VirtualDiskConfig,
 };
-
-/// Flag set by the Ctrl+C handler to request graceful shutdown.
-pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+use shakenfist_spice_renderer::SHUTDOWN_REQUESTED;
 
 fn main() -> Result<()> {
     // Install Ctrl+C handler so graceful shutdown works on all platforms.

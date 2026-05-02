@@ -12,21 +12,19 @@ use nusb::MaybeFuture;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "linux")]
+use crate::usb::real::RealDevice;
+use crate::usb::virtual_msc::VirtualMsc;
+use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
+use crate::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, VirtualDiskConfig,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
-#[cfg(target_os = "linux")]
-use shakenfist_spice_renderer::usb::real::RealDevice;
-use shakenfist_spice_renderer::usb::virtual_msc::VirtualMsc;
-use shakenfist_spice_renderer::usb::{
-    is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend,
-};
-use shakenfist_spice_renderer::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, VirtualDiskConfig,
-};
 use shakenfist_spice_usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
 use shakenfist_spice_usbredir::messages::{
     make_usbredir_message, AltSettingStatus, BulkPacketHeader, ConfigurationStatus,

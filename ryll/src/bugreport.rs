@@ -557,8 +557,8 @@ pub(crate) fn encode_region_png(
     // insurance against a future caller that skips the surface
     // layer and defends `(width as usize) * 4` from overflow on
     // 32-bit targets.
-    if width > crate::display::MAX_SURFACE_DIMENSION
-        || height > crate::display::MAX_SURFACE_DIMENSION
+    if width > shakenfist_spice_renderer::display::MAX_SURFACE_DIMENSION
+        || height > shakenfist_spice_renderer::display::MAX_SURFACE_DIMENSION
     {
         return Ok(None);
     }

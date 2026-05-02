@@ -12,7 +12,7 @@
 
 use eframe::egui::{ColorImage, Context, TextureFilter, TextureHandle, TextureOptions};
 
-use crate::display::DisplaySurface;
+use shakenfist_spice_renderer::DisplaySurface;
 
 /// `DisplaySurface` plus a cached egui texture handle.
 ///

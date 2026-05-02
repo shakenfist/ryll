@@ -7,15 +7,13 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
+use crate::{ByteCounter, LogConfig, NotificationEntry, NotificationSource, TrafficSink};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
-use shakenfist_spice_renderer::{
-    ByteCounter, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
-};
 
 use super::ChannelEvent;
 

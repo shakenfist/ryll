@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
+use crate::snapshots::{DecodeResult, DisplaySnapshot};
+use crate::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+};
 use shakenfist_spice_compression::{
     decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
     GlzDictionary,
@@ -23,10 +27,6 @@ use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, re
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
     IMAGE_FLAGS_CACHE_ME,
-};
-use shakenfist_spice_renderer::snapshots::{DecodeResult, DisplaySnapshot};
-use shakenfist_spice_renderer::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 
 use super::ChannelEvent;

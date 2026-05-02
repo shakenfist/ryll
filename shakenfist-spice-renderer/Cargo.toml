@@ -66,6 +66,17 @@ nusb = "0.2"
 # Per-thread CPU metrics via sysconf(_SC_CLK_TCK) (Linux only)
 libc = "0.2"
 
+# Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107), used in
+# the display channel
+flate2 = "1"
+
+# JPEG decoding for SPICE JPEG image type, used in the display channel
+jpeg-decoder = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Clipboard access (host <-> guest copy/paste), used in main_channel
+arboard = "3"
+
 # WebDAV server (RFC 4918 handler with LocalFs backend)
 dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
 

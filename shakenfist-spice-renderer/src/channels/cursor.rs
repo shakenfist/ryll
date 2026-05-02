@@ -5,6 +5,10 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
+use crate::snapshots::{CursorCacheEntry, CursorSnapshot};
+use crate::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -12,10 +16,6 @@ use shakenfist_spice_protocol::messages::{
     SpiceCursorHeader,
 };
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
-use shakenfist_spice_renderer::snapshots::{CursorCacheEntry, CursorSnapshot};
-use shakenfist_spice_renderer::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
-};
 
 use super::{ChannelEvent, CursorImage};
 

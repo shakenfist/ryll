@@ -7,6 +7,10 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
 use tracing::{debug, info, warn};
 
+use crate::snapshots::MainSnapshot;
+use crate::{
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -14,10 +18,6 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
-};
-use shakenfist_spice_renderer::snapshots::MainSnapshot;
-use shakenfist_spice_renderer::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 
 use super::ChannelEvent;

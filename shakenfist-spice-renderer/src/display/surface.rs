@@ -13,7 +13,7 @@ use tracing::warn;
 /// `width * height * 4` from overflowing `usize` (which on 64-bit
 /// would still allocate an absurd buffer even without overflow;
 /// 16 384 × 16 384 × 4 = 1 GiB — already past any real display).
-pub(crate) const MAX_SURFACE_DIMENSION: u32 = 16_384;
+pub const MAX_SURFACE_DIMENSION: u32 = 16_384;
 
 /// A display surface that holds RGBA pixel data and tracks
 /// whether it has been mutated since the last consumer read.

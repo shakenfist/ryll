@@ -17,9 +17,9 @@ pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
+use crate::notification::NotificationEntry;
+use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
-use shakenfist_spice_renderer::usb::UsbDeviceInfo;
-use shakenfist_spice_renderer::NotificationEntry;
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]

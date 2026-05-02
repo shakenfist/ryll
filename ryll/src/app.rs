@@ -15,12 +15,6 @@ use crate::bugreport::{
     TriggerTimestamps,
 };
 use crate::capture::CaptureSession;
-use crate::channels::inputs::scancode_for_logical_key;
-use crate::channels::{
-    ChannelEvent, CursorChannel, CursorImage, DisplayChannel, InputEvent, InputsChannel,
-    MainChannel, PlaybackChannel, UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel,
-    WebdavCommand,
-};
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::GuiSurface;
 use crate::input_egui::{egui_key_to_logical, mouse_button_to_spice};
@@ -30,7 +24,13 @@ use crate::notifications::{
 };
 use crate::settings;
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, SpiceClient, MOUSE_MODE_SERVER};
+use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
+use shakenfist_spice_renderer::channels::{
+    CursorChannel, DisplayChannel, InputsChannel, MainChannel, PlaybackChannel, UsbredirChannel,
+    VolumeControl, WebdavChannel,
+};
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
+use shakenfist_spice_renderer::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavCommand};
 
 /// Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 1024;
@@ -706,7 +706,7 @@ impl RyllApp {
         let byte_counter = Arc::new(ByteCounter::new());
         let traffic = Arc::new(TrafficBuffers::new());
         let channel_snapshots = ChannelSnapshots::new();
-        let volume_control = crate::channels::playback::VolumeControl::new();
+        let volume_control = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
 
         self.event_rx = event_rx;
         self.input_tx = Some(input_tx);
@@ -1246,7 +1246,7 @@ impl RyllApp {
     /// Returns true if a paste was triggered (or an error
     /// dialog was shown), false if there was nothing to do.
     fn trigger_paste(&mut self) -> bool {
-        use crate::channels::{translate_paste, PasteError};
+        use shakenfist_spice_renderer::channels::{translate_paste, PasteError};
 
         if !self.enable_paste || self.agent_connected {
             return false;
@@ -1743,7 +1743,8 @@ impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Graceful shutdown on Ctrl+C: close capture session (flushes
         // the MP4 moov atom) then ask eframe to exit.
-        if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+        if shakenfist_spice_renderer::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+        {
             info!("app: shutdown requested (SIGINT)");
             if let Some(ref capture) = self.capture {
                 capture.close();
@@ -3835,7 +3836,7 @@ pub async fn run_headless(
             }
             // Poll for Ctrl+C (SIGINT) at a reasonable interval
             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+                if shakenfist_spice_renderer::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
                     info!("app: shutdown requested (SIGINT)");
                     break;
                 }
