@@ -955,4 +955,27 @@ mod tests {
         server.close().await.expect("server close");
         client.close().await.expect("client close");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn accept_offer_rejects_malformed_sdp() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use tokio::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge constructs");
+
+        let result = bridge.accept_offer("not actually sdp".to_owned()).await;
+        assert!(
+            result.is_err(),
+            "accept_offer must reject malformed SDP, got Ok: {:?}",
+            result.ok()
+        );
+
+        bridge.close().await.expect("close");
+    }
 }

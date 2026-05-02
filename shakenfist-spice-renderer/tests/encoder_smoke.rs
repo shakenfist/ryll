@@ -31,7 +31,12 @@ const EXPECTED_FRAMES: usize = 90;
 /// unoptimised encoder may run well below 30 fps. The floor is set
 /// low enough to pass on slow CI while still verifying the pipeline
 /// produced a meaningful NAL stream.
-const MIN_FRAMES: usize = 10;
+/// In release builds the encoder runs at full speed, so we require
+/// at least 60 frames (~2 s of real output at 30 fps). This tighter
+/// floor catches throughput regressions that a debug-build run
+/// cannot, since software encoding under debug assertions is far
+/// too slow to distinguish a pipeline stall from ordinary slowness.
+const MIN_FRAMES: usize = if cfg!(debug_assertions) { 10 } else { 60 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encoder_smoke_writes_playable_h264() {
