@@ -9,6 +9,15 @@ Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Comput
 - **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming
 - **Audio playback** - SPICE playback channel with raw PCM and Opus codec support; lock-free ring buffer to dedicated audio thread via cpal
 - **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
+- **Window auto-fit** - The ryll window tracks the guest's display surface size: every primary `SURFACE_CREATE`
+  resizes the window to match (modulo an 8-pixel alignment that mirrors what we send the guest via
+  `VDAgentMonitorsConfig`). Maximised or fullscreen windows are left alone, and the surface renders at native
+  size inside them. Toggle `Obey guest size hints` in the hamburger menu (or launch with
+  `--no-obey-guest-size`) to pin the window — useful for fixed-size capture or for guests that flap between
+  resolutions on their own. The toggle is a session-level preference and survives reconnect. Resolution
+  changes are also surfaced as Info notifications ("Display resolution: WxH"), debounced over 500 ms so a
+  boot-time mode probe storm or a drag-resize through many sizes collapses to a single entry rather than
+  spamming the panel.
 - **Multi-channel support** - Handles main, display, cursor, inputs, playback, usbredir, and webdav channels
 - **USB device redirection** - Forward physical USB devices (Linux only) or present RAW disk images as virtual USB mass storage devices on all platforms. Interactive USB panel in the GUI for device enumeration, connect/disconnect, and adding disk images at runtime. CLI flags (`--usb-disk`, `--usb-disk-ro`) for headless/scripted use
 - **WebDAV folder sharing** - Share a local directory with the guest VM via the SPICE WebDAV channel. The guest mounts the share via `spice-webdavd` + `davfs2`. Supports read-write and read-only modes. Interactive "Folders" panel in the GUI for directory selection and share management. CLI flags (`--share-dir`, `--share-dir-ro`) for headless/scripted use
@@ -164,6 +173,7 @@ Options:
   --cadence              Enable cadence mode (automatic keystroke every 2 seconds)
   -v, --verbose          Enable verbose logging
   --monitors <N>         Number of monitors (default 1)
+  --no-obey-guest-size   Start with "Obey guest size hints" turned off
   --capture <DIR>        Write pcap + video capture to directory
   --latency-file <PATH>  Path to write latency measurements
   --enable-paste-as-keystrokes  Enable paste-as-keystrokes fallback

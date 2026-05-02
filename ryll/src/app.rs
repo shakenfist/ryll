@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::bugreport::{
     chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
@@ -36,6 +36,25 @@ const INPUT_CHANNEL_SIZE: usize = 256;
 
 /// Approximate height of the stats bar at the bottom of the window
 const STATS_BAR_HEIGHT: f32 = 20.0;
+
+/// Debounce window for resolution-change notifications.
+/// A burst of SurfaceCreated events within this window
+/// (boot mode probes, drag-resize storms) collapses to a
+/// single notification carrying the latest resolution.
+const RESOLUTION_NOTIFY_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Upper bound (logical pixels) for a primary surface
+/// dimension that the auto-fit pipeline will honour. A
+/// hostile or buggy SPICE server can announce
+/// `SurfaceCreated { width: u32::MAX, height: u32::MAX }`;
+/// without a bound we would forward that as
+/// `ViewportCommand::InnerSize` to egui (platform-dependent
+/// behaviour, possibly large internal allocations) and
+/// emit a `"Display resolution: 4294967295x4294967295"`
+/// notification. 16384 is `GL_MAX_TEXTURE_SIZE` on most
+/// hardware and is comfortably above any realistic
+/// display resolution.
+const MAX_AUTO_FIT_DIMENSION: u32 = 16384;
 
 /// Number of bandwidth samples to keep for the sparkline.
 const BANDWIDTH_HISTORY_LEN: usize = 60;
@@ -238,14 +257,46 @@ pub struct RyllApp {
     // forwarding is suppressed (e.g. bug report dialog opens).
     forwarded_buttons: u32,
 
-    // Pending viewport resize from a new surface
+    // Pending viewport resize from a new primary-surface event.
+    // Only set for (display_channel_id, surface_id) == (0, 0).
     pending_resize: Option<(f32, f32)>,
 
-    // Whether the window has been auto-sized to the remote
-    // surface yet.  We do this once on first connection; after
-    // that the user drives window sizing and the guest follows
-    // via VDAgentMonitorsConfig.
-    initial_resize_done: bool,
+    // (8-aligned width, height) of the last auto-resize we
+    // issued. None until the first resize. Used to dedup so we
+    // don't re-issue ViewportCommand::InnerSize every frame
+    // while the window already matches the surface, and so
+    // reconnect can re-fit by clearing it.
+    last_auto_resize: Option<(u32, u32)>,
+
+    // User-controlled opt-out of the always-fit behaviour.
+    // True (default) => auto-fit the window to every primary
+    // SurfaceCreated. False => leave the window alone; the
+    // surface renders at native pixel size inside whatever
+    // window the user has chosen (may overflow or letterbox).
+    // Toggled live via the hamburger menu; initial value comes
+    // from `--no-obey-guest-size` (inverted).
+    obey_guest_size: bool,
+
+    // Resolution-change notification state. The debounce
+    // coalesces a burst of guest-side mode changes (boot
+    // probes, drag-resize storms) into a single user-visible
+    // notification per quiescent window so the panel does
+    // not spam.
+    //
+    // pending_resolution_notify holds the latest (w, h) we
+    // have seen on a primary SurfaceCreated paired with the
+    // timestamp of that observation. The two are always set
+    // and cleared together, so collapsing them into one
+    // Option removes the representable-but-invalid state
+    // where one is Some and the other is None. RyllApp::update
+    // emits when the queued-at timestamp is at least
+    // RESOLUTION_NOTIFY_DEBOUNCE old and the value differs
+    // from last_notified_resolution. last_notified_resolution
+    // suppresses re-emitting the same value (e.g. when the
+    // guest re-confirms an existing mode after a fullscreen
+    // toggle).
+    pending_resolution_notify: Option<((u32, u32), Instant)>,
+    last_notified_resolution: Option<(u32, u32)>,
 
     // Bandwidth tracking for the status bar sparkline
     bandwidth: BandwidthTracker,
@@ -432,6 +483,7 @@ impl RyllApp {
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
         pedantic_config: Option<PedanticConfig>,
+        obey_guest_size: bool,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -572,7 +624,10 @@ impl RyllApp {
             last_modifiers: None,
             forwarded_buttons: 0,
             pending_resize: None,
-            initial_resize_done: false,
+            last_auto_resize: None,
+            obey_guest_size,
+            pending_resolution_notify: None,
+            last_notified_resolution: None,
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
@@ -686,6 +741,9 @@ impl RyllApp {
         self.last_modifiers = None;
         self.forwarded_buttons = 0;
         self.pending_resize = None;
+        self.last_auto_resize = None;
+        self.pending_resolution_notify = None;
+        self.last_notified_resolution = None;
         self.bandwidth = BandwidthTracker::new(byte_counter.clone());
         self.usb_tx = Some(usb_tx);
         self.webdav_tx = Some(webdav_tx);
@@ -796,7 +854,19 @@ impl RyllApp {
                         (display_channel_id, surface_id),
                         DisplaySurface::new(surface_id, width, height),
                     );
-                    self.pending_resize = Some((width as f32, height as f32));
+                    if is_primary_surface(display_channel_id, surface_id) {
+                        if auto_fit_size_acceptable(width, height) {
+                            self.pending_resize = Some((width as f32, height as f32));
+                            self.pending_resolution_notify =
+                                Some(((width, height), Instant::now()));
+                        } else {
+                            warn!(
+                                "app: ignoring oversized primary surface {}x{} for auto-fit \
+                                 (limit {}px per axis)",
+                                width, height, MAX_AUTO_FIT_DIMENSION
+                            );
+                        }
+                    }
                 }
 
                 ChannelEvent::SurfaceDestroyed {
@@ -832,7 +902,19 @@ impl RyllApp {
                             surface_id, surf_w, surf_h, left, top, width, height
                         );
                         e.insert(DisplaySurface::new(surface_id, surf_w, surf_h));
-                        self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                        if is_primary_surface(display_channel_id, surface_id) {
+                            if auto_fit_size_acceptable(surf_w, surf_h) {
+                                self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                                self.pending_resolution_notify =
+                                    Some(((surf_w, surf_h), Instant::now()));
+                            } else {
+                                warn!(
+                                    "app: ignoring oversized auto-created primary surface \
+                                     {}x{} for auto-fit (limit {}px per axis)",
+                                    surf_w, surf_h, MAX_AUTO_FIT_DIMENSION
+                                );
+                            }
+                        }
                     }
 
                     let surface = self
@@ -1551,14 +1633,8 @@ impl RyllApp {
         let is_max = ctx.input(|i| {
             i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
         });
-        let bar_height = if is_max { 0.0 } else { STATS_BAR_HEIGHT };
-        let mut width = viewport_size.x.max(0.0) as u32;
-        let mut height = (viewport_size.y - bar_height).max(0.0) as u32;
 
-        width -= width % 8;
-        height -= height % 8;
-        width = width.max(8);
-        height = height.max(8);
+        let (width, height) = compute_outgoing_resize((viewport_size.x, viewport_size.y), is_max);
 
         if self.last_sent_resize == Some((width, height)) {
             return;
@@ -1664,26 +1740,55 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
-        // Resize viewport to match the remote surface (plus stats bar)
-        // on first connection only.  After that, window sizing is
-        // user-driven and the guest follows via VDAgentMonitorsConfig.
-        if let Some((w, h)) = self.pending_resize.take() {
-            if !self.initial_resize_done {
-                let total_h = h + STATS_BAR_HEIGHT;
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
-                // Seed last_sent_resize so maybe_send_monitors_resize
-                // doesn't echo our own resize back to the guest as a
-                // VDAgentMonitorsConfig change.  Mirror the alignment
-                // and minimum-size logic from that function.
-                let mut aw = w as u32;
-                let mut ah = h as u32;
-                aw -= aw % 8;
-                ah -= ah % 8;
-                self.last_sent_resize = Some((aw.max(8), ah.max(8)));
-                self.initial_resize_done = true;
-                info!("app: initial window resize to {}x{}", w as u32, h as u32);
+        // Resize viewport to match the remote surface (plus stats
+        // bar) whenever a new primary surface differs from the
+        // size we last fitted to. Maximised/fullscreen windows
+        // are left alone — we cannot meaningfully change their
+        // inner size, and the surface will render at native size
+        // inside the available area.
+        let pending = self.pending_resize.take();
+        let is_max = ctx.input(|i| {
+            i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+        });
+        if let Some((w, h, aw, ah)) =
+            compute_auto_resize(pending, self.last_auto_resize, is_max, self.obey_guest_size)
+        {
+            let total_h = h + STATS_BAR_HEIGHT;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+            // Seed last_sent_resize so maybe_send_monitors_resize
+            // doesn't echo our own resize back to the guest as a
+            // VDAgentMonitorsConfig change.
+            self.last_sent_resize = Some((aw, ah));
+            self.last_auto_resize = Some((aw, ah));
+            info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
+        }
+
+        let now = Instant::now();
+        if let Some((w, h)) = resolution_notification_due(
+            self.pending_resolution_notify,
+            self.last_notified_resolution,
+            now,
+            RESOLUTION_NOTIFY_DEBOUNCE,
+        ) {
+            self.push_notification(
+                NotifySeverity::Info,
+                NotificationSource::Internal,
+                format!("Display resolution: {}x{}", w, h),
+            );
+            self.last_notified_resolution = Some((w, h));
+            self.pending_resolution_notify = None;
+        } else if let Some((_, at)) = self.pending_resolution_notify {
+            // Still inside the debounce window. Ask egui for a
+            // repaint right at the deadline so the notification
+            // fires promptly even if no other events arrive.
+            let elapsed = now.saturating_duration_since(at);
+            if elapsed < RESOLUTION_NOTIFY_DEBOUNCE {
+                ctx.request_repaint_after(RESOLUTION_NOTIFY_DEBOUNCE - elapsed);
             } else {
-                debug!("app: surface resize {}x{} (window already sized)", w, h);
+                // Past the deadline but skipped (target matches
+                // last_notified). Drop the pending state so we
+                // do not keep retrying.
+                self.pending_resolution_notify = None;
             }
         }
 
@@ -1920,6 +2025,8 @@ impl eframe::App for RyllApp {
 
                         ui.separator();
                         egui::menu::menu_button(ui, "☰", |ui| {
+                            ui.checkbox(&mut self.obey_guest_size, "Obey guest size hints");
+                            ui.separator();
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
                             ui.checkbox(&mut self.show_usb_panel, "USB");
                             ui.checkbox(&mut self.show_webdav_panel, "Folders");
@@ -3028,6 +3135,129 @@ impl eframe::App for RyllApp {
     }
 }
 
+/// True when an inbound display-channel surface refers to
+/// the primary surface — i.e. display channel 0, surface
+/// id 0. The phase 1 plan picked this literal pair (rather
+/// than tracking "the renderer's current primary key")
+/// because the primary surface key is fixed by the SPICE
+/// protocol; centralising the check here keeps the trigger
+/// sites in sync if that ever changes.
+fn is_primary_surface(display_channel_id: u8, surface_id: u32) -> bool {
+    display_channel_id == 0 && surface_id == 0
+}
+
+/// True when an announced surface size is small enough to
+/// safely drive the auto-fit and resolution-notification
+/// pipelines. See `MAX_AUTO_FIT_DIMENSION` for the
+/// rationale; the trigger sites use this to refuse to
+/// arm `pending_resize` / `pending_resolution_notify` for
+/// nonsense-sized surfaces (which a hostile server can
+/// announce trivially) without affecting the SPICE
+/// renderer's own surface bookkeeping.
+fn auto_fit_size_acceptable(width: u32, height: u32) -> bool {
+    width <= MAX_AUTO_FIT_DIMENSION && height <= MAX_AUTO_FIT_DIMENSION
+}
+
+/// Decide whether to issue a `ViewportCommand::InnerSize`
+/// to fit the remote surface, and what size to ask for.
+///
+/// `pending` is the surface size pulled from
+/// `pending_resize` (logical pixels, f32). `last_auto`
+/// is the (8-aligned) size of the last auto-resize we
+/// issued, or None if we have not auto-resized yet. `is_max`
+/// is true when the viewport is maximised or fullscreen
+/// and we should not change the inner size. `obey` is the
+/// user-controlled toggle: when false the function always
+/// returns None so the window is never auto-fitted.
+///
+/// Returns Some((width, height, aligned_w, aligned_h))
+/// where `(width, height)` are the values to pass to
+/// `ViewportCommand::InnerSize` (with `STATS_BAR_HEIGHT`
+/// added to the height — see the call site) and
+/// `(aligned_w, aligned_h)` are the values to store in
+/// `last_auto_resize` and seed into `last_sent_resize`.
+/// Returns None when no resize should fire.
+fn compute_auto_resize(
+    pending: Option<(f32, f32)>,
+    last_auto: Option<(u32, u32)>,
+    is_max: bool,
+    obey: bool,
+) -> Option<(f32, f32, u32, u32)> {
+    let (w, h) = pending?;
+    if !obey || is_max {
+        return None;
+    }
+    let aligned_w = ((w as u32).max(8) / 8) * 8;
+    let aligned_h = ((h as u32).max(8) / 8) * 8;
+    if last_auto == Some((aligned_w, aligned_h)) {
+        return None;
+    }
+    Some((w, h, aligned_w, aligned_h))
+}
+
+/// Decide what `(width, height)` to send to the guest as a
+/// `VDAgentMonitorsConfig` from a given viewport size.
+///
+/// `viewport` is the live inner-rect size in logical
+/// pixels (typically `egui::ViewportInputState::inner_rect`).
+/// `is_max` is true when the viewport is maximised or
+/// fullscreen — in that case we do not subtract
+/// `STATS_BAR_HEIGHT` from the height because the stats
+/// bar overlays inside the maximised area rather than
+/// adding to it.
+///
+/// The result is 8-pixel aligned (rounded down, matching
+/// what the SPICE display-channel mode-set machinery
+/// expects) and clamped to a minimum of 8 on each axis so
+/// we never send a degenerate `(0, 0)` resize during a
+/// pathological viewport report.
+fn compute_outgoing_resize(viewport: (f32, f32), is_max: bool) -> (u32, u32) {
+    let bar_height = if is_max { 0.0 } else { STATS_BAR_HEIGHT };
+    let w_raw = viewport.0.max(0.0) as u32;
+    let h_raw = (viewport.1 - bar_height).max(0.0) as u32;
+    let aligned_w = (w_raw.max(8) / 8) * 8;
+    let aligned_h = (h_raw.max(8) / 8) * 8;
+    (aligned_w, aligned_h)
+}
+
+/// Decide whether the pending resolution-change
+/// notification has been quiet long enough to emit, and
+/// what value to emit.
+///
+/// `pending` pairs the latest queued (w, h) with its
+/// observation timestamp; the two are always set and
+/// cleared together at every call site.
+///
+/// Returns Some((w, h)) when:
+/// * a value is pending,
+/// * at least `debounce` has elapsed since the value
+///   was queued, and
+/// * the value differs from `last_notified` (so we do
+///   not re-emit a confirmation of the existing mode).
+///
+/// Returns None to leave the pending state in place
+/// (still inside the debounce window) or to drop it
+/// silently (matches last_notified — the caller should
+/// also clear the pending field in that case; see the
+/// call site).
+///
+/// Pure for unit-testability — `now` is injected.
+fn resolution_notification_due(
+    pending: Option<((u32, u32), Instant)>,
+    last_notified: Option<(u32, u32)>,
+    now: Instant,
+    debounce: Duration,
+) -> Option<(u32, u32)> {
+    let (target, queued_at) = pending?;
+    if now.saturating_duration_since(queued_at) < debounce {
+        return None;
+    }
+    if last_notified == Some(target) {
+        return None;
+    }
+    Some(target)
+}
+
 /// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
 fn default_arrow_cursor() -> Vec<u8> {
     #[rustfmt::skip]
@@ -3378,6 +3608,9 @@ pub async fn run_headless(
     capture: Option<Arc<CaptureSession>>,
     monitors: u8,
     pedantic_config: Option<PedanticConfig>,
+    // Headless mode has no window to resize, so this flag is accepted for
+    // CLI symmetry but is not used.
+    _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -3678,6 +3911,171 @@ mod tests {
     }
 
     #[test]
+    fn compute_auto_resize_decisions() {
+        // No pending event => no resize.
+        assert_eq!(compute_auto_resize(None, None, false, true), None);
+
+        // Pending size, never resized before, not maximised =>
+        // resize to the aligned target.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), None, false, true),
+            Some((1024.0, 768.0, 1024, 768)),
+        );
+
+        // Same target as last_auto => skip (dedup).
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false, true),
+            None,
+        );
+
+        // Maximised => skip even when target differs.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((640, 480)), true, true),
+            None,
+        );
+
+        // Non-aligned size gets aligned to 8 px boundary.
+        assert_eq!(
+            compute_auto_resize(Some((1366.0, 770.0)), None, false, true),
+            Some((1366.0, 770.0, 1360, 768)),
+        );
+
+        // Differs after alignment from last_auto => resize.
+        assert_eq!(
+            compute_auto_resize(Some((1280.0, 800.0)), Some((1024, 768)), false, true),
+            Some((1280.0, 800.0, 1280, 800)),
+        );
+
+        // obey = false short-circuits even when the target
+        // differs and the window is not maximised.
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), None, false, false,),
+            None,
+        );
+
+        // obey = false short-circuits even when the target equals
+        // last_auto (would dedup anyway, but we want the obey
+        // gate to be the reason).
+        assert_eq!(
+            compute_auto_resize(Some((1024.0, 768.0)), Some((1024, 768)), false, false,),
+            None,
+        );
+    }
+
+    #[test]
+    fn compute_outgoing_resize_decisions() {
+        // Even-aligned input passes through unchanged
+        // (height has STATS_BAR_HEIGHT subtracted first).
+        assert_eq!(
+            compute_outgoing_resize((1024.0, 768.0 + STATS_BAR_HEIGHT), false),
+            (1024, 768),
+        );
+
+        // Non-aligned widths round DOWN to the 8 px grid
+        // (matches the historical `w -= w % 8` form).
+        assert_eq!(
+            compute_outgoing_resize((1366.0, 768.0 + STATS_BAR_HEIGHT), false),
+            (1360, 768),
+        );
+
+        // Non-aligned heights round DOWN too.
+        assert_eq!(
+            compute_outgoing_resize((1024.0, 770.0 + STATS_BAR_HEIGHT), false),
+            (1024, 768),
+        );
+
+        // Sub-8 viewport dims clamp to the 8 px floor on each
+        // axis. Use 4×4 (after bar subtraction) — both axes
+        // hit the clamp.
+        assert_eq!(
+            compute_outgoing_resize((4.0, 4.0 + STATS_BAR_HEIGHT), false),
+            (8, 8),
+        );
+
+        // Negative viewport dims (f32 < 0) clamp to zero
+        // before the 8 px floor — must not panic on the
+        // `as u32` conversion. f32 -> u32 is saturating in
+        // Rust, but we still rely on the .max(0.0) up front.
+        assert_eq!(compute_outgoing_resize((-100.0, -50.0), false), (8, 8),);
+
+        // is_max = true skips the STATS_BAR_HEIGHT
+        // subtraction. Same viewport, different is_max ->
+        // different height.
+        assert_eq!(compute_outgoing_resize((1024.0, 768.0), true), (1024, 768),);
+        // is_max = false subtracts STATS_BAR_HEIGHT (20) then rounds down to
+        // the 8-px grid: (768 - 20) = 748, rounded down to 744.
+        assert_eq!(compute_outgoing_resize((1024.0, 768.0), false), (1024, 744),);
+    }
+
+    /// After auto-fitting to a fresh guest surface, the next
+    /// frame's outgoing-resize computation must produce the
+    /// same (aligned_w, aligned_h) so `last_sent_resize`
+    /// dedupes and we do not echo our own resize back to the
+    /// guest as a fresh VDAgentMonitorsConfig.
+    #[test]
+    fn round_trip_no_echo() {
+        // Guest sends SurfaceCreated 1024x768. compute_auto_resize
+        // returns the (w, h, aligned_w, aligned_h) we will fit
+        // to and seed into last_sent_resize.
+        let auto = compute_auto_resize(Some((1024.0, 768.0)), None, false, true)
+            .expect("auto-fit should fire on first surface");
+        let (fit_w, fit_h, aligned_w, aligned_h) = auto;
+        assert_eq!((fit_w as u32, fit_h as u32), (1024, 768));
+        assert_eq!((aligned_w, aligned_h), (1024, 768));
+
+        // egui then reports the new viewport inner-rect: the
+        // surface size plus STATS_BAR_HEIGHT (we asked for
+        // total_h = h + STATS_BAR_HEIGHT in the resize block).
+        let viewport = (fit_w, fit_h + STATS_BAR_HEIGHT);
+        let outgoing = compute_outgoing_resize(viewport, false);
+
+        // The outgoing computation must match the seeded
+        // last_sent_resize, so maybe_send_monitors_resize
+        // dedupes and does NOT fire.
+        assert_eq!(outgoing, (aligned_w, aligned_h));
+    }
+
+    /// If the guest answers a ryll-driven resize request with
+    /// a *different* size (e.g. ryll asked for 1280x800, guest
+    /// can only do 1024x768), auto-fit re-seeds last_sent_resize
+    /// to the guest's choice. The next outgoing computation
+    /// against the new viewport must dedupe so ryll does not
+    /// then ask for 1024x768 again as if it were a user-driven
+    /// resize.
+    #[test]
+    fn round_trip_guest_overrides_request() {
+        // State at the start of the test: last_sent_resize
+        // was (1280, 800) because the user dragged the window
+        // to that size and we sent a VDAgentMonitorsConfig
+        // accordingly. last_auto_resize is None because no
+        // auto-fit has fired yet this session.
+        let last_sent = Some((1280u32, 800u32));
+        let last_auto: Option<(u32, u32)> = None;
+
+        // Guest replies with a 1024x768 SurfaceCreated.
+        let auto = compute_auto_resize(Some((1024.0, 768.0)), last_auto, false, true)
+            .expect("auto-fit should fire — surface differs from last_auto");
+        let (_, _, aligned_w, aligned_h) = auto;
+        assert_eq!((aligned_w, aligned_h), (1024, 768));
+
+        // Caller seeds both last_sent_resize and
+        // last_auto_resize from the auto-fit result.
+        let new_last_sent = Some((aligned_w, aligned_h));
+        assert_ne!(
+            new_last_sent, last_sent,
+            "last_sent must update — we did not request 1024x768"
+        );
+
+        // egui reports the new viewport size. Outgoing
+        // computation against it must match new_last_sent so
+        // we do NOT then fire a fresh VDAgentMonitorsConfig
+        // asking the guest for a size it just gave us.
+        let viewport = (aligned_w as f32, aligned_h as f32 + STATS_BAR_HEIGHT);
+        let outgoing = compute_outgoing_resize(viewport, false);
+        assert_eq!(Some(outgoing), new_last_sent);
+    }
+
+    #[test]
     fn latency_tracker_record_trims_to_capacity() {
         let mut tracker = LatencyTracker::new();
         // Push 65 values: 0.0, 1.0, ..., 64.0
@@ -3688,5 +4086,93 @@ mod tests {
         assert_eq!(tracker.history.len(), LATENCY_HISTORY_LEN);
         // The first kept value should be the 6th original (index 5)
         assert_eq!(tracker.history[0], 5.0);
+    }
+
+    #[test]
+    fn auto_fit_size_acceptable_bounds() {
+        // Anchors the cap so a typo (`>` vs `>=`, `||` vs
+        // `&&`) cannot silently let an attacker-controlled
+        // dimension through. The cap matches
+        // GL_MAX_TEXTURE_SIZE on common hardware and is
+        // comfortably above any realistic display.
+        assert!(auto_fit_size_acceptable(0, 0));
+        assert!(auto_fit_size_acceptable(1024, 768));
+        assert!(auto_fit_size_acceptable(
+            MAX_AUTO_FIT_DIMENSION,
+            MAX_AUTO_FIT_DIMENSION
+        ));
+        assert!(!auto_fit_size_acceptable(MAX_AUTO_FIT_DIMENSION + 1, 768));
+        assert!(!auto_fit_size_acceptable(1024, MAX_AUTO_FIT_DIMENSION + 1));
+        assert!(!auto_fit_size_acceptable(u32::MAX, u32::MAX));
+    }
+
+    #[test]
+    fn is_primary_surface_only_zero_zero() {
+        // Anchors the gating predicate so a typo
+        // (`||` for `&&`, or a non-zero default) cannot
+        // silently widen the set of surfaces that drive
+        // auto-fit and resolution notifications.
+        assert!(is_primary_surface(0, 0));
+        assert!(!is_primary_surface(0, 1));
+        assert!(!is_primary_surface(1, 0));
+        assert!(!is_primary_surface(1, 1));
+    }
+
+    #[test]
+    fn resolution_notification_due_nothing_pending() {
+        let now = Instant::now();
+        assert_eq!(
+            resolution_notification_due(None, None, now, Duration::from_millis(500),),
+            None,
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_inside_debounce() {
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(100);
+        assert_eq!(
+            resolution_notification_due(
+                Some(((1024, 768), queued_at)),
+                None,
+                now,
+                Duration::from_millis(500),
+            ),
+            None,
+            "100 ms < 500 ms debounce — must not fire",
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_past_window_emits() {
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(600);
+        assert_eq!(
+            resolution_notification_due(
+                Some(((1024, 768), queued_at)),
+                None,
+                now,
+                Duration::from_millis(500),
+            ),
+            Some((1024, 768)),
+        );
+    }
+
+    #[test]
+    fn resolution_notification_due_past_window_dedupes() {
+        // Pending value matches last_notified — caller
+        // should suppress so we do not announce the same
+        // resolution twice in a row.
+        let now = Instant::now();
+        let queued_at = now - Duration::from_millis(600);
+        assert_eq!(
+            resolution_notification_due(
+                Some(((1024, 768), queued_at)),
+                Some((1024, 768)),
+                now,
+                Duration::from_millis(500),
+            ),
+            None,
+        );
     }
 }

@@ -444,6 +444,99 @@ target the correct surface even when surface IDs overlap across
 channels. This prevents cross-channel surface corruption in
 multi-head configurations.
 
+## Window sizing
+
+The ryll window auto-fits to the guest display surface.
+On every primary `SURFACE_CREATE` (and on the
+`ImageReady` auto-create fallback for surface 0), the
+event-handling path queues a viewport resize via
+`pending_resize`. `RyllApp::update` consumes the pending
+value, runs the pure `compute_auto_resize` decision
+helper, and — if the helper returns Some — issues a
+`ViewportCommand::InnerSize` to ask egui to make the
+window match the surface. The aligned target is also
+seeded into `last_sent_resize` so the next frame's
+`maybe_send_monitors_resize` dedupes and we do not echo
+our own resize back to the guest as a fresh
+`VDAgentMonitorsConfig`.
+
+The reverse direction — user drags the ryll window —
+runs each frame in `maybe_send_monitors_resize`. The
+viewport's inner-rect size is reduced by
+`STATS_BAR_HEIGHT` (zero when maximised or fullscreen),
+8-pixel aligned, and clamped to a floor of 8 on each
+axis via `compute_outgoing_resize`. The result is sent
+to the guest as a `VDAgentMonitorsConfig` if it differs
+from `last_sent_resize`. The guest may honour the hint
+exactly, pick the closest supported mode, or decline —
+whatever resolution the guest actually chooses comes back
+as a fresh `SURFACE_CREATE`, and the auto-fit pipeline
+above re-syncs the window.
+
+Three short-circuits keep the loop stable:
+
+* `compute_auto_resize` returns None when the viewport is
+  maximised or fullscreen; the surface renders at native
+  size inside the available area rather than fighting
+  egui for the inner size.
+* `compute_auto_resize` dedupes against `last_auto_resize`
+  so a no-op resize event does not refire the
+  `ViewportCommand` every frame.
+* `compute_outgoing_resize` plus `last_sent_resize`
+  dedupes the outgoing side, so an auto-fit's seeded
+  target does not bounce back to the guest as if the
+  user had just dragged the window.
+
+Both decision helpers are pure functions and are
+unit-tested in `ryll/src/app.rs`'s `tests` module.
+
+The auto-fit can be turned off with the
+`Obey guest size hints` checkbox in the hamburger menu
+(or the `--no-obey-guest-size` CLI flag at launch).
+With the toggle off, the window stays where the user put
+it and the surface renders at native pixel size inside
+it — overflowing or letterboxing as the dimensions
+require. The toggle is a session-level preference and
+is **not** reset across a reconnect.
+
+Every primary-surface mode change is also surfaced as an
+Info notification ("Display resolution: WxH") through the
+existing notification panel, debounced by
+`RESOLUTION_NOTIFY_DEBOUNCE` (500 ms) so a burst of
+events — boot probes that step `640×480 → 800×600 →
+1024×768` over a second, or a drag-resize that steps
+through dozens of 8-pixel-aligned sizes — collapses to a
+single entry carrying the latest resolution. The
+debounce is on top of the 30-second
+`NOTIFICATION_DEDUP_WINDOW` from
+`ryll/src/notifications.rs`, which folds same-resolution
+repeats into a `count++` on the existing entry. The
+decision is in the pure
+`resolution_notification_due` helper next to the
+window-fit helpers, and is unit-tested alongside them.
+
+`pending_resize` is only set when the affected surface
+key is `(display_channel_id == 0, surface_id == 0)`
+(centralised as `is_primary_surface`), so a secondary
+monitor's surface event cannot resize the primary
+window.
+
+Both auto-fit arms additionally refuse to honour
+`SurfaceCreated` dimensions above
+`MAX_AUTO_FIT_DIMENSION` (16384 px per axis,
+`GL_MAX_TEXTURE_SIZE` on common hardware). A hostile
+SPICE server can announce
+`SurfaceCreated { width: u32::MAX, height: u32::MAX }`;
+without the bound, ryll would forward that as
+`ViewportCommand::InnerSize` (platform-dependent
+behaviour, possibly large internal allocations) and
+emit a notification carrying the absurd value. The cap
+is checked at the trigger sites by
+`auto_fit_size_acceptable`, which is unit-tested with
+the other pure helpers; rejected sizes log a `warn!`
+and leave the SPICE renderer's own surface bookkeeping
+untouched.
+
 ## Audio Playback Pipeline
 
 SPICE audio data arrives on the **Playback channel** (type 5) as
@@ -912,6 +1005,11 @@ this list first. The reconnect path **does not** touch:
   the reset.
 - The paste-as-keystrokes toggle and inter-character
   delay.
+- The "Obey guest size hints" toggle. It is a
+  session-level preference (set via the hamburger menu
+  or `--no-obey-guest-size`) and is not touched by the
+  reconnect path, so a reconnect inherits whatever
+  value the user last left.
 - The in-app notification store (history of past
   notifications). The store is an `Arc<Mutex<…>>` and
   the same `Arc` is handed to the new connection.

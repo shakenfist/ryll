@@ -89,6 +89,13 @@ pub struct Args {
     /// Inter-character delay for paste-as-keystrokes in milliseconds
     #[arg(long = "paste-char-delay-ms", default_value_t = 16)]
     pub paste_char_delay_ms: u32,
+
+    /// Start with "obey guest size hints" turned off so the
+    /// window does not auto-fit when the guest changes
+    /// resolution. Equivalent to opening the hamburger menu
+    /// and unchecking the checkbox after launch.
+    #[arg(long, default_value_t = false)]
+    pub no_obey_guest_size: bool,
 }
 
 /// SPICE connection configuration
@@ -329,4 +336,26 @@ fn validate_disk_path(path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The "obey guest size hints" toggle defaults to ON;
+    // --no-obey-guest-size flips it OFF. main.rs inverts
+    // the flag (`obey_guest_size = !args.no_obey_guest_size`),
+    // so anchor the bool semantics here at the parse layer
+    // and let the inversion stay implicit.
+    #[test]
+    fn no_obey_guest_size_default_is_false() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900"]);
+        assert!(!args.no_obey_guest_size);
+    }
+
+    #[test]
+    fn no_obey_guest_size_flag_sets_true() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900", "--no-obey-guest-size"]);
+        assert!(args.no_obey_guest_size);
+    }
 }
