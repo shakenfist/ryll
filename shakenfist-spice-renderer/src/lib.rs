@@ -31,7 +31,10 @@ pub use channels::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavComm
 pub use clipboard::ClipboardBackend;
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
-pub use encoder::{EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder};
+pub use encoder::{
+    EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
+    SyntheticFrameSource,
+};
 pub use log_config::LogConfig;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;
