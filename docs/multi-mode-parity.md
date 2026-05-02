@@ -43,6 +43,7 @@
 | SPICE streaming / MJPEG | available | partial (decoded messages counted as frames, not rendered) | available (inherited) |
 | Display capabilities advertisement (COMPOSITE, MONITORS_CONFIG, etc.) | available | available | available |
 | Window auto-resize to surface size | available | n/a — intrinsic (no window; resize channel exists but resize_tx is never connected to a window, `ryll/src/app.rs:3391`) | n/a — intrinsic (browser viewport is user-controlled) |
+| Obey guest size hints toggle (`--no-obey-guest-size` / hamburger toggle) | available | n/a — intrinsic (no window; flag accepted in headless for CLI symmetry but ignored, `ryll/src/main.rs:195`) | missing (out of MVP scope; the web frontend's "guest fits browser viewport" inverse is Phase 5a of PLAN-web-frontend.md) |
 | Guest resolution follows viewport (`VDAgentMonitorsConfig`) | available | missing (`ryll/src/app.rs:3391` — `_resize_tx` is created but never used to drive resize logic in headless) | available (MVP; Phase 5a of PLAN-web-frontend.md) |
 | **Cursor** | | | |
 | Server cursor rendering (SET/INIT) | available | missing (`ryll/src/app.rs:3563` — `CursorChannel` runs, events arrive, but headless event loop has no handler for `CursorImage`/`CursorPos` events) | available (MVP; datachannel CSS overlay, Phase 5b) |
