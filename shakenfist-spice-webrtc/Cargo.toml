@@ -43,9 +43,9 @@ opus = "0.3"
 # and integration test.
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
 
-[dev-dependencies]
-# The DTLS handshake in the loopback test drives rustls, which
-# requires a CryptoProvider to be installed when both aws-lc-rs
-# and ring are present in the dependency tree. Pin to the same
-# version webrtc 0.17.1 pulls in transitively.
+# rustls 0.23 dropped the implicit default CryptoProvider; the
+# DTLS handshake inside webrtc-rs needs one installed before the
+# first PeerConnection is created. Pin to the version webrtc
+# 0.17.1 pulls in transitively; "ring" feature ensures the ring
+# backend is compiled in so install_default() succeeds.
 rustls = { version = "0.23", features = ["ring"] }

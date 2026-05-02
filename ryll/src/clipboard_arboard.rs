@@ -39,7 +39,9 @@ impl ArboardClipboard {
                 Err(_) => return None,
             }
         }
-        Some(f(guard.as_mut().unwrap()))
+        Some(f(guard
+            .as_mut()
+            .expect("clipboard was just initialised above")))
     }
 }
 
@@ -54,7 +56,11 @@ impl ClipboardBackend for ArboardClipboard {
         if guard.is_none() {
             *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
         }
-        match guard.as_mut().unwrap().set_text(text) {
+        match guard
+            .as_mut()
+            .expect("clipboard was just initialised above")
+            .set_text(text)
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 // Reset the cached handle so the next call retries.

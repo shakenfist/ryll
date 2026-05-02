@@ -489,8 +489,7 @@ impl DisplaySurface {
         was_dirty
     }
 
-    /// Get raw pixel data (for headless mode statistics)
-    #[allow(dead_code)]
+    /// Get raw pixel data.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }

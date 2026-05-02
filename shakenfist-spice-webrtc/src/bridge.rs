@@ -131,9 +131,10 @@ pub struct WebrtcBridge {
     video_track: Arc<TrackLocalStaticRTP>,
     audio_track: Arc<TrackLocalStaticRTP>,
     control_dc: Arc<RTCDataChannel>,
-    #[allow(dead_code)] // retained for diagnostics; the on-state
-    // handler keeps its own clone.
-    encoder_control: mpsc::Sender<EncoderControl>,
+    // Retained so the Sender is kept alive for diagnostics; the
+    // on-state handler keeps its own clone. Prefixed with `_` to
+    // signal intentional non-use without suppressing via attribute.
+    _encoder_control: mpsc::Sender<EncoderControl>,
     /// Receiver for incoming control-DC messages. Take it once
     /// via [`WebrtcBridge::control_rx`]. Wrapped in
     /// `Mutex<Option<...>>` because `WebrtcBridge` is shared via
@@ -147,6 +148,13 @@ impl WebrtcBridge {
     /// the on-connected handler that requests a keyframe whenever
     /// a viewer attaches.
     pub async fn new(config: WebrtcBridgeConfig) -> Result<Self> {
+        // rustls 0.23 dropped the implicit default CryptoProvider; the
+        // DTLS handshake inside webrtc-rs needs one installed before the
+        // first PeerConnection is created. install_default returns Err
+        // if a provider is already installed (which is fine — tests
+        // install one explicitly), so we ignore the result.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let mut media_engine = MediaEngine::default();
         // register_default_codecs is conditional on webrtc's H.264
         // feature being enabled. Register Opus + H.264 explicitly
@@ -295,7 +303,7 @@ impl WebrtcBridge {
             video_track,
             audio_track,
             control_dc,
-            encoder_control: config.encoder_control,
+            _encoder_control: config.encoder_control,
             incoming_control,
         })
     }

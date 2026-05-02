@@ -72,6 +72,8 @@ impl GuiSurface {
             }
         }
 
-        self.texture.as_ref().unwrap()
+        self.texture
+            .as_ref()
+            .expect("texture was just initialised above")
     }
 }
