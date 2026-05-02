@@ -957,9 +957,85 @@ We will know the MVP has landed when:
   milestone *for the operator*, not a general-availability
   claim.
 
+#### Items deferred from the post-Phase-3 pre-push audit
+
+Tracked from a `PUSH-TEMPLATE.md` audit run after Phases 0–3
+landed. Blocking items (malformed-SDP test, doc gaps, rustls
+provider init, unwrap → expect polish) were addressed before
+the audit's push gate; the items below are advisory and
+deferred:
+
+- **`split_annex_b` / `find_start_code` re-export.** Phase 2
+  step 2b added private helpers in
+  `shakenfist-spice-renderer/src/encoder/h264.rs` that parse
+  Annex-B-framed NAL streams. A second consumer (e.g. an HLS
+  muxer or a future client-side viewer) would re-derive the
+  same logic. Re-export from the renderer when a second
+  consumer materialises.
+- **`capture.rs` odd-dimension repack** (`ryll/src/capture.rs`
+  ~line 223). When the source surface has odd dimensions,
+  `&pixels[..pixel_count * 4]` reads slightly into the next
+  row — pre-existing behaviour preserved across the Phase 2
+  capture cleanup. Worst case is a single-pixel horizontal
+  smear in the captured `display.mp4`. Tracked as a TODO
+  comment in the source. Fix by row-by-row repacking when
+  source dims are odd.
+- **`H264Encoder::encode` wrong-buffer-size unit test.** The
+  validation code is correct by inspection; an adversarial
+  unit test (passing `width * height * 3` bytes) would make
+  the contract explicit and catch a future regression if the
+  check is ever moved.
+- **`EncoderTask` encoder-error exit-path test.** When
+  `encoder.encode` returns Err, the task exits with Err. No
+  test covers that path. Inject a fake `FrameSource` whose
+  RGBA slice is wrong-sized to trigger the encoder error and
+  assert the `JoinHandle` resolves to Err.
+- **`NotificationStoreSink::push` direct test.** The thin
+  newtype wrapper in `ryll/src/notifications.rs` that adapts
+  `Arc<Mutex<NotificationStore>>` to the renderer's
+  `NotificationSink` trait has no direct unit test — only
+  transitively covered via the channel-handler tests.
+- **`ArboardClipboard` test coverage.** Hard to unit-test in
+  CI without a display server. Options: a mock
+  `ClipboardBackend` impl for tests; or a
+  `#[cfg(any(target_os = "linux"))]` test that probes for
+  `$DISPLAY` and skips otherwise.
+- **`ArboardClipboard::set_text` poisoning policy.** The
+  `get_text` path returns `None` on Mutex poisoning;
+  `set_text` propagates the poison error string. Inconsistent.
+  Align both paths (return None / reset the inner Option), or
+  switch to `parking_lot::Mutex` to avoid poisoning entirely.
+  Severity is low because reaching a poisoned lock requires
+  a panic inside `arboard::Clipboard::set_text`, which is
+  rare.
+- **Bound clipboard payload size at the SPICE-channel layer.**
+  `ArboardClipboard::set_text` does not bound `text` length,
+  so a malicious guest could ship a multi-GiB clipboard
+  payload via the SPICE main channel and OOM the host. Cap
+  at e.g. 16 MiB inside
+  `shakenfist-spice-renderer/src/channels/main_channel.rs`
+  before delegating to `ClipboardBackend::set_text`.
+  Pre-existing risk class (the SPICE main channel design
+  inherits this from the protocol), not introduced by the
+  web-frontend work, but worth tracking now.
+
 ### Bugs fixed during this work
 
-(None yet — no implementation has started.)
+- **`capture.rs` H.264 NAL extraction** (Phase 2 follow-up,
+  commit `7871259e`). The pre-extraction `capture.rs`
+  primary NAL loop read `nal[0] & 0x1F` as the NAL type, but
+  openh264 0.6's `layer.nal_unit(i)` returns NALs with the
+  Annex-B start code prepended, so `nal[0]` was always
+  `0x00`. Every NAL silently fell into the default arm and
+  got concatenated with its start code into the frame
+  buffer. A fallback path re-extracted SPS/PPS via start-
+  code scanning but never repaired the frame buffer. Plus
+  `length_prefix_nal` was being called once per frame on the
+  whole concatenated buffer rather than per-NAL — producing
+  invalid AVCC framing. Decoders were tolerant enough that
+  the resulting `display.mp4` mostly played, but it was not
+  standards-compliant. Routing through the new H264Encoder
+  eliminated both bugs.
 
 ### Documentation index maintenance
 
