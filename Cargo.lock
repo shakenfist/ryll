@@ -5369,6 +5369,7 @@ dependencies = [
  "bytes",
  "opus",
  "rand 0.8.5",
+ "rustls",
  "shakenfist-spice-renderer",
  "thiserror 1.0.69",
  "tokio",

@@ -4,7 +4,9 @@
 //! Phase 3 step 3b implements [`WebrtcBridge::new`] and
 //! [`WebrtcBridge::accept_offer`]; 3c adds the video pump; 3d adds
 //! the synthetic Opus audio pump; 3e adds the datachannel
-//! send/recv; 3f adds the in-process loopback integration test.
+//! send/recv ([`WebrtcBridge::send_control`],
+//! [`WebrtcBridge::control_rx`]); 3f adds the in-process loopback
+//! integration test.
 //!
 //! ## Codec registration
 //!
@@ -17,7 +19,7 @@
 //! (`profile-level-id=42e01f`, baseline level 3.1, packetization
 //! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -29,6 +31,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
@@ -121,17 +124,21 @@ impl WebrtcBridgeConfig {
 /// Phase 3 step 3b ships [`WebrtcBridge::new`],
 /// [`WebrtcBridge::accept_offer`], and [`WebrtcBridge::close`]; 3c
 /// adds [`WebrtcBridge::spawn_video_pump`]; 3d adds
-/// [`WebrtcBridge::spawn_synthetic_audio_pump`]. The remaining
-/// surface (`send_control`, `control_rx`) is added in 3e.
+/// [`WebrtcBridge::spawn_synthetic_audio_pump`]; 3e adds
+/// [`WebrtcBridge::send_control`] and [`WebrtcBridge::control_rx`].
 pub struct WebrtcBridge {
     pc: Arc<RTCPeerConnection>,
     video_track: Arc<TrackLocalStaticRTP>,
     audio_track: Arc<TrackLocalStaticRTP>,
-    #[allow(dead_code)] // populated for 3e (datachannel send/recv).
     control_dc: Arc<RTCDataChannel>,
     #[allow(dead_code)] // retained for diagnostics; the on-state
     // handler keeps its own clone.
     encoder_control: mpsc::Sender<EncoderControl>,
+    /// Receiver for incoming control-DC messages. Take it once
+    /// via [`WebrtcBridge::control_rx`]. Wrapped in
+    /// `Mutex<Option<...>>` because `WebrtcBridge` is shared via
+    /// `Arc` but the receiver can only be consumed once.
+    incoming_control: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
 }
 
 impl WebrtcBridge {
@@ -226,12 +233,70 @@ impl WebrtcBridge {
             })
         }));
 
+        // Control DC incoming message fan-in: the on_message callback
+        // pushes raw bytes onto a bounded mpsc channel. The consumer
+        // takes the Receiver once via `control_rx()`.
+        //
+        // Two DCs are involved in a two-bridge loopback scenario:
+        //   1. This bridge's own `control_dc` (created above) — used
+        //      for `send_control` and receives messages from the remote
+        //      peer's answerer-side DC.
+        //   2. The DC *received* from the remote peer when the bridge
+        //      acts as the answerer (`on_data_channel` callback) —
+        //      this carries messages sent by the remote peer on its
+        //      own created DC.
+        // Both are wired to the same `incoming_tx` so `control_rx()`
+        // delivers messages from either direction.
+        let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
+
+        let incoming_tx_clone = incoming_tx.clone();
+        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let tx = incoming_tx_clone.clone();
+            Box::pin(async move {
+                let bytes = msg.data.to_vec();
+                if tx.send(bytes).await.is_err() {
+                    tracing::debug!("WebrtcBridge: control_rx receiver dropped, message lost");
+                }
+            })
+        }));
+
+        // Also handle DCs initiated by the remote peer. When this
+        // bridge acts as the answerer in an SDP exchange, the offerer's
+        // DC arrives here via `on_data_channel`. Wire its `on_message`
+        // to the same channel so `control_rx()` sees all incoming
+        // messages regardless of which side initiated the DC.
+        let incoming_tx_dc = incoming_tx.clone();
+        pc.on_data_channel(Box::new(move |remote_dc: Arc<RTCDataChannel>| {
+            let tx = incoming_tx_dc.clone();
+            Box::pin(async move {
+                tracing::debug!(
+                    label = %remote_dc.label(),
+                    "WebrtcBridge: remote DC received via on_data_channel"
+                );
+                remote_dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let tx = tx.clone();
+                    Box::pin(async move {
+                        let bytes = msg.data.to_vec();
+                        if tx.send(bytes).await.is_err() {
+                            tracing::debug!(
+                                "WebrtcBridge: control_rx receiver dropped, \
+                                 remote-DC message lost"
+                            );
+                        }
+                    })
+                }));
+            })
+        }));
+
+        let incoming_control = Mutex::new(Some(incoming_rx));
+
         Ok(Self {
             pc,
             video_track,
             audio_track,
             control_dc,
             encoder_control: config.encoder_control,
+            incoming_control,
         })
     }
 
@@ -295,6 +360,35 @@ impl WebrtcBridge {
     pub fn spawn_synthetic_audio_pump(&self) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
         tokio::spawn(run_synthetic_audio_pump(track))
+    }
+
+    /// Send a payload over the control datachannel. The DC is
+    /// reliable + ordered; this is appropriate for inputs and
+    /// cursor overlay updates (Phase 5).
+    ///
+    /// Returns an error if the underlying datachannel send fails
+    /// (e.g. the channel is not yet open or the remote peer has
+    /// closed it).
+    pub async fn send_control(&self, payload: &[u8]) -> Result<()> {
+        let bytes = Bytes::copy_from_slice(payload);
+        self.control_dc
+            .send(&bytes)
+            .await
+            .map(|_n| ())
+            .map_err(|e| anyhow!("control DC send: {}", e))
+    }
+
+    /// Take the receiver for incoming control-DC messages.
+    ///
+    /// Can only be called once per bridge; subsequent calls return
+    /// `None`. Register the `on_message` callback (done in
+    /// [`WebrtcBridge::new`]) before calling this to avoid a race
+    /// where an early message is lost.
+    pub fn control_rx(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+        self.incoming_control
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
     }
 
     /// Close the underlying peer connection. Consumes `self` so
@@ -530,6 +624,44 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
     }
 }
 
+/// Test-only helpers that expose internals needed for driving the
+/// client side of a two-bridge SDP exchange in unit tests.
+#[cfg(test)]
+impl WebrtcBridge {
+    /// Create an SDP offer, set it as the local description, wait
+    /// for ICE gathering to complete, and return the fully-resolved
+    /// SDP string. Mirrors what a browser would do before sending
+    /// its offer to the server.
+    pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
+        let offer = self.pc.create_offer(None).await?;
+        self.pc.set_local_description(offer).await?;
+        let mut gather = self.pc.gathering_complete_promise().await;
+        let _ = gather.recv().await;
+        let local = self
+            .pc
+            .local_description()
+            .await
+            .ok_or_else(|| anyhow!("local description missing after ICE gathering"))?;
+        Ok(local.sdp)
+    }
+
+    /// Set the remote description from an SDP answer string,
+    /// completing the SDP exchange on the client side.
+    pub(crate) async fn set_remote_answer(&self, answer_sdp: String) -> Result<()> {
+        let answer = RTCSessionDescription::answer(answer_sdp)?;
+        self.pc.set_remote_description(answer).await?;
+        Ok(())
+    }
+
+    /// Return the current peer connection state. Used in tests to
+    /// poll until both sides reach `Connected`.
+    pub(crate) fn connection_state(
+        &self,
+    ) -> webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState {
+        self.pc.connection_state()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,5 +842,117 @@ mod tests {
         pump.abort();
 
         bridge.close().await.expect("close");
+    }
+
+    /// Round-trip test for the control datachannel. Two in-process
+    /// `WebrtcBridge` instances exchange SDP directly (no signalling
+    /// server), wait for ICE/DTLS to establish, then round-trip
+    /// "ping" and "pong" messages.
+    ///
+    /// The "client" bridge uses the test-only
+    /// `create_offer_and_gather` + `set_remote_answer` helpers to
+    /// drive the SDP exchange from the client side without adding
+    /// any public API.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn control_datachannel_roundtrips_messages() {
+        use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+
+        // When both aws-lc-rs and ring are in the dependency tree
+        // (webrtc 0.17.1 pulls both via rustls 0.23) rustls cannot
+        // auto-select a CryptoProvider. Install ring explicitly before
+        // the DTLS handshake starts. `install_default` is idempotent
+        // across concurrent tests (it returns Err if already set, which
+        // we ignore).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // Server bridge (the answerer).
+        let (server_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
+        let server = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: server_enc_tx,
+        })
+        .await
+        .expect("server bridge");
+
+        // Client bridge (the offerer).
+        let (client_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
+        let client = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: client_enc_tx,
+        })
+        .await
+        .expect("client bridge");
+
+        // Take receivers early — before any messages can arrive —
+        // so the on_message handlers have a live channel to push
+        // into and nothing is dropped due to a closed receiver.
+        let mut server_rx = server.control_rx().expect("server rx (first call)");
+        let mut client_rx = client.control_rx().expect("client rx (first call)");
+
+        // A second call must return None (the option is exhausted).
+        assert!(
+            server.control_rx().is_none(),
+            "second control_rx should be None"
+        );
+
+        // Drive SDP exchange: client offers, server answers.
+        let offer_sdp = client
+            .create_offer_and_gather()
+            .await
+            .expect("client offer");
+        let answer_sdp = server.accept_offer(offer_sdp).await.expect("server accept");
+        client
+            .set_remote_answer(answer_sdp)
+            .await
+            .expect("client set answer");
+
+        // Wait for both PCs to reach Connected (ICE + DTLS).
+        // With two in-process PCs and host-only candidates
+        // (no STUN) this usually completes within 2 s on loopback.
+        let connected = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if server.connection_state() == RTCPeerConnectionState::Connected
+                    && client.connection_state() == RTCPeerConnectionState::Connected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            connected.is_ok(),
+            "PCs did not reach Connected within timeout"
+        );
+
+        // Give the datachannel a moment to open after PC Connected.
+        // The DC open event is asynchronous and slightly lags the
+        // connection state change.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Client → server "ping".
+        client
+            .send_control(b"ping")
+            .await
+            .expect("client send ping");
+        let msg = tokio::time::timeout(Duration::from_secs(2), server_rx.recv())
+            .await
+            .expect("server did not receive ping in time")
+            .expect("server rx closed");
+        assert_eq!(msg, b"ping", "server should receive 'ping'");
+
+        // Server → client "pong".
+        server
+            .send_control(b"pong")
+            .await
+            .expect("server send pong");
+        let msg = tokio::time::timeout(Duration::from_secs(2), client_rx.recv())
+            .await
+            .expect("client did not receive pong in time")
+            .expect("client rx closed");
+        assert_eq!(msg, b"pong", "client should receive 'pong'");
+
+        server.close().await.expect("server close");
+        client.close().await.expect("client close");
     }
 }

@@ -42,3 +42,10 @@ opus = "0.3"
 # H264Encoder, and SyntheticFrameSource used for the Phase 3 pumps
 # and integration test.
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
+
+[dev-dependencies]
+# The DTLS handshake in the loopback test drives rustls, which
+# requires a CryptoProvider to be installed when both aws-lc-rs
+# and ring are present in the dependency tree. Pin to the same
+# version webrtc 0.17.1 pulls in transitively.
+rustls = { version = "0.23", features = ["ring"] }
