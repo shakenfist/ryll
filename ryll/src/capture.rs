@@ -176,7 +176,7 @@ const CHANNELS: &[&str] = &["main", "display", "cursor", "inputs", "usbredir"];
 /// surface dimensions. Encodes RGBA → YUV420 → H.264
 /// and muxes into an MP4 container.
 struct VideoWriter {
-    encoder: openh264::encoder::Encoder,
+    encoder: shakenfist_spice_renderer::H264Encoder,
     mp4_writer: mp4::Mp4Writer<File>,
     track_id: u32,
     width: u32,
@@ -195,19 +195,13 @@ impl VideoWriter {
         timestamp_ms: u64,
     ) -> Option<Self> {
         use mp4::{AvcConfig, MediaConfig, Mp4Config, TrackConfig, TrackType};
-        use openh264::encoder::Encoder;
-        use openh264::formats::{RgbaSliceU8, YUVBuffer};
+        use shakenfist_spice_renderer::H264Encoder;
 
-        // openh264 requires even dimensions
+        // openh264 requires even dimensions; H264Encoder enforces this.
         let w = width & !1;
         let h = height & !1;
-        if w == 0 || h == 0 {
-            warn!("capture: video dimensions too small: {}x{}", width, height);
-            return None;
-        }
 
-        // Create encoder (dimensions auto-detected from first frame)
-        let mut encoder = match Encoder::new() {
+        let mut encoder = match H264Encoder::new(w, h) {
             Ok(e) => e,
             Err(e) => {
                 warn!("capture: failed to create H.264 encoder: {}", e);
@@ -215,110 +209,70 @@ impl VideoWriter {
             }
         };
 
-        // Convert RGBA to YUV via openh264's built-in conversion
-        let rgba = RgbaSliceU8::new(pixels, (w as usize, h as usize));
-        let yuv = YUVBuffer::from_rgb_source(rgba);
+        let pixel_count = (w * h) as usize;
+        if pixels.len() < pixel_count * 4 {
+            warn!(
+                "capture: first frame too short: {} bytes, need {}",
+                pixels.len(),
+                pixel_count * 4
+            );
+            return None;
+        }
+        // Pass the first w*h*4 bytes. When source dims are odd this
+        // reads slightly into the next row, which matches the
+        // pre-existing behaviour. TODO: repack when source dims are odd.
+        let rgba = &pixels[..pixel_count * 4];
 
-        // Force first frame to be an IDR keyframe (produces SPS/PPS)
-        encoder.force_intra_frame();
-
-        // Encode first frame
-        let bitstream = match encoder.encode(&yuv) {
-            Ok(bs) => bs,
+        // First frame is implicitly an IDR (openh264 default); no need
+        // to force_keyframe.
+        let frame = match encoder.encode(rgba, false) {
+            Ok(f) => f,
             Err(e) => {
                 warn!("capture: failed to encode first frame: {}", e);
                 return None;
             }
         };
 
-        // Collect NAL units from the bitstream
+        // Strip Annex-B start codes and partition NALs.
         let mut sps: Vec<u8> = Vec::new();
         let mut pps: Vec<u8> = Vec::new();
-        let mut frame_data: Vec<u8> = Vec::new();
+        let mut avcc_frame_data: Vec<u8> = Vec::new();
         let mut is_sync = false;
 
-        for layer_idx in 0..bitstream.num_layers() {
-            if let Some(layer) = bitstream.layer(layer_idx) {
-                for nal_idx in 0..layer.nal_count() {
-                    if let Some(nal) = layer.nal_unit(nal_idx) {
-                        if nal.is_empty() {
-                            continue;
-                        }
-                        let nal_type = nal[0] & 0x1F;
-                        match nal_type {
-                            7 => sps = nal.to_vec(),
-                            8 => pps = nal.to_vec(),
-                            5 => {
-                                is_sync = true;
-                                frame_data.extend_from_slice(nal);
-                            }
-                            _ => {
-                                frame_data.extend_from_slice(nal);
-                            }
-                        }
-                    }
-                }
+        for annex_b_nal in &frame.nal_units {
+            if annex_b_nal.len() < 5 {
+                continue;
             }
-        }
-
-        if sps.is_empty() || pps.is_empty() {
-            // Try to get SPS/PPS by writing the full bitstream and
-            // scanning for start codes (0x00 0x00 0x00 0x01)
-            let full = bitstream.to_vec();
-            debug!(
-                "capture: bitstream {} bytes, {} layers, scanning for NAL start codes",
-                full.len(),
-                bitstream.num_layers()
+            debug_assert_eq!(
+                &annex_b_nal[0..4],
+                &[0x00, 0x00, 0x00, 0x01],
+                "H264Encoder must emit Annex-B start codes"
             );
-
-            let mut pos = 0;
-            while pos + 4 < full.len() {
-                if full[pos] == 0 && full[pos + 1] == 0 && full[pos + 2] == 0 && full[pos + 3] == 1
-                {
-                    let nal_start = pos + 4;
-                    // Find next start code or end
-                    let mut end = full.len();
-                    for j in nal_start..full.len().saturating_sub(3) {
-                        if full[j] == 0 && full[j + 1] == 0 && full[j + 2] == 0 && full[j + 3] == 1
-                        {
-                            end = j;
-                            break;
-                        }
-                    }
-                    let nal_type = full[nal_start] & 0x1F;
-                    debug!(
-                        "capture: found NAL type={} at offset {} len={}",
-                        nal_type,
-                        pos,
-                        end - nal_start
-                    );
-                    match nal_type {
-                        7 if sps.is_empty() => sps = full[nal_start..end].to_vec(),
-                        8 if pps.is_empty() => pps = full[nal_start..end].to_vec(),
-                        5 => {
-                            is_sync = true;
-                            if frame_data.is_empty() {
-                                frame_data = full[nal_start..end].to_vec();
-                            }
-                        }
-                        1 if frame_data.is_empty() => {
-                            frame_data = full[nal_start..end].to_vec();
-                        }
-                        _ => {}
-                    }
-                    pos = end;
-                } else {
-                    pos += 1;
+            let raw_nal = &annex_b_nal[4..];
+            let nal_type = raw_nal[0] & 0x1F;
+            match nal_type {
+                7 => sps = raw_nal.to_vec(),
+                8 => pps = raw_nal.to_vec(),
+                5 => {
+                    is_sync = true;
+                    // SPS/PPS go in the AvcConfig, not the sample.
+                    // Slices go in the sample, AVCC-framed (each with
+                    // its own length prefix).
+                    append_avcc_nal(&mut avcc_frame_data, raw_nal);
+                }
+                _ => {
+                    append_avcc_nal(&mut avcc_frame_data, raw_nal);
                 }
             }
         }
 
-        if sps.is_empty() || pps.is_empty() {
+        if sps.is_empty() || pps.is_empty() || avcc_frame_data.is_empty() {
             warn!(
-                "capture: encoder did not produce SPS/PPS (sps={} pps={} frame={})",
+                "capture: encoder did not produce SPS/PPS/IDR \
+                 (sps={} pps={} frame={})",
                 sps.len(),
                 pps.len(),
-                frame_data.len()
+                avcc_frame_data.len()
             );
             return None;
         }
@@ -374,14 +328,14 @@ impl VideoWriter {
 
         let track_id = 1;
 
-        // Write first frame as length-prefixed NAL (AVCC format)
-        let nal_with_length = length_prefix_nal(&frame_data);
+        // avcc_frame_data is already properly AVCC-framed (each NAL
+        // has its own 4-byte length prefix).
         let sample = mp4::Mp4Sample {
             start_time: timestamp_ms,
             duration: 33, // placeholder until next frame
             rendering_offset: 0,
             is_sync,
-            bytes: bytes::Bytes::from(nal_with_length),
+            bytes: bytes::Bytes::from(avcc_frame_data),
         };
 
         if let Err(e) = mp4_writer.write_sample(track_id, &sample) {
@@ -404,8 +358,6 @@ impl VideoWriter {
 
     /// Encode and write a subsequent frame.
     fn write_frame(&mut self, pixels: &[u8], width: u32, height: u32, timestamp_ms: u64) {
-        use openh264::formats::{RgbaSliceU8, YUVBuffer};
-
         if width != self.width || height != self.height {
             warn!(
                 "capture: surface dimensions changed {}x{} -> {}x{}, stopping video",
@@ -418,54 +370,49 @@ impl VideoWriter {
         if pixels.len() < pixel_count * 4 {
             return;
         }
+        let rgba = &pixels[..pixel_count * 4];
 
-        let rgba = RgbaSliceU8::new(pixels, (self.width as usize, self.height as usize));
-        let yuv = YUVBuffer::from_rgb_source(rgba);
-
-        let bitstream = match self.encoder.encode(&yuv) {
-            Ok(bs) => bs,
+        let frame = match self.encoder.encode(rgba, false) {
+            Ok(f) => f,
             Err(e) => {
                 warn!("capture: H.264 encode failed: {}", e);
                 return;
             }
         };
 
-        // Collect NAL units (skip SPS/PPS for subsequent frames)
-        let mut frame_data: Vec<u8> = Vec::new();
+        let mut avcc_frame_data: Vec<u8> = Vec::new();
         let mut is_sync = false;
 
-        for layer_idx in 0..bitstream.num_layers() {
-            if let Some(layer) = bitstream.layer(layer_idx) {
-                for nal_idx in 0..layer.nal_count() {
-                    if let Some(nal) = layer.nal_unit(nal_idx) {
-                        if nal.is_empty() {
-                            continue;
-                        }
-                        let nal_type = nal[0] & 0x1F;
-                        if nal_type == 5 {
-                            is_sync = true;
-                        }
-                        if nal_type != 7 && nal_type != 8 {
-                            frame_data.extend_from_slice(nal);
-                        }
-                    }
-                }
+        for annex_b_nal in &frame.nal_units {
+            if annex_b_nal.len() < 5 {
+                continue;
             }
+            let raw_nal = &annex_b_nal[4..];
+            let nal_type = raw_nal[0] & 0x1F;
+            if nal_type == 5 {
+                is_sync = true;
+            }
+            // Skip in-band SPS/PPS: they're already in the AvcConfig.
+            // The encoder may re-emit them after a forced keyframe;
+            // capture mode never forces, so this is mostly defensive.
+            if nal_type == 7 || nal_type == 8 {
+                continue;
+            }
+            append_avcc_nal(&mut avcc_frame_data, raw_nal);
         }
 
-        if frame_data.is_empty() {
+        if avcc_frame_data.is_empty() {
             return;
         }
 
         let duration_ms = timestamp_ms.saturating_sub(self.last_timestamp_ms).max(1) as u32;
 
-        let nal_with_length = length_prefix_nal(&frame_data);
         let sample = mp4::Mp4Sample {
             start_time: timestamp_ms,
             duration: duration_ms,
             rendering_offset: 0,
             is_sync,
-            bytes: bytes::Bytes::from(nal_with_length),
+            bytes: bytes::Bytes::from(avcc_frame_data),
         };
 
         if let Err(e) = self.mp4_writer.write_sample(self.track_id, &sample) {
@@ -487,14 +434,12 @@ impl VideoWriter {
     }
 }
 
-/// Wrap raw NAL unit data with a 4-byte big-endian length prefix
-/// (Annex B to AVCC format, required by MP4).
-fn length_prefix_nal(nal: &[u8]) -> Vec<u8> {
-    let len = nal.len() as u32;
-    let mut out = Vec::with_capacity(4 + nal.len());
+/// Append a NAL body to an AVCC-framed buffer. AVCC requires each
+/// NAL to be prefixed with its own 4-byte big-endian length.
+fn append_avcc_nal(out: &mut Vec<u8>, raw_nal: &[u8]) {
+    let len = raw_nal.len() as u32;
     out.extend_from_slice(&len.to_be_bytes());
-    out.extend_from_slice(nal);
-    out
+    out.extend_from_slice(raw_nal);
 }
 
 /// Re-export from bugreport module to avoid duplication.

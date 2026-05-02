@@ -9,7 +9,7 @@ description = "A Rust SPICE VDI test client"
 
 [features]
 default = ["capture"]
-capture = ["dep:pcap-file", "dep:etherparse", "dep:openh264", "dep:mp4"]
+capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
 
 [dependencies]
 # GUI framework
@@ -74,7 +74,6 @@ jpeg-decoder = "0.3"
 # Capture mode (--capture) — optional, disabled on Windows
 pcap-file = { version = "2", optional = true }
 etherparse = { version = "0.16", optional = true }
-openh264 = { version = "0.6", optional = true }
 mp4 = { version = "0.14", optional = true }
 
 # Clipboard access (host <-> guest copy/paste)
