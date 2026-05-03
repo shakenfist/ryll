@@ -28,6 +28,7 @@ use tracing::{error, info};
 
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
 
+use crate::audio_sink::OpusPacketSink;
 use crate::byte_counter::ByteCounter;
 use crate::capture_sink::CaptureSink;
 use crate::channels::{
@@ -88,6 +89,7 @@ pub async fn run_connection(
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
+    opus_sink: Option<Arc<dyn OpusPacketSink>>,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -288,6 +290,7 @@ pub async fn run_connection(
                     volume_control.clone(),
                     log_config,
                     cancel.clone(),
+                    opus_sink.clone(),
                 );
                 handles.push(tokio::spawn(async move { channel.run().await }));
             }
@@ -425,6 +428,7 @@ pub async fn run_headless(
             log_config,
             cancel_for_conn,
             None, // headless mode: no clipboard
+            None, // headless mode: no opus sink (cpal output only)
         )
         .await
     });

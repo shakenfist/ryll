@@ -583,6 +583,7 @@ impl RyllApp {
                     log_config_clone,
                     cancel_for_conn,
                     clipboard,
+                    /* opus_sink */ None,
                 )
                 .await
                 {
@@ -819,6 +820,7 @@ impl RyllApp {
                     log_config_clone,
                     cancel_for_conn,
                     clipboard,
+                    /* opus_sink */ None,
                 )
                 .await
                 {

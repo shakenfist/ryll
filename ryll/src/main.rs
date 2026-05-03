@@ -461,6 +461,14 @@ fn run_web(
             shakenfist_spice_renderer::SurfaceMirror::new(),
         ));
 
+        // Phase 5e: build the Opus passthrough sink. The sink
+        // is handed to `run_connection` so the playback channel
+        // taps every Opus packet into it; the matching slot is
+        // stashed in `WebState` so each `/offer` can plug a
+        // fresh Sender in for its audio pump.
+        let (opus_sink, active_opus_tx) = crate::web::audio::WebOpusSink::new();
+        let opus_sink_dyn: Arc<dyn shakenfist_spice_renderer::OpusPacketSink> = opus_sink;
+
         // Cancel flag bridged from the process-global
         // `SHUTDOWN_REQUESTED`. Same shape as the headless path.
         let cancel = Arc::new(AtomicBool::new(false));
@@ -500,6 +508,7 @@ fn run_web(
                 log_config,
                 connection_cancel,
                 /* clipboard */ None,
+                /* opus_sink */ Some(opus_sink_dyn),
             )
             .await
         });
@@ -565,6 +574,7 @@ fn run_web(
             resize_tx,
             event_broadcast_tx,
             surface_mirror,
+            active_opus_tx,
         ));
         let cursor_bridge_slot = state.bridge_slot.clone();
         let cursor_handle = tokio::spawn(crate::web::cursor::run_cursor_relay(

@@ -8,6 +8,7 @@
 //! few host-policy concerns (Ctrl+C handling, the in-app
 //! notification store, pedantic bug-report registration).
 
+pub mod audio_sink;
 pub mod byte_counter;
 pub mod capture_sink;
 pub mod channels;
@@ -26,6 +27,7 @@ pub mod traffic;
 pub mod usb;
 pub mod webdav;
 
+pub use audio_sink::OpusPacketSink;
 pub use byte_counter::ByteCounter;
 pub use capture_sink::CaptureSink;
 pub use channels::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavCommand};

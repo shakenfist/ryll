@@ -8,6 +8,7 @@
 //! and the browser-shell wiring (4d).
 
 pub(crate) mod assets;
+pub(crate) mod audio;
 pub(crate) mod cursor;
 pub(crate) mod inputs;
 pub(crate) mod server;

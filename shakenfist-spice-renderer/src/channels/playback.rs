@@ -7,7 +7,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, info, warn};
 
-use crate::{ByteCounter, LogConfig, NotificationEntry, NotificationSource, TrafficSink};
+use crate::{
+    ByteCounter, LogConfig, NotificationEntry, NotificationSource, OpusPacketSink, TrafficSink,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -146,6 +148,77 @@ fn write_samples_f32(
         resampler.next_frame(local_buf, &mut frame);
         for (out, &s) in chunk.iter_mut().zip(frame.iter()) {
             *out = s as f32 / 32768.0 * v;
+        }
+    }
+}
+
+/// Convert a little-endian PCM byte stream to a fresh
+/// `Vec<i16>`. Used by the pre-decode tap to hand raw PCM
+/// samples to an [`OpusPacketSink`] without disturbing the
+/// existing cpal path.
+fn pcm_bytes_to_i16(bytes: &[u8]) -> Vec<i16> {
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    out
+}
+
+/// Compute the number of 48 kHz samples represented by one
+/// Opus packet by inspecting its TOC byte and frame count.
+///
+/// This is a tiny port of `opus_packet_get_nb_samples()`
+/// specialised to Fs=48000 (which is what RFC 7587 §4.1
+/// pins for RTP). The TOC byte's bottom two bits give the
+/// "code" (frame-count format); for code 3, the frame
+/// count is encoded in the next byte's low 6 bits. Frame
+/// duration comes from the upper bits of the TOC.
+///
+/// Returns 960 (the WebRTC default of 20 ms at 48 kHz) for
+/// empty or malformed packets so the caller always has a
+/// usable timestamp delta. The decoder downstream still
+/// validates the packet on its own; this helper is only
+/// used for RTP timestamp arithmetic.
+fn opus_packet_samples_48k(packet: &[u8]) -> u32 {
+    if packet.is_empty() {
+        return 960;
+    }
+    let toc = packet[0];
+    let samples_per_frame = samples_per_frame_48k(toc);
+    let frame_count = match toc & 0x03 {
+        0 => 1,
+        1 | 2 => 2,
+        3 => {
+            // Code 3: the next byte's low 6 bits hold M.
+            if packet.len() < 2 {
+                return 960;
+            }
+            (packet[1] & 0x3F) as usize
+        }
+        _ => 1,
+    };
+    (samples_per_frame.saturating_mul(frame_count)).min(u32::MAX as usize) as u32
+}
+
+/// Mirror of `opus_packet_get_samples_per_frame()` from libopus,
+/// specialised to Fs=48000. See RFC 6716 §3.1 for the TOC byte
+/// layout.
+fn samples_per_frame_48k(toc: u8) -> usize {
+    if (toc & 0x80) != 0 {
+        let audiosize = ((toc >> 3) & 0x03) as usize;
+        (48_000usize << audiosize) / 400
+    } else if (toc & 0x60) == 0x60 {
+        if (toc & 0x08) != 0 {
+            48_000usize / 50
+        } else {
+            48_000usize / 100
+        }
+    } else {
+        let audiosize = ((toc >> 3) & 0x03) as usize;
+        if audiosize == 3 {
+            (48_000usize * 60) / 1000
+        } else {
+            (48_000usize << audiosize) / 100
         }
     }
 }
@@ -317,6 +390,13 @@ pub struct PlaybackChannel {
     audio_thread: Option<AudioThread>,
     opus_decoder: Option<opus_decoder::OpusDecoder>,
     volume_control: Arc<VolumeControl>,
+    /// Optional pre-decode tap. When set, every Opus DATA
+    /// packet is forwarded to the sink before the decode-to-
+    /// cpal path runs. The web frontend uses this to forward
+    /// Opus packets straight to a WebRTC audio track without
+    /// re-encoding; GUI / headless modes pass `None` and see
+    /// the existing decode path unchanged.
+    opus_sink: Option<Arc<dyn OpusPacketSink>>,
     /// Per-connection cancel flag. The 100 ms select branch in
     /// the read loop polls this so the channel exits cleanly when
     /// the orchestrator's cancel flag flips (Ctrl+C bridge in
@@ -335,6 +415,7 @@ impl PlaybackChannel {
         volume_control: Arc<VolumeControl>,
         log_config: LogConfig,
         cancel: Arc<AtomicBool>,
+        opus_sink: Option<Arc<dyn OpusPacketSink>>,
     ) -> Self {
         PlaybackChannel {
             stream,
@@ -357,6 +438,7 @@ impl PlaybackChannel {
             audio_thread: None,
             opus_decoder: None,
             volume_control,
+            opus_sink,
             cancel,
         }
     }
@@ -554,8 +636,26 @@ impl PlaybackChannel {
                     if payload.len() > 4 {
                         let audio_data = &payload[4..];
                         if self.audio_mode == AUDIO_DATA_MODE_RAW {
+                            // Pre-decode tap: forward to the optional
+                            // sink before the decode-to-cpal path.
+                            // Web mode uses this; GUI / headless pass
+                            // None and the call is a no-op.
+                            if let Some(ref sink) = self.opus_sink {
+                                sink.on_pcm_samples(
+                                    &pcm_bytes_to_i16(audio_data),
+                                    self.sample_rate,
+                                    self.channels as u8,
+                                );
+                            }
                             self.push_samples_raw(audio_data);
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
+                            // Pre-decode tap: forward the raw Opus
+                            // packet to the optional sink before the
+                            // libopus decode + cpal path runs.
+                            if let Some(ref sink) = self.opus_sink {
+                                let samples = opus_packet_samples_48k(audio_data);
+                                sink.on_opus_packet(audio_data, samples);
+                            }
                             self.push_samples_opus(audio_data);
                         }
                     }
@@ -667,7 +767,9 @@ impl PlaybackChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::{Resampler, VolumeControl};
+    use super::{
+        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, Resampler, VolumeControl,
+    };
     use std::collections::VecDeque;
 
     // --- VolumeControl tests ---
@@ -765,6 +867,61 @@ mod tests {
 
         assert_eq!(out[0], 0, "underrun should produce silence");
         assert!(buf.is_empty(), "buffer should remain empty after underrun");
+    }
+
+    // --- Audio-tap helpers ---
+
+    #[test]
+    fn pcm_bytes_to_i16_decodes_little_endian() {
+        let bytes = [0x01, 0x00, 0xff, 0xff, 0x00, 0x80];
+        let samples = pcm_bytes_to_i16(&bytes);
+        assert_eq!(samples, vec![1i16, -1, i16::MIN]);
+    }
+
+    #[test]
+    fn pcm_bytes_to_i16_drops_trailing_odd_byte() {
+        // The chunks_exact(2) loop ignores the trailing single byte.
+        let bytes = [0x01, 0x00, 0x42];
+        let samples = pcm_bytes_to_i16(&bytes);
+        assert_eq!(samples, vec![1i16]);
+    }
+
+    #[test]
+    fn samples_per_frame_48k_celt_only_20ms_is_960() {
+        // CELT-only config 19 (0b10011, top 5 bits) is 20 ms at
+        // 48 kHz = 960 samples. TOC layout: config<<3 | s<<2 | code.
+        let toc = 19u8 << 3;
+        assert_eq!(samples_per_frame_48k(toc), 960);
+    }
+
+    #[test]
+    fn opus_packet_samples_48k_code0_returns_one_frame_worth() {
+        // Code 0 = one frame in the packet. CELT-only 20 ms.
+        let toc = 19u8 << 3; // code = 0
+        let pkt = [toc, 0xaa, 0xbb];
+        assert_eq!(opus_packet_samples_48k(&pkt), 960);
+    }
+
+    #[test]
+    fn opus_packet_samples_48k_code1_doubles_frame_count() {
+        // Code 1 = two frames CBR. 20 ms × 2 = 40 ms = 1920.
+        let toc = (19u8 << 3) | 1;
+        let pkt = [toc, 0x11, 0x22, 0x33, 0x44];
+        assert_eq!(opus_packet_samples_48k(&pkt), 1920);
+    }
+
+    #[test]
+    fn opus_packet_samples_48k_empty_falls_back_to_960() {
+        assert_eq!(opus_packet_samples_48k(&[]), 960);
+    }
+
+    #[test]
+    fn opus_packet_samples_48k_code3_reads_frame_count_byte() {
+        // Code 3 = M frames; the next byte's low 6 bits are M.
+        // 20 ms config × 3 frames = 2880 samples.
+        let toc = (19u8 << 3) | 3;
+        let pkt = [toc, 0x03, 0x00, 0x00];
+        assert_eq!(opus_packet_samples_48k(&pkt), 2880);
     }
 
     #[test]

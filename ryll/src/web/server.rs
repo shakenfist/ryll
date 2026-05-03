@@ -83,6 +83,14 @@ pub struct WebState {
     /// asynchronously while the encoder thread `try_lock`s
     /// synchronously from its blocking pool.
     pub surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    /// Slot holding the active bridge's audio-pump
+    /// `mpsc::Sender`. The renderer-side
+    /// [`crate::web::audio::WebOpusSink`] reads from this slot
+    /// on every Opus DATA packet; the signalling handler writes
+    /// a fresh `Sender` into the slot at every `/offer`. `None`
+    /// outside web-with-SPICE sessions (e.g. unit tests of the
+    /// HTTP layer construct a `WebState` without a sink).
+    pub active_opus_tx: super::audio::ActiveSenderSlot,
 }
 
 impl WebState {
@@ -93,7 +101,13 @@ impl WebState {
     /// [`Self::with_channels`] to wire the renderer.
     #[cfg(test)]
     pub fn new() -> Self {
-        Self::build(None, None, None, Arc::new(Mutex::new(SurfaceMirror::new())))
+        Self::build(
+            None,
+            None,
+            None,
+            Arc::new(Mutex::new(SurfaceMirror::new())),
+            Arc::new(std::sync::Mutex::new(None)),
+        )
     }
 
     /// Construct state with the renderer channels populated.
@@ -105,12 +119,14 @@ impl WebState {
         resize_tx: mpsc::Sender<(u32, u32)>,
         event_tx: broadcast::Sender<ChannelEvent>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
+        active_opus_tx: super::audio::ActiveSenderSlot,
     ) -> Self {
         Self::build(
             Some(input_tx),
             Some(resize_tx),
             Some(event_tx),
             surface_mirror,
+            active_opus_tx,
         )
     }
 
@@ -119,6 +135,7 @@ impl WebState {
         resize_tx: Option<mpsc::Sender<(u32, u32)>>,
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
+        active_opus_tx: super::audio::ActiveSenderSlot,
     ) -> Self {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -134,6 +151,7 @@ impl WebState {
             resize_tx,
             event_tx,
             surface_mirror,
+            active_opus_tx,
         }
     }
 }

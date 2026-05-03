@@ -352,11 +352,11 @@ impl WebrtcBridge {
     /// (960 samples per frame), payload via [`OpusPayloader`], and
     /// write RTP packets to the bridge's audio track at 50 fps.
     ///
-    /// Phase 5 will replace this with a real Opus passthrough from
-    /// the SPICE playback channel; Phase 3 ships this synthetic
-    /// path so the audio track is exercised in integration tests
-    /// (3f) and so the browser-side `<audio>` element receives a
-    /// continuous stream as soon as DTLS comes up.
+    /// Phase 3 ships this synthetic path so the audio track is
+    /// exercised in integration tests (3f); Phase 5e replaces it
+    /// in production with [`Self::spawn_audio_pump`] which forwards
+    /// real SPICE Opus packets. The synthetic pump is retained for
+    /// tests and as a debugging aid.
     ///
     /// The pump runs forever — there is no natural stop condition
     /// because the synthetic source has no end-of-stream. Callers
@@ -368,6 +368,33 @@ impl WebrtcBridge {
     pub fn spawn_synthetic_audio_pump(&self) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
         tokio::spawn(run_synthetic_audio_pump(track))
+    }
+
+    /// Spawn the real Opus passthrough pump (Phase 5e).
+    ///
+    /// Consumes `(opus_packet, samples_in_packet)` tuples from
+    /// `rx`, where `opus_packet` is a single Opus packet as
+    /// emitted by the SPICE playback channel and
+    /// `samples_in_packet` is its 48 kHz sample duration (used
+    /// to advance the RTP timestamp). Payloads with
+    /// [`OpusPayloader`] (which is a one-to-one passthrough for
+    /// the standard one-Opus-packet-per-RTP-packet framing per
+    /// RFC 7587 §4.2), and writes the resulting RTP packet to
+    /// the bridge's audio track.
+    ///
+    /// The caller is responsible for plugging the corresponding
+    /// `mpsc::Sender` into the playback channel's
+    /// `OpusPacketSink`. The pump exits cleanly when the channel
+    /// closes (every sender dropped, e.g. when the active bridge
+    /// is replaced by a fresh `/offer` and the previous viewer's
+    /// sender is dropped).
+    ///
+    /// `track.write_rtp` errors before the remote peer completes
+    /// ICE/DTLS are logged at debug and do not stop the loop,
+    /// mirroring the video pump's behaviour.
+    pub fn spawn_audio_pump(&self, rx: mpsc::Receiver<(Vec<u8>, u32)>) -> JoinHandle<Result<()>> {
+        let track = self.audio_track.clone();
+        tokio::spawn(run_audio_pump(rx, track))
     }
 
     /// Send a payload over the control datachannel. The DC is
@@ -632,6 +659,68 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
     }
 }
 
+/// Spawned by [`WebrtcBridge::spawn_audio_pump`]. Owns the
+/// receiver side of the SPICE playback channel's pre-decode
+/// tap and a clone of the bridge's audio track. Iterates
+/// incoming `(opus_packet, samples_in_packet)` tuples,
+/// payloads via [`OpusPayloader`] (a passthrough), and writes
+/// RTP packets to the track. The RTP timestamp advances by
+/// `samples_in_packet` per packet to match RFC 7587 §4.1's
+/// 48 kHz audio clock — even when the SPICE server sends
+/// shorter Opus frames (5.33 ms / 256 samples), the
+/// timestamp delta tracks the actual content duration.
+///
+/// `track.write_rtp` errors are logged at debug and the loop
+/// continues — the receiver may not have negotiated DTLS
+/// yet when the first packets arrive, so dropped packets
+/// early on are normal.
+async fn run_audio_pump(
+    mut rx: mpsc::Receiver<(Vec<u8>, u32)>,
+    track: Arc<TrackLocalStaticRTP>,
+) -> Result<()> {
+    let mut payloader = OpusPayloader;
+    let mut sequence: u16 = rand::random();
+    let ssrc: u32 = rand::random();
+    let mut rtp_timestamp: u32 = 0;
+
+    while let Some((opus_packet, samples_in_packet)) = rx.recv().await {
+        if opus_packet.is_empty() {
+            continue;
+        }
+        let payload = Bytes::from(opus_packet);
+        let payloads = payloader
+            .payload(AUDIO_OPUS_BUF_BYTES, &payload)
+            .map_err(|e| anyhow!("OpusPayloader failed: {}", e))?;
+
+        for payload in payloads {
+            if payload.is_empty() {
+                continue;
+            }
+            let header = Header {
+                version: 2,
+                payload_type: OPUS_PAYLOAD_TYPE,
+                sequence_number: sequence,
+                timestamp: rtp_timestamp,
+                ssrc,
+                marker: false,
+                ..Default::default()
+            };
+            let pkt = Packet { header, payload };
+            sequence = sequence.wrapping_add(1);
+            if let Err(e) = track.write_rtp(&pkt).await {
+                tracing::debug!("audio pump: write_rtp dropped packet: {}", e);
+            }
+        }
+        // Advance the RTP timestamp by the actual sample duration
+        // of this packet so the receiver's jitter buffer tracks
+        // wall-clock correctly even for non-20 ms framings.
+        rtp_timestamp = rtp_timestamp.wrapping_add(samples_in_packet);
+    }
+
+    tracing::debug!("audio pump: receiver closed, exiting");
+    Ok(())
+}
+
 /// Test-only helpers that expose internals needed for driving the
 /// client side of a two-bridge SDP exchange in unit tests.
 #[cfg(test)]
@@ -848,6 +937,55 @@ mod tests {
         // need to inspect — the assertions are "didn't panic"
         // and "the bridge can still close cleanly".
         pump.abort();
+
+        bridge.close().await.expect("close");
+    }
+
+    /// Smoke test: spawn the real Opus passthrough pump and feed
+    /// it a handful of synthetic Opus packets. As with the
+    /// synthetic pump, we don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
+    /// without a connected peer (they're buffered/dropped at the
+    /// transport). The Phase 5e success criterion here is "no
+    /// panics, payloader accepts the bytes, the track accepts
+    /// writes, the pump exits cleanly when the channel closes".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn audio_pump_forwards_real_opus_packets() {
+        let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: control_tx,
+        })
+        .await
+        .expect("bridge");
+
+        // Encode a handful of synthetic Opus packets so the
+        // payloader sees real Opus content (not random bytes).
+        let mut encoder =
+            opus::Encoder::new(48_000, opus::Channels::Mono, opus::Application::Audio)
+                .expect("opus encoder");
+        encoder
+            .set_bitrate(opus::Bitrate::Bits(32_000))
+            .expect("set bitrate");
+
+        let (tx, rx) = mpsc::channel::<(Vec<u8>, u32)>(8);
+        let pump = bridge.spawn_audio_pump(rx);
+
+        // Feed five 20 ms frames of silence-encoded Opus.
+        let pcm = vec![0i16; 960];
+        for _ in 0..5 {
+            let mut buf = vec![0u8; 1500];
+            let n = encoder.encode(&pcm, &mut buf).expect("encode");
+            buf.truncate(n);
+            tx.send((buf, 960)).await.expect("send");
+        }
+        drop(tx);
+
+        // The pump exits when its rx closes; give it a moment.
+        let res = tokio::time::timeout(Duration::from_secs(2), pump)
+            .await
+            .expect("pump did not exit");
+        res.expect("join").expect("pump task error");
 
         bridge.close().await.expect("close");
     }

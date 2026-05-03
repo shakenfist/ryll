@@ -257,10 +257,30 @@ pub async fn post_offer(
     // pumps live for as long as the bridge does. Closing the
     // bridge drops the tracks, which causes write_rtp to
     // fail; the video pump exits when its frame_rx closes
-    // (driven by step 1+2 of the next offer); the synthetic
-    // audio pump runs forever and is dropped at process exit.
+    // (driven by step 1+2 of the next offer); the audio pump
+    // exits when its rx closes (driven by the next /offer
+    // overwriting `active_opus_tx`, dropping this Sender).
     let _video_handle = bridge.spawn_video_pump(frame_rx);
-    let _audio_handle = bridge.spawn_synthetic_audio_pump();
+    // Phase 5e: real Opus passthrough from the SPICE playback
+    // channel. Build a fresh per-viewer mpsc and plug the
+    // Sender into the shared slot the renderer-side
+    // `WebOpusSink` reads from. The previous bridge's Sender
+    // is replaced atomically; that drops the previous audio
+    // pump's `Receiver` and causes that pump to exit cleanly.
+    let (opus_tx, opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(64);
+    {
+        // std::sync::Mutex on the slot — see the rationale in
+        // ryll/src/web/audio.rs. lock() may panic if poisoned;
+        // we recover the inner Option in that case.
+        match state.active_opus_tx.lock() {
+            Ok(mut guard) => *guard = Some(opus_tx),
+            Err(poisoned) => {
+                let mut inner = poisoned.into_inner();
+                *inner = Some(opus_tx);
+            }
+        }
+    }
+    let _audio_handle = bridge.spawn_audio_pump(opus_rx);
 
     // Step 5c: spawn the browser → renderer input relay. Each
     // bridge owns exactly one control DC; `control_rx()` is
