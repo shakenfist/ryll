@@ -131,6 +131,12 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# Phase 4 step 4c uses a real webrtc-rs client PC to drive an
+# SDP offer through the in-process axum router. rustls is
+# pinned to ring because both aws-lc-rs and ring are pulled in
+# transitively and rustls 0.23 requires an explicit choice.
+webrtc = "0.17.1"
+rustls = { version = "0.23", features = ["ring"] }
 
 [package.metadata.deb]
 maintainer = "Michael Still <mikal@stillhq.com>"

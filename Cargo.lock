@@ -5119,6 +5119,7 @@ dependencies = [
  "rfd",
  "rsa",
  "rtrb",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
@@ -5140,6 +5141,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "webpki-roots 0.26.11",
+ "webrtc",
  "zip",
 ]
 

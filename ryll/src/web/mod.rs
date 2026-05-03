@@ -8,7 +8,8 @@
 //! and the browser-shell wiring (4d).
 
 pub(crate) mod assets;
-mod server;
+pub(crate) mod server;
+pub(crate) mod signalling;
 
 // These re-exports become used in step 4e when run_web
 // is wired into main. Suppressed until then.

@@ -1,0 +1,407 @@
+//! POST /offer signalling handler and per-viewer encoder
+//! lifecycle.
+//!
+//! Each new viewer gets a fresh encoder + bridge pair. The
+//! existing encoder is stopped (sending [`EncoderControl::Stop`])
+//! and a new [`EncoderTask`] is spawned with a fresh
+//! `mpsc::channel` for the encoded-frame stream. Single-viewer
+//! enforcement: a second offer replaces the existing bridge.
+//!
+//! # Lock ordering
+//!
+//! Always close the existing bridge **before** restarting the
+//! encoder. The bridge's video-pump task holds a reference to
+//! the old encoder's `frame_rx`; closing the bridge drops the
+//! pump task, which drops `frame_rx`, which lets the old
+//! encoder task exit on its next blocking_send. Holding the
+//! encoder lock while constructing a new bridge is safe — the
+//! bridge constructor does not take any state lock.
+
+use std::sync::Arc;
+
+use axum::{extract::State, http::StatusCode, Json};
+use serde::{Deserialize, Serialize};
+use shakenfist_spice_renderer::{
+    EncodedFrame, EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource,
+};
+use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
+
+use super::server::WebState;
+
+/// Encoder dimensions for the synthetic Phase 4 source. 720p
+/// at 30 fps matches the synthetic-frame-source defaults and
+/// keeps openh264 CPU manageable in debug builds.
+const ENCODER_WIDTH: u32 = 1280;
+const ENCODER_HEIGHT: u32 = 720;
+const ENCODER_FPS: u32 = 30;
+
+/// JSON body of a `POST /offer` request: a browser SDP offer.
+#[derive(Deserialize)]
+pub struct OfferReq {
+    /// Always `"offer"` in practice. We do not strictly check
+    /// this — webrtc-rs's `RTCSessionDescription::offer` will
+    /// reject malformed SDP regardless.
+    #[serde(rename = "type")]
+    pub req_type: String,
+    pub sdp: String,
+}
+
+/// JSON body of a `POST /offer` response: the server's SDP
+/// answer.
+#[derive(Serialize)]
+pub struct OfferRes {
+    #[serde(rename = "type")]
+    pub res_type: &'static str,
+    pub sdp: String,
+}
+
+/// Holds the active encoder pipeline. [`Self::restart`] replaces
+/// the encoder + frame channel atomically and returns the new
+/// `frame_rx` for the caller to hand to a fresh
+/// [`WebrtcBridge`].
+pub struct EncoderInfra {
+    /// Sender for [`EncoderControl`] messages to the running
+    /// task. `None` until the first restart.
+    control_tx: Option<mpsc::Sender<EncoderControl>>,
+    /// JoinHandle of the running encoder task. `None` until
+    /// the first restart.
+    handle: Option<JoinHandle<anyhow::Result<()>>>,
+}
+
+impl EncoderInfra {
+    pub fn new() -> Self {
+        Self {
+            control_tx: None,
+            handle: None,
+        }
+    }
+
+    /// Stop any existing encoder, spawn a fresh one, and
+    /// return the receiver-end of the encoded-frame stream so
+    /// the caller can wire it into a new [`WebrtcBridge`].
+    ///
+    /// Returns also a fresh `control_tx` that the caller
+    /// passes into [`WebrtcBridgeConfig::encoder_control`].
+    /// That sender is owned by the bridge for keyframe-on-
+    /// attach signalling; the [`EncoderInfra`] holds its own
+    /// clone (via the `control_tx` field) for sending
+    /// [`EncoderControl::Stop`] on the next restart.
+    pub async fn restart(
+        &mut self,
+    ) -> anyhow::Result<(mpsc::Receiver<EncodedFrame>, mpsc::Sender<EncoderControl>)> {
+        // Stop existing if any. Order matters: send Stop first
+        // so the encoder loop sees the message on its next
+        // tick; then await the JoinHandle with a timeout so a
+        // wedged encoder cannot block the new viewer's offer.
+        if let Some(tx) = self.control_tx.take() {
+            // Use try_send rather than await: the task may
+            // already have exited (channel closed) which is
+            // fine and shouldn't error here.
+            let _ = tx.send(EncoderControl::Stop).await;
+        }
+        if let Some(h) = self.handle.take() {
+            let aborted = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
+            match aborted {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => warn!("encoder previous run errored: {}", e),
+                Ok(Err(e)) => warn!("encoder previous join errored: {}", e),
+                Err(_) => warn!("encoder did not stop within 2s; continuing"),
+            }
+        }
+
+        // Build new pipeline.
+        let encoder = H264Encoder::new(ENCODER_WIDTH, ENCODER_HEIGHT)
+            .map_err(|e| anyhow::anyhow!("H264Encoder::new: {}", e))?;
+        let source = SyntheticFrameSource::new(ENCODER_WIDTH, ENCODER_HEIGHT);
+        let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(32);
+        let (control_tx, control_rx) = mpsc::channel::<EncoderControl>(8);
+
+        let handle = EncoderTask::spawn(encoder, source, frame_tx, control_rx, ENCODER_FPS);
+
+        // Hold our own clone of control_tx so we can send
+        // Stop on the next restart. Hand the original to the
+        // caller for the bridge config (the bridge clones it
+        // again internally; either copy works).
+        self.control_tx = Some(control_tx.clone());
+        self.handle = Some(handle);
+
+        Ok((frame_rx, control_tx))
+    }
+}
+
+impl Default for EncoderInfra {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `POST /offer` handler.
+///
+/// Steps:
+///
+/// 1. Take `bridge_slot` lock; pull out any existing bridge.
+/// 2. Drop the lock and close the old bridge (lets its
+///    video-pump task drop the old `frame_rx`).
+/// 3. Take `encoder` lock; `restart()` to get a fresh
+///    `frame_rx` and a fresh `control_tx`.
+/// 4. Build the new [`WebrtcBridge`] with `control_tx` as
+///    `encoder_control`.
+/// 5. `spawn_video_pump(frame_rx)` and
+///    `spawn_synthetic_audio_pump`.
+/// 6. `accept_offer(offer.sdp)` -> answer SDP.
+/// 7. Take `bridge_slot` lock; store the new bridge.
+/// 8. Return JSON answer.
+pub async fn post_offer(
+    State(state): State<Arc<WebState>>,
+    Json(offer): Json<OfferReq>,
+) -> Result<Json<OfferRes>, (StatusCode, String)> {
+    info!(
+        "web: /offer received (type={}, sdp_len={})",
+        offer.req_type,
+        offer.sdp.len()
+    );
+
+    // Step 1+2: replace any existing bridge.
+    let old_bridge = {
+        let mut slot = state.bridge_slot.lock().await;
+        slot.take()
+    };
+    if let Some(old) = old_bridge {
+        if let Err(e) = old.close().await {
+            warn!("web: closing previous bridge errored: {}", e);
+        }
+    }
+
+    // Step 3: restart the encoder.
+    let (frame_rx, encoder_control) = {
+        let mut enc = state.encoder.lock().await;
+        enc.restart().await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("encoder restart: {}", e),
+            )
+        })?
+    };
+
+    // Step 4: build the new bridge.
+    let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+        ice_servers: vec![],
+        encoder_control,
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("bridge new: {}", e),
+        )
+    })?;
+
+    // Step 5: spawn pumps. The handles are detached — the
+    // pumps live for as long as the bridge does. Closing the
+    // bridge drops the tracks, which causes write_rtp to
+    // fail; the video pump exits when its frame_rx closes
+    // (driven by step 1+2 of the next offer); the synthetic
+    // audio pump runs forever and is dropped at process exit.
+    let _video_handle = bridge.spawn_video_pump(frame_rx);
+    let _audio_handle = bridge.spawn_synthetic_audio_pump();
+
+    // Step 6: SDP exchange.
+    let answer_sdp = bridge
+        .accept_offer(offer.sdp)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)))?;
+
+    // Step 7: store the new bridge.
+    {
+        let mut slot = state.bridge_slot.lock().await;
+        *slot = Some(bridge);
+    }
+
+    info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
+    Ok(Json(OfferRes {
+        res_type: "answer",
+        sdp: answer_sdp,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::web::server::{build_router, WebState};
+    use axum::body::Body;
+    use axum::http::{header, Method, Request as HttpRequest, StatusCode};
+    use tower::ServiceExt;
+
+    /// Helper struct that mirrors [`OfferRes`] for
+    /// deserialisation in tests. [`OfferRes`] only derives
+    /// `Serialize` (it's a response shape), so deserialising
+    /// the response body needs a parallel struct.
+    #[derive(serde::Deserialize)]
+    struct OfferResJson {
+        #[serde(rename = "type")]
+        res_type: String,
+        sdp: String,
+    }
+
+    /// Build a real client-side `RTCPeerConnection`, generate
+    /// an offer, and POST it to the `/offer` endpoint of an
+    /// in-process axum app. Assert the response is 200 and
+    /// carries an SDP answer that advertises H.264.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn post_offer_returns_valid_answer() {
+        // When both aws-lc-rs and ring are in the dependency
+        // tree (webrtc 0.17.1 pulls both via rustls 0.23)
+        // rustls cannot auto-select a CryptoProvider. Install
+        // ring explicitly before the DTLS handshake starts.
+        // `install_default` is idempotent across concurrent
+        // tests (it returns Err if already set, which we
+        // ignore).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = Arc::new(WebState::new());
+        let token = state.token.clone();
+        let router = build_router(state);
+
+        // Build a client-side PC to generate a real SDP
+        // offer.
+        use webrtc::api::interceptor_registry::register_default_interceptors;
+        use webrtc::api::media_engine::MediaEngine;
+        use webrtc::api::APIBuilder;
+        use webrtc::interceptor::registry::Registry;
+        use webrtc::peer_connection::configuration::RTCConfiguration;
+        use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
+        use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
+        use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+
+        let mut me = MediaEngine::default();
+        me.register_default_codecs().expect("default codecs");
+        let mut reg = Registry::new();
+        reg = register_default_interceptors(reg, &mut me).expect("interceptors");
+        let api = APIBuilder::new()
+            .with_media_engine(me)
+            .with_interceptor_registry(reg)
+            .build();
+        let client_pc = api
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .expect("client pc");
+
+        // Phase 3 step 3f finding: must create a DC before
+        // the offer so the SDP carries an m=application
+        // section. Without it, the bridge's data-channel
+        // expectations don't match the answer side.
+        let _client_dc = client_pc
+            .create_data_channel("control-seed", None)
+            .await
+            .expect("client dc");
+
+        let _ = client_pc
+            .add_transceiver_from_kind(
+                RTPCodecType::Video,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .expect("video transceiver");
+        let _ = client_pc
+            .add_transceiver_from_kind(
+                RTPCodecType::Audio,
+                Some(RTCRtpTransceiverInit {
+                    direction: RTCRtpTransceiverDirection::Recvonly,
+                    send_encodings: vec![],
+                }),
+            )
+            .await
+            .expect("audio transceiver");
+
+        let offer = client_pc.create_offer(None).await.expect("offer");
+        client_pc
+            .set_local_description(offer.clone())
+            .await
+            .expect("client lsd");
+
+        // Wait for ICE gathering complete so the offer
+        // carries every candidate.
+        let mut gather = client_pc.gathering_complete_promise().await;
+        let _ = gather.recv().await;
+        let final_offer_sdp = client_pc.local_description().await.unwrap().sdp;
+
+        // POST the offer.
+        let body = serde_json::json!({
+            "type": "offer",
+            "sdp": final_offer_sdp,
+        })
+        .to_string();
+        let req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(format!("/offer?token={}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.expect("router");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "expected 200, got {}",
+            resp.status()
+        );
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let answer: OfferResJson = serde_json::from_slice(&body_bytes).expect("json");
+        assert_eq!(answer.res_type, "answer");
+        assert!(
+            answer.sdp.contains("v=0"),
+            "answer SDP should start with v=0:\n{}",
+            answer.sdp
+        );
+        let lower = answer.sdp.to_ascii_lowercase();
+        assert!(
+            lower.contains("h264"),
+            "answer SDP should advertise H264:\n{}",
+            answer.sdp
+        );
+
+        // Cleanup: feed the answer back to the client PC so
+        // it can close cleanly.
+        let answer_obj =
+            webrtc::peer_connection::sdp::session_description::RTCSessionDescription::answer(
+                answer.sdp,
+            )
+            .unwrap();
+        client_pc
+            .set_remote_description(answer_obj)
+            .await
+            .expect("client rsd");
+        client_pc.close().await.expect("client close");
+    }
+
+    /// Without a token, `POST /offer` is rejected by the
+    /// middleware before the handler runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_offer_without_token_is_unauthorized() {
+        let state = Arc::new(WebState::new());
+        let router = build_router(state);
+
+        let body = serde_json::json!({
+            "type": "offer",
+            "sdp": "v=0\r\n",
+        })
+        .to_string();
+        let req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/offer")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = router.oneshot(req).await.expect("router");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+}

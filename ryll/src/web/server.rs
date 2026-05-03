@@ -8,20 +8,32 @@ use axum::{
     http::{header, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use rand::RngCore;
+use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tracing::info;
 
-/// Per-launch state shared across handlers. Future steps
-/// (4c) extend this with bridge and encoder slots.
-#[allow(dead_code)]
+use super::signalling::EncoderInfra;
+
+/// Per-launch state shared across handlers. Holds the
+/// auth token plus the per-viewer bridge + encoder slots
+/// that 4c's `POST /offer` handler manipulates.
 pub struct WebState {
     pub token: String,
-    // 4c will add: bridge_slot, encoder.
+    /// Holds the active [`WebrtcBridge`] when one exists.
+    /// Single-viewer enforcement: a new offer replaces the
+    /// existing bridge.
+    pub bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    /// Per-launch encoder pipeline (synthetic source +
+    /// `H264Encoder` + `EncoderTask`). `EncoderInfra::restart`
+    /// stops any existing encoder and spawns a fresh one for
+    /// each new viewer.
+    pub encoder: Arc<Mutex<EncoderInfra>>,
 }
 
 impl WebState {
@@ -34,7 +46,11 @@ impl WebState {
             let _ = write!(acc, "{:02x}", b);
             acc
         });
-        Self { token }
+        Self {
+            token,
+            bridge_slot: Arc::new(Mutex::new(None)),
+            encoder: Arc::new(Mutex::new(EncoderInfra::new())),
+        }
     }
 }
 
@@ -46,6 +62,7 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/", get(serve_index))
         .route("/static/app.js", get(serve_app_js))
         .route("/static/style.css", get(serve_style_css))
+        .route("/offer", post(super::signalling::post_offer))
         .layer(middleware::from_fn_with_state(token_state, check_token))
         .with_state(state)
 }
