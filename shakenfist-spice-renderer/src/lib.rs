@@ -21,6 +21,7 @@ pub mod notification;
 pub mod notification_sink;
 pub mod session;
 pub mod snapshots;
+pub mod surface_mirror;
 pub mod traffic;
 pub mod usb;
 pub mod webdav;
@@ -32,7 +33,7 @@ pub use clipboard::ClipboardBackend;
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
 pub use encoder::{
-    EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
+    EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder, RealFrameSource,
     SyntheticFrameSource,
 };
 pub use log_config::LogConfig;
@@ -43,4 +44,5 @@ pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot,
 };
+pub use surface_mirror::SurfaceMirror;
 pub use traffic::TrafficSink;

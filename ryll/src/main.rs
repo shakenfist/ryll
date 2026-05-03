@@ -448,11 +448,18 @@ fn run_web(
         // Broadcaster the 5b/5d/5e relays subscribe to. The
         // forwarder task below pulls from the renderer's mpsc
         // and re-broadcasts so multiple consumers can observe
-        // each event. With no subscribers (5a), `send` returns
-        // `Err` which we ignore — events drop on the floor.
+        // each event. 5b adds the surface-mirror subscriber
+        // below; 5d/5e add cursor and audio subscribers.
         let (event_broadcast_tx, _) = tokio::sync::broadcast::channel::<
             shakenfist_spice_renderer::ChannelEvent,
         >(crate::web::server::EVENT_BROADCAST_CAPACITY);
+
+        // Live pixel store that turns ChannelEvents into surface
+        // mutations. The encoder reads from this via
+        // `RealFrameSource` (constructed in `EncoderInfra::restart`).
+        let surface_mirror = Arc::new(tokio::sync::Mutex::new(
+            shakenfist_spice_renderer::SurfaceMirror::new(),
+        ));
 
         // Cancel flag bridged from the process-global
         // `SHUTDOWN_REQUESTED`. Same shape as the headless path.
@@ -500,15 +507,45 @@ fn run_web(
         // Forwarder: drain the renderer's mpsc into the broadcast
         // bus so multiple subscribers (5b surface mirror, 5d
         // cursor relay, 5e audio sink) can each see every event.
-        // 5a installs no subscribers, in which case `send`
-        // returns `Err(SendError(_))` because the channel has
-        // no live receivers; that's expected and ignored. The
-        // forwarder exits when the renderer drops its sender on
-        // session shutdown.
+        // The forwarder exits when the renderer drops its sender
+        // on session shutdown.
         let event_broadcast_for_forwarder = event_broadcast_tx.clone();
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = event_rx_mpsc.recv().await {
                 let _ = event_broadcast_for_forwarder.send(event);
+            }
+        });
+
+        // Surface-mirror apply-event task. Subscribes to the
+        // broadcast bus and pipes every ChannelEvent through
+        // `SurfaceMirror::apply_event`. `Lagged` means a slow
+        // subscriber missed N events; for the mirror that's
+        // bad because surface state diverges from what SPICE
+        // sent — log a warning but continue rather than
+        // tearing the session down. If lag becomes a real
+        // operational problem it's a Phase 6 perf item
+        // (larger broadcast capacity or a backpressure scheme).
+        let mirror_for_task = surface_mirror.clone();
+        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
+        let mirror_handle = tokio::spawn(async move {
+            loop {
+                match event_rx_for_mirror.recv().await {
+                    Ok(event) => {
+                        let mut m = mirror_for_task.lock().await;
+                        m.apply_event(&event);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            "web: surface mirror lagged by {} events; \
+                             surface state may briefly diverge",
+                            n
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("web: surface mirror task exiting (broadcast closed)");
+                        break;
+                    }
+                }
             }
         });
 
@@ -520,6 +557,7 @@ fn run_web(
             input_tx,
             resize_tx,
             event_broadcast_tx,
+            surface_mirror,
         ));
         let server_result = crate::web::run(state, &web_host, web_port).await;
 
@@ -533,6 +571,7 @@ fn run_web(
         // Give the renderer a brief window to unwind cleanly.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection_handle).await;
         forwarder_handle.abort();
+        mirror_handle.abort();
 
         server_result
     });

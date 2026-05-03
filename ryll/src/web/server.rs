@@ -13,7 +13,7 @@ use axum::{
     Router,
 };
 use rand::RngCore;
-use shakenfist_spice_renderer::{ChannelEvent, InputEvent};
+use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
@@ -76,6 +76,13 @@ pub struct WebState {
     /// tests of the HTTP layer).
     #[allow(dead_code)] // subscribed in 5b/5d/5e
     pub event_tx: Option<broadcast::Sender<ChannelEvent>>,
+    /// Live pixel store rebuilt from the renderer's `ChannelEvent`
+    /// stream by the apply-event task spawned in `run_web`. The
+    /// encoder reads from this via `RealFrameSource`. Wrapped in
+    /// a `tokio::sync::Mutex` so the apply-event task can `lock`
+    /// asynchronously while the encoder thread `try_lock`s
+    /// synchronously from its blocking pool.
+    pub surface_mirror: Arc<Mutex<SurfaceMirror>>,
 }
 
 impl WebState {
@@ -86,7 +93,7 @@ impl WebState {
     /// [`Self::with_channels`] to wire the renderer.
     #[cfg(test)]
     pub fn new() -> Self {
-        Self::build(None, None, None)
+        Self::build(None, None, None, Arc::new(Mutex::new(SurfaceMirror::new())))
     }
 
     /// Construct state with the renderer channels populated.
@@ -97,14 +104,21 @@ impl WebState {
         input_tx: mpsc::Sender<InputEvent>,
         resize_tx: mpsc::Sender<(u32, u32)>,
         event_tx: broadcast::Sender<ChannelEvent>,
+        surface_mirror: Arc<Mutex<SurfaceMirror>>,
     ) -> Self {
-        Self::build(Some(input_tx), Some(resize_tx), Some(event_tx))
+        Self::build(
+            Some(input_tx),
+            Some(resize_tx),
+            Some(event_tx),
+            surface_mirror,
+        )
     }
 
     fn build(
         input_tx: Option<mpsc::Sender<InputEvent>>,
         resize_tx: Option<mpsc::Sender<(u32, u32)>>,
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
+        surface_mirror: Arc<Mutex<SurfaceMirror>>,
     ) -> Self {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -119,6 +133,7 @@ impl WebState {
             input_tx,
             resize_tx,
             event_tx,
+            surface_mirror,
         }
     }
 }

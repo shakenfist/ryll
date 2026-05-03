@@ -22,21 +22,28 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_renderer::{
-    EncodedFrame, EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource,
+    EncodedFrame, EncoderControl, EncoderTask, H264Encoder, RealFrameSource, SurfaceMirror,
 };
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::server::WebState;
 
-/// Encoder dimensions for the synthetic Phase 4 source. 720p
-/// at 30 fps matches the synthetic-frame-source defaults and
-/// keeps openh264 CPU manageable in debug builds.
-const ENCODER_WIDTH: u32 = 1280;
-const ENCODER_HEIGHT: u32 = 720;
+/// Encoder FPS cap. 30 fps matches master plan Resolution §4.
+/// The encoder dimensions come from the SurfaceMirror's primary
+/// surface at restart time (Phase 5), not a hard-coded constant
+/// (Phase 4 used 1280×720; that's gone now).
 const ENCODER_FPS: u32 = 30;
+
+/// Sentinel error message returned by [`EncoderInfra::restart`]
+/// when the SPICE session has not yet produced a primary
+/// surface. The HTTP handler maps this to 503 Service Unavailable
+/// so the browser can retry once the session has finished
+/// initialising. Match-by-string is fragile; we use a const so
+/// the producer and consumer agree.
+pub const RESTART_ERR_NO_PRIMARY: &str = "primary surface not yet available";
 
 /// JSON body of a `POST /offer` request: a browser SDP offer.
 #[derive(Deserialize)]
@@ -89,9 +96,41 @@ impl EncoderInfra {
     /// attach signalling; the [`EncoderInfra`] holds its own
     /// clone (via the `control_tx` field) for sending
     /// [`EncoderControl::Stop`] on the next restart.
+    ///
+    /// Encoder dimensions are read from `surface_mirror`'s
+    /// primary surface at the moment of restart. If the SPICE
+    /// session has not yet produced a primary surface,
+    /// returns `Err` with [`RESTART_ERR_NO_PRIMARY`]; the
+    /// HTTP handler maps that to 503 so the browser retries
+    /// after session-init finishes.
     pub async fn restart(
         &mut self,
+        surface_mirror: &Arc<Mutex<SurfaceMirror>>,
     ) -> anyhow::Result<(mpsc::Receiver<EncodedFrame>, mpsc::Sender<EncoderControl>)> {
+        // Read primary surface dimensions before tearing the
+        // old encoder down — if the mirror has no primary yet
+        // we want to return Err without disturbing the existing
+        // pipeline. A retry from the browser then has a chance
+        // to land after the SPICE session is ready.
+        let (width, height) = {
+            let guard = surface_mirror.lock().await;
+            match guard.primary_surface() {
+                Some(s) => s.size(),
+                None => return Err(anyhow::anyhow!(RESTART_ERR_NO_PRIMARY)),
+            }
+        };
+
+        // openh264 requires even dimensions. If SPICE produced
+        // an odd-sized primary (rare, but possible at startup
+        // before the guest's vdagent settles) round down by
+        // one pixel — losing a single column/row is invisible
+        // and avoids a hard error from H264Encoder::new.
+        let width = width & !1;
+        let height = height & !1;
+        if width == 0 || height == 0 {
+            return Err(anyhow::anyhow!(RESTART_ERR_NO_PRIMARY));
+        }
+
         // Stop existing if any. Order matters: send Stop first
         // so the encoder loop sees the message on its next
         // tick; then await the JoinHandle with a timeout so a
@@ -112,10 +151,10 @@ impl EncoderInfra {
             }
         }
 
-        // Build new pipeline.
-        let encoder = H264Encoder::new(ENCODER_WIDTH, ENCODER_HEIGHT)
+        // Build new pipeline at the SPICE-derived dimensions.
+        let encoder = H264Encoder::new(width, height)
             .map_err(|e| anyhow::anyhow!("H264Encoder::new: {}", e))?;
-        let source = SyntheticFrameSource::new(ENCODER_WIDTH, ENCODER_HEIGHT);
+        let source = RealFrameSource::new(surface_mirror.clone());
         let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(32);
         let (control_tx, control_rx) = mpsc::channel::<EncoderControl>(8);
 
@@ -128,6 +167,10 @@ impl EncoderInfra {
         self.control_tx = Some(control_tx.clone());
         self.handle = Some(handle);
 
+        info!(
+            "web: encoder restarted at {}x{}@{}fps",
+            width, height, ENCODER_FPS
+        );
         Ok((frame_rx, control_tx))
     }
 }
@@ -175,15 +218,26 @@ pub async fn post_offer(
         }
     }
 
-    // Step 3: restart the encoder.
+    // Step 3: restart the encoder. The mirror is read here to
+    // pick up the primary surface dimensions at restart time.
+    // If no primary surface exists yet (browser connected
+    // before SPICE finished session-init), surface-the
+    // sentinel as a 503 so the browser retries.
     let (frame_rx, encoder_control) = {
         let mut enc = state.encoder.lock().await;
-        enc.restart().await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("encoder restart: {}", e),
-            )
-        })?
+        match enc.restart(&state.surface_mirror).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains(RESTART_ERR_NO_PRIMARY) {
+                    return Err((StatusCode::SERVICE_UNAVAILABLE, msg));
+                }
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("encoder restart: {}", msg),
+                ));
+            }
+        }
     };
 
     // Step 4: build the new bridge.
@@ -262,6 +316,18 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let state = Arc::new(WebState::new());
+        // Seed the surface mirror with a primary so the
+        // encoder restart path doesn't return the 503 sentinel.
+        // 1280x720 matches what Phase 4's hard-coded source used.
+        {
+            let mut m = state.surface_mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 1280,
+                height: 720,
+            });
+        }
         let token = state.token.clone();
         let router = build_router(state);
 
@@ -403,5 +469,55 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.expect("router");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// `EncoderInfra::restart` returns the
+    /// [`RESTART_ERR_NO_PRIMARY`] sentinel when the surface
+    /// mirror has no primary surface. The HTTP handler turns
+    /// this into 503 so the browser can retry once SPICE has
+    /// finished session-init.
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_errs_when_mirror_empty() {
+        let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
+        let mut infra = EncoderInfra::new();
+        let err = infra
+            .restart(&mirror)
+            .await
+            .expect_err("restart should error on empty mirror");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(RESTART_ERR_NO_PRIMARY),
+            "error should carry the no-primary sentinel: {}",
+            msg
+        );
+    }
+
+    /// Once the mirror has a primary surface,
+    /// `EncoderInfra::restart` succeeds and produces a fresh
+    /// frame_rx + control_tx pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_succeeds_with_primary_surface() {
+        let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
+        {
+            let mut m = mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 640,
+                height: 480,
+            });
+        }
+        let mut infra = EncoderInfra::new();
+        let (frame_rx, control_tx) = infra
+            .restart(&mirror)
+            .await
+            .expect("restart should succeed");
+        // Sanity: the channel pair is alive.
+        assert!(!control_tx.is_closed());
+        drop(frame_rx);
+        // Stop the spawned encoder so the test exits cleanly.
+        let _ = control_tx
+            .send(shakenfist_spice_renderer::EncoderControl::Stop)
+            .await;
     }
 }
