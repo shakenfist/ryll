@@ -40,7 +40,7 @@ shared core. The supported modes are:
 |------|----------|--------|-------------|
 | GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
-| Web | Browser via WebRTC | In progress (Phases 0–3 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+| Web | Browser via WebRTC | In progress (Phases 0–5 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
 
 A feature is not considered complete when it works in only
 one mode. Every feature should be reachable from every mode
@@ -251,6 +251,109 @@ Always spawn a separate tokio task for the `read_rtp` loop inside
 `on_track`. This is a webrtc-rs idiom that differs from what
 plain intuition suggests; document it explicitly when writing
 any new receiver-side WebRTC code.
+
+## Phase 5: Real SPICE Wire-Up (`--web` mode)
+
+Phase 5 of the web-frontend plan (`docs/plans/PLAN-web-frontend-phase-05-iac.md`)
+delivers the four real-data connections that replace the Phase 4
+synthetic sources: display frames, audio, keyboard/mouse input,
+and cursor overlay.
+
+### `SurfaceMirror`
+
+`shakenfist-spice-renderer/src/surface_mirror.rs` — subscribes
+to the renderer's broadcast `ChannelEvent` stream and maintains
+a `HashMap<(u8, u32), DisplaySurface>` keyed by
+`(channel_id, surface_id)`. The mirror is the authoritative
+surface state for the web encoder path; it is separate from
+the `RyllApp` surface map so the `--web` mode can run without
+any egui dependency.
+
+### `RealFrameSource`
+
+`shakenfist-spice-renderer/src/encoder/frame_source.rs` — a
+`FrameSource` implementation that reads from a `SurfaceMirror`
+under `try_lock`. Returns `None` on lock contention (the encoder
+skips the tick rather than blocking) and also returns `None` when
+the primary surface is not dirty, achieving genuine
+encode-on-dirty behaviour within the 30 fps cap.
+
+### `OpusPacketSink` trait
+
+`shakenfist-spice-renderer/src/audio_sink.rs` — a pre-decode
+tap on the SPICE playback channel. When a type implementing this
+trait is injected into the playback channel constructor, raw Opus
+packets from the SPICE server are delivered to `push_opus_packet`
+before being decoded to PCM for the cpal path. The `--web` mode
+uses this to route Opus packets to the WebRTC audio track without
+re-encoding. When the SPICE server negotiates raw PCM (not Opus),
+the sink receives no packets; the web audio track is silent (a
+warning is logged).
+
+### Web-mode input relay
+
+`ryll/src/web/inputs.rs` — drains the bridge's control
+datachannel, parses the JSON input events that the browser shell
+posts, and emits `InputEvent` variants (key down/up with AT
+scancodes, mouse position/button) into the renderer's existing
+inputs channel handler. Viewport-resize messages from the browser
+are forwarded to `maybe_send_monitors_resize` so the SPICE guest
+can track the browser viewport size at connect time.
+
+### Web-mode cursor relay
+
+`ryll/src/web/cursor.rs` — subscribes to the renderer's
+broadcast `ChannelEvent` stream and watches for `CursorImage`
+and `CursorPos` events (the same events the egui frontend
+consumes). Cursor shapes are encoded as PNG (`base64 = "0.22"`
+for the data-URL wrapper) and sent as JSON over the control
+datachannel. The browser shell decodes the data-URL, updates
+an `<img>` overlay element, and repositions it to follow cursor
+motion events — keeping cursor latency on the datachannel path
+rather than the video encoder path.
+
+### Web-mode audio adapter
+
+`ryll/src/web/audio.rs` — `WebOpusSink` implements
+`OpusPacketSink`. When the `RTCPeerConnection` reaches
+`Connected`, the bridge activates the audio pump; `WebOpusSink`
+routes each incoming Opus packet to the bridge's audio track
+via the WebRTC audio pump. PCM-only SPICE servers do not
+trigger any `push_opus_packet` calls, so the audio track emits
+silence (and a one-time warning is logged).
+
+### End-to-end data flow (`--web` mode)
+
+```
+SPICE server
+    │
+    ▼
+shakenfist-spice-renderer::run_connection
+    │
+    ├─► DisplayChannel ──► broadcast ChannelEvent ──► SurfaceMirror
+    │                                              └─► CursorRelay (cursor.rs)
+    │
+    ├─► PlaybackChannel ──► OpusPacketSink (audio.rs) ──► WebRTC audio track
+    │
+    └─► InputsChannel ◄── web inputs relay (inputs.rs) ◄── control DC ◄── browser
+                                                                              │
+shakenfist-spice-webrtc::WebrtcBridge                                         │
+    ├─► video track ◄── EncoderTask ◄── RealFrameSource ◄── SurfaceMirror    │
+    ├─► audio track ◄── WebOpusSink ◄── PlaybackChannel (Opus path)          │
+    └─► control DC ◄──────────────────────────────────── cursor/input relay ──┘
+    │
+    ▼
+Browser (RTCPeerConnection)
+    ├─ <video> H.264 display
+    ├─ <audio> Opus audio
+    └─ datachannel: cursor overlay + input events
+```
+
+The `on_track`-must-spawn-a-task webrtc-rs idiom (documented
+in "webrtc-rs convention" above) and the rustls
+`CryptoProvider` init (required once at process start, before
+any TLS handshake) both apply to the `--web` mode and are
+handled in `ryll/src/main.rs` before `run_web()` is called.
 
 ## Code Organisation
 

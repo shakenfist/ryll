@@ -44,7 +44,7 @@
 | Display capabilities advertisement (COMPOSITE, MONITORS_CONFIG, etc.) | available | available | available |
 | Window auto-resize to surface size | available | n/a — intrinsic (no window; resize channel exists but resize_tx is never connected to a window, `ryll/src/app.rs:3391`) | n/a — intrinsic (browser viewport is user-controlled) |
 | Obey guest size hints toggle (`--no-obey-guest-size` / hamburger toggle) | available | n/a — intrinsic (no window; flag accepted in headless for CLI symmetry but ignored, `ryll/src/main.rs:195`) | missing (out of MVP scope; the web frontend's "guest fits browser viewport" inverse is Phase 5a of PLAN-web-frontend.md) |
-| Guest resolution follows viewport (`VDAgentMonitorsConfig`) | available | missing (`ryll/src/app.rs:3391` — `_resize_tx` is created but never used to drive resize logic in headless) | available (MVP; Phase 5a of PLAN-web-frontend.md) |
+| Guest resolution follows viewport (`VDAgentMonitorsConfig`) | available | missing (`ryll/src/app.rs:3391` — `_resize_tx` is created but never used to drive resize logic in headless) | available |
 | **Cursor** | | | |
 | Server cursor rendering (SET/INIT) | available | missing (`ryll/src/app.rs:3563` — `CursorChannel` runs, events arrive, but headless event loop has no handler for `CursorImage`/`CursorPos` events) | available (MVP; datachannel CSS overlay, Phase 5b) |
 | Cursor position tracking | available | missing (same as above) | available (MVP) |
@@ -143,7 +143,7 @@
 | WebRTC SDP signalling endpoint (`POST /offer`) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |
 | Synthetic video stream over WebRTC (test pattern) | n/a — intrinsic | n/a — intrinsic | available (Phase 4; SyntheticFrameSource) |
 | Synthetic audio stream over WebRTC (440 Hz tone) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |
-| Real SPICE display frames over WebRTC | available (egui paint loop) | n/a — intrinsic (no encoder driven from real frames) | missing (Phase 5; needs FrameSource impl over the renderer's surface map) |
-| Real SPICE audio over WebRTC (Opus passthrough) | available (cpal sink) | n/a — intrinsic (no audio sink) | missing (Phase 5) |
-| Browser-side keyboard/mouse input over datachannel | available (egui inputs) | n/a — intrinsic (no input device) | missing (Phase 5) |
-| Browser-side cursor overlay (datachannel) | available (egui overlay) | n/a — intrinsic | missing (Phase 5) |
+| Real SPICE display frames over WebRTC | available (egui paint loop) | n/a — intrinsic (no encoder driven from real frames) | available (Phase 5b; RealFrameSource over SurfaceMirror) |
+| Real SPICE audio over WebRTC (Opus passthrough) | available (cpal sink) | n/a — intrinsic (no audio sink) | available (Opus path; PCM-only servers fall back to silent audio with a warn) |
+| Browser-side keyboard/mouse input over datachannel | available (egui inputs) | n/a — intrinsic (no input device) | available (Phase 5c) |
+| Browser-side cursor overlay (datachannel) | available (egui overlay) | n/a — intrinsic | available (Phase 5d) |

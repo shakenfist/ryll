@@ -275,7 +275,18 @@ ryll/src/
 ├── notifications.rs     # NotificationStore (in-app store) +
 │                        #   NotificationStoreSink (implements
 │                        #   NotificationSink)
-└── settings.rs          # is_verbose() gate
+├── settings.rs          # is_verbose() gate
+└── web/                 # --web mode (Phase 4+5 of PLAN-web-frontend.md)
+    ├── mod.rs           # run_web() entry point, HTTP server,
+    │                    #   SDP /offer endpoint, token auth
+    ├── audio.rs         # WebOpusSink (implements OpusPacketSink);
+    │                    #   routes Opus packets to WebRTC audio track
+    ├── cursor.rs        # Cursor relay: ChannelEvent → PNG data-URL
+    │                    #   → control datachannel → browser <img>
+    │                    #   overlay; uses base64 = "0.22"
+    └── inputs.rs        # Input relay: control datachannel → JSON
+                         #   parse → InputEvent + resize events into
+                         #   the renderer's inputs channel handler
 ```
 
 The SPICE substrate (channels, display, encoder, session) lives
@@ -300,7 +311,10 @@ shakenfist-spice-renderer/src/
 ├── encoder/
 │   ├── mod.rs           # Re-exports
 │   ├── frame_source.rs  # FrameSource trait, FrameRef struct,
-│   │                    #   SyntheticFrameSource (test/CI)
+│   │                    #   SyntheticFrameSource (test/CI),
+│   │                    #   RealFrameSource (Phase 5b; reads from
+│   │                    #   SurfaceMirror under try_lock,
+│   │                    #   skips tick on contention or clean frame)
 │   ├── h264.rs          # H264Encoder (openh264 wrapper),
 │   │                    #   EncodedFrame, Annex-B NAL output
 │   └── task.rs          # EncoderTask async driver,
@@ -329,6 +343,13 @@ shakenfist-spice-renderer/src/
 ├── notification_sink.rs # NotificationSink trait
 ├── snapshots.rs         # Channel-state snapshot types
 │                        #   (DisplaySnapshot, InputsSnapshot, etc.)
+├── surface_mirror.rs    # SurfaceMirror: subscribes to broadcast
+│                        #   ChannelEvent, maintains
+│                        #   HashMap<(u8,u32), DisplaySurface>
+│                        #   for the --web encoder path (Phase 5b)
+├── audio_sink.rs        # OpusPacketSink trait: pre-decode tap on
+│                        #   the playback channel for Opus passthrough
+│                        #   to the WebRTC audio track (Phase 5e)
 └── traffic.rs           # TrafficSink trait
 
 shakenfist-spice-webrtc/src/
@@ -352,6 +373,7 @@ important when adding new channels or extending existing ones.
 | `ClipboardBackend` | Host clipboard read/write | `clipboard_arboard` (via `arboard`) |
 | `UsbBackend` | USB host-side device attachment | Implemented by `usb::RealDevice` (Linux only) and `usb::VirtualMsc` |
 | `WebdavBackend` | WebDAV directory share lifecycle | `webdav::MuxDemuxer` + `webdav::WebdavServer` |
+| `OpusPacketSink` | Pre-decode tap on the SPICE playback channel; delivers raw Opus packets for WebRTC audio passthrough (Phase 5e) | `web::audio::WebOpusSink` in `ryll/src/web/audio.rs` |
 
 ### Dual-spec Cargo dep convention
 
@@ -641,3 +663,4 @@ partial state.
 | ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |
 | libc | POSIX bindings; `sysconf(_SC_CLK_TCK)` for the runtime metrics module that reads `/proc/self/*` for bug reports |
 | rfd | Native file dialogs for the screenshot save flow and bug-report save |
+| base64 = "0.22" | Base64 encoding for cursor PNG data-URLs sent over the control datachannel (Phase 5d; `ryll/src/web/cursor.rs`) |

@@ -2,7 +2,7 @@
 
 Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Computing Environments) client, designed for testing the Kerbside SPICE proxy.
 
-Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a first-class citizen and shares as much functionality as the mode itself can physically support. The supported modes today are a **GUI** (egui / eframe desktop window) for interactive day-to-day use and a **headless** mode for automated testing, CI, and cadence latency probing. A third **web** mode (browser frontend over WebRTC) is in concept-plan stage as a future replacement for stacks like Kasm + Apache Guacamole; see `docs/plans/PLAN-web-frontend.md`.
+Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a first-class citizen and shares as much functionality as the mode itself can physically support. The supported modes today are a **GUI** (egui / eframe desktop window) for interactive day-to-day use, a **headless** mode for automated testing, CI, and cadence latency probing, and a **web** mode (browser frontend over WebRTC, Phases 0–5 of 8 complete) that lets any modern browser connect to a SPICE session without installing software; see `docs/plans/PLAN-web-frontend.md` and `docs/web-frontend.md`.
 
 ## Features
 
@@ -217,6 +217,29 @@ This will:
 - Send automatic keystrokes every 2 seconds
 - Print statistics periodically
 
+### Web frontend (`--web` mode)
+
+```bash
+ryll --web session.vv
+```
+
+Open the printed `http://<host>:<port>/?token=...` URL in
+Firefox or Chrome. The desktop is visible and audible;
+keyboard and mouse work; the cursor is rendered as an overlay.
+Audio requires the SPICE server to negotiate Opus (xspice and
+QEMU defaults). Click the volume button on the page to enable
+audio after it loads (browser autoplay policy).
+
+Optional flags:
+- `--web-host 0.0.0.0` — bind address (defaults to loopback)
+- `--web-port 8080` — port (defaults to ephemeral)
+
+Phase 5 of the web-frontend plan is operationally complete.
+Reconnect-on-disconnect (Phase 6), packaging / CI (Phase 7),
+and full operator docs including a systemd unit example
+(Phase 8) are still pending. See `docs/web-frontend.md` for
+the current operator guide.
+
 ### `--pedantic` mode
 
 When enabled with `--pedantic`, ryll writes a bug-report
@@ -247,8 +270,11 @@ tints amber or red when there are unread Warn or Error-severity entries
 The repository is a Cargo workspace with **6 crates**. The web
 frontend (`--web` mode) is in active development; see
 [docs/plans/PLAN-web-frontend.md](docs/plans/PLAN-web-frontend.md)
-for the master plan. Phases 0–3 (parity audit, renderer
-extraction, encoder pipeline, WebRTC bridge) have landed.
+for the master plan. Phases 0–5 (parity audit, renderer
+extraction, encoder pipeline, WebRTC bridge, HTTP server, and
+real SPICE wire-up for display/audio/inputs/cursor) have landed.
+Phases 6–8 (reconnect, CI packaging, full operator docs) are
+pending. Quick-start: `docs/web-frontend.md`.
 
 | Crate | Role |
 |-------|------|
@@ -345,6 +371,7 @@ In the `docs/` directory:
 - [Documentation Index](docs/index.md) - What ryll is and why it exists
 - [Installation](docs/installation.md) - Pre-built packages and install instructions
 - [Configuration](docs/configuration.md) - CLI options and .vv file format
+- [Web frontend guide](docs/web-frontend.md) - Operator guide for `--web` mode
 - [macOS Development](docs/development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
 - [Binary Portability](docs/portability.md) - How to share binaries between machines
