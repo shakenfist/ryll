@@ -535,7 +535,7 @@ master plan is the input to writing them.
 | 1. Renderer extraction (`shakenfist-spice-renderer` crate) | PLAN-web-frontend-phase-01-extract.md | Complete |
 | 2. Encoder pipeline (framebuffer → H.264 NAL units, with VP8 contingency) | PLAN-web-frontend-phase-02-encoder.md | Complete (H.264 path; VP8 contingency not triggered) |
 | 3. WebRTC plumbing (`webrtc-rs`, video track, audio track, datachannel) | PLAN-web-frontend-phase-03-webrtc.md | Complete |
-| 4. HTTP server + token auth + signalling endpoint + browser shell | PLAN-web-frontend-phase-04-server.md | Not written |
+| 4. HTTP server + token auth + signalling endpoint + browser shell | PLAN-web-frontend-phase-04-server.md | Not started |
 | 5. Inputs + cursor overlay + audio passthrough | PLAN-web-frontend-phase-05-iac.md | Not written |
 | 6. Reconnect + lifecycle | PLAN-web-frontend-phase-06-lifecycle.md | Not written |
 | 7. CI build + packaging | PLAN-web-frontend-phase-07-ci.md | Not written |
