@@ -250,6 +250,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_js_reads_token_from_url() {
+        let (router, token) = router();
+        let req = HttpRequest::builder()
+            .method(Method::GET)
+            .uri(format!("/static/app.js?token={}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body.contains("URLSearchParams"),
+            "app.js should read the token via URLSearchParams: missing"
+        );
+        assert!(
+            body.contains("createDataChannel"),
+            "app.js should create a data channel before offer \
+             (Phase 3 finding): missing"
+        );
+        assert!(
+            body.contains("recvonly"),
+            "app.js should request recvonly transceivers: missing"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn style_css_with_token_returns_css() {
         let (router, token) = router();
         let req = HttpRequest::builder()
