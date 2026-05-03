@@ -3,6 +3,11 @@ mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
+// The web module is scaffolded in step 4a and wired into
+// main in step 4e. Until then, the exported symbols are
+// not yet called from main.
+#[allow(dead_code)]
+mod web;
 #[cfg(not(feature = "capture"))]
 mod capture {
     /// Stub CaptureSession when capture feature is disabled.

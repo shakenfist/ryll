@@ -119,8 +119,18 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
 
+# HTTP server and routing for --web mode
+axum = "0.8"
+
+# Constant-time comparison for token auth (timing-safe)
+subtle = "2"
+
+# Query-string parsing for token extraction
+url = "2"
+
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [package.metadata.deb]
 maintainer = "Michael Still <mikal@stillhq.com>"
