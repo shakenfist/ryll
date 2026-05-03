@@ -553,11 +553,24 @@ fn run_web(
         // run the HTTP server. When the server exits (Ctrl+C
         // raised SHUTDOWN_REQUESTED, or axum::serve errored)
         // we tear the rest down before returning.
+        //
+        // Step 5d: clone the bus subscription + surface mirror
+        // handle here (before `with_channels` moves the broadcast
+        // sender) so we can spawn the cursor relay against the
+        // same `bridge_slot` the signalling handler installs into.
+        let cursor_event_rx = event_broadcast_tx.subscribe();
+        let cursor_mirror = surface_mirror.clone();
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
             resize_tx,
             event_broadcast_tx,
             surface_mirror,
+        ));
+        let cursor_bridge_slot = state.bridge_slot.clone();
+        let cursor_handle = tokio::spawn(crate::web::cursor::run_cursor_relay(
+            cursor_event_rx,
+            cursor_bridge_slot,
+            cursor_mirror,
         ));
         let server_result = crate::web::run(state, &web_host, web_port).await;
 
@@ -572,6 +585,7 @@ fn run_web(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection_handle).await;
         forwarder_handle.abort();
         mirror_handle.abort();
+        cursor_handle.abort();
 
         server_result
     });

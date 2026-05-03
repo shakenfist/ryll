@@ -132,6 +132,10 @@ rustls = { version = "0.23", features = ["ring"] }
 # Constant-time comparison for token auth (timing-safe)
 subtle = "2"
 
+# Base64 for PNG-encoded cursor shapes shipped over the control
+# DC in --web mode.
+base64 = "0.22"
+
 # Query-string parsing for token extraction
 url = "2"
 

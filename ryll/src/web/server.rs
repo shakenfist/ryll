@@ -349,6 +349,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn index_includes_cursor_overlay() {
+        let (router, token) = router();
+        let req = HttpRequest::builder()
+            .method(Method::GET)
+            .uri(format!("/?token={}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body.contains(r#"id="cursor""#),
+            "rendered HTML should include the cursor overlay element: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn app_js_with_token_returns_javascript() {
         let (router, token) = router();
         let req = HttpRequest::builder()

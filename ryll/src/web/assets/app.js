@@ -31,6 +31,7 @@
 
     const statusEl = document.getElementById("status");
     const videoEl = document.getElementById("video");
+    const cursorEl = document.getElementById("cursor");
 
     const params = new URLSearchParams(window.location.search);
     const TOKEN = params.get("token");
@@ -180,7 +181,91 @@
         dcOpen = false;
         console.log("[ryll] data channel closed");
     };
-    dc.onmessage = (e) => console.log("[ryll] dc message:", e.data);
+    // ---------------------------------------------------------------
+    // Server → browser cursor overlay state. The server forwards
+    // CursorShape (PNG, base64'd) and CursorPosition events from
+    // the SPICE cursor channel over the same control DC the
+    // browser uses for inputs. The browser places an <img>
+    // overlay above the <video> at the denormalised position
+    // (letterbox-aware) and hides the host cursor over the video
+    // (in style.css) so the SPICE cursor wins.
+    // ---------------------------------------------------------------
+    let cursorHotX = 0;
+    let cursorHotY = 0;
+    let cursorLastNorm = null;
+
+    dc.onmessage = (event) => {
+        let msg;
+        try {
+            const text = typeof event.data === "string"
+                ? event.data
+                : new TextDecoder().decode(event.data);
+            msg = JSON.parse(text);
+        } catch (err) {
+            console.warn("[ryll] invalid control message:", err);
+            return;
+        }
+        handleControlMessage(msg);
+    };
+
+    const handleControlMessage = (msg) => {
+        switch (msg && msg.type) {
+            case "cursor-shape":
+                cursorEl.src = `data:image/png;base64,${msg.png_b64}`;
+                cursorHotX = msg.hot_x ?? 0;
+                cursorHotY = msg.hot_y ?? 0;
+                cursorEl.hidden = false;
+                if (cursorLastNorm) {
+                    positionCursor(cursorLastNorm.x, cursorLastNorm.y);
+                }
+                break;
+            case "cursor-pos":
+                cursorLastNorm = { x: msg.x_norm, y: msg.y_norm };
+                positionCursor(msg.x_norm, msg.y_norm);
+                break;
+            case "cursor-hide":
+                cursorEl.hidden = true;
+                break;
+            case "cursor-show":
+                if (cursorEl.src) {
+                    cursorEl.hidden = false;
+                }
+                break;
+            default:
+                console.log("[ryll] dc message:", msg);
+                break;
+        }
+    };
+
+    const positionCursor = (xNorm, yNorm) => {
+        const rect = videoEl.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            return;
+        }
+        // Mirror the input-side letterbox correction in
+        // pointerToNorm so the overlay tracks the inputs we sent
+        // exactly: compute the actually-rendered video area, then
+        // place the cursor inside it at the normalised position.
+        const elemAspect = rect.width / rect.height;
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        const videoAspect = vw > 0 && vh > 0 ? vw / vh : NaN;
+        let renderedX = rect.left;
+        let renderedY = rect.top;
+        let renderedW = rect.width;
+        let renderedH = rect.height;
+        if (isFinite(videoAspect) && videoAspect > 0) {
+            if (elemAspect > videoAspect) {
+                renderedW = rect.height * videoAspect;
+                renderedX = rect.left + (rect.width - renderedW) / 2;
+            } else {
+                renderedH = rect.width / videoAspect;
+                renderedY = rect.top + (rect.height - renderedH) / 2;
+            }
+        }
+        cursorEl.style.left = `${renderedX + xNorm * renderedW - cursorHotX}px`;
+        cursorEl.style.top = `${renderedY + yNorm * renderedH - cursorHotY}px`;
+    };
 
     const sendCtrl = (obj) => {
         if (!dcOpen) {

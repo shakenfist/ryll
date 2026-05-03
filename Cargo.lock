@@ -5091,6 +5091,7 @@ dependencies = [
  "arboard",
  "async-channel",
  "axum",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "clap",
