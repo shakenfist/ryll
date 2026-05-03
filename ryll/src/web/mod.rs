@@ -7,6 +7,7 @@
 //! serving (4b), the POST /offer SDP exchange handler (4c),
 //! and the browser-shell wiring (4d).
 
+pub(crate) mod assets;
 mod server;
 
 // These re-exports become used in step 4e when run_web
