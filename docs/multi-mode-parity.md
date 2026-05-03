@@ -137,3 +137,13 @@
 | **Authentication / Session Token** | | | |
 | Per-launch URL token (web mode only) | n/a — intrinsic (no HTTP server) | n/a — intrinsic (no HTTP server) | available (MVP; random 32-byte token printed to stdout, Phase 4) |
 | TLS for browser-facing endpoint | n/a — intrinsic | n/a — intrinsic | missing (out of MVP scope; deferred per PLAN-web-frontend.md §Resolutions §8) |
+| **Web frontend (--web mode)** | | | |
+| HTTP server with per-launch URL token | n/a — intrinsic | n/a — intrinsic | available (Phase 4; `ryll/src/web/server.rs`) |
+| Embedded browser shell (HTML/JS/CSS via include_bytes!) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |
+| WebRTC SDP signalling endpoint (`POST /offer`) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |
+| Synthetic video stream over WebRTC (test pattern) | n/a — intrinsic | n/a — intrinsic | available (Phase 4; SyntheticFrameSource) |
+| Synthetic audio stream over WebRTC (440 Hz tone) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |
+| Real SPICE display frames over WebRTC | available (egui paint loop) | n/a — intrinsic (no encoder driven from real frames) | missing (Phase 5; needs FrameSource impl over the renderer's surface map) |
+| Real SPICE audio over WebRTC (Opus passthrough) | available (cpal sink) | n/a — intrinsic (no audio sink) | missing (Phase 5) |
+| Browser-side keyboard/mouse input over datachannel | available (egui inputs) | n/a — intrinsic (no input device) | missing (Phase 5) |
+| Browser-side cursor overlay (datachannel) | available (egui overlay) | n/a — intrinsic | missing (Phase 5) |

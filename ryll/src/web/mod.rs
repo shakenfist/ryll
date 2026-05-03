@@ -11,7 +11,4 @@ pub(crate) mod assets;
 pub(crate) mod server;
 pub(crate) mod signalling;
 
-// These re-exports become used in step 4e when run_web
-// is wired into main. Suppressed until then.
-#[allow(unused_imports)]
 pub use server::{run, WebState};

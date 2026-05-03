@@ -102,6 +102,22 @@ pub struct Args {
     /// and unchecking the checkbox after launch.
     #[arg(long, default_value_t = false)]
     pub no_obey_guest_size: bool,
+
+    /// Run as a SPICE → browser transcoder. Listens on an
+    /// ephemeral HTTP port, prints a URL with a per-launch
+    /// random token, and serves a browser shell that consumes
+    /// the SPICE display via WebRTC. Mutually exclusive with
+    /// --headless and the GUI default.
+    #[arg(long)]
+    pub web: bool,
+
+    /// Bind address for --web mode (default 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub web_host: String,
+
+    /// Listen port for --web mode (default ephemeral).
+    #[arg(long, default_value_t = 0u16)]
+    pub web_port: u16,
 }
 
 /// SPICE connection configuration
@@ -154,7 +170,16 @@ fn parse_optional_u16(ini: &Ini, section: &str, key: &str) -> Result<Option<u16>
 }
 
 impl Config {
-    /// Create configuration from command line arguments
+    /// Create configuration from command line arguments.
+    ///
+    /// In `--web` mode the SPICE connection is not yet made
+    /// (Phase 4 serves only the synthetic test pattern;
+    /// Phase 5 wires real frames). A `.vv` / `--file` /
+    /// `--direct` is therefore *optional* under `--web`.
+    /// When none is provided a placeholder stub is returned
+    /// so the rest of `main()` can still build the usual
+    /// pipeline variables; the stub is never used to open a
+    /// socket in Phase 4.
     pub fn from_args(args: &Args) -> Result<Self> {
         if let Some(url) = &args.url {
             Self::from_url(url)
@@ -162,6 +187,17 @@ impl Config {
             Self::from_vv_file(file)
         } else if let Some(direct) = &args.direct {
             Self::from_direct(direct)
+        } else if args.web {
+            // Phase 4: no SPICE connection yet — return a stub.
+            // Phase 5 will require a real config source here.
+            Ok(Config {
+                host: String::new(),
+                port: 0,
+                tls_port: None,
+                password: None,
+                ca_cert: None,
+                host_subject: None,
+            })
         } else {
             Err(anyhow!("Must specify one of --url, --file, or --direct"))
         }

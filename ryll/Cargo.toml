@@ -122,6 +122,13 @@ http-body-util = "0.1"
 # HTTP server and routing for --web mode
 axum = "0.8"
 
+# TLS crypto provider — needed by --web mode to install the
+# rustls ring provider at startup before any WebRTC offers
+# arrive. webrtc-rs pulls it in transitively but an explicit
+# dep here makes `install_default()` resolvable from main.rs
+# without reaching into a transitive crate's re-exports.
+rustls = { version = "0.23", features = ["ring"] }
+
 # Constant-time comparison for token auth (timing-safe)
 subtle = "2"
 

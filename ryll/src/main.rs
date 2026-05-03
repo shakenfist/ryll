@@ -3,10 +3,6 @@ mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
-// The web module is scaffolded in step 4a and wired into
-// main in step 4e. Until then, the exported symbols are
-// not yet called from main.
-#[allow(dead_code)]
 mod web;
 #[cfg(not(feature = "capture"))]
 mod capture {
@@ -115,14 +111,21 @@ fn main() -> Result<()> {
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
 
-    // Load configuration
+    // Load configuration. In --web mode Phase 4 does not yet
+    // make a SPICE connection, so from_args returns a stub
+    // when no --file / --url / --direct is given; the stub
+    // is passed through for CLI symmetry but never used to
+    // open a socket. Phase 5 wires real frames and will
+    // require a valid config source even in --web mode.
     let config = Config::from_args(&args)?;
-    info!(
-        "Connecting to {}:{} (TLS: {})",
-        config.host,
-        config.port,
-        config.tls_port.is_some()
-    );
+    if !args.web {
+        info!(
+            "Connecting to {}:{} (TLS: {})",
+            config.host,
+            config.port,
+            config.tls_port.is_some()
+        );
+    }
 
     // Parse virtual disk configs (validates paths early)
     let virtual_disks = parse_virtual_disks(&args)?;
@@ -165,7 +168,16 @@ fn main() -> Result<()> {
 
     let obey_guest_size = !args.no_obey_guest_size;
 
-    if args.headless {
+    if args.web {
+        run_web(
+            config,
+            &args,
+            virtual_disks,
+            share_dir,
+            capture,
+            pedantic_config,
+        )
+    } else if args.headless {
         run_headless(
             config,
             &args,
@@ -306,6 +318,42 @@ fn run_headless(
     }
 
     result
+}
+
+fn run_web(
+    _config: Config,
+    args: &Args,
+    _virtual_disks: Vec<VirtualDiskConfig>,
+    _share_dir: Option<ShareDirConfig>,
+    _capture: Option<Arc<CaptureSession>>,
+    _pedantic_config: Option<PedanticConfig>,
+) -> Result<()> {
+    info!("Running in web mode");
+
+    // The .vv file / config / virtual disks / etc. are parsed
+    // for CLI symmetry with --headless and the GUI default,
+    // but the SPICE connection is not made in Phase 4 — that
+    // wiring lands in Phase 5. Phase 4's user-facing
+    // acceptance is "browser shows the synthetic test
+    // pattern from PLAN-web-frontend-phase-02-encoder.md"; no
+    // real frames flow yet.
+
+    let web_host = args.web_host.clone();
+    let web_port = args.web_port;
+
+    let runtime = tokio::runtime::Runtime::new()
+        .with_context(|| "failed to construct tokio runtime for --web")?;
+
+    runtime.block_on(async move {
+        // Idempotent rustls CryptoProvider install. The
+        // WebrtcBridge::new path also installs this internally
+        // (commit a2dc11cb), but doing it here once at startup
+        // covers the case where no offer is ever received.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = std::sync::Arc::new(crate::web::WebState::new());
+        crate::web::run(state, &web_host, web_port).await
+    })
 }
 
 fn run_gui(
