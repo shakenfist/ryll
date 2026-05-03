@@ -1,5 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -116,7 +117,9 @@ async fn check_token(
 
 /// Bind a TcpListener on `host:port` (port=0 -> ephemeral),
 /// build the router with `state`, print the URL to stdout,
-/// and run the server until `axum::serve` exits.
+/// and run the server until the process-wide `SHUTDOWN_REQUESTED`
+/// flag is raised (e.g. via Ctrl+C) or `axum::serve` exits for
+/// another reason.
 pub async fn run(state: Arc<WebState>, host: &str, port: u16) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
@@ -128,8 +131,27 @@ pub async fn run(state: Arc<WebState>, host: &str, port: u16) -> Result<()> {
         local_addr, state.token
     );
     info!("web: listening on {}", local_addr);
-    axum::serve(listener, build_router(state)).await?;
+    axum::serve(listener, build_router(state))
+        .with_graceful_shutdown(shutdown_signal(&crate::SHUTDOWN_REQUESTED))
+        .await?;
     Ok(())
+}
+
+/// Future that resolves when `flag` is set to `true`. Polls at
+/// 100 ms cadence to match the headless-mode bridge in `main.rs`.
+/// Passing the flag as a parameter (rather than hard-coding
+/// `crate::SHUTDOWN_REQUESTED`) lets tests inject a private
+/// `AtomicBool` and avoid interfering with other tests.
+async fn shutdown_signal(flag: &'static AtomicBool) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            tracing::info!("web: shutdown requested; draining axum");
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +246,26 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn index_includes_enable_audio_button() {
+        let (router, token) = router();
+        let req = HttpRequest::builder()
+            .method(Method::GET)
+            .uri(format!("/?token={}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+        assert!(
+            body.contains(r#"id="enable-audio""#),
+            "rendered HTML should include the enable-audio button: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn app_js_with_token_returns_javascript() {
         let (router, token) = router();
         let req = HttpRequest::builder()
@@ -290,5 +332,40 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
         assert!(ct.to_str().unwrap().starts_with("text/css"));
+    }
+
+    /// Verify that `shutdown_signal` stays pending while the flag
+    /// is false and resolves within 500 ms after the flag is set.
+    /// Uses a private static so the test never touches the
+    /// process-wide `SHUTDOWN_REQUESTED` flag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_signal_observes_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        static TEST_FLAG: AtomicBool = AtomicBool::new(false);
+        // Ensure a clean starting state in case of test re-runs.
+        TEST_FLAG.store(false, Ordering::SeqCst);
+
+        // Spawn the shutdown_signal future; it must NOT complete
+        // while the flag is false.
+        let handle = tokio::spawn(shutdown_signal(&TEST_FLAG));
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !handle.is_finished(),
+            "shutdown_signal completed before flag was set"
+        );
+
+        // Raise the flag and confirm the future resolves quickly.
+        TEST_FLAG.store(true, Ordering::SeqCst);
+        let res = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        assert!(
+            res.is_ok(),
+            "shutdown_signal did not return within 500 ms after flag was set"
+        );
+
+        // Reset for safety (no other test uses TEST_FLAG, but be tidy).
+        TEST_FLAG.store(false, Ordering::SeqCst);
     }
 }
