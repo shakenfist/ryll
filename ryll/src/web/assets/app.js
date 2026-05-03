@@ -41,11 +41,21 @@
     dc.onmessage = (e) => console.log("[ryll] dc message:", e.data);
 
     // Receive the server's video and audio tracks.
+    const enableAudioBtn = document.getElementById("enable-audio");
+    enableAudioBtn.addEventListener("click", () => {
+        videoEl.muted = false;
+        enableAudioBtn.hidden = true;
+        // Re-trigger play in case the browser paused on un-mute.
+        videoEl.play().catch(err => console.warn("[ryll] play after unmute failed:", err));
+    });
+
     pc.ontrack = (event) => {
         console.log("[ryll] ontrack kind=", event.track.kind);
         if (event.track.kind === "video" && event.streams[0]) {
             videoEl.srcObject = event.streams[0];
             setStatus("Connected");
+            // Reveal the audio-toggle button now that we have a stream.
+            enableAudioBtn.hidden = false;
         }
         // Audio plays via the browser's default sink; the
         // <video> element with the same MediaStream object
