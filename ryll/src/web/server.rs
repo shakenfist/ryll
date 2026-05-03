@@ -13,17 +13,40 @@ use axum::{
     Router,
 };
 use rand::RngCore;
+use shakenfist_spice_renderer::{ChannelEvent, InputEvent};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::info;
 
 use super::signalling::EncoderInfra;
 
+/// Default capacity of the broadcast channel that fan-outs
+/// `ChannelEvent`s from the renderer to web-mode consumers
+/// (surface mirror in 5b, cursor relay in 5d, audio sink in 5e).
+/// 5a installs no real subscribers; a slow / absent subscriber
+/// would simply lose old messages with `RecvError::Lagged`,
+/// which is fine because the events are stateless deltas.
+pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
+/// Capacity of the `InputEvent` mpsc that 5c will feed once
+/// browser keyboard/mouse messages start flowing. 5a creates
+/// the channel but nothing sends on it.
+pub const INPUT_CHANNEL_CAPACITY: usize = 256;
+/// Capacity of the `(width, height)` resize mpsc that 5c will
+/// feed when the browser sends its initial viewport message.
+pub const RESIZE_CHANNEL_CAPACITY: usize = 16;
+
 /// Per-launch state shared across handlers. Holds the
 /// auth token plus the per-viewer bridge + encoder slots
 /// that 4c's `POST /offer` handler manipulates.
+///
+/// Phase 5a additions: channel handles that bridge the renderer
+/// (running inside `run_connection`) to web-mode consumers and
+/// producers. The senders are owned by the future input/cursor/
+/// audio relays (5b–5e); the broadcast `event_tx` lets multiple
+/// observers subscribe to `ChannelEvent`s without restructuring
+/// when later steps add their consumers.
 pub struct WebState {
     pub token: String,
     /// Holds the active [`WebrtcBridge`] when one exists.
@@ -35,12 +58,54 @@ pub struct WebState {
     /// stops any existing encoder and spawns a fresh one for
     /// each new viewer.
     pub encoder: Arc<Mutex<EncoderInfra>>,
+    /// Sender for the [`InputEvent`] channel `run_connection`
+    /// consumes. 5c will start sending real keyboard / pointer
+    /// events here. `None` in tests / when web mode is not
+    /// actually connected to a SPICE session.
+    #[allow(dead_code)] // wired in 5c
+    pub input_tx: Option<mpsc::Sender<InputEvent>>,
+    /// Sender for the `(width, height)` resize channel
+    /// `run_connection` plumbs into `MainChannel` to drive the
+    /// SPICE vdagent's `VDAgentMonitorsConfig` flow. 5c will
+    /// send the browser's initial viewport here.
+    #[allow(dead_code)] // wired in 5c
+    pub resize_tx: Option<mpsc::Sender<(u32, u32)>>,
+    /// Broadcaster for `ChannelEvent`s emitted by the renderer's
+    /// session orchestrator. 5b/5d/5e each spawn a subscriber.
+    /// `None` outside web-with-SPICE sessions (e.g. in unit
+    /// tests of the HTTP layer).
+    #[allow(dead_code)] // subscribed in 5b/5d/5e
+    pub event_tx: Option<broadcast::Sender<ChannelEvent>>,
 }
 
 impl WebState {
-    /// Construct fresh state with a random 32-byte token
-    /// (hex-encoded -> 64 chars).
+    /// Construct state without renderer channels. Used by the
+    /// router unit tests and by any hypothetical caller that
+    /// only wants to exercise the HTTP layer without a live
+    /// SPICE session attached. The 5a `run_web` path uses
+    /// [`Self::with_channels`] to wire the renderer.
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::build(None, None, None)
+    }
+
+    /// Construct state with the renderer channels populated.
+    /// 5a's `run_web` calls this after spawning `run_connection`
+    /// so the HTTP handlers (and 5b–5e relays) can find the
+    /// senders.
+    pub fn with_channels(
+        input_tx: mpsc::Sender<InputEvent>,
+        resize_tx: mpsc::Sender<(u32, u32)>,
+        event_tx: broadcast::Sender<ChannelEvent>,
+    ) -> Self {
+        Self::build(Some(input_tx), Some(resize_tx), Some(event_tx))
+    }
+
+    fn build(
+        input_tx: Option<mpsc::Sender<InputEvent>>,
+        resize_tx: Option<mpsc::Sender<(u32, u32)>>,
+        event_tx: Option<broadcast::Sender<ChannelEvent>>,
+    ) -> Self {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
         let token = bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
@@ -51,6 +116,9 @@ impl WebState {
             token,
             bridge_slot: Arc::new(Mutex::new(None)),
             encoder: Arc::new(Mutex::new(EncoderInfra::new())),
+            input_tx,
+            resize_tx,
+            event_tx,
         }
     }
 }

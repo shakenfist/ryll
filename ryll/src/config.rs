@@ -172,14 +172,12 @@ fn parse_optional_u16(ini: &Ini, section: &str, key: &str) -> Result<Option<u16>
 impl Config {
     /// Create configuration from command line arguments.
     ///
-    /// In `--web` mode the SPICE connection is not yet made
-    /// (Phase 4 serves only the synthetic test pattern;
-    /// Phase 5 wires real frames). A `.vv` / `--file` /
-    /// `--direct` is therefore *optional* under `--web`.
-    /// When none is provided a placeholder stub is returned
-    /// so the rest of `main()` can still build the usual
-    /// pipeline variables; the stub is never used to open a
-    /// socket in Phase 4.
+    /// Phase 5 step 5a tightened `--web` to require a real
+    /// connection source (`--url` / `--file` / `--direct`).
+    /// Phase 4 had returned a placeholder stub here so the
+    /// HTTP server could come up without a SPICE backend; that
+    /// expedient is gone now that `run_web` actually spawns
+    /// `run_connection`.
     pub fn from_args(args: &Args) -> Result<Self> {
         if let Some(url) = &args.url {
             Self::from_url(url)
@@ -187,17 +185,6 @@ impl Config {
             Self::from_vv_file(file)
         } else if let Some(direct) = &args.direct {
             Self::from_direct(direct)
-        } else if args.web {
-            // Phase 4: no SPICE connection yet — return a stub.
-            // Phase 5 will require a real config source here.
-            Ok(Config {
-                host: String::new(),
-                port: 0,
-                tls_port: None,
-                password: None,
-                ca_cert: None,
-                host_subject: None,
-            })
         } else {
             Err(anyhow!("Must specify one of --url, --file, or --direct"))
         }

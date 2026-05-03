@@ -111,21 +111,17 @@ fn main() -> Result<()> {
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
 
-    // Load configuration. In --web mode Phase 4 does not yet
-    // make a SPICE connection, so from_args returns a stub
-    // when no --file / --url / --direct is given; the stub
-    // is passed through for CLI symmetry but never used to
-    // open a socket. Phase 5 wires real frames and will
-    // require a valid config source even in --web mode.
+    // Load configuration. Phase 5 step 5a removed the
+    // `--web` stub: every mode now requires a real `.vv` /
+    // `--url` / `--direct` because `run_web` now spawns
+    // `run_connection` and actually connects to SPICE.
     let config = Config::from_args(&args)?;
-    if !args.web {
-        info!(
-            "Connecting to {}:{} (TLS: {})",
-            config.host,
-            config.port,
-            config.tls_port.is_some()
-        );
-    }
+    info!(
+        "Connecting to {}:{} (TLS: {})",
+        config.host,
+        config.port,
+        config.tls_port.is_some()
+    );
 
     // Parse virtual disk configs (validates paths early)
     let virtual_disks = parse_virtual_disks(&args)?;
@@ -176,6 +172,7 @@ fn main() -> Result<()> {
             share_dir,
             capture,
             pedantic_config,
+            obey_guest_size,
         )
     } else if args.headless {
         run_headless(
@@ -320,40 +317,233 @@ fn run_headless(
     result
 }
 
+/// Bridge `flag` (typically [`SHUTDOWN_REQUESTED`]) into the
+/// per-connection `cancel: Arc<AtomicBool>` that the renderer's
+/// session orchestrator polls. Returns when `flag` is `true`,
+/// after flipping `cancel` so the renderer's 100 ms cancel-poll
+/// branch fires on its next tick.
+///
+/// Mirrors the inline pattern in [`run_headless`]; extracted so
+/// `run_web` can reuse it and so the bridge can be unit-tested
+/// without spinning up a real SPICE session.
+async fn shutdown_to_cancel_bridge(flag: &'static AtomicBool, cancel: Arc<AtomicBool>) {
+    use std::time::Duration;
+    loop {
+        if flag.load(Ordering::Relaxed) {
+            cancel.store(true, Ordering::Relaxed);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn run_web(
-    _config: Config,
+    config: Config,
     args: &Args,
-    _virtual_disks: Vec<VirtualDiskConfig>,
-    _share_dir: Option<ShareDirConfig>,
-    _capture: Option<Arc<CaptureSession>>,
-    _pedantic_config: Option<PedanticConfig>,
+    virtual_disks: Vec<VirtualDiskConfig>,
+    share_dir: Option<ShareDirConfig>,
+    capture: Option<Arc<CaptureSession>>,
+    pedantic_config: Option<PedanticConfig>,
+    // Web mode never opens a host window, so the GUI's
+    // "obey guest size" toggle is accepted for CLI symmetry
+    // and ignored. The browser-driven viewport flow that
+    // resolves to `VDAgentMonitorsConfig` lands in 5c.
+    _obey_guest_size: bool,
 ) -> Result<()> {
     info!("Running in web mode");
 
-    // The .vv file / config / virtual disks / etc. are parsed
-    // for CLI symmetry with --headless and the GUI default,
-    // but the SPICE connection is not made in Phase 4 — that
-    // wiring lands in Phase 5. Phase 4's user-facing
-    // acceptance is "browser shows the synthetic test
-    // pattern from PLAN-web-frontend-phase-02-encoder.md"; no
-    // real frames flow yet.
-
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
+    let monitors = args.monitors;
 
     let runtime = tokio::runtime::Runtime::new()
         .with_context(|| "failed to construct tokio runtime for --web")?;
 
-    runtime.block_on(async move {
+    let capture_for_renderer = capture.clone();
+    let result = runtime.block_on(async move {
         // Idempotent rustls CryptoProvider install. The
         // WebrtcBridge::new path also installs this internally
         // (commit a2dc11cb), but doing it here once at startup
         // covers the case where no offer is ever received.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let state = std::sync::Arc::new(crate::web::WebState::new());
-        crate::web::run(state, &web_host, web_port).await
-    })
+        // Build the host-side scaffolding the renderer expects.
+        // Same shape as `run_headless` so any future trait or
+        // observer that grows in headless mode flows naturally
+        // into web mode by mirroring the wiring.
+        let byte_counter = Arc::new(shakenfist_spice_renderer::ByteCounter::new());
+        let traffic = Arc::new(TrafficBuffers::new());
+        let notifications: SharedNotifications =
+            Arc::new(std::sync::Mutex::new(NotificationStore::new()));
+        let snapshots = ChannelSnapshots::new();
+
+        // Pedantic-mode bug-report observer. As in headless,
+        // `app_snapshot` stays at its default — that field is
+        // populated by the GUI loop only. The web frontend may
+        // grow its own equivalent in a later phase; for now we
+        // warn the user the same way headless does so the
+        // pedantic zip clearly indicates the missing data.
+        if let Some(pedantic) = pedantic_config {
+            let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
+            tracing::warn!(
+                "pedantic mode in web: traffic pcap and channel-state are \
+                 live, but app-level snapshot (surfaces list, bandwidth, \
+                 latency) is not populated — that field is updated by the \
+                 GUI loop only."
+            );
+            BugReport::register_pedantic_observer(
+                pedantic,
+                config.host.clone(),
+                config.port,
+                traffic.clone(),
+                snapshots.clone(),
+                app_snapshot,
+                notifications.clone(),
+            );
+        }
+        register_gap_notification_observer(notifications.clone());
+
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
+        let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
+            traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
+        let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> =
+            capture_for_renderer.map(|c| c as Arc<dyn shakenfist_spice_renderer::CaptureSink>);
+        // Notification sink is wired even though web mode has no
+        // notification UI yet — the renderer emits notifications
+        // for protocol gaps that the gap observer above already
+        // funnels into the SharedNotifications store; keeping
+        // the sink wired means a future "web notifications" UI
+        // gets the same data without any session-side changes.
+        let _notifications_sink: Arc<dyn shakenfist_spice_renderer::NotificationSink> =
+            Arc::new(NotificationStoreSink(notifications.clone()));
+        let log_config = settings::log_config();
+
+        // Channels the orchestrator consumes. The renderer's
+        // `run_connection` takes mpsc receivers for inputs / usb
+        // / webdav / resize and an mpsc sender for the channel-
+        // event stream. Web mode keeps the senders for the input
+        // and resize channels so 5c can drive them from browser
+        // messages; usb and webdav stay closed (web mode does
+        // not implement these in MVP).
+        let (event_tx_mpsc, mut event_rx_mpsc) =
+            tokio::sync::mpsc::channel::<shakenfist_spice_renderer::ChannelEvent>(
+                shakenfist_spice_renderer::session::EVENT_CHANNEL_SIZE,
+            );
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel::<
+            shakenfist_spice_renderer::InputEvent,
+        >(crate::web::server::INPUT_CHANNEL_CAPACITY);
+        let (usb_tx, usb_rx) =
+            tokio::sync::mpsc::channel::<shakenfist_spice_renderer::UsbCommand>(16);
+        let (webdav_tx, webdav_rx) =
+            tokio::sync::mpsc::channel::<shakenfist_spice_renderer::WebdavCommand>(16);
+        let (resize_tx, resize_rx) =
+            tokio::sync::mpsc::channel::<(u32, u32)>(crate::web::server::RESIZE_CHANNEL_CAPACITY);
+        // usb / webdav senders are dropped immediately so the
+        // corresponding receivers see a closed channel; the
+        // matching channel tasks treat closed-channel as "no
+        // commands ever, that's fine".
+        drop(usb_tx);
+        drop(webdav_tx);
+
+        // Broadcaster the 5b/5d/5e relays subscribe to. The
+        // forwarder task below pulls from the renderer's mpsc
+        // and re-broadcasts so multiple consumers can observe
+        // each event. With no subscribers (5a), `send` returns
+        // `Err` which we ignore — events drop on the floor.
+        let (event_broadcast_tx, _) = tokio::sync::broadcast::channel::<
+            shakenfist_spice_renderer::ChannelEvent,
+        >(crate::web::server::EVENT_BROADCAST_CAPACITY);
+
+        // Cancel flag bridged from the process-global
+        // `SHUTDOWN_REQUESTED`. Same shape as the headless path.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let bridge_cancel = cancel.clone();
+        let cancel_bridge_handle = tokio::spawn(async move {
+            shutdown_to_cancel_bridge(&SHUTDOWN_REQUESTED, bridge_cancel).await;
+        });
+
+        // GUI repaint hook — unused in web mode but
+        // `run_connection` requires a non-`Option` `Arc<Notify>`.
+        let repaint_notify = Arc::new(tokio::sync::Notify::new());
+        let volume_control = shakenfist_spice_renderer::channels::VolumeControl::new();
+
+        // Spawn the renderer's session orchestrator. The web
+        // mode has no clipboard backend (clipboard sync is
+        // out of scope for the MVP) and never enables paste-as-
+        // keystrokes (that's a host-side hotkey feature).
+        let connection_cancel = cancel.clone();
+        let connection_handle = tokio::spawn(async move {
+            shakenfist_spice_renderer::run_connection(
+                connection_config,
+                event_tx_mpsc,
+                repaint_notify,
+                input_rx,
+                usb_rx,
+                webdav_rx,
+                virtual_disks,
+                share_dir,
+                capture_dyn,
+                byte_counter,
+                traffic_dyn,
+                snapshots,
+                monitors,
+                resize_rx,
+                volume_control,
+                /* enable_paste */ false,
+                log_config,
+                connection_cancel,
+                /* clipboard */ None,
+            )
+            .await
+        });
+
+        // Forwarder: drain the renderer's mpsc into the broadcast
+        // bus so multiple subscribers (5b surface mirror, 5d
+        // cursor relay, 5e audio sink) can each see every event.
+        // 5a installs no subscribers, in which case `send`
+        // returns `Err(SendError(_))` because the channel has
+        // no live receivers; that's expected and ignored. The
+        // forwarder exits when the renderer drops its sender on
+        // session shutdown.
+        let event_broadcast_for_forwarder = event_broadcast_tx.clone();
+        let forwarder_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx_mpsc.recv().await {
+                let _ = event_broadcast_for_forwarder.send(event);
+            }
+        });
+
+        // Build state with the channel handles populated and
+        // run the HTTP server. When the server exits (Ctrl+C
+        // raised SHUTDOWN_REQUESTED, or axum::serve errored)
+        // we tear the rest down before returning.
+        let state = Arc::new(crate::web::WebState::with_channels(
+            input_tx,
+            resize_tx,
+            event_broadcast_tx,
+        ));
+        let server_result = crate::web::run(state, &web_host, web_port).await;
+
+        // Server exited; ensure the cancel flag is up so the
+        // renderer notices on its next 100 ms tick. The cancel
+        // bridge above is doing this already if SHUTDOWN_REQUESTED
+        // is set; this is the belt-and-braces case where the
+        // server returned for an unrelated reason.
+        cancel.store(true, Ordering::Relaxed);
+        cancel_bridge_handle.abort();
+        // Give the renderer a brief window to unwind cleanly.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection_handle).await;
+        forwarder_handle.abort();
+
+        server_result
+    });
+
+    // Close capture session on the host side, mirroring
+    // `run_headless`.
+    if let Some(ref capture) = capture {
+        capture.close();
+    }
+
+    result
 }
 
 fn run_gui(
@@ -398,4 +588,55 @@ fn run_gui(
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cancel bridge installed by `run_web` mirrors the inline
+    /// pattern in `run_headless`: a 100 ms poll loop that flips a
+    /// per-attempt `Arc<AtomicBool>` once the process-global
+    /// shutdown flag is set. Verify the bridge stays pending while
+    /// the flag is false and propagates within ~500 ms once raised.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_bridge_observes_shutdown_flag() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Use a private static so the test never touches the
+        // process-wide SHUTDOWN_REQUESTED flag.
+        static TEST_FLAG: AtomicBool = AtomicBool::new(false);
+        TEST_FLAG.store(false, Ordering::SeqCst);
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_clone = cancel.clone();
+        let handle =
+            tokio::spawn(async move { shutdown_to_cancel_bridge(&TEST_FLAG, cancel_clone).await });
+
+        // Bridge should not flip cancel while the flag is false.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !handle.is_finished(),
+            "cancel bridge completed before flag was raised"
+        );
+        assert!(
+            !cancel.load(Ordering::Relaxed),
+            "cancel was flipped before the flag was raised"
+        );
+
+        // Raise the flag; bridge should flip cancel and exit.
+        TEST_FLAG.store(true, Ordering::SeqCst);
+        let res = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        assert!(
+            res.is_ok(),
+            "cancel bridge did not return within 500 ms after flag was raised"
+        );
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "cancel was not flipped after the flag was raised"
+        );
+
+        TEST_FLAG.store(false, Ordering::SeqCst);
+    }
 }
