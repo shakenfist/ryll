@@ -262,6 +262,24 @@ pub async fn post_offer(
     let _video_handle = bridge.spawn_video_pump(frame_rx);
     let _audio_handle = bridge.spawn_synthetic_audio_pump();
 
+    // Step 5c: spawn the browser → renderer input relay. Each
+    // bridge owns exactly one control DC; `control_rx()` is
+    // single-shot, so taking it here is correct. We only spawn
+    // the relay when the renderer-side senders are populated
+    // (i.e. `run_web` wired a real SPICE session); the unit
+    // tests construct `WebState::new()` without senders and
+    // skip this branch silently.
+    if let (Some(input_tx), Some(resize_tx)) = (state.input_tx.clone(), state.resize_tx.clone()) {
+        if let Some(control_rx) = bridge.control_rx() {
+            let mirror = state.surface_mirror.clone();
+            tokio::spawn(crate::web::inputs::run_input_relay(
+                control_rx, input_tx, resize_tx, mirror,
+            ));
+        } else {
+            warn!("web: bridge.control_rx() returned None; input relay not spawned");
+        }
+    }
+
     // Step 6: SDP exchange.
     let answer_sdp = bridge
         .accept_offer(offer.sdp)

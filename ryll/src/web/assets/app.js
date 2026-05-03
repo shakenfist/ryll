@@ -1,4 +1,4 @@
-// ryll web frontend — Phase 4 client.
+// ryll web frontend — Phase 4 + 5c client.
 //
 // Reads the per-launch token from window.location.search,
 // constructs an RTCPeerConnection, opens a "control-seed"
@@ -8,10 +8,27 @@
 // exchange via POST /offer, and attaches the incoming video
 // track to the <video> element.
 //
-// Phase 5 will replace the no-op data-channel handlers with
-// real input event marshalling and cursor overlay updates.
+// Phase 5c additions:
+//   * KeyboardEvent.code → AT scancode table (ported from
+//     `scancode_for_logical_key` in
+//     shakenfist-spice-renderer/src/channels/inputs.rs).
+//     Extended keys (E0-prefixed) are encoded with the
+//     prefix byte in the low byte of the u32, matching
+//     `make_scancode()` on the Rust side.
+//   * keydown / keyup listeners on `document`, dispatched
+//     through the data channel as `{type:"key",scancode,down}`.
+//   * mousemove / mousedown / mouseup on the `<video>`
+//     element with letterbox-corrected normalised
+//     coordinates, dispatched as `{type:"pointer-move"}`
+//     and `{type:"pointer-button"}`.
+//   * On PC connectionState=connected, send an initial
+//     `{type:"viewport",width,height}` message so the
+//     guest's vdagent resizes the display via
+//     VDAgentMonitorsConfig.
 
 (() => {
+    "use strict";
+
     const statusEl = document.getElementById("status");
     const videoEl = document.getElementById("video");
 
@@ -27,6 +44,123 @@
         console.log("[ryll]", msg);
     };
 
+    // ---------------------------------------------------------------
+    // KeyboardEvent.code → AT scancode wire value.
+    //
+    // Ported from `scancode_for_logical_key` in
+    // shakenfist-spice-renderer/src/channels/inputs.rs. Extended
+    // keys (navigation cluster, arrows, right-side modifiers) use
+    // the SPICE wire format produced by `make_scancode()`:
+    //   wire = (scancode << 8) | 0xE0
+    // i.e. Up arrow's base 0x48 becomes 0xE048 on the wire.
+    //
+    // Modifier keys aren't in the LogicalKey table (the GUI
+    // path lets egui's modifier state ride along on the
+    // VKEY events) but the SPICE inputs channel happily
+    // accepts them as standalone scancodes. The mapping below
+    // matches spice-gtk's host_to_pc_scancode() for ShiftLeft,
+    // ShiftRight, ControlLeft, ControlRight, AltLeft, AltRight.
+    // ---------------------------------------------------------------
+    const SCANCODE_TABLE = {
+        // Letters (A..Z)
+        KeyA: 0x1E, KeyB: 0x30, KeyC: 0x2E, KeyD: 0x20, KeyE: 0x12,
+        KeyF: 0x21, KeyG: 0x22, KeyH: 0x23, KeyI: 0x17, KeyJ: 0x24,
+        KeyK: 0x25, KeyL: 0x26, KeyM: 0x32, KeyN: 0x31, KeyO: 0x18,
+        KeyP: 0x19, KeyQ: 0x10, KeyR: 0x13, KeyS: 0x1F, KeyT: 0x14,
+        KeyU: 0x16, KeyV: 0x2F, KeyW: 0x11, KeyX: 0x2D, KeyY: 0x15,
+        KeyZ: 0x2C,
+
+        // Digits 1..9, 0
+        Digit1: 0x02, Digit2: 0x03, Digit3: 0x04, Digit4: 0x05, Digit5: 0x06,
+        Digit6: 0x07, Digit7: 0x08, Digit8: 0x09, Digit9: 0x0A, Digit0: 0x0B,
+
+        // Function keys
+        F1: 0x3B, F2: 0x3C, F3: 0x3D, F4: 0x3E, F5: 0x3F,
+        F6: 0x40, F7: 0x41, F8: 0x42, F9: 0x43, F10: 0x44,
+        F11: 0x57, F12: 0x58,
+
+        // Whitespace / control cluster
+        Space: 0x39,
+        Enter: 0x1C,
+        Tab: 0x0F,
+        Backspace: 0x0E,
+        Escape: 0x01,
+        CapsLock: 0x3A,
+
+        // Punctuation
+        Backquote: 0x29,
+        Minus: 0x0C,
+        Equal: 0x0D,
+        BracketLeft: 0x1A,
+        BracketRight: 0x1B,
+        Backslash: 0x2B,
+        Semicolon: 0x27,
+        Quote: 0x28,
+        Comma: 0x33,
+        Period: 0x34,
+        Slash: 0x35,
+        IntlBackslash: 0x56,
+
+        // Modifiers — left-side keys are non-extended, right-side
+        // keys are E0-prefixed extended scancodes.
+        ShiftLeft: 0x2A,
+        ShiftRight: 0x36,
+        ControlLeft: 0x1D,
+        ControlRight: 0xE01D,
+        AltLeft: 0x38,
+        AltRight: 0xE038,
+        MetaLeft: 0xE05B,
+        MetaRight: 0xE05C,
+        ContextMenu: 0xE05D,
+
+        // Navigation cluster (all E0-prefixed)
+        Insert: 0xE052,
+        Delete: 0xE053,
+        Home: 0xE047,
+        End: 0xE04F,
+        PageUp: 0xE049,
+        PageDown: 0xE051,
+
+        // Arrow keys (all E0-prefixed)
+        ArrowUp: 0xE048,
+        ArrowDown: 0xE050,
+        ArrowLeft: 0xE04B,
+        ArrowRight: 0xE04D,
+
+        // Numpad — covers the common subset; the SPICE side
+        // accepts these as either NumLock'd or unshifted
+        // depending on the modifier state, which the guest
+        // resolves itself.
+        Numpad0: 0x52, Numpad1: 0x4F, Numpad2: 0x50, Numpad3: 0x51,
+        Numpad4: 0x4B, Numpad5: 0x4C, Numpad6: 0x4D, Numpad7: 0x47,
+        Numpad8: 0x48, Numpad9: 0x49,
+        NumpadDecimal: 0x53,
+        NumpadAdd: 0x4E,
+        NumpadSubtract: 0x4A,
+        NumpadMultiply: 0x37,
+        NumpadDivide: 0xE035,
+        NumpadEnter: 0xE01C,
+        NumLock: 0x45,
+        ScrollLock: 0x46,
+        Pause: 0x45,  // approximate; full Pause is multi-byte
+        PrintScreen: 0xE037,
+    };
+
+    // SPICE button bitmask values (from
+    // shakenfist-spice-protocol/src/constants.rs::mouse_buttons).
+    // Browser MouseEvent.button: 0=primary, 1=middle, 2=secondary.
+    const SPICE_BUTTON_LEFT = 1;
+    const SPICE_BUTTON_MIDDLE = 2;
+    const SPICE_BUTTON_RIGHT = 4;
+    const browserButtonToSpice = (button) => {
+        switch (button) {
+            case 0: return SPICE_BUTTON_LEFT;
+            case 1: return SPICE_BUTTON_MIDDLE;
+            case 2: return SPICE_BUTTON_RIGHT;
+            default: return 0;
+        }
+    };
+
     setStatus("Negotiating…");
 
     const pc = new RTCPeerConnection();
@@ -34,11 +168,149 @@
     // Phase 3 step 3f finding: a data channel must exist on the
     // offer side before createOffer() so the SDP carries an
     // m=application section. The server bridge's control DC
-    // is answered against this seed channel; Phase 5 will use
-    // it for input events and cursor overlay.
+    // is answered against this seed channel; Phase 5c uses
+    // it for input events and viewport sizing.
     const dc = pc.createDataChannel("control-seed", { ordered: true });
-    dc.onopen = () => console.log("[ryll] data channel open");
+    let dcOpen = false;
+    dc.onopen = () => {
+        dcOpen = true;
+        console.log("[ryll] data channel open");
+    };
+    dc.onclose = () => {
+        dcOpen = false;
+        console.log("[ryll] data channel closed");
+    };
     dc.onmessage = (e) => console.log("[ryll] dc message:", e.data);
+
+    const sendCtrl = (obj) => {
+        if (!dcOpen) {
+            return;
+        }
+        try {
+            dc.send(JSON.stringify(obj));
+        } catch (err) {
+            console.warn("[ryll] dc.send failed:", err);
+        }
+    };
+
+    // ---------------------------------------------------------------
+    // Pointer coordinate normalisation with letterbox correction.
+    //
+    // The <video> element's bounding rect may be larger than the
+    // actually-rendered video area when the source aspect ratio
+    // doesn't match the element's. Compute the rendered area
+    // from videoWidth / videoHeight and offset the pointer into
+    // it before normalising to [0, 1].
+    // ---------------------------------------------------------------
+    const pointerToNorm = (e) => {
+        const rect = videoEl.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            return null;
+        }
+        const elemAspect = rect.width / rect.height;
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        const videoAspect = vw > 0 && vh > 0 ? vw / vh : NaN;
+        if (!isFinite(videoAspect) || videoAspect <= 0) {
+            // No video metadata yet — just normalise over the
+            // element rect. The Rust side will denormalise
+            // against whatever primary surface is present.
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top) / rect.height;
+            return { x_norm: clamp01(x), y_norm: clamp01(y) };
+        }
+        if (elemAspect > videoAspect) {
+            // Pillarboxed: black bars on left/right.
+            const renderedWidth = rect.height * videoAspect;
+            const padX = (rect.width - renderedWidth) / 2;
+            const x = (e.clientX - rect.left - padX) / renderedWidth;
+            const y = (e.clientY - rect.top) / rect.height;
+            return { x_norm: clamp01(x), y_norm: clamp01(y) };
+        } else {
+            // Letterboxed: black bars on top/bottom.
+            const renderedHeight = rect.width / videoAspect;
+            const padY = (rect.height - renderedHeight) / 2;
+            const x = (e.clientX - rect.left) / rect.width;
+            const y = (e.clientY - rect.top - padY) / renderedHeight;
+            return { x_norm: clamp01(x), y_norm: clamp01(y) };
+        }
+    };
+
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+    // ---------------------------------------------------------------
+    // Keyboard listeners — bound on `document` because the
+    // <video> element doesn't naturally have keyboard focus.
+    // We preventDefault on every recognised key so browser
+    // shortcuts (Ctrl+W, Ctrl+T, etc.) don't intercept the
+    // input destined for the guest. F11 is allowed through so
+    // browser fullscreen still works.
+    // ---------------------------------------------------------------
+    const KEY_PASSTHROUGH = new Set(["F11"]);
+
+    document.addEventListener("keydown", (e) => {
+        const sc = SCANCODE_TABLE[e.code];
+        if (sc === undefined) {
+            return;
+        }
+        if (!KEY_PASSTHROUGH.has(e.code)) {
+            e.preventDefault();
+        }
+        sendCtrl({ type: "key", scancode: sc, down: true });
+    });
+
+    document.addEventListener("keyup", (e) => {
+        const sc = SCANCODE_TABLE[e.code];
+        if (sc === undefined) {
+            return;
+        }
+        if (!KEY_PASSTHROUGH.has(e.code)) {
+            e.preventDefault();
+        }
+        sendCtrl({ type: "key", scancode: sc, down: false });
+    });
+
+    // ---------------------------------------------------------------
+    // Pointer listeners on <video>. Suppress the default context
+    // menu so right-clicks reach the guest.
+    // ---------------------------------------------------------------
+    videoEl.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    videoEl.addEventListener("mousemove", (e) => {
+        const norm = pointerToNorm(e);
+        if (!norm) return;
+        sendCtrl({ type: "pointer-move", x_norm: norm.x_norm, y_norm: norm.y_norm });
+    });
+
+    videoEl.addEventListener("mousedown", (e) => {
+        const norm = pointerToNorm(e);
+        if (!norm) return;
+        const button = browserButtonToSpice(e.button);
+        if (!button) return;
+        e.preventDefault();
+        sendCtrl({
+            type: "pointer-button",
+            button,
+            down: true,
+            x_norm: norm.x_norm,
+            y_norm: norm.y_norm,
+        });
+    });
+
+    videoEl.addEventListener("mouseup", (e) => {
+        const norm = pointerToNorm(e);
+        if (!norm) return;
+        const button = browserButtonToSpice(e.button);
+        if (!button) return;
+        e.preventDefault();
+        sendCtrl({
+            type: "pointer-button",
+            button,
+            down: false,
+            x_norm: norm.x_norm,
+            y_norm: norm.y_norm,
+        });
+    });
 
     // Receive the server's video and audio tracks.
     const enableAudioBtn = document.getElementById("enable-audio");
@@ -68,6 +340,33 @@
             setStatus("ICE failed — check the network");
         } else if (pc.iceConnectionState === "disconnected") {
             setStatus("Disconnected");
+        }
+    };
+
+    // ---------------------------------------------------------------
+    // Send the initial viewport message exactly once when the PC
+    // reaches the connected state. Use the <video> element's
+    // bounding rect as the requested resolution — the guest's
+    // vdagent will resize its X session to match (via
+    // VDAgentMonitorsConfig dispatched on the Rust side from
+    // the resize_tx channel that this message lands on).
+    // ---------------------------------------------------------------
+    let viewportSent = false;
+    const sendViewport = () => {
+        if (viewportSent) return;
+        const rect = videoEl.getBoundingClientRect();
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w <= 0 || h <= 0) return;
+        viewportSent = true;
+        sendCtrl({ type: "viewport", width: w, height: h });
+        console.log("[ryll] viewport sent:", w, "x", h);
+    };
+
+    pc.onconnectionstatechange = () => {
+        console.log("[ryll] PC state:", pc.connectionState);
+        if (pc.connectionState === "connected") {
+            sendViewport();
         }
     };
 
