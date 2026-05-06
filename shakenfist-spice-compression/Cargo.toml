@@ -20,4 +20,4 @@ anyhow = "1"
 byteorder = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
-lz4_flex = { version = "0.11", optional = true }
+lz4_flex = { version = "0.13", optional = true }

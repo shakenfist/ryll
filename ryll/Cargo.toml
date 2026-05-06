@@ -53,17 +53,17 @@ reqwest = { version = "0.12", features = ["blocking"] }
 
 # LZ4 compression/decompression for general data (webdav, usbredir).
 # SPICE image LZ4 lives in shakenfist-spice-compression below.
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving
 # from crates.io. Versions are kept in lockstep with ryll via
 # cargo-release; see tools/cut-release.sh.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.4" }
-shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.4" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.4" }
-shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.4" }
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.5" }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.5" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.5" }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.5" }
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.5" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
@@ -74,7 +74,7 @@ jpeg-decoder = "0.3"
 
 # Capture mode (--capture) — optional, disabled on Windows
 pcap-file = { version = "2", optional = true }
-etherparse = { version = "0.16", optional = true }
+etherparse = { version = "0.20", optional = true }
 mp4 = { version = "0.14", optional = true }
 
 # Clipboard access (host <-> guest copy/paste)
