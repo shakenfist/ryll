@@ -538,7 +538,7 @@ master plan is the input to writing them.
 | 4. HTTP server + token auth + signalling endpoint + browser shell | PLAN-web-frontend-phase-04-server.md | Complete (synthetic source; real frames Phase 5) |
 | 5. Inputs + cursor overlay + audio passthrough | PLAN-web-frontend-phase-05-iac.md | Complete |
 | 6. Reconnect + lifecycle | PLAN-web-frontend-phase-06-lifecycle.md | Complete (`7c6fa2fa` bridge dead signal, `a3aaa1b5` reaper + encoder stop, `e7c98f10` browser auto-reconnect, 6d docs) |
-| 7. CI build + packaging | PLAN-web-frontend-phase-07-ci.md | Not written |
+| 7. CI build + packaging | PLAN-web-frontend-phase-07-ci.md | Not started |
 | 8. Operator docs + systemd example | PLAN-web-frontend-phase-08-docs.md | Not written |
 
 ### Phase 0: Multi-mode parity audit
