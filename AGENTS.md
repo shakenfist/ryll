@@ -465,6 +465,22 @@ ryll's pcap files are big-endian libpcap format carrying
 synthetic TCP frames around the raw post-link SPICE
 stream. The helper handles that without any extra flags.
 
+### Smoke-testing `--web` mode
+
+`tools/web-smoke.sh` verifies that `ryll --web` starts,
+binds the HTTP server, and shuts down cleanly on SIGTERM.
+Usage:
+
+```
+tools/web-smoke.sh [path-to-ryll-binary]
+```
+
+Defaults to `target/release/ryll`; `WEB_PORT` env var
+overrides the port (default `18080`). The script creates a
+temporary stub `.vv`, launches ryll, waits 3 seconds,
+SIGTERMs, and asserts clean exit within 5 seconds. CI runs
+this on the Linux matrix entry after `cargo build --release`.
+
 ## Process templates
 
 Four templates at the repo root capture the workflows we

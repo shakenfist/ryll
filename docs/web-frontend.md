@@ -113,13 +113,26 @@ LAN-connected workstation). For exposure beyond a trusted
 LAN, wait for Phase 8's TLS support — or front the server
 with an HTTPS reverse proxy.
 
+## CI smoke test
+
+`tools/web-smoke.sh` runs on every Linux PR in CI. It
+launches `ryll --web` with a stub `.vv` file (pointing at a
+non-existent SPICE server on a local nc listener), waits 3
+seconds to verify the process has not exited prematurely,
+sends SIGTERM, and asserts that ryll exits cleanly within
+5 seconds. This catches regressions in HTTP-server
+startup, rustls provider install, and SIGTERM handling
+without requiring a real SPICE session.
+
+macOS and Windows CI builds verify the `--web` dependencies
+link correctly but do not run the smoke test (runtime smoke
+is Linux-only for the MVP; see `docs/portability.md`).
+
 ## Pending phases
 
-Phases 0–6 of the web-frontend plan are complete.
+Phases 0–7 of the web-frontend plan are complete.
 The following phases are still pending:
 
-- **Phase 7 (CI + packaging)**: verify the `--web` dependencies
-  build cleanly on Linux, macOS, and Windows in CI.
 - **Phase 8 (Operator docs)**: expand this guide with a systemd
   unit example, troubleshooting section, TLS configuration,
   and security hardening notes.

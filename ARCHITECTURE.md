@@ -40,7 +40,7 @@ shared core. The supported modes are:
 |------|----------|--------|-------------|
 | GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
-| Web | Browser via WebRTC | In progress (Phases 0–6 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+| Web | Browser via WebRTC | In progress (Phases 0–7 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
 
 A feature is not considered complete when it works in only
 one mode. Every feature should be reachable from every mode
@@ -439,6 +439,31 @@ called with backoff delays of 1 s, 2 s, 4 s, 8 s, 16 s
 revealed when all attempts are exhausted. Each attempt
 constructs a brand-new `RTCPeerConnection`; the backoff
 counter resets on a successful `Connected` transition.
+
+## Phase 7: CI + Packaging (`--web` mode)
+
+Phase 7 of the web-frontend plan
+(`docs/plans/PLAN-web-frontend-phase-07-ci.md`) gates the
+`--web` stack through CI and crates.io publishing.
+
+Key changes:
+
+- `shakenfist-spice-renderer` and `shakenfist-spice-webrtc`
+  are added to the `publish-crates` step in `release.yml`
+  in dependency order (renderer after compression; webrtc
+  after usbredir; ryll last).
+- `libopus-dev` is installed on the Linux CI runner so the
+  `opus` crate dynamic-links against a system libopus.
+  The deb/rpm packaging metadata records `libopus0` as a
+  runtime dependency. On macOS and Windows the `audiopus_sys`
+  source-build fallback applies (pkg-config absent → compile
+  from source → no runtime dep).
+- `tools/web-smoke.sh` is a CI step on the Linux matrix
+  entry only. It launches `ryll --web` with a stub `.vv`,
+  asserts the process stays alive for 3 seconds, sends
+  SIGTERM, and verifies clean exit within 5 seconds.
+  macOS and Windows CI verifies the `--web` dependencies
+  link but does not run the smoke test.
 
 ## Code Organisation
 
