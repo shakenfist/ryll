@@ -1019,6 +1019,61 @@ deferred:
   inherits this from the protocol), not introduced by the
   web-frontend work, but worth tracking now.
 
+#### Items deferred from the post-Phase-8 pre-push audit
+
+Tracked from a `PUSH-TEMPLATE.md` audit run after Phases 0–8
+landed. Three blocking security findings (token leaking into
+structured logs, reaper-vs-/offer race, no rate limit on
+/offer) were addressed before push as commits `0d2ed6e0`,
+`a9601da5`, `a468de26`. The items below are advisory and
+deferred:
+
+- **Orphan `_notifications_sink` in `ryll/src/main.rs::run_web`**
+  (around line 419). `run_web` builds an
+  `Arc<dyn NotificationSink>` and immediately discards it via
+  the `_` prefix; `run_connection` does not accept a sink
+  parameter, unlike the headless path. Either wire the sink
+  into `run_connection` so web-mode channel handlers route
+  notifications through the unified store (Decision #21), or
+  delete the orphan and replace with a `// TODO(web-notifications):`
+  marker. Low-risk because the gap-observer at the same call
+  site already populates the store.
+- **Accumulated `#[allow(dead_code)]` annotations.** Three on
+  `WebState` (`input_tx`, `resize_tx`, `event_tx`) annotated
+  "wired in 5b/5c/5d/5e", plus several on `ChannelEvent`
+  variants and per-event `image_id` fields in the renderer's
+  `channels/mod.rs`. With Phase 5 complete these forward
+  references should be revisited — most are now actually used
+  by `run_web` and the relays, so the annotations can be
+  removed.
+- **RTP header helper extraction in `shakenfist-spice-webrtc/src/bridge.rs`.**
+  `run_video_pump`, `run_synthetic_audio_pump`, and
+  `run_audio_pump` all build a 7-field `Header` struct literal
+  inline. A `fn make_rtp_header(pt, seq, ts, ssrc) -> Header`
+  helper would eliminate the triple copy-paste.
+- **`WebState::teardown_bridge()` extraction before multi-viewer.**
+  `run_bridge_reaper` and the implicit teardown sequence in
+  `post_offer` share the same lock-ordered "close bridge → stop
+  encoder → clear opus_active_tx" shape. When multi-viewer
+  support is added a `WebState::teardown_bridge()` method
+  would prevent a third copy.
+- **`denormalise` adversarial test in `ryll/src/web/inputs.rs`.**
+  The browser-side denormalisation function clamps coordinates
+  defensively but has no unit test for `NaN`, `±∞`, or
+  out-of-range float inputs. NaN comparisons in `clamp`
+  produce platform-dependent surprises. Add a parameterised
+  unit test.
+- **Targeted unit test for `run_bridge_reaper`'s generation-
+  counter fast path** (`ryll/src/web/lifecycle.rs`). The
+  Phase 6b note about "real WebrtcBridge required for
+  unit-testing the reaper" is now partially relaxed — the
+  generation-counter path could be tested without a live
+  bridge by injecting a `WebState` and bumping
+  `bridge_generation` between subscription and signal.
+  Existing lifecycle integration test covers the no-regression
+  case but a targeted unit test would harden the race-handling
+  logic cheaply.
+
 ### Bugs fixed during this work
 
 - **`capture.rs` H.264 NAL extraction** (Phase 2 follow-up,

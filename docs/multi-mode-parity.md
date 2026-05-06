@@ -28,8 +28,8 @@
 
 # Multi-mode parity matrix
 
-| Feature | GUI | Headless | Web (planned) |
-|---------|-----|----------|---------------|
+| Feature | GUI | Headless | Web |
+|---------|-----|----------|-----|
 | **Connection** | | | |
 | Connect via .vv file (`--file`) | available | available | available |
 | Connect via URL (`--url`) | available | available | available |

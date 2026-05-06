@@ -63,12 +63,11 @@ Ryll uses:
 3. **Headless mode** - Essential for automated testing. Runs the full protocol
    stack without GUI overhead. Headless is also the first evidence of the
    project's broader **multi-modal client** stance: the SPICE stack is
-   frontend-agnostic, and additional frontends (a browser-facing web mode is in
-   concept-plan stage in `docs/plans/PLAN-web-frontend.md`) are intended to be
-   first-class peers of the GUI rather than retrofits. When you add or modify a
-   feature, ask which modes it should be reachable from; if a mode physically
-   cannot host the feature, say so in the docs rather than leaving the gap
-   unstated.
+   frontend-agnostic, and additional frontends (`--web` browser mode shipped
+   end-to-end via `docs/plans/PLAN-web-frontend.md`) are first-class peers of
+   the GUI rather than retrofits. When you add or modify a feature, ask which
+   modes it should be reachable from; if a mode physically cannot host the
+   feature, say so in the docs rather than leaving the gap unstated.
 
 4. **Cadence mode** - Sends automatic keystrokes every 2 seconds to generate
    predictable input→display latency measurements.
@@ -550,8 +549,13 @@ applies to all future webrtc-rs work:
 - **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
   on Linux, macOS (ARM), and Windows on every push to `develop` and
-  on pull requests. CI runs native `cargo` (not Docker). PRs also
-  receive an automated code review via the shared
+  on pull requests. CI runs native `cargo` (not Docker). On Linux, CI
+  installs `libopus-dev` so audiopus_sys dynamic-links libopus and the
+  `.deb` declares `libopus0` via cargo-deb's `$auto`; on macOS and
+  Windows audiopus_sys source-builds libopus for a self-contained
+  binary. CI also runs `tools/web-smoke.sh` (plain + `--tls` variants)
+  on Linux to verify `--web` mode startup and graceful shutdown. PRs
+  also receive an automated code review via the shared
   `shakenfist/actions/review-pr-with-claude` action.
 - **Bot-triggered workflows** for PR automation:
   `@shakenfist-bot please re-review`, `please address comments`,
@@ -678,7 +682,7 @@ partial state.
 | openh264 | H.264 video encoding: in `shakenfist-spice-renderer` for the live encoder pipeline; also in `ryll`'s `capture` feature for `--capture` MP4 output |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
 | webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Pinned at `"0.17.1"` which re-exports `rtp = "^0.17.1"` (used for `H264Payloader` packetisation). |
-| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc`. The `audiopus_sys` transitive dep builds libopus from source (via cmake) in the devcontainer if `pkg-config` does not find a system libopus. Phase 5 will reuse this for real PCM → Opus encoding if the SPICE server negotiates an uncompressed playback format. |
+| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc` and the `WebOpusSink` passthrough path in `--web` mode. The `audiopus_sys` transitive dep builds libopus from source (via cmake) in the devcontainer if `pkg-config` does not find a system libopus; CI installs `libopus-dev` on Linux so the resulting binary dynamic-links libopus.so.0 and cargo-deb's `$auto` picks up `libopus0` as a runtime dep. Real PCM → Opus encoding for SPICE servers that negotiate uncompressed playback is deferred future work; today the PCM path produces silent audio with a warn-once log line. |
 | cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
 | rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |
