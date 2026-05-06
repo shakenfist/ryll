@@ -87,6 +87,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # See ci.yml for rationale: CMake 4.x rejects libopus's bundled
+      # cmake_minimum_required(VERSION <3.5); this policy override lets
+      # the audiopus_sys source-build path keep working on macOS/Windows.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
