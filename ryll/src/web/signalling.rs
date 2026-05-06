@@ -19,6 +19,7 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
@@ -230,6 +231,30 @@ pub async fn post_offer(
     State(state): State<Arc<WebState>>,
     Json(offer): Json<OfferReq>,
 ) -> Result<Json<OfferRes>, (StatusCode, String)> {
+    // Rate limit: at most one accepted offer per second. Uses a
+    // std::sync::Mutex because the lock hold time is microseconds
+    // and no .await is held while locked.
+    {
+        let now = Instant::now();
+        match state.last_offer_at.lock() {
+            Ok(mut last) => {
+                if now.duration_since(*last) < Duration::from_secs(1) {
+                    return Err((
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "Too many requests; wait 1 s between offers".to_string(),
+                    ));
+                }
+                *last = now;
+            }
+            Err(poisoned) => {
+                // Recover from a poisoned mutex rather than
+                // panic; reset the timestamp and proceed.
+                let mut inner = poisoned.into_inner();
+                *inner = now;
+            }
+        }
+    }
+
     info!(
         "web: /offer received (type={}, sdp_len={})",
         offer.req_type,
@@ -620,5 +645,80 @@ mod tests {
             "control_tx should be None after stop()"
         );
         assert!(infra.handle.is_none(), "handle should be None after stop()");
+    }
+
+    /// Two `POST /offer` requests in rapid succession: the second
+    /// must return 429 Too Many Requests. This exercises the
+    /// `last_offer_at` cooldown added in the wave-2d security fix.
+    ///
+    /// We call `post_offer` directly (bypassing the axum router)
+    /// to avoid building a real WebRTC offer, which would be too
+    /// slow for an in-series burst test. We rely on the rate-limit
+    /// guard returning early before any bridge construction so a
+    /// dummy SDP is fine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_offer_within_cooldown_returns_429() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = Arc::new(WebState::new());
+        // Seed the surface mirror so the encoder restart does not
+        // return 503 for the first offer.
+        {
+            let mut m = state.surface_mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 1280,
+                height: 720,
+            });
+        }
+        let token = state.token.clone();
+        let router = build_router(Arc::clone(&state));
+
+        // Helper: build a minimal (deliberately malformed) offer
+        // body. The SDP will fail `accept_offer` inside the
+        // handler, but a 429 fires before that point, so the
+        // second request never reaches `accept_offer`.
+        let offer_body = serde_json::json!({
+            "type": "offer",
+            "sdp": "v=0\r\n",
+        })
+        .to_string();
+
+        // First request — should NOT be rate-limited (not 429).
+        // It may return any other status (200 if accept_offer
+        // somehow succeeds, or 400 on bad SDP — both are fine).
+        let req1 = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(format!("/offer?token={}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(offer_body.clone()))
+            .unwrap();
+
+        // Second request — must be 429. Send both requests with
+        // no sleep between them so the cooldown window cannot
+        // expire between the two.
+        let req2 = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(format!("/offer?token={}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(offer_body.clone()))
+            .unwrap();
+
+        // Use a cloned router for each oneshot call.
+        let router2 = router.clone();
+        let resp1 = router.oneshot(req1).await.expect("router req1");
+        let resp2 = router2.oneshot(req2).await.expect("router req2");
+
+        assert_ne!(
+            resp1.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "first offer should not be rate-limited"
+        );
+        assert_eq!(
+            resp2.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "second offer within cooldown should be 429"
+        );
     }
 }

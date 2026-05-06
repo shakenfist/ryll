@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -101,6 +101,15 @@ pub struct WebState {
     /// wakes, a new bridge has replaced the old one and the
     /// reaper skips the reap to avoid closing a healthy bridge.
     pub bridge_generation: Arc<AtomicU64>,
+    /// Timestamp of the last accepted `POST /offer`. Used to
+    /// enforce a 1-second cooldown between offers so an
+    /// authenticated client cannot thrash the openh264 encoder
+    /// init at arbitrary rate.
+    ///
+    /// `std::sync::Mutex` (not `tokio::sync::Mutex`) because the
+    /// lock hold time is microseconds and no `.await` is held
+    /// while the guard is live.
+    pub last_offer_at: std::sync::Mutex<Instant>,
 }
 
 impl WebState {
@@ -163,6 +172,9 @@ impl WebState {
             surface_mirror,
             active_opus_tx,
             bridge_generation: Arc::new(AtomicU64::new(0)),
+            // Initialise 60 s in the past so the first offer
+            // always succeeds without a cold-start delay.
+            last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),
         }
     }
 }
@@ -325,8 +337,8 @@ async fn run_inner(
             // Goes to stdout only — never through the tracing
             // pipeline so the token does not leak into journald
             // or log aggregators.
-            // audit-allow-println: operator-facing URL output, not for logs
             println!(
+                // audit-allow-println: operator-facing URL output, not for logs
                 "ryll: serving web frontend at {}://{}/?token={}",
                 scheme, local_addr, token
             );
