@@ -19,12 +19,13 @@
 //! (`profile-level-id=42e01f`, baseline level 3.1, packetization
 //! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
@@ -140,6 +141,21 @@ pub struct WebrtcBridge {
     /// `Mutex<Option<...>>` because `WebrtcBridge` is shared via
     /// `Arc` but the receiver can only be consumed once.
     incoming_control: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
+    /// Notified once when the underlying `RTCPeerConnection`
+    /// reaches a terminal state (`Failed`, `Disconnected`, or
+    /// `Closed`). External waiters can clone this via
+    /// [`WebrtcBridge::dead_handle`] or await it directly via
+    /// [`WebrtcBridge::wait_for_dead`]. Phase 6a wires this up so
+    /// the server-side reaper (Phase 6b) can tear down the bridge
+    /// + encoder when the browser disconnects.
+    dead: Arc<Notify>,
+    /// Sticky flag set the first time the PC reaches a terminal
+    /// state. Used to ensure `notify_waiters()` fires only once
+    /// (subsequent terminal transitions are no-ops) and to give
+    /// late subscribers a fast-path return from
+    /// [`WebrtcBridge::wait_for_dead`] when the bridge already
+    /// died before they began awaiting.
+    dead_flag: Arc<AtomicBool>,
 }
 
 impl WebrtcBridge {
@@ -220,23 +236,58 @@ impl WebrtcBridge {
             )
             .await?;
 
+        // Bridge lifecycle signal: a `Notify` + sticky `AtomicBool`
+        // pair that fires once when the PC reaches a terminal state
+        // (`Failed` / `Disconnected` / `Closed`). The reaper task
+        // in Phase 6b waits on this to tear down the bridge and
+        // encoder when the browser disconnects. The flag is sticky
+        // so late subscribers (callers that begin awaiting after
+        // the PC already died) return immediately via
+        // `wait_for_dead`'s fast-path check.
+        let dead = Arc::new(Notify::new());
+        let dead_flag = Arc::new(AtomicBool::new(false));
+
         // Keyframe-on-attach: whenever the PC reaches Connected, ask
         // the encoder for a fresh IDR so the viewer can decode
         // immediately rather than waiting for the next periodic
-        // keyframe.
+        // keyframe. Also signals "dead" on terminal states so the
+        // server-side reaper can tear the bridge down proactively.
         let on_connected_tx = config.encoder_control.clone();
+        let dead_cb = dead.clone();
+        let dead_flag_cb = dead_flag.clone();
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
             let tx = on_connected_tx.clone();
+            let dead = dead_cb.clone();
+            let dead_flag = dead_flag_cb.clone();
             Box::pin(async move {
-                if state == RTCPeerConnectionState::Connected {
-                    if let Err(err) = tx.send(EncoderControl::RequestKeyframe).await {
-                        tracing::warn!(
-                            error = %err,
-                            "WebrtcBridge: failed to request keyframe on Connected",
-                        );
-                    } else {
-                        tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                match state {
+                    RTCPeerConnectionState::Connected => {
+                        if let Err(err) = tx.send(EncoderControl::RequestKeyframe).await {
+                            tracing::warn!(
+                                error = %err,
+                                "WebrtcBridge: failed to request keyframe on Connected",
+                            );
+                        } else {
+                            tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                        }
                     }
+                    // `swap(true)` returns the previous value;
+                    // the guard fires only on the very first
+                    // terminal transition so subsequent state
+                    // changes (e.g. Disconnected → Closed) do
+                    // not re-notify.
+                    RTCPeerConnectionState::Failed
+                    | RTCPeerConnectionState::Disconnected
+                    | RTCPeerConnectionState::Closed
+                        if !dead_flag.swap(true, Ordering::SeqCst) =>
+                    {
+                        tracing::info!(
+                            ?state,
+                            "WebrtcBridge: PC reached terminal state, signalling dead",
+                        );
+                        dead.notify_waiters();
+                    }
+                    _ => {}
                 }
             })
         }));
@@ -305,7 +356,47 @@ impl WebrtcBridge {
             control_dc,
             _encoder_control: config.encoder_control,
             incoming_control,
+            dead,
+            dead_flag,
         })
+    }
+
+    /// Wait until the bridge's underlying `RTCPeerConnection`
+    /// reaches a terminal state (`Failed`, `Disconnected`, or
+    /// `Closed`).
+    ///
+    /// The flag is sticky: a caller that invokes this after the
+    /// PC has already died returns immediately via the
+    /// `dead_flag` fast-path check. Multiple waiters are
+    /// supported; all currently-awaiting `wait_for_dead` futures
+    /// resolve when the first terminal transition fires
+    /// `notify_waiters()`. Subsequent calls (after the flag is
+    /// set) take the fast-path and return without awaiting.
+    ///
+    /// `notified().await` is cancellation-safe: dropping the
+    /// awaiting future does not leak any state inside the
+    /// `Notify`.
+    pub async fn wait_for_dead(&self) {
+        if self.dead_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        self.dead.notified().await;
+    }
+
+    /// Return a clone of the `Arc<Notify>` that fires once when
+    /// the bridge's PC reaches a terminal state. Used by the
+    /// server-side reaper (Phase 6b) so it can wait on the
+    /// signal without holding the `bridge_slot` lock or
+    /// borrowing `&self` across an `.await`.
+    ///
+    /// Note: callers that obtain this handle should pair it with
+    /// a check of [`WebrtcBridge::wait_for_dead`]'s flag (or
+    /// observe the bridge state another way) — `Notify` does not
+    /// queue notifications for waiters that subscribe after
+    /// `notify_waiters()` was called, so a late subscriber on
+    /// the bare handle would wait forever.
+    pub fn dead_handle(&self) -> Arc<Notify> {
+        self.dead.clone()
     }
 
     /// Accept a remote SDP offer, generate our answer, and wait for
