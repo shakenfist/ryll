@@ -67,11 +67,18 @@ echo
 bold "=== wave 1b: mechanical style checks ==="
 
 # 1. No raw println! / eprintln! in non-test source code.
+#    Allowlist: lines containing the marker comment
+#    `audit-allow-println` are intentional operator-facing
+#    output (e.g. the startup URL line that must go to the
+#    operator's terminal only, never through the tracing
+#    pipeline). Any use of the marker must be reviewed and
+#    justified in the same commit that adds it.
 PRINTLN_HITS=$(grep -rn --include='*.rs' -E '^[[:space:]]*(println|eprintln)!' \
     ryll/src shakenfist-spice-protocol/src shakenfist-spice-compression/src \
     shakenfist-spice-usbredir/src 2>/dev/null \
     | grep -v '#\[cfg(test)\]' \
     | grep -v '/tests/' \
+    | grep -v 'audit-allow-println' \
     || true)
 if [[ -n "$PRINTLN_HITS" ]]; then
     red "FAIL: raw println!/eprintln! found:"

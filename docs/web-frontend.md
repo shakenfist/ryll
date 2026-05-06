@@ -397,8 +397,13 @@ The TLS key must be readable by the `ryll` user:
 
 ### Extracting the per-launch URL
 
-ryll emits its URL with the per-launch token to stdout (via tracing)
-on startup. Under systemd, stdout goes to the journal. Extract it with:
+ryll prints its URL with the per-launch token directly to stdout
+(not via the tracing pipeline, so the token never reaches journald
+or log aggregators). Under systemd, stdout is captured in the
+journal only if the unit uses `StandardOutput=journal`. With the
+default `StandardOutput=inherit` the URL goes to the terminal where
+you launched the service. To read it from the journal when it is
+captured there:
 
     journalctl -u ryll-web -n 50 --no-pager \
         | grep -oE 'https?://[^ ]+token=[^ ]+' | tail -1

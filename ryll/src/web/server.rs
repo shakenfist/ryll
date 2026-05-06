@@ -307,18 +307,30 @@ async fn run_inner(
     // axum-server doesn't hand back a TcpListener pre-serve
     // (unlike axum::serve), so we use Handle::listening() —
     // resolves to `Some(local_addr)` once the bind succeeds.
-    // Goes through tracing rather than raw stdout so the line
-    // respects the operator's logging configuration. The
-    // workspace's tracing-subscriber writes fmt::layer to stdout
-    // by default, so the smoke test continues to grep stdout.
     let scheme = if tls.is_some() { "https" } else { "http" };
     let token = state.token.clone();
     let reporter_handle = handle.clone();
     let reporter = tokio::spawn(async move {
         if let Some(local_addr) = reporter_handle.listening().await {
-            info!(
+            // Operator-visible: full URL (must be the way the
+            // operator actually copies it to their browser).
+            // Goes to stdout only — never through the tracing
+            // pipeline so the token does not leak into journald
+            // or log aggregators.
+            // audit-allow-println: operator-facing URL output, not for logs
+            println!(
                 "ryll: serving web frontend at {}://{}/?token={}",
                 scheme, local_addr, token
+            );
+
+            // Structured-log breadcrumb: bind address only. The
+            // token prefix is enough to disambiguate sessions in
+            // audit logs without giving log readers the full
+            // credential.
+            info!(
+                "web: listening on {} (token prefix {}…)",
+                local_addr,
+                &token[..8.min(token.len())],
             );
         }
     });
