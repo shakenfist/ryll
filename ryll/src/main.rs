@@ -582,7 +582,41 @@ fn run_web(
             cursor_bridge_slot,
             cursor_mirror,
         ));
-        let server_result = crate::web::run(state, &web_host, web_port).await;
+
+        // Phase 6b: spawn the bridge reaper. It watches the
+        // active bridge's dead signal and tears down the bridge
+        // + encoder + audio pump when the browser disconnects.
+        // The SPICE session is left untouched. The handle is
+        // retained so the reaper can be aborted in the shutdown
+        // path after axum::serve returns.
+        let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(state.clone()));
+
+        let server_result = crate::web::run(state.clone(), &web_host, web_port).await;
+
+        // Phase 6b: explicit bridge close. After axum::serve
+        // returns (Ctrl+C raised SHUTDOWN_REQUESTED, or axum
+        // errored), close any active bridge so DTLS/SRTP tears
+        // down cleanly before the runtime drops. Use a 2-second
+        // ceiling so a wedged bridge cannot block shutdown
+        // indefinitely.
+        tracing::info!("web: HTTP server drained");
+        {
+            let bridge = {
+                let mut slot = state.bridge_slot.lock().await;
+                slot.take()
+            };
+            if let Some(b) = bridge {
+                tracing::info!("web: closing active bridge before exit");
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), b.close()).await;
+            }
+        }
+        {
+            let mut enc = state.encoder.lock().await;
+            tokio::time::timeout(std::time::Duration::from_secs(2), enc.stop())
+                .await
+                .ok();
+        }
+        reaper_handle.abort();
 
         // Server exited; ensure the cancel flag is up so the
         // renderer notices on its next 100 ms tick. The cancel

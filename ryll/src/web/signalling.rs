@@ -173,6 +173,34 @@ impl EncoderInfra {
         );
         Ok((frame_rx, control_tx))
     }
+
+    /// Stop the active encoder task without restarting. Used
+    /// by the bridge reaper (Phase 6b) when the browser
+    /// disconnects and no immediate replacement is expected,
+    /// and by the shutdown path in `run_web` to release
+    /// resources before the runtime drops.
+    ///
+    /// Sends [`EncoderControl::Stop`] on the control channel
+    /// and awaits the task [`JoinHandle`] with a 2-second
+    /// ceiling. If the task does not exit within the timeout
+    /// it is abandoned — the task will exit naturally on the
+    /// next send error once all receivers are dropped.
+    pub async fn stop(&mut self) {
+        if let Some(tx) = self.control_tx.take() {
+            let _ = tx.send(EncoderControl::Stop).await;
+        }
+        if let Some(h) = self.handle.take() {
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), h).await;
+            match result {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => tracing::warn!("encoder task errored on stop: {}", e),
+                Ok(Err(e)) => tracing::warn!("encoder join errored on stop: {}", e),
+                Err(_) => {
+                    tracing::warn!("encoder did not stop within 2s on stop; abandoning")
+                }
+            }
+        }
+    }
 }
 
 impl Default for EncoderInfra {
@@ -557,5 +585,35 @@ mod tests {
         let _ = control_tx
             .send(shakenfist_spice_renderer::EncoderControl::Stop)
             .await;
+    }
+
+    /// `EncoderInfra::stop` sends `Stop` and awaits the task
+    /// handle. After `stop()` returns, `control_tx` and
+    /// `handle` are both `None` and the encoder task has exited.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_releases_encoder_task() {
+        let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
+        {
+            let mut m = mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 640,
+                height: 480,
+            });
+        }
+        let mut infra = EncoderInfra::new();
+        let (_frame_rx, _control_tx) = infra
+            .restart(&mirror)
+            .await
+            .expect("restart should succeed");
+        // Encoder is running. Now stop it via stop().
+        infra.stop().await;
+        // After stop(), the infra fields are cleared.
+        assert!(
+            infra.control_tx.is_none(),
+            "control_tx should be None after stop()"
+        );
+        assert!(infra.handle.is_none(), "handle should be None after stop()");
     }
 }

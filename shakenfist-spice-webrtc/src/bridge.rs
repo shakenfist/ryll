@@ -399,6 +399,21 @@ impl WebrtcBridge {
         self.dead.clone()
     }
 
+    /// Return a clone of the sticky `Arc<AtomicBool>` that is set
+    /// to `true` the first time the PC reaches a terminal state.
+    /// Callers that hold an `Arc<Notify>` from [`dead_handle`]
+    /// but cannot call [`wait_for_dead`] (because they do not
+    /// hold `&self` at await time) should check this flag before
+    /// calling `notified().await` to replicate the late-subscriber
+    /// fast-path and avoid hanging when the bridge already died
+    /// before the caller subscribed.
+    ///
+    /// [`dead_handle`]: Self::dead_handle
+    /// [`wait_for_dead`]: Self::wait_for_dead
+    pub fn dead_flag_handle(&self) -> Arc<AtomicBool> {
+        self.dead_flag.clone()
+    }
+
     /// Accept a remote SDP offer, generate our answer, and wait for
     /// ICE gathering to complete so the returned answer carries every
     /// candidate we know about (no trickle ICE for the MVP).

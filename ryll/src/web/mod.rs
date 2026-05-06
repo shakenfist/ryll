@@ -11,6 +11,7 @@ pub(crate) mod assets;
 pub(crate) mod audio;
 pub(crate) mod cursor;
 pub(crate) mod inputs;
+pub(crate) mod lifecycle;
 pub(crate) mod server;
 pub(crate) mod signalling;
 
