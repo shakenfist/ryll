@@ -113,6 +113,88 @@ LAN-connected workstation). For exposure beyond a trusted
 LAN, wait for Phase 8's TLS support — or front the server
 with an HTTPS reverse proxy.
 
+## Service mode
+
+For long-lived deployments, run ryll under systemd so it restarts
+automatically on failure and logs go to the journal.
+
+A reference unit file is at [`examples/ryll-web.service`](../examples/ryll-web.service).
+Copy it to `/etc/systemd/system/ryll-web.service`, then:
+
+    systemctl daemon-reload
+    systemctl enable --now ryll-web
+
+### User and group
+
+Create a dedicated unprivileged account:
+
+    useradd -r -s /usr/sbin/nologin ryll
+
+The unit runs as `User=ryll Group=ryll`.
+
+### EnvironmentFile
+
+The unit reads `/etc/ryll/web.env` so you can tune all parameters
+without touching the unit file. Create it with owner `root:ryll`,
+mode `0640`:
+
+    install -d -o root -g ryll -m 750 /etc/ryll
+    install -o root -g ryll -m 640 /dev/null /etc/ryll/web.env
+
+Example `/etc/ryll/web.env`:
+
+    VV_FILE=/etc/ryll/session.vv
+    WEB_HOST=0.0.0.0
+    WEB_PORT=8443
+    WEB_TLS_CERT=/etc/ryll/tls/cert.pem
+    WEB_TLS_KEY=/etc/ryll/tls/key.pem
+
+The `.vv` file should be readable only by the ryll user:
+
+    install -o ryll -g ryll -m 600 /dev/null /etc/ryll/session.vv
+
+### Cert file permissions
+
+The TLS key must be readable by the `ryll` user:
+
+    chown ryll:ryll /etc/ryll/tls/cert.pem /etc/ryll/tls/key.pem
+    chmod 0600 /etc/ryll/tls/key.pem
+
+### Extracting the per-launch URL
+
+ryll prints its URL with the per-launch token to stdout on startup.
+Under systemd, stdout goes to the journal. Extract it with:
+
+    journalctl -u ryll-web -n 50 --no-pager \
+        | grep -oE 'https?://[^ ]+token=[^ ]+' | tail -1
+
+The URL includes the token and is valid until the service restarts.
+
+### Graceful shutdown
+
+`KillSignal=SIGTERM` causes `systemctl stop ryll-web` to send SIGTERM.
+This engages Phase 6's graceful-shutdown path (`with_graceful_shutdown`
+/ `Handle::graceful_shutdown`), which drains in-flight HTTP requests
+and tears down any active WebRTC bridge cleanly. `TimeoutStopSec=10s`
+is a generous ceiling; normal shutdown completes within ~5 seconds.
+
+### Cert rotation (MVP)
+
+ryll does not support inline cert reload. To rotate a certificate:
+
+    # Install new cert/key into /etc/ryll/tls/, then:
+    systemctl restart ryll-web
+
+The URL token changes on each restart. Extract the new URL from the
+journal using the recipe above.
+
+### Hardening note
+
+`ProtectSystem=strict` + `ReadOnlyPaths=/etc/ryll` prevents writes
+outside the declared paths. If you use `--log-file` to write logs to
+disk, add `ReadWritePaths=/var/log/ryll` (or your chosen path) to the
+unit's `[Service]` section to relax the restriction.
+
 ## CI smoke test
 
 `tools/web-smoke.sh` runs on every Linux PR in CI. It
