@@ -1,0 +1,52 @@
+# ryll-web.service — reference systemd unit for ryll --web mode
+#
+# Installation:
+#   cp examples/ryll-web.service /etc/systemd/system/ryll-web.service
+#   systemctl daemon-reload
+#   systemctl enable --now ryll-web
+#
+# Customise the EnvironmentFile path if your site layout differs
+# (e.g. /etc/ryll/web.env → /opt/ryll/web.env).  All tuneable
+# parameters live in the env file; the unit file itself rarely needs
+# editing.
+
+[Unit]
+Description=ryll --web SPICE-to-browser transcoder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ryll
+Group=ryll
+EnvironmentFile=/etc/ryll/web.env
+# web.env declares:
+#   VV_FILE=/etc/ryll/session.vv
+#   WEB_HOST=0.0.0.0
+#   WEB_PORT=8443
+#   WEB_TLS_CERT=/etc/ryll/tls/cert.pem
+#   WEB_TLS_KEY=/etc/ryll/tls/key.pem
+ExecStart=/usr/bin/ryll --web \
+    --file ${VV_FILE} \
+    --web-host ${WEB_HOST} \
+    --web-port ${WEB_PORT} \
+    --web-tls-cert ${WEB_TLS_CERT} \
+    --web-tls-key ${WEB_TLS_KEY}
+Restart=on-failure
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadOnlyPaths=/etc/ryll
+# ryll opens UDP for ICE; allow UDP egress.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

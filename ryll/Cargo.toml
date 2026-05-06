@@ -9,7 +9,7 @@ description = "A Rust SPICE VDI test client"
 
 [features]
 default = ["capture"]
-capture = ["dep:pcap-file", "dep:etherparse", "dep:openh264", "dep:mp4"]
+capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
 
 [dependencies]
 # GUI framework
@@ -61,7 +61,9 @@ lz4_flex = "0.13"
 # cargo-release; see tools/cut-release.sh.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.5" }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.5" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.5" }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.5" }
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.5" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
@@ -73,7 +75,6 @@ jpeg-decoder = "0.3"
 # Capture mode (--capture) — optional, disabled on Windows
 pcap-file = { version = "2", optional = true }
 etherparse = { version = "0.20", optional = true }
-openh264 = { version = "0.6", optional = true }
 mp4 = { version = "0.14", optional = true }
 
 # Clipboard access (host <-> guest copy/paste)
@@ -118,19 +119,68 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
 
+# HTTP server and routing for --web mode
+axum = "0.8"
+
+# TLS-capable axum bind path. `tls-rustls-no-provider` keeps the
+# rustls 0.23 + ring provider pinning the workspace already chose
+# (main.rs installs `rustls::crypto::ring::default_provider()`)
+# rather than forcing the aws-lc-rs surface that the plain
+# `tls-rustls` feature would activate. `RustlsConfig::from_pem_file`
+# picks up the process-wide default provider at runtime.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+
+# TLS crypto provider — needed by --web mode to install the
+# rustls ring provider at startup before any WebRTC offers
+# arrive. webrtc-rs pulls it in transitively but an explicit
+# dep here makes `install_default()` resolvable from main.rs
+# without reaching into a transitive crate's re-exports.
+rustls = { version = "0.23", features = ["ring"] }
+
+# Constant-time comparison for token auth (timing-safe)
+subtle = "2"
+
+# Base64 for PNG-encoded cursor shapes shipped over the control
+# DC in --web mode.
+base64 = "0.22"
+
+# Query-string parsing for token extraction
+url = "2"
+
 [dev-dependencies]
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+# Self-signed cert generation for the --web TLS integration tests.
+rcgen = "0.13"
+# Phase 4 step 4c uses a real webrtc-rs client PC to drive an
+# SDP offer through the in-process axum router. rustls is
+# pinned to ring because both aws-lc-rs and ring are pulled in
+# transitively and rustls 0.23 requires an explicit choice.
+webrtc = "0.17.1"
+rustls = { version = "0.23", features = ["ring"] }
 
 [package.metadata.deb]
 maintainer = "Michael Still <mikal@stillhq.com>"
 section = "utils"
 priority = "optional"
+# $auto scans the binary's NEEDED entries and picks up libopus0
+# (introduced by --web mode via audiopus_sys dynamic-linking to
+# libopus.so.0), libasound2, libxcb1, etc. automatically.
+# Phase 7b installs libopus-dev on Linux CI runners so the binary
+# dynamic-links libopus; $auto therefore captures the runtime dep.
 depends = "$auto"
 assets = [
     ["target/release/ryll", "usr/bin/", "755"],
 ]
 
 [package.metadata.generate-rpm]
+# auto-req = "auto" (the default) uses ldd-based detection to generate
+# RPM Requires entries from the binary's NEEDED entries. This picks up
+# opus (Fedora/RHEL package name) introduced by --web mode, plus any
+# other shared-library deps, without requiring a manual requires list.
+# Supported since cargo-generate-rpm 0.11; "auto" is the default so
+# this line is explicit documentation of the chosen policy.
+auto-req = "auto"
 assets = [
     { source = "target/release/ryll", dest = "/usr/bin/ryll", mode = "0755" },
 ]

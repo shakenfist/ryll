@@ -6,6 +6,12 @@ use clap::Parser;
 use configparser::ini::Ini;
 use shakenfist_spice_protocol::ConnectionConfig;
 
+// Device-shaped configuration (the value types passed into the
+// channel constructors) lives in the renderer crate. The
+// CLI-shaped `Args` and `Config` definitions stay here, alongside
+// the path-validation helpers.
+pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskConfig};
+
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -96,6 +102,33 @@ pub struct Args {
     /// and unchecking the checkbox after launch.
     #[arg(long, default_value_t = false)]
     pub no_obey_guest_size: bool,
+
+    /// Run as a SPICE → browser transcoder. Listens on an
+    /// ephemeral HTTP port, prints a URL with a per-launch
+    /// random token, and serves a browser shell that consumes
+    /// the SPICE display via WebRTC. Mutually exclusive with
+    /// --headless and the GUI default.
+    #[arg(long)]
+    pub web: bool,
+
+    /// Bind address for --web mode (default 127.0.0.1).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub web_host: String,
+
+    /// Listen port for --web mode (default ephemeral).
+    #[arg(long, default_value_t = 0u16)]
+    pub web_port: u16,
+
+    /// PEM-encoded TLS certificate chain for --web mode. If
+    /// supplied, --web-tls-key is also required and the web
+    /// frontend serves over HTTPS instead of plain HTTP.
+    #[arg(long, requires = "web_tls_key")]
+    pub web_tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded TLS private key for --web mode. Required if
+    /// --web-tls-cert is supplied.
+    #[arg(long, requires = "web_tls_cert")]
+    pub web_tls_key: Option<PathBuf>,
 }
 
 /// SPICE connection configuration
@@ -148,7 +181,14 @@ fn parse_optional_u16(ini: &Ini, section: &str, key: &str) -> Result<Option<u16>
 }
 
 impl Config {
-    /// Create configuration from command line arguments
+    /// Create configuration from command line arguments.
+    ///
+    /// Phase 5 step 5a tightened `--web` to require a real
+    /// connection source (`--url` / `--file` / `--direct`).
+    /// Phase 4 had returned a placeholder stub here so the
+    /// HTTP server could come up without a SPICE backend; that
+    /// expedient is gone now that `run_web` actually spawns
+    /// `run_connection`.
     pub fn from_args(args: &Args) -> Result<Self> {
         if let Some(url) = &args.url {
             Self::from_url(url)
@@ -246,13 +286,6 @@ impl Config {
     }
 }
 
-/// Parsed virtual disk configuration from CLI flags.
-#[derive(Debug, Clone)]
-pub struct VirtualDiskConfig {
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
 /// Collect virtual disk configs from CLI args and validate paths.
 pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
     let mut disks = Vec::new();
@@ -283,13 +316,6 @@ pub fn parse_virtual_disks(args: &Args) -> Result<Vec<VirtualDiskConfig>> {
     }
 
     Ok(disks)
-}
-
-/// Parsed shared directory configuration from CLI flags.
-#[derive(Debug, Clone)]
-pub struct ShareDirConfig {
-    pub path: PathBuf,
-    pub read_only: bool,
 }
 
 /// Parse shared directory config from CLI args, validating the path.

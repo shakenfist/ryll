@@ -35,7 +35,8 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -64,6 +65,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # audiopus_sys source-builds libopus on macOS and Windows when
+      # pkg-config / vcpkg do not surface a system libopus. The bundled
+      # libopus CMakeLists declares cmake_minimum_required(VERSION <3.5),
+      # which CMake 4.x (now the default on macOS runners) refuses without
+      # an explicit policy override. Setting CMAKE_POLICY_VERSION_MINIMUM
+      # tells cmake to fall back to 3.5 policies for the libopus build —
+      # the libopus source itself is unchanged. Linux installs libopus-dev
+      # so audiopus_sys finds it via pkg-config and never invokes cmake.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +83,12 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # On Linux we install libopus-dev so audiopus_sys (the opus crate)
+      # dynamic-links to libopus.so.0; cargo-deb's $auto then records
+      # libopus0 as a runtime dep in the generated .deb. On macOS and
+      # Windows we do not install opus via brew/vcpkg — audiopus_sys
+      # falls back to building libopus from source (bundled vendor),
+      # producing a self-contained binary with no runtime opus dep.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -84,10 +100,19 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
       - name: Build
         run: cargo build --release -p ryll ${{ matrix.features }}
+
+      - name: Run --web smoke test
+        if: runner.os == 'Linux'
+        run: tools/web-smoke.sh target/release/ryll
+
+      - name: Run --web smoke test (TLS)
+        if: runner.os == 'Linux'
+        run: tools/web-smoke.sh --tls target/release/ryll
 
       - name: Run tests
         run: cargo test --workspace ${{ matrix.features }}

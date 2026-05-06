@@ -1,7 +1,15 @@
-/// Global runtime settings
+/// Global runtime settings shim for ryll-side callers.
 ///
-/// These are set once at startup and read by channel handlers.
+/// Channels no longer read these globals — they receive a
+/// `shakenfist_spice_renderer::LogConfig` value at construction
+/// time. The globals remain for the few host-side callers that
+/// have not yet been threaded with `LogConfig` (e.g. the GUI
+/// stats panel and bug-report assembly), and as the source of
+/// truth that `app.rs::reconnect()` reads to build a
+/// `LogConfig` for the channels it spawns.
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use shakenfist_spice_renderer::LogConfig;
 
 /// Whether verbose protocol logging is enabled
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -21,6 +29,13 @@ pub fn is_verbose() -> bool {
 }
 
 /// Check if intimate logging is enabled
+#[allow(dead_code)]
 pub fn is_intimate() -> bool {
     INTIMATE.load(Ordering::Relaxed)
+}
+
+/// Snapshot the global flags into a `LogConfig` for handing to
+/// renderer-side channel constructors.
+pub fn log_config() -> LogConfig {
+    LogConfig::new(is_verbose(), is_intimate())
 }

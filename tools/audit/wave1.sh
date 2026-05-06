@@ -67,11 +67,36 @@ echo
 bold "=== wave 1b: mechanical style checks ==="
 
 # 1. No raw println! / eprintln! in non-test source code.
+#    Allowlist mechanism: a println!/eprintln! is permitted
+#    when the file containing it also contains the marker
+#    comment `audit-allow-println`. Any such marker must be
+#    reviewed and justified in the same commit that adds it.
+#    Files with the marker are entirely excluded from this
+#    check — intentional, because a single operator-facing
+#    print in a file is the expected pattern and the marker
+#    documents the rationale inline.
+#
+#    We use a Python one-liner to filter: for each grep hit
+#    (format "path:lineno:text"), check whether the source
+#    file contains the marker anywhere; if so, skip it.
 PRINTLN_HITS=$(grep -rn --include='*.rs' -E '^[[:space:]]*(println|eprintln)!' \
     ryll/src shakenfist-spice-protocol/src shakenfist-spice-compression/src \
     shakenfist-spice-usbredir/src 2>/dev/null \
     | grep -v '#\[cfg(test)\]' \
     | grep -v '/tests/' \
+    | python3 -c "
+import sys
+for line in sys.stdin:
+    parts = line.split(':', 2)
+    if len(parts) >= 1:
+        try:
+            content = open(parts[0]).read()
+            if 'audit-allow-println' in content:
+                continue
+        except OSError:
+            pass
+    print(line, end='')
+" \
     || true)
 if [[ -n "$PRINTLN_HITS" ]]; then
     red "FAIL: raw println!/eprintln! found:"

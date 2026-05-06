@@ -87,6 +87,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
+      # See ci.yml for rationale: CMake 4.x rejects libopus's bundled
+      # cmake_minimum_required(VERSION <3.5); this policy override lets
+      # the audiopus_sys source-build path keep working on macOS/Windows.
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
@@ -102,6 +106,12 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
+      # On Linux we install libopus-dev so audiopus_sys (the opus crate)
+      # dynamic-links to libopus.so.0; cargo-deb's $auto then records
+      # libopus0 as a runtime dep in the generated .deb. On macOS and
+      # Windows we do not install opus via brew/vcpkg — audiopus_sys
+      # falls back to building libopus from source (bundled vendor),
+      # producing a self-contained binary with no runtime opus dep.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -113,7 +123,8 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
       - name: Build
         run: cargo build --release -p ryll ${{ matrix.features }}
@@ -206,12 +217,20 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
-      # Publish in dependency order. The three sub-crates are
-      # independent of each other; ryll depends on all three.
-      # cargo publish waits for the crate to appear in the index
-      # before returning, so serial publishing is safe.
+      # Publish in dependency order. cargo publish waits for the
+      # crate to appear in the index before returning, so serial
+      # publishing is safe.
+      #
+      # Dependency graph (→ means "depends on"):
+      #   protocol          (leaf)
+      #   compression       → protocol
+      #   usbredir          → protocol
+      #   renderer          → protocol + compression + usbredir
+      #   webrtc            → renderer
+      #   ryll              → all of the above
       - name: Publish shakenfist-spice-protocol
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -226,6 +245,16 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish -p shakenfist-spice-usbredir
+
+      - name: Publish shakenfist-spice-renderer
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p shakenfist-spice-renderer
+
+      - name: Publish shakenfist-spice-webrtc
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p shakenfist-spice-webrtc
 
       - name: Publish ryll
         env:
