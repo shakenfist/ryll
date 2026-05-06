@@ -439,6 +439,25 @@ mod tests {
             body.contains("recvonly"),
             "app.js should request recvonly transceivers: missing"
         );
+        // Phase 6c: auto-reconnect assertions.
+        assert!(
+            body.contains("scheduleReconnect"),
+            "app.js should contain scheduleReconnect (Phase 6c): missing"
+        );
+        assert!(
+            body.contains("async function connect"),
+            "app.js should expose connect() as a callable function \
+             (Phase 6c): missing"
+        );
+        assert!(
+            body.contains("1000"),
+            "app.js should contain the 1 s backoff value (Phase 6c): missing"
+        );
+        assert!(
+            body.contains("reconnect-btn"),
+            "app.js should reference the reconnect button id \
+             (Phase 6c): missing"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

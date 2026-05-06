@@ -1,4 +1,4 @@
-// ryll web frontend — Phase 4 + 5c client.
+// ryll web frontend — Phase 4 + 5c + 6c client.
 //
 // Reads the per-launch token from window.location.search,
 // constructs an RTCPeerConnection, opens a "control-seed"
@@ -25,25 +25,45 @@
 //     `{type:"viewport",width,height}` message so the
 //     guest's vdagent resizes the display via
 //     VDAgentMonitorsConfig.
+//
+// Phase 6c additions:
+//   * Browser-side auto-reconnect with exponential backoff
+//     (1 s, 2 s, 4 s, 8 s, 16 s; max 5 attempts).
+//   * scheduleReconnect() / resetPeerConnection() helpers.
+//   * "Click to reconnect" button revealed after max attempts.
+//   * connect() is now a callable function; the IIFE calls it
+//     and chains .catch() → scheduleReconnect().
+//   * Input listeners stay registered across reconnects — they
+//     reach the module-level `dc` reference via sendCtrl().
 
 (() => {
-    "use strict";
+    'use strict';
 
-    const statusEl = document.getElementById("status");
-    const videoEl = document.getElementById("video");
-    const cursorEl = document.getElementById("cursor");
+    const statusEl = document.getElementById('status');
+    const videoEl = document.getElementById('video');
+    const cursorEl = document.getElementById('cursor');
 
     const params = new URLSearchParams(window.location.search);
-    const TOKEN = params.get("token");
+    const TOKEN = params.get('token');
     if (!TOKEN) {
-        statusEl.textContent = "Missing token in URL";
+        statusEl.textContent = 'Missing token in URL';
         return;
     }
 
     const setStatus = (msg) => {
         statusEl.textContent = msg;
-        console.log("[ryll]", msg);
+        console.log('[ryll]', msg);
     };
+
+    // ---------------------------------------------------------------
+    // Reconnect state.
+    // ---------------------------------------------------------------
+    const RECONNECT_BACKOFFS_MS = [1000, 2000, 4000, 8000, 16000];
+    let reconnectAttempt = 0;
+
+    // Module-level pc / dc references updated by connect().
+    let pc = null;
+    let dc = null;
 
     // ---------------------------------------------------------------
     // KeyboardEvent.code → AT scancode wire value.
@@ -162,122 +182,6 @@
         }
     };
 
-    setStatus("Negotiating…");
-
-    const pc = new RTCPeerConnection();
-
-    // Phase 3 step 3f finding: a data channel must exist on the
-    // offer side before createOffer() so the SDP carries an
-    // m=application section. The server bridge's control DC
-    // is answered against this seed channel; Phase 5c uses
-    // it for input events and viewport sizing.
-    const dc = pc.createDataChannel("control-seed", { ordered: true });
-    let dcOpen = false;
-    dc.onopen = () => {
-        dcOpen = true;
-        console.log("[ryll] data channel open");
-    };
-    dc.onclose = () => {
-        dcOpen = false;
-        console.log("[ryll] data channel closed");
-    };
-    // ---------------------------------------------------------------
-    // Server → browser cursor overlay state. The server forwards
-    // CursorShape (PNG, base64'd) and CursorPosition events from
-    // the SPICE cursor channel over the same control DC the
-    // browser uses for inputs. The browser places an <img>
-    // overlay above the <video> at the denormalised position
-    // (letterbox-aware) and hides the host cursor over the video
-    // (in style.css) so the SPICE cursor wins.
-    // ---------------------------------------------------------------
-    let cursorHotX = 0;
-    let cursorHotY = 0;
-    let cursorLastNorm = null;
-
-    dc.onmessage = (event) => {
-        let msg;
-        try {
-            const text = typeof event.data === "string"
-                ? event.data
-                : new TextDecoder().decode(event.data);
-            msg = JSON.parse(text);
-        } catch (err) {
-            console.warn("[ryll] invalid control message:", err);
-            return;
-        }
-        handleControlMessage(msg);
-    };
-
-    const handleControlMessage = (msg) => {
-        switch (msg && msg.type) {
-            case "cursor-shape":
-                cursorEl.src = `data:image/png;base64,${msg.png_b64}`;
-                cursorHotX = msg.hot_x ?? 0;
-                cursorHotY = msg.hot_y ?? 0;
-                cursorEl.hidden = false;
-                if (cursorLastNorm) {
-                    positionCursor(cursorLastNorm.x, cursorLastNorm.y);
-                }
-                break;
-            case "cursor-pos":
-                cursorLastNorm = { x: msg.x_norm, y: msg.y_norm };
-                positionCursor(msg.x_norm, msg.y_norm);
-                break;
-            case "cursor-hide":
-                cursorEl.hidden = true;
-                break;
-            case "cursor-show":
-                if (cursorEl.src) {
-                    cursorEl.hidden = false;
-                }
-                break;
-            default:
-                console.log("[ryll] dc message:", msg);
-                break;
-        }
-    };
-
-    const positionCursor = (xNorm, yNorm) => {
-        const rect = videoEl.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) {
-            return;
-        }
-        // Mirror the input-side letterbox correction in
-        // pointerToNorm so the overlay tracks the inputs we sent
-        // exactly: compute the actually-rendered video area, then
-        // place the cursor inside it at the normalised position.
-        const elemAspect = rect.width / rect.height;
-        const vw = videoEl.videoWidth;
-        const vh = videoEl.videoHeight;
-        const videoAspect = vw > 0 && vh > 0 ? vw / vh : NaN;
-        let renderedX = rect.left;
-        let renderedY = rect.top;
-        let renderedW = rect.width;
-        let renderedH = rect.height;
-        if (isFinite(videoAspect) && videoAspect > 0) {
-            if (elemAspect > videoAspect) {
-                renderedW = rect.height * videoAspect;
-                renderedX = rect.left + (rect.width - renderedW) / 2;
-            } else {
-                renderedH = rect.width / videoAspect;
-                renderedY = rect.top + (rect.height - renderedH) / 2;
-            }
-        }
-        cursorEl.style.left = `${renderedX + xNorm * renderedW - cursorHotX}px`;
-        cursorEl.style.top = `${renderedY + yNorm * renderedH - cursorHotY}px`;
-    };
-
-    const sendCtrl = (obj) => {
-        if (!dcOpen) {
-            return;
-        }
-        try {
-            dc.send(JSON.stringify(obj));
-        } catch (err) {
-            console.warn("[ryll] dc.send failed:", err);
-        }
-    };
-
     // ---------------------------------------------------------------
     // Pointer coordinate normalisation with letterbox correction.
     //
@@ -324,6 +228,22 @@
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
     // ---------------------------------------------------------------
+    // sendCtrl uses the module-level `dc` reference so that
+    // input listeners registered once continue to work across
+    // reconnects without re-registration.
+    // ---------------------------------------------------------------
+    const sendCtrl = (obj) => {
+        if (!dc || dc.readyState !== 'open') {
+            return;
+        }
+        try {
+            dc.send(JSON.stringify(obj));
+        } catch (err) {
+            console.warn('[ryll] dc.send failed:', err);
+        }
+    };
+
+    // ---------------------------------------------------------------
     // Keyboard listeners — bound on `document` because the
     // <video> element doesn't naturally have keyboard focus.
     // We preventDefault on every recognised key so browser
@@ -331,9 +251,9 @@
     // input destined for the guest. F11 is allowed through so
     // browser fullscreen still works.
     // ---------------------------------------------------------------
-    const KEY_PASSTHROUGH = new Set(["F11"]);
+    const KEY_PASSTHROUGH = new Set(['F11']);
 
-    document.addEventListener("keydown", (e) => {
+    document.addEventListener('keydown', (e) => {
         const sc = SCANCODE_TABLE[e.code];
         if (sc === undefined) {
             return;
@@ -341,10 +261,10 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
-        sendCtrl({ type: "key", scancode: sc, down: true });
+        sendCtrl({ type: 'key', scancode: sc, down: true });
     });
 
-    document.addEventListener("keyup", (e) => {
+    document.addEventListener('keyup', (e) => {
         const sc = SCANCODE_TABLE[e.code];
         if (sc === undefined) {
             return;
@@ -352,29 +272,29 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
-        sendCtrl({ type: "key", scancode: sc, down: false });
+        sendCtrl({ type: 'key', scancode: sc, down: false });
     });
 
     // ---------------------------------------------------------------
     // Pointer listeners on <video>. Suppress the default context
     // menu so right-clicks reach the guest.
     // ---------------------------------------------------------------
-    videoEl.addEventListener("contextmenu", (e) => e.preventDefault());
+    videoEl.addEventListener('contextmenu', (e) => e.preventDefault());
 
-    videoEl.addEventListener("mousemove", (e) => {
+    videoEl.addEventListener('mousemove', (e) => {
         const norm = pointerToNorm(e);
         if (!norm) return;
-        sendCtrl({ type: "pointer-move", x_norm: norm.x_norm, y_norm: norm.y_norm });
+        sendCtrl({ type: 'pointer-move', x_norm: norm.x_norm, y_norm: norm.y_norm });
     });
 
-    videoEl.addEventListener("mousedown", (e) => {
+    videoEl.addEventListener('mousedown', (e) => {
         const norm = pointerToNorm(e);
         if (!norm) return;
         const button = browserButtonToSpice(e.button);
         if (!button) return;
         e.preventDefault();
         sendCtrl({
-            type: "pointer-button",
+            type: 'pointer-button',
             button,
             down: true,
             x_norm: norm.x_norm,
@@ -382,14 +302,14 @@
         });
     });
 
-    videoEl.addEventListener("mouseup", (e) => {
+    videoEl.addEventListener('mouseup', (e) => {
         const norm = pointerToNorm(e);
         if (!norm) return;
         const button = browserButtonToSpice(e.button);
         if (!button) return;
         e.preventDefault();
         sendCtrl({
-            type: "pointer-button",
+            type: 'pointer-button',
             button,
             down: false,
             x_norm: norm.x_norm,
@@ -397,92 +317,257 @@
         });
     });
 
-    // Receive the server's video and audio tracks.
-    const enableAudioBtn = document.getElementById("enable-audio");
-    enableAudioBtn.addEventListener("click", () => {
+    // ---------------------------------------------------------------
+    // Audio-enable button wired once (stays across reconnects).
+    // ---------------------------------------------------------------
+    const enableAudioBtn = document.getElementById('enable-audio');
+    enableAudioBtn.addEventListener('click', () => {
         videoEl.muted = false;
         enableAudioBtn.hidden = true;
         // Re-trigger play in case the browser paused on un-mute.
-        videoEl.play().catch(err => console.warn("[ryll] play after unmute failed:", err));
+        videoEl.play().catch(err => console.warn('[ryll] play after unmute failed:', err));
     });
 
-    pc.ontrack = (event) => {
-        console.log("[ryll] ontrack kind=", event.track.kind);
-        if (event.track.kind === "video" && event.streams[0]) {
-            videoEl.srcObject = event.streams[0];
-            setStatus("Connected");
-            // Reveal the audio-toggle button now that we have a stream.
-            enableAudioBtn.hidden = false;
-        }
-        // Audio plays via the browser's default sink; the
-        // <video> element with the same MediaStream object
-        // handles audio rendering implicitly.
+    // ---------------------------------------------------------------
+    // Manual reconnect button — revealed when max backoff attempts
+    // are exhausted.
+    // ---------------------------------------------------------------
+    const reconnectBtn = document.getElementById('reconnect-btn');
+    const showReconnectButton = () => {
+        reconnectBtn.style.display = '';
     };
 
-    pc.oniceconnectionstatechange = () => {
-        console.log("[ryll] ICE state:", pc.iceConnectionState);
-        if (pc.iceConnectionState === "failed") {
-            setStatus("ICE failed — check the network");
-        } else if (pc.iceConnectionState === "disconnected") {
-            setStatus("Disconnected");
-        }
-    };
+    reconnectBtn.addEventListener('click', () => {
+        reconnectBtn.style.display = 'none';
+        reconnectAttempt = 0;
+        scheduleReconnect();
+    });
 
     // ---------------------------------------------------------------
-    // Send the initial viewport message exactly once when the PC
-    // reaches the connected state. Use the <video> element's
-    // bounding rect as the requested resolution — the guest's
-    // vdagent will resize its X session to match (via
-    // VDAgentMonitorsConfig dispatched on the Rust side from
-    // the resize_tx channel that this message lands on).
+    // scheduleReconnect — exponential backoff, up to 5 attempts.
+    // After max attempts the manual reconnect button is revealed.
     // ---------------------------------------------------------------
-    let viewportSent = false;
-    const sendViewport = () => {
-        if (viewportSent) return;
-        const rect = videoEl.getBoundingClientRect();
-        const w = Math.round(rect.width);
-        const h = Math.round(rect.height);
-        if (w <= 0 || h <= 0) return;
-        viewportSent = true;
-        sendCtrl({ type: "viewport", width: w, height: h });
-        console.log("[ryll] viewport sent:", w, "x", h);
-    };
-
-    pc.onconnectionstatechange = () => {
-        console.log("[ryll] PC state:", pc.connectionState);
-        if (pc.connectionState === "connected") {
-            sendViewport();
-        }
-    };
-
-    // Tell the server we're a recvonly viewer for both video
-    // and audio.
-    pc.addTransceiver("video", { direction: "recvonly" });
-    pc.addTransceiver("audio", { direction: "recvonly" });
-
-    const waitForIceComplete = () => new Promise((resolve) => {
-        if (pc.iceGatheringState === "complete") {
-            resolve();
+    function scheduleReconnect() {
+        if (reconnectAttempt >= RECONNECT_BACKOFFS_MS.length) {
+            setStatus('Disconnected. Click to reconnect.');
+            showReconnectButton();
             return;
         }
-        const onChange = () => {
-            if (pc.iceGatheringState === "complete") {
-                pc.removeEventListener("icegatheringstatechange", onChange);
-                resolve();
+        const delay = RECONNECT_BACKOFFS_MS[reconnectAttempt++];
+        setStatus(`Reconnecting in ${delay / 1000}s (attempt ${reconnectAttempt})…`);
+        setTimeout(() => {
+            resetPeerConnection();
+            connect().catch(err => {
+                console.warn('[ryll] reconnect attempt failed:', err);
+                scheduleReconnect();
+            });
+        }, delay);
+    }
+
+    // ---------------------------------------------------------------
+    // resetPeerConnection — close existing PC (if any) and null it
+    // so the next connect() builds a fresh RTCPeerConnection.
+    // ---------------------------------------------------------------
+    function resetPeerConnection() {
+        if (pc) {
+            try { pc.close(); } catch (e) { /* ignore */ }
+            pc = null;
+        }
+        dc = null;
+    }
+
+    // ---------------------------------------------------------------
+    // Server → browser cursor overlay state. The server forwards
+    // CursorShape (PNG, base64'd) and CursorPosition events from
+    // the SPICE cursor channel over the same control DC the
+    // browser uses for inputs. The browser places an <img>
+    // overlay above the <video> at the denormalised position
+    // (letterbox-aware) and hides the host cursor over the video
+    // (in style.css) so the SPICE cursor wins.
+    // ---------------------------------------------------------------
+    let cursorHotX = 0;
+    let cursorHotY = 0;
+    let cursorLastNorm = null;
+
+    const positionCursor = (xNorm, yNorm) => {
+        const rect = videoEl.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+            return;
+        }
+        // Mirror the input-side letterbox correction in
+        // pointerToNorm so the overlay tracks the inputs we sent
+        // exactly: compute the actually-rendered video area, then
+        // place the cursor inside it at the normalised position.
+        const elemAspect = rect.width / rect.height;
+        const vw = videoEl.videoWidth;
+        const vh = videoEl.videoHeight;
+        const videoAspect = vw > 0 && vh > 0 ? vw / vh : NaN;
+        let renderedX = rect.left;
+        let renderedY = rect.top;
+        let renderedW = rect.width;
+        let renderedH = rect.height;
+        if (isFinite(videoAspect) && videoAspect > 0) {
+            if (elemAspect > videoAspect) {
+                renderedW = rect.height * videoAspect;
+                renderedX = rect.left + (rect.width - renderedW) / 2;
+            } else {
+                renderedH = rect.width / videoAspect;
+                renderedY = rect.top + (rect.height - renderedH) / 2;
+            }
+        }
+        cursorEl.style.left = `${renderedX + xNorm * renderedW - cursorHotX}px`;
+        cursorEl.style.top = `${renderedY + yNorm * renderedH - cursorHotY}px`;
+    };
+
+    const handleControlMessage = (msg) => {
+        switch (msg && msg.type) {
+            case 'cursor-shape':
+                cursorEl.src = `data:image/png;base64,${msg.png_b64}`;
+                cursorHotX = msg.hot_x ?? 0;
+                cursorHotY = msg.hot_y ?? 0;
+                cursorEl.hidden = false;
+                if (cursorLastNorm) {
+                    positionCursor(cursorLastNorm.x, cursorLastNorm.y);
+                }
+                break;
+            case 'cursor-pos':
+                cursorLastNorm = { x: msg.x_norm, y: msg.y_norm };
+                positionCursor(msg.x_norm, msg.y_norm);
+                break;
+            case 'cursor-hide':
+                cursorEl.hidden = true;
+                break;
+            case 'cursor-show':
+                if (cursorEl.src) {
+                    cursorEl.hidden = false;
+                }
+                break;
+            default:
+                console.log('[ryll] dc message:', msg);
+                break;
+        }
+    };
+
+    // ---------------------------------------------------------------
+    // connect() — build a new RTCPeerConnection, wire all PC/DC
+    // callbacks, and drive the offer/answer SDP exchange.
+    // Re-callable on each reconnect attempt.
+    // ---------------------------------------------------------------
+    async function connect() {
+        setStatus('Negotiating…');
+
+        // Build a brand-new PC each time so we never reuse a failed
+        // connection object (some browsers cache failed PCs briefly).
+        pc = new RTCPeerConnection();
+
+        // Phase 3 finding: a data channel must exist on the offer
+        // side before createOffer() so the SDP carries an
+        // m=application section. The server bridge's control DC is
+        // answered against this seed channel.
+        dc = pc.createDataChannel('control-seed', { ordered: true });
+
+        dc.onopen = () => {
+            console.log('[ryll] data channel open');
+        };
+        dc.onclose = () => {
+            console.log('[ryll] data channel closed');
+        };
+        dc.onmessage = (event) => {
+            let msg;
+            try {
+                const text = typeof event.data === 'string'
+                    ? event.data
+                    : new TextDecoder().decode(event.data);
+                msg = JSON.parse(text);
+            } catch (err) {
+                console.warn('[ryll] invalid control message:', err);
+                return;
+            }
+            handleControlMessage(msg);
+        };
+
+        // Receive the server's video and audio tracks.
+        pc.ontrack = (event) => {
+            console.log('[ryll] ontrack kind=', event.track.kind);
+            if (event.track.kind === 'video' && event.streams[0]) {
+                videoEl.srcObject = event.streams[0];
+                setStatus('Connected');
+                // Reveal the audio-toggle button now that we have a stream.
+                enableAudioBtn.hidden = false;
+            }
+            // Audio plays via the browser's default sink; the
+            // <video> element with the same MediaStream object
+            // handles audio rendering implicitly.
+        };
+
+        pc.oniceconnectionstatechange = () => {
+            console.log('[ryll] ICE state:', pc.iceConnectionState);
+            if (pc.iceConnectionState === 'failed' ||
+                    pc.iceConnectionState === 'disconnected') {
+                scheduleReconnect();
             }
         };
-        pc.addEventListener("icegatheringstatechange", onChange);
-    });
 
-    const connect = async () => {
+        // ---------------------------------------------------------------
+        // Send the initial viewport message exactly once when the PC
+        // reaches the connected state. Use the <video> element's
+        // bounding rect as the requested resolution — the guest's
+        // vdagent will resize its X session to match (via
+        // VDAgentMonitorsConfig dispatched on the Rust side from
+        // the resize_tx channel that this message lands on).
+        // viewportSent is scoped to this connect() call so it
+        // retriggers correctly on reconnect.
+        // ---------------------------------------------------------------
+        let viewportSent = false;
+        const sendViewport = () => {
+            if (viewportSent) return;
+            const rect = videoEl.getBoundingClientRect();
+            const w = Math.round(rect.width);
+            const h = Math.round(rect.height);
+            if (w <= 0 || h <= 0) return;
+            viewportSent = true;
+            sendCtrl({ type: 'viewport', width: w, height: h });
+            console.log('[ryll] viewport sent:', w, 'x', h);
+        };
+
+        pc.onconnectionstatechange = () => {
+            console.log('[ryll] PC state:', pc.connectionState);
+            if (pc.connectionState === 'connected') {
+                // Reset backoff counter on successful connection.
+                reconnectAttempt = 0;
+                sendViewport();
+            } else if (pc.connectionState === 'failed') {
+                scheduleReconnect();
+            }
+        };
+
+        // Tell the server we're a recvonly viewer for both video
+        // and audio.
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+
+        const waitForIceComplete = () => new Promise((resolve) => {
+            if (pc.iceGatheringState === 'complete') {
+                resolve();
+                return;
+            }
+            const onChange = () => {
+                if (pc.iceGatheringState === 'complete') {
+                    pc.removeEventListener('icegatheringstatechange', onChange);
+                    resolve();
+                }
+            };
+            pc.addEventListener('icegatheringstatechange', onChange);
+        });
+
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         await waitForIceComplete();
 
         const finalOffer = pc.localDescription;
         const response = await fetch(`/offer?token=${encodeURIComponent(TOKEN)}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 type: finalOffer.type,
                 sdp: finalOffer.sdp,
@@ -490,14 +575,15 @@
         });
         if (!response.ok) {
             setStatus(`Server: ${response.status} ${response.statusText}`);
-            return;
+            throw new Error(`offer rejected: ${response.status}`);
         }
         const answer = await response.json();
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    };
+    }
 
-    connect().catch((err) => {
-        console.error("[ryll] connect failed:", err);
-        setStatus(`Error: ${err.message ?? err}`);
+    // Initial connection — failures feed into the reconnect schedule.
+    connect().catch(err => {
+        console.error('[ryll] initial connect failed:', err);
+        scheduleReconnect();
     });
 })();

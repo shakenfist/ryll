@@ -10,5 +10,7 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
    denormalises the position over the actually-rendered video
    area (letterbox-aware) before placing the overlay. The host
    browser cursor is hidden over the video so the overlay wins. */
+#reconnect-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 0.6rem 1.2rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 1rem; cursor: pointer; z-index: 20; }
+#reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
 #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }
 #cursor[hidden] { display: none; }
