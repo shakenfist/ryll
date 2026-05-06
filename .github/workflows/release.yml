@@ -102,6 +102,12 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/v}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
+      # On Linux we install libopus-dev so audiopus_sys (the opus crate)
+      # dynamic-links to libopus.so.0; cargo-deb's $auto then records
+      # libopus0 as a runtime dep in the generated .deb. On macOS and
+      # Windows we do not install opus via brew/vcpkg — audiopus_sys
+      # falls back to building libopus from source (bundled vendor),
+      # producing a self-contained binary with no runtime opus dep.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -113,7 +119,8 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
       - name: Build
         run: cargo build --release -p ryll ${{ matrix.features }}
@@ -206,7 +213,8 @@ jobs:
             libx11-dev libxkbcommon-dev \
             libgl1-mesa-dev libegl1-mesa-dev \
             libwayland-dev libssl-dev \
-            libasound2-dev
+            libasound2-dev \
+            libopus-dev
 
       # Publish in dependency order. cargo publish waits for the
       # crate to appear in the index before returning, so serial
