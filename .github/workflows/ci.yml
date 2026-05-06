@@ -97,6 +97,10 @@ jobs:
       - name: Build
         run: cargo build --release -p ryll ${{ matrix.features }}
 
+      - name: Run --web smoke test
+        if: runner.os == 'Linux'
+        run: tools/web-smoke.sh target/release/ryll
+
       - name: Run tests
         run: cargo test --workspace ${{ matrix.features }}
 
