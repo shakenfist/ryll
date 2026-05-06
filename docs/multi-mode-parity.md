@@ -114,11 +114,11 @@
 | SPICE_MSG_NOTIFY surfacing | available | partial (stored in notification store; printed nowhere in headless event loop unless captured by `--pedantic`) | missing (out of MVP scope) |
 | Gap observer notification feed | available | partial (registered in headless at `ryll/src/app.rs:3431`; notifications accumulate in store but are never printed to stdout) | missing (out of MVP scope) |
 | **Reconnect / Lifecycle** | | | |
-| Reconnect on disconnect (Reconnect button) | available | n/a — intrinsic (no GUI; headless exits when main channel disconnects) | available (MVP; SPICE session held during PeerConnection drop, Phase 6) |
-| State preserved across reconnect (disks, share dir, paste toggle) | available | n/a — intrinsic (headless does not reconnect) | partial (SPICE session continuity is the MVP goal; UI/session state preservation for web is not specified — see Phase 6 of PLAN-web-frontend.md) |
+| Reconnect on disconnect (Reconnect button) | available | n/a — intrinsic (no GUI; headless exits when main channel disconnects) | available (Phase 6 complete; SPICE session held while PeerConnection is dead; browser auto-reconnects with 1 s/2 s/4 s/8 s/16 s backoff, max 5 attempts then a manual button) |
+| State preserved across reconnect (disks, share dir, paste toggle) | available | n/a — intrinsic (headless does not reconnect) | partial (SPICE session continuity is preserved — the bridge is reaped and rebuilt, leaving the SPICE channels untouched; per-tab UI state is browser-managed) |
 | Notification history preserved across reconnect | available | n/a — intrinsic | n/a — intrinsic (browser tab holds its own page state) |
 | Disconnect dialog | available | n/a — intrinsic (no GUI) | missing (not in MVP scope; browser tab closure is the UX) |
-| Graceful Ctrl+C shutdown | available | available | available (SIGTERM via systemd; see PLAN-web-frontend.md §Phase 6) |
+| Graceful Ctrl+C shutdown | available | available | available (Phase 6 complete; SIGTERM/Ctrl-C drains axum then explicitly closes the active bridge so DTLS/SRTP tears down cleanly before the process exits) |
 | Cancel superseded connection attempt | available | n/a — intrinsic (headless does not reconnect) | n/a — intrinsic (single-session MVP) |
 | **Window / Session Persistence** | | | |
 | Window size/position persistence (eframe persistence) | available | n/a — intrinsic (no window) | n/a — intrinsic (browser manages its own viewport) |

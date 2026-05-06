@@ -40,7 +40,7 @@ shared core. The supported modes are:
 |------|----------|--------|-------------|
 | GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
-| Web | Browser via WebRTC | In progress (Phases 0–5 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+| Web | Browser via WebRTC | In progress (Phases 0–6 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
 
 A feature is not considered complete when it works in only
 one mode. Every feature should be reachable from every mode
@@ -355,6 +355,91 @@ in "webrtc-rs convention" above) and the rustls
 any TLS handshake) both apply to the `--web` mode and are
 handled in `ryll/src/main.rs` before `run_web()` is called.
 
+## Phase 6: Bridge Lifecycle (`--web` mode)
+
+Phase 6 of the web-frontend plan
+(`docs/plans/PLAN-web-frontend-phase-06-lifecycle.md`) adds
+proactive bridge reaping and browser-side auto-reconnect.
+
+### Bridge dead signal
+
+`WebrtcBridge` grows two fields:
+
+- `dead: Arc<tokio::sync::Notify>` — notified exactly once
+  when the `RTCPeerConnection` reaches `Failed`,
+  `Disconnected`, or `Closed`.
+- `dead_flag: Arc<AtomicBool>` — sticky flag that lets late
+  callers avoid waiting on an already-dead bridge.
+
+Public API:
+
+- `wait_for_dead(&self) -> impl Future` — resolves when the
+  PC reaches a terminal state. Returns immediately if the
+  flag is already set (late-subscriber safety).
+- `dead_handle(&self) -> Arc<Notify>` — exposes the raw
+  notify for consumers that hold their own clone without
+  keeping a reference to the bridge.
+- `dead_flag_handle(&self) -> Arc<AtomicBool>` — exposes the
+  sticky flag for the same purpose.
+
+### Server-side reaper (`ryll/src/web/lifecycle.rs`)
+
+`run_bridge_reaper(state: Arc<WebState>)` is a long-lived
+task spawned from `run_web`. Its loop:
+
+1. Peeks at the active bridge's `dead_handle()` without
+   holding the slot lock for long.
+2. If no bridge is active, sleeps 500 ms and retries.
+3. Awaits the dead signal.
+4. Takes the bridge out of `bridge_slot`, calls
+   `bridge.close().await`.
+5. Calls `EncoderInfra::stop()` — sends `EncoderControl::Stop`
+   and awaits the encoder task handle (2-second ceiling).
+6. Clears `opus_active_tx`.
+
+The SPICE session (`run_connection`) is left completely
+untouched. A subsequent `/offer` from the browser rebuilds
+a fresh bridge and encoder from the same live SPICE state.
+
+Race condition: a new `/offer` and the reaper both race to
+take the bridge via `bridge_slot.lock()`. Both serialise on
+the mutex; whichever arrives first takes the slot, the other
+observes `None` and no-ops.
+
+### `EncoderInfra::stop`
+
+A new helper alongside `restart()`: sends
+`EncoderControl::Stop` to the running encoder task and joins
+the handle with a 2-second timeout. Used by both the reaper
+(bridge died) and the shutdown path (process exiting). Any
+orphaned task exits naturally on its next send error.
+
+### Graceful shutdown sequence
+
+After Phase 6, `run_web`'s shutdown sequence is:
+
+1. Ctrl-C → `SHUTDOWN_REQUESTED.store(true)`.
+2. The bridge between `SHUTDOWN_REQUESTED` and the SPICE
+   `cancel` flag flips the cancel.
+3. `axum::serve(…).with_graceful_shutdown(…).await` drains.
+4. **New:** take the active bridge from the slot and close
+   it (2-second ceiling) so DTLS/SRTP tears down cleanly.
+5. **New:** call `EncoderInfra::stop()` to release the
+   encoder task.
+6. `run_web` returns; the tokio runtime drops.
+
+### Browser-side auto-reconnect
+
+`app.js` is refactored so the `RTCPeerConnection` setup and
+SDP offer flow live inside a callable `connect()` function
+rather than a one-shot IIFE. On ICE-failed or
+connection-state-failed events, `scheduleReconnect()` is
+called with backoff delays of 1 s, 2 s, 4 s, 8 s, 16 s
+(max 5 attempts). A hidden "Click to reconnect" button is
+revealed when all attempts are exhausted. Each attempt
+constructs a brand-new `RTCPeerConnection`; the backoff
+counter resets on a successful `Connected` transition.
+
 ## Code Organisation
 
 ```
@@ -372,7 +457,15 @@ ryll/src/
 │                        #   around DisplaySurface
 ├── input_egui.rs        # egui::Key → LogicalKey adapter
 ├── notifications.rs     # NotificationStore + NotificationStoreSink
-└── settings.rs          # is_verbose() gate
+├── settings.rs          # is_verbose() gate
+└── web/                 # --web mode (Phase 4–6)
+    ├── mod.rs           # run_web(), HTTP server, /offer endpoint,
+    │                    #   token auth, EncoderInfra stop helper
+    ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
+    ├── cursor.rs        # Cursor relay → control datachannel
+    ├── inputs.rs        # Input relay ← control datachannel
+    └── lifecycle.rs     # run_bridge_reaper: watches dead signal,
+                         #   reaps bridge + encoder when PC dies
 
 shakenfist-spice-renderer/src/
 ├── channels/            # Per-channel handlers
@@ -404,7 +497,9 @@ shakenfist-spice-renderer/src/
 └── byte_counter.rs      # ByteCounter
 
 shakenfist-spice-webrtc/src/
-└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig
+└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
+                         #   Phase 6: wait_for_dead(), dead_handle(),
+                         #   dead_flag_handle()
 ```
 
 ## Concurrency Model

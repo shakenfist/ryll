@@ -37,14 +37,62 @@ exchanges SDP via `POST /offer`, and starts streaming.
   `VDAgentMonitorsConfig`).
 - Ctrl-C cleanly stops the binary.
 
+## Reconnect behaviour
+
+Phase 6 makes `--web` mode resilient to browser disconnects.
+
+### Browser tab close → reopen
+
+When the browser tab is closed (or the network between the
+browser and ryll drops), the server-side bridge reaper
+notices the `RTCPeerConnection` reaching a terminal state
+(`Failed`, `Disconnected`, or `Closed`) within ~1 second.
+The reaper:
+
+1. Takes the bridge out of the active slot and closes it,
+   tearing down the DTLS/SRTP state.
+2. Calls `EncoderInfra::stop()` so the H.264 encoder task
+   exits and CPU usage drops to idle.
+3. Clears the audio pump.
+
+The **SPICE session is left untouched**. Reopening the same
+URL at any time establishes a fresh `RTCPeerConnection` via a
+new `/offer` round-trip; the encoder restarts, requests a
+keyframe, and the guest desktop appears within a few frames.
+
+### Browser-side auto-reconnect
+
+On transient ICE or connection-state failures the browser
+retries automatically with exponential backoff:
+
+| Attempt | Delay |
+|---------|-------|
+| 1 | 1 s |
+| 2 | 2 s |
+| 3 | 4 s |
+| 4 | 8 s |
+| 5 | 16 s |
+
+After 5 failed attempts the status overlay shows
+"Disconnected. Click to reconnect." and a button lets the
+operator trigger a manual retry.
+
+Each attempt constructs a brand-new `RTCPeerConnection` (no
+stale SDP cache), resets the backoff counter on a successful
+`Connected` transition, and retriggers the viewport-resize
+message so the guest resolution re-syncs.
+
+### Graceful shutdown
+
+Ctrl-C or SIGTERM drains the axum HTTP server (existing
+graceful-shutdown path) then explicitly closes any active
+bridge before the process exits, ensuring DTLS/SRTP state
+tears down cleanly.
+
 ## Limitations (MVP)
 
 - Single viewer at a time. A second offer replaces the
   existing connection.
-- No reconnect-on-disconnect — closing the browser tab and
-  reopening drops the SPICE session and starts a new one
-  (Phase 6 will hold the SPICE session open across browser
-  reconnects).
 - Plain HTTP only. The transport itself (WebRTC's
   DTLS-SRTP) is encrypted by the protocol; the signalling
   page is plain HTTP and intended for trusted-LAN use only.
@@ -67,12 +115,9 @@ with an HTTPS reverse proxy.
 
 ## Pending phases
 
-Phase 5 of the web-frontend plan is operationally complete.
+Phases 0–6 of the web-frontend plan are complete.
 The following phases are still pending:
 
-- **Phase 6 (Reconnect + lifecycle)**: hold the SPICE session
-  open when the browser tab closes; allow the same URL to
-  resume the existing session within ~30 seconds.
 - **Phase 7 (CI + packaging)**: verify the `--web` dependencies
   build cleanly on Linux, macOS, and Windows in CI.
 - **Phase 8 (Operator docs)**: expand this guide with a systemd

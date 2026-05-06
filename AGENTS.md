@@ -276,17 +276,22 @@ ryll/src/
 │                        #   NotificationStoreSink (implements
 │                        #   NotificationSink)
 ├── settings.rs          # is_verbose() gate
-└── web/                 # --web mode (Phase 4+5 of PLAN-web-frontend.md)
+└── web/                 # --web mode (Phase 4–6 of PLAN-web-frontend.md)
     ├── mod.rs           # run_web() entry point, HTTP server,
-    │                    #   SDP /offer endpoint, token auth
+    │                    #   SDP /offer endpoint, token auth,
+    │                    #   EncoderInfra::stop() helper
     ├── audio.rs         # WebOpusSink (implements OpusPacketSink);
     │                    #   routes Opus packets to WebRTC audio track
     ├── cursor.rs        # Cursor relay: ChannelEvent → PNG data-URL
     │                    #   → control datachannel → browser <img>
     │                    #   overlay; uses base64 = "0.22"
-    └── inputs.rs        # Input relay: control datachannel → JSON
-                         #   parse → InputEvent + resize events into
-                         #   the renderer's inputs channel handler
+    ├── inputs.rs        # Input relay: control datachannel → JSON
+    │                    #   parse → InputEvent + resize events into
+    │                    #   the renderer's inputs channel handler
+    └── lifecycle.rs     # run_bridge_reaper: watches WebrtcBridge's
+                         #   dead signal (wait_for_dead / dead_handle),
+                         #   reaps bridge + calls EncoderInfra::stop
+                         #   + clears opus_active_tx when PC dies
 ```
 
 The SPICE substrate (channels, display, encoder, session) lives
@@ -353,7 +358,12 @@ shakenfist-spice-renderer/src/
 └── traffic.rs           # TrafficSink trait
 
 shakenfist-spice-webrtc/src/
-└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig
+└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
+                         #   Phase 6 public API:
+                         #     wait_for_dead() — resolves when PC
+                         #       reaches Failed/Disconnected/Closed
+                         #     dead_handle() → Arc<Notify>
+                         #     dead_flag_handle() → Arc<AtomicBool>
 ```
 
 ## Trait / Observer Scheme
