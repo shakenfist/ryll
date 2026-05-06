@@ -153,12 +153,24 @@ rustls = { version = "0.23", features = ["ring"] }
 maintainer = "Michael Still <mikal@stillhq.com>"
 section = "utils"
 priority = "optional"
+# $auto scans the binary's NEEDED entries and picks up libopus0
+# (introduced by --web mode via audiopus_sys dynamic-linking to
+# libopus.so.0), libasound2, libxcb1, etc. automatically.
+# Phase 7b installs libopus-dev on Linux CI runners so the binary
+# dynamic-links libopus; $auto therefore captures the runtime dep.
 depends = "$auto"
 assets = [
     ["target/release/ryll", "usr/bin/", "755"],
 ]
 
 [package.metadata.generate-rpm]
+# auto-req = "auto" (the default) uses ldd-based detection to generate
+# RPM Requires entries from the binary's NEEDED entries. This picks up
+# opus (Fedora/RHEL package name) introduced by --web mode, plus any
+# other shared-library deps, without requiring a manual requires list.
+# Supported since cargo-generate-rpm 0.11; "auto" is the default so
+# this line is explicit documentation of the chosen policy.
+auto-req = "auto"
 assets = [
     { source = "target/release/ryll", dest = "/usr/bin/ryll", mode = "0755" },
 ]
