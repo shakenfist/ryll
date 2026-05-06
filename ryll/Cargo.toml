@@ -53,7 +53,7 @@ reqwest = { version = "0.12", features = ["blocking"] }
 
 # LZ4 compression/decompression for general data (webdav, usbredir).
 # SPICE image LZ4 lives in shakenfist-spice-compression below.
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving
