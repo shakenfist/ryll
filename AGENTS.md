@@ -548,15 +548,18 @@ applies to all future webrtc-rs work:
 - Cargo cache persisted in `.cargo-cache/` for faster rebuilds
 - **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
-  on Linux, macOS (ARM), and Windows on every push to `develop` and
-  on pull requests. CI runs native `cargo` (not Docker). On Linux, CI
-  installs `libopus-dev` so audiopus_sys dynamic-links libopus and the
-  `.deb` declares `libopus0` via cargo-deb's `$auto`; on macOS and
-  Windows audiopus_sys source-builds libopus for a self-contained
-  binary. CI also runs `tools/web-smoke.sh` (plain + `--tls` variants)
-  on Linux to verify `--web` mode startup and graceful shutdown. PRs
-  also receive an automated code review via the shared
-  `shakenfist/actions/review-pr-with-claude` action.
+  on Linux (x86_64 + aarch64), macOS (Apple Silicon), and Windows
+  (x86_64 + aarch64) on every push to `develop` and on pull requests.
+  Each architecture uses a native github-hosted runner (no
+  cross-compile); arm64 Linux uses `ubuntu-24.04-arm` and arm64
+  Windows uses `windows-11-arm`. CI runs native `cargo` (not Docker).
+  On Linux, CI installs `libopus-dev` so audiopus_sys dynamic-links
+  libopus and the `.deb` declares `libopus0` via cargo-deb's `$auto`;
+  on macOS and Windows audiopus_sys source-builds libopus for a
+  self-contained binary. CI also runs `tools/web-smoke.sh` (plain +
+  `--tls` variants) on Linux to verify `--web` mode startup and
+  graceful shutdown. PRs also receive an automated code review via
+  the shared `shakenfist/actions/review-pr-with-claude` action.
 - **Bot-triggered workflows** for PR automation:
   `@shakenfist-bot please re-review`, `please address comments`,
   `please retest`

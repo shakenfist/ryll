@@ -53,9 +53,10 @@ Pre-built `.deb` packages for Debian/Ubuntu are available from
 
 ## CI and Automation
 
-GitHub Actions CI builds and tests ryll on Linux, macOS (Apple Silicon),
-and Windows on every push to `develop` and on pull requests. PRs also
-receive an automated code review via Claude Code.
+GitHub Actions CI builds and tests ryll on Linux (x86_64 + aarch64),
+macOS (Apple Silicon), and Windows (x86_64 + aarch64) on every push to
+`develop` and on pull requests. PRs also receive an automated code
+review via Claude Code.
 
 Workflows in `.github/workflows/`:
 
