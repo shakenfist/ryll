@@ -2,7 +2,7 @@
 
 Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent Computing Environments) client, designed for testing the Kerbside SPICE proxy.
 
-Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a first-class citizen and shares as much functionality as the mode itself can physically support. The supported modes today are a **GUI** (egui / eframe desktop window) for interactive day-to-day use, a **headless** mode for automated testing, CI, and cadence latency probing, and a **web** mode (browser frontend over WebRTC, Phases 0–7 of 8 complete) that lets any modern browser connect to a SPICE session without installing software; see `docs/plans/PLAN-web-frontend.md` and `docs/web-frontend.md`.
+Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a first-class citizen and shares as much functionality as the mode itself can physically support. The supported modes today are a **GUI** (egui / eframe desktop window) for interactive day-to-day use, a **headless** mode for automated testing, CI, and cadence latency probing, and a **web** mode (browser frontend over WebRTC with native TLS, all 8 phases shipped) that lets any modern browser connect to a SPICE session without installing software; see `docs/plans/PLAN-web-frontend.md` and `docs/web-frontend.md`.
 
 ## Features
 
@@ -233,15 +233,15 @@ audio after it loads (browser autoplay policy).
 Optional flags:
 - `--web-host 0.0.0.0` — bind address (defaults to loopback)
 - `--web-port 8080` — port (defaults to ephemeral)
+- `--web-tls-cert /path/cert.pem` + `--web-tls-key /path/key.pem` — serve over HTTPS with native TLS (both required together; see `docs/web-frontend.md` for cert recipes)
 
-Phases 5 and 6 of the web-frontend plan are complete.
-Closing the browser tab reaps the bridge and encoder within
-~1 second (SPICE session stays live); reopening the same URL
-establishes a fresh connection. The browser auto-reconnects
-on transient ICE failures with 1 s/2 s/4 s/8 s/16 s backoff.
-Packaging / CI (Phase 7) and full operator docs including
-a systemd unit example (Phase 8) are still pending. See
-`docs/web-frontend.md` for the current operator guide.
+All 8 phases of the web-frontend plan are complete. Closing
+the browser tab reaps the bridge and encoder within ~1 second
+(SPICE session stays live); reopening the same URL establishes
+a fresh connection. The browser auto-reconnects on transient
+ICE failures with 1 s/2 s/4 s/8 s/16 s backoff. A reference
+systemd unit is at `examples/ryll-web.service`. See
+`docs/web-frontend.md` for the full operator guide.
 
 ### `--pedantic` mode
 
@@ -271,14 +271,13 @@ tints amber or red when there are unread Warn or Error-severity entries
 ## Architecture
 
 The repository is a Cargo workspace with **6 crates**. The web
-frontend (`--web` mode) is in active development; see
+frontend (`--web` mode) shipped across all 8 phases; see
 [docs/plans/PLAN-web-frontend.md](docs/plans/PLAN-web-frontend.md)
-for the master plan. Phases 0–6 (parity audit, renderer
+for the master plan. All phases (parity audit, renderer
 extraction, encoder pipeline, WebRTC bridge, HTTP server,
-real SPICE wire-up for display/audio/inputs/cursor, and
-reconnect / bridge lifecycle) have landed.
-Phases 7–8 (CI packaging, full operator docs) are pending.
-Quick-start: `docs/web-frontend.md`.
+real SPICE wire-up for display/audio/inputs/cursor, reconnect
+/ bridge lifecycle, CI packaging, and operator docs with
+native TLS) have landed. Quick-start: `docs/web-frontend.md`.
 
 | Crate | Role |
 |-------|------|

@@ -445,11 +445,10 @@ macOS and Windows CI builds verify the `--web` dependencies
 link correctly but do not run the smoke test (runtime smoke
 is Linux-only for the MVP; see `docs/portability.md`).
 
-## Pending phases
+## Project status
 
-Phases 0–8 (steps 8a–8c) of the web-frontend plan are
-complete. Steps 8d (kerbside cross-reference) and 8e
-(status flips) are in progress.
-
-See `docs/plans/PLAN-web-frontend.md` for the master plan
-and individual phase plan files for implementation details.
+All 8 phases of the web-frontend plan are complete. The
+`--web` mode ships end-to-end: display, audio, inputs,
+cursor, reconnect, CI packaging, native TLS, and operator
+documentation. See `docs/plans/PLAN-web-frontend.md` for
+the full history.

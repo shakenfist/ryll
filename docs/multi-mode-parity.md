@@ -136,7 +136,7 @@
 | TCP keepalive on all channel sockets | available | available | available (inherited from SpiceClient) |
 | **Authentication / Session Token** | | | |
 | Per-launch URL token (web mode only) | n/a — intrinsic (no HTTP server) | n/a — intrinsic (no HTTP server) | available (MVP; random 32-byte token printed to stdout, Phase 4) |
-| TLS for browser-facing endpoint | n/a — intrinsic | n/a — intrinsic | missing (out of MVP scope; deferred per PLAN-web-frontend.md §Resolutions §8) |
+| TLS for browser-facing endpoint | n/a — intrinsic | n/a — intrinsic | available (Phase 8a; `--web-tls-cert` / `--web-tls-key` flags; axum-server with rustls) |
 | **Web frontend (--web mode)** | | | |
 | HTTP server with per-launch URL token | n/a — intrinsic | n/a — intrinsic | available (Phase 4; `ryll/src/web/server.rs`) |
 | Embedded browser shell (HTML/JS/CSS via include_bytes!) | n/a — intrinsic | n/a — intrinsic | available (Phase 4) |

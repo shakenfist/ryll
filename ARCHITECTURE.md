@@ -40,7 +40,7 @@ shared core. The supported modes are:
 |------|----------|--------|-------------|
 | GUI | egui / eframe desktop window | Shipping | Interactive day-to-day VDI access from the operator's own machine |
 | Headless | none (stdout + metrics) | Shipping | Automated testing, CI, cadence latency probing, scripted USB / WebDAV scenarios |
-| Web | Browser via WebRTC | In progress (Phases 0–7 landed) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
+| Web | Browser via WebRTC | Shipping (all 8 phases complete) | Interactive VDI access from any browser on the LAN; see `docs/plans/PLAN-web-frontend.md` |
 
 A feature is not considered complete when it works in only
 one mode. Every feature should be reachable from every mode
@@ -464,6 +464,26 @@ Key changes:
   SIGTERM, and verifies clean exit within 5 seconds.
   macOS and Windows CI verifies the `--web` dependencies
   link but does not run the smoke test.
+
+## Phase 8: Operator Docs + Native TLS (`--web` mode)
+
+Phase 8 of the web-frontend plan
+(`docs/plans/PLAN-web-frontend-phase-08-docs.md`) closes
+the operator-facing gaps and ships native TLS.
+
+`axum-server` (with the `tls-rustls` feature) is added as
+a dependency. Two CLI flags — `--web-tls-cert <PATH>` and
+`--web-tls-key <PATH>` — activate HTTPS mode; clap's
+`requires =` enforces that both are supplied together or
+neither. When TLS is active the startup URL line prints
+`https://` and the server uses
+`axum_server::bind_rustls(addr, RustlsConfig)` with a
+`Handle::graceful_shutdown` shim driven by
+`SHUTDOWN_REQUESTED`, keeping the Phase 6 graceful-shutdown
+semantics intact. A reference systemd unit at
+`examples/ryll-web.service` shows the TLS-enabled
+invocation with an `EnvironmentFile` pattern. With all 8
+phases landed, the web-frontend project is complete.
 
 ## Code Organisation
 
