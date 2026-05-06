@@ -539,7 +539,7 @@ master plan is the input to writing them.
 | 5. Inputs + cursor overlay + audio passthrough | PLAN-web-frontend-phase-05-iac.md | Complete |
 | 6. Reconnect + lifecycle | PLAN-web-frontend-phase-06-lifecycle.md | Complete (`7c6fa2fa` bridge dead signal, `a3aaa1b5` reaper + encoder stop, `e7c98f10` browser auto-reconnect, 6d docs) |
 | 7. CI build + packaging | PLAN-web-frontend-phase-07-ci.md | Complete (`026a761e` publish-crates, `c6a0a94b` libopus-dev, `93ab083b` smoke test, `e59b8b13` deb/rpm deps, `efe9de60` docs sweep) |
-| 8. Operator docs + systemd example | PLAN-web-frontend-phase-08-docs.md | Not written |
+| 8. Operator docs + systemd example | PLAN-web-frontend-phase-08-docs.md | Not started |
 
 ### Phase 0: Multi-mode parity audit
 
