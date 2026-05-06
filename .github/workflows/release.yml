@@ -72,17 +72,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
+          - name: Linux (x86_64)
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             features: ""
-          - name: macOS
+          - name: Linux (aarch64)
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            features: ""
+          - name: macOS (aarch64)
             os: macos-latest
             target: aarch64-apple-darwin
             features: ""
-          - name: Windows
+          - name: Windows (x86_64)
             os: windows-latest
             target: x86_64-pc-windows-msvc
+            features: "--no-default-features"
+          - name: Windows (aarch64)
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
             features: "--no-default-features"
     runs-on: ${{ matrix.os }}
     env:
@@ -146,7 +154,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: release-deb
+          name: release-deb-${{ matrix.target }}
           path: target/debian/*.deb
 
       - name: Install cargo-generate-rpm
@@ -161,7 +169,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: release-rpm
+          name: release-rpm-${{ matrix.target }}
           path: target/generate-rpm/*.rpm
 
       # --- macOS: tarball ---
@@ -193,7 +201,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: release-windows
+          name: release-windows-${{ matrix.target }}
           path: target/release/ryll-*.zip
 
   publish-crates:
