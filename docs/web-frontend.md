@@ -93,9 +93,6 @@ tears down cleanly.
 
 - Single viewer at a time. A second offer replaces the
   existing connection.
-- Plain HTTP only. The transport itself (WebRTC's
-  DTLS-SRTP) is encrypted by the protocol; the signalling
-  page is plain HTTP and intended for trusted-LAN use only.
 - No clipboard sync, USB redirection, or folder sharing
   (out of MVP scope).
 - No multi-monitor (single video track, single primary
@@ -103,15 +100,253 @@ tears down cleanly.
 - Browser audio autoplay policy: click the volume button on
   the page to enable sound after the page loads.
 
+## Native TLS
+
+ryll supports HTTPS natively via two flags:
+
+    ryll --web session.vv \
+        --web-tls-cert /path/to/cert.pem \
+        --web-tls-key  /path/to/key.pem
+
+Both flags must be supplied together; clap rejects one
+without the other at parse time. Omitting both keeps the
+default plain-HTTP behaviour.
+
+**Accepted formats**: PEM-encoded certificate chain
+(`cert.pem`) and PEM-encoded private key (`key.pem`).
+A chain file should contain the leaf certificate first,
+followed by any intermediate CA certificates.
+
+When TLS is active the startup URL line prints `https://`:
+
+    ryll: serving web frontend at https://0.0.0.0:8443/?token=...
+
+**Cert rotation (MVP)**: ryll does not support inline cert
+reload. To rotate a certificate, replace the files on disk
+then restart the process (or `systemctl restart ryll-web`).
+The URL token changes on each restart.
+
+**Security layers**: WebRTC's media path is always
+encrypted by DTLS-SRTP at the protocol level, regardless
+of whether the signalling page is over HTTPS. Native TLS
+protects the URL token and the signalling page (`GET /`,
+`POST /offer`). DTLS-SRTP protects the audio/video media
+stream. The two layers are complementary: use native TLS
+for the signalling path whenever the traffic crosses any
+untrusted network.
+
+## Cert recipes
+
+### mkcert (LAN dev)
+
+[mkcert](https://github.com/FiloSottile/mkcert) installs a
+local CA into your machine's trust store so browsers on
+that machine accept the generated cert without a warning:
+
+    mkcert -install
+    mkcert ryll.lan 192.168.1.10
+
+Pass the resulting `.pem` files directly to
+`--web-tls-cert` and `--web-tls-key`.
+
+### certbot (public DNS)
+
+For a host with a public DNS A record and ports 80/443
+reachable:
+
+    certbot certonly --standalone -d ryll.example.com
+
+Certs land at
+`/etc/letsencrypt/live/ryll.example.com/fullchain.pem`
+and `.../privkey.pem`. Auto-renewal:
+
+    # /etc/cron.d/certbot-renew (or use certbot's timer)
+    0 3 * * * root certbot renew --quiet \
+        --deploy-hook "systemctl restart ryll-web"
+
+### openssl one-off (self-signed)
+
+For a one-afternoon diagnostic session where a browser
+warning is acceptable:
+
+    openssl req -x509 -newkey rsa:2048 \
+        -keyout key.pem -out cert.pem \
+        -days 30 -nodes -subj "/CN=ryll.lan"
+
+The browser will show an untrusted-cert warning. Proceed
+by adding a permanent exception, or use mkcert instead.
+
+### Internal CA
+
+For org-managed PKI, request a cert from your internal CA
+and follow your org's cert-issuance documentation. The
+output should be a PEM chain file and a PEM key file,
+which pass directly to `--web-tls-cert`/`--web-tls-key`.
+
+## Reverse-proxy fallback
+
+If you already terminate TLS at a reverse proxy for
+unrelated reasons, you can pass the plain-HTTP URL
+through to ryll and let the proxy handle HTTPS. Native TLS
+is recommended for new deployments — the reverse-proxy
+path is documented here as a fallback only.
+
+**Caddy** (autocert handles the cert lifecycle):
+
+```caddy
+ryll.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+That is the entire config for a publicly-reachable
+deployment with an A record pointing at the host. Caddy
+talks to Let's Encrypt automatically.
+
+**nginx** (operator manages the cert separately):
+
+```
+proxy_pass http://127.0.0.1:8080;
+```
+
+A full nginx server block follows the standard
+`proxy_pass` + `ssl_certificate` / `ssl_certificate_key`
+pattern.
+
+> **Important — WebRTC media is NOT proxied.**
+>
+> ICE candidates emitted by ryll point at ryll's host and
+> port directly. The browser opens UDP flows to that
+> endpoint — they never go through the reverse proxy.
+> The proxy carries only the HTTP signalling page and the
+> `POST /offer` request.
+>
+> Consequences:
+>
+> - **ryll's UDP port range must be reachable from the
+>   browser.** Open the relevant firewall ports on ryll's
+>   host. The ephemeral RTP port range is chosen by the OS
+>   (typically 32768–60999 on Linux).
+> - **Bind ryll to the public-facing IP, not loopback,**
+>   when the proxy listens on a different IP. Use
+>   `--web-host 0.0.0.0` or the specific public IP.
+>   If ryll is bound to `127.0.0.1`, the ICE candidates
+>   it advertises will be loopback-only and the browser
+>   cannot reach them.
+
+## Troubleshooting
+
+### Page loads, video stays black for >10 seconds
+
+**Likely causes:**
+
+- **ICE failure** — UDP between the browser and ryll is
+  blocked. Open the browser DevTools console and check the
+  `RTCPeerConnection` connection state. If it is stuck on
+  `connecting`, ICE negotiation has not completed.
+  Fix: ensure ryll's UDP port range is reachable from the
+  browser host (firewall / security-group rules). If ryll
+  is behind a reverse proxy, see the callout in the
+  Reverse-proxy fallback section above.
+
+- **Encoder didn't start** — `RTCPeerConnection` reached
+  `connected` but no frames arrived. Check ryll's stderr
+  for encoder errors. The encoder requests a keyframe on
+  the `Connected` transition; the first frame may take up
+  to ~1 second. If no frame arrives after 10 seconds,
+  the encoder task is wedged — restart ryll and file a
+  bug.
+
+### No audio, video works
+
+**Likely causes:**
+
+- **Browser autoplay policy** — the `<video>` element is
+  muted by default to satisfy autoplay rules. Click the
+  volume button on the page to enable audio.
+
+- **PCM-only SPICE server** — ryll does Opus passthrough
+  only in MVP. If the SPICE server negotiated PCM playback
+  (no Opus), ryll logs a warning and audio will be silent
+  until a future PCM→Opus encoder lands.
+
+### "Click to reconnect" loop
+
+The browser retries automatically five times with
+exponential backoff, then shows a manual button (Phase 6).
+If the button appears every time you reconnect, check
+ryll's logs for:
+
+    bridge reaper: bridge died, reaping
+
+If this line is absent, the reaper task may not be running
+or the bridge is not reaching a terminal state. Restart
+ryll and file a bug with the full log.
+
+### High CPU when no browser is connected
+
+This should not happen on Phase 6+ ryll. The bridge reaper
+drops the H.264 encoder when the browser disconnects, so
+CPU usage returns to near-idle. If you observe sustained
+high CPU with no active browser session, check that the
+reaper task is reaching the dead-bridge signal in the logs.
+If it is absent, file a bug with ryll version and log.
+
+### Cert load errors at startup
+
+ryll prints a clear error chain on cert-load failure, for
+example:
+
+    Error: loading --web TLS cert/key from /etc/ryll/tls/cert.pem /
+    /etc/ryll/tls/key.pem: ...
+
+Common causes and fixes:
+
+- **File permissions** — the ryll process must be able to
+  read both files. Fix:
+
+      chown ryll:ryll cert.pem key.pem
+      chmod 0600 key.pem
+
+- **Malformed PEM** — the file is not valid PEM. Re-export
+  the cert/key from your CA or regenerate with openssl.
+
+- **Mismatched cert/key** — the public key in the cert
+  does not match the private key. Verify they were
+  generated together.
+
+### Browser shows cert warning
+
+The certificate is self-signed or the browser does not
+trust the issuing CA. Options:
+
+- Use mkcert (see Cert recipes), which installs its CA
+  into the system trust store automatically.
+- Install your internal CA's root cert into the browser's
+  trust store.
+- Accept the browser warning for one-off / diagnostic
+  access (the media path is still DTLS-SRTP encrypted).
+
+### Ctrl-C ignored (historic, pre-Phase 6)
+
+Phase 6's `with_graceful_shutdown` / `Handle::graceful_shutdown`
+path fixed a race where Ctrl-C was delivered before the
+axum server was ready to drain. If you see this on a
+current ryll build, file a bug. Update to ryll ≥ Phase 6.
+
 ## Security note
 
-The MVP listens on plain HTTP with a single per-launch
-token in the URL. The token is sufficient to defeat casual
-port-scanning but is not a substitute for HTTPS. Intended
-for trusted-LAN deployment (operator's own machine or a
-LAN-connected workstation). For exposure beyond a trusted
-LAN, wait for Phase 8's TLS support — or front the server
-with an HTTPS reverse proxy.
+ryll supports native HTTPS via `--web-tls-cert` /
+`--web-tls-key` — this is the recommended deployment for
+any traffic that crosses a network you do not fully
+control. Plain HTTP is acceptable only for loopback-only
+(`--web-host 127.0.0.1`, the default) or fully-trusted-LAN
+deployments where the URL token is the only sensitive
+material on the wire and you control all endpoints.
+
+In all cases, the WebRTC media path (audio and video) is
+encrypted at the protocol level by DTLS-SRTP, independent
+of whether the signalling page is served over HTTPS.
 
 ## Service mode
 
@@ -212,12 +447,9 @@ is Linux-only for the MVP; see `docs/portability.md`).
 
 ## Pending phases
 
-Phases 0–7 of the web-frontend plan are complete.
-The following phases are still pending:
+Phases 0–8 (steps 8a–8c) of the web-frontend plan are
+complete. Steps 8d (kerbside cross-reference) and 8e
+(status flips) are in progress.
 
-- **Phase 8 (Operator docs)**: expand this guide with a systemd
-  unit example, troubleshooting section, TLS configuration,
-  and security hardening notes.
-
-See `docs/plans/PLAN-web-frontend.md` for the master plan and
-individual phase plan files for implementation details.
+See `docs/plans/PLAN-web-frontend.md` for the master plan
+and individual phase plan files for implementation details.
