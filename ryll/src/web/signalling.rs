@@ -17,6 +17,7 @@
 //! encoder lock while constructing a new bridge is safe — the
 //! bridge constructor does not take any state lock.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, Json};
@@ -334,10 +335,14 @@ pub async fn post_offer(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)))?;
 
-    // Step 7: store the new bridge.
+    // Step 7: store the new bridge and bump the generation
+    // counter so the reaper knows not to act on the dead
+    // signal from the OLD bridge (which may fire after the
+    // new bridge is already in the slot).
     {
         let mut slot = state.bridge_slot.lock().await;
         *slot = Some(bridge);
+        state.bridge_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());

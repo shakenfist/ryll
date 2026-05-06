@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -94,6 +94,13 @@ pub struct WebState {
     /// outside web-with-SPICE sessions (e.g. unit tests of the
     /// HTTP layer construct a `WebState` without a sink).
     pub active_opus_tx: super::audio::ActiveSenderSlot,
+    /// Monotonically increasing counter incremented by `POST
+    /// /offer` whenever a new bridge is installed. The bridge
+    /// reaper snapshots this before awaiting the dead signal;
+    /// if the counter has advanced by the time the reaper
+    /// wakes, a new bridge has replaced the old one and the
+    /// reaper skips the reap to avoid closing a healthy bridge.
+    pub bridge_generation: Arc<AtomicU64>,
 }
 
 impl WebState {
@@ -155,6 +162,7 @@ impl WebState {
             event_tx,
             surface_mirror,
             active_opus_tx,
+            bridge_generation: Arc::new(AtomicU64::new(0)),
         }
     }
 }
