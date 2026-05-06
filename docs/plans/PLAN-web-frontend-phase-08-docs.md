@@ -1,4 +1,4 @@
-# Phase 8: Operator docs + systemd + TLS recipes
+# Phase 8: Native TLS + operator docs + systemd
 
 ## Prompt
 
@@ -36,116 +36,135 @@ Flag any uncertainty rather than guessing.
 
 ## Goal
 
-Close the operator-facing documentation gap so a sysadmin
-who does not know the codebase can:
+Make the signalling page TLS-capable in the binary itself,
+then close the operator-facing documentation gap so a
+sysadmin who does not know the codebase can:
 
-- Run `ryll --web` as a long-lived systemd service.
-- Front it with TLS via Caddy or nginx, including an
-  end-to-end recipe for obtaining a cert (LAN-only via
-  mkcert; public via Let's Encrypt).
+- Serve `ryll --web` directly over HTTPS with a cert pair
+  (no required reverse proxy).
+- Run it as a long-lived systemd service.
 - Diagnose common failure modes (no video, ICE failure,
   no audio, autoplay blocked) without reading source.
 - Know where ryll's `--web` mode fits in the broader
   shakenfist deployment story (the kerbside cross-ref).
 
+The motivation for native TLS over a documented reverse-
+proxy pattern: SPICE's existing UX flags unencrypted
+sessions explicitly via the notification system. Shipping a
+web frontend that *requires* an external proxy for HTTPS
+would mislead operators by quietly serving the page (and
+the per-launch URL token) in cleartext on the wire whenever
+they're not careful. Native TLS keeps the security story
+"what ryll prints is what's used" without an extra moving
+part. The reverse-proxy path is documented as an option
+for operators who already run one, but it's no longer the
+recommended baseline.
+
 After Phase 8:
 
-- `docs/web-frontend.md` has a Service mode, Troubleshooting,
-  and TLS sections, plus a deployment-patterns appendix.
+- `ryll --web --web-tls-cert /path/cert.pem
+  --web-tls-key /path/key.pem` serves the signalling page
+  over HTTPS (and prints `https://...` in the URL line).
+  Without those flags, behaviour is unchanged
+  (plain-HTTP, loopback default).
+- `docs/web-frontend.md` has Service mode, Native TLS,
+  Cert recipes, Troubleshooting, and Deployment patterns
+  sections.
 - A reference systemd unit lives at `examples/ryll-web.service`
-  (or under `packaging/`, wherever existing examples live).
-- A reference Caddyfile and nginx server-block live next to
-  the unit file.
+  showing the TLS-mode invocation.
+- An optional reference Caddyfile lives in the docs as a
+  fallback recipe for operators who want auto-fetched
+  certs without managing them in ryll's config; this is
+  no longer the primary recommendation.
 - `kerbside/docs/` has a one-paragraph note pointing at
-  ryll's `--web` mode for browser-based SPICE access.
-- The master plan's Phase 8 row flips to Complete; README
-  and index update to "Phases 0–8 of 8 complete" or
-  equivalent (the web-frontend project becomes Complete).
+  ryll's `--web` mode.
+- The web-frontend project status flips to Complete.
 
 Out of scope:
 
-- **Native TLS in ryll's axum server.** The plan defaults
-  to documenting the reverse-proxy pattern (Caddy/nginx).
-  Native TLS is a code change, not a doc change, and is
-  flagged as an Open Question below for user decision.
-- Multi-viewer support, auth integration (OIDC, SAML),
-  audit logging, rate limiting — all future work.
+- ACME / auto-cert support inside ryll. Operators bring
+  their own cert pair (mkcert, certbot, internal CA, etc.).
+  ACME is a substantial dependency surface and a future
+  enhancement.
+- Multiple cert support / SNI. One cert pair per ryll
+  instance.
+- mTLS (client certs for browser auth). The per-launch
+  URL token remains the auth boundary.
+- Multi-viewer support, OIDC/SAML, audit logging, rate
+  limiting — future work.
 - A Docker / Podman container image for ryll-as-a-service.
-  Could be a follow-up after Phase 8 if the operator wants
-  it, but not required for MVP completion.
 - Distro-specific packaging tweaks beyond what Phase 7
   already shipped.
-
-## Open question for user before execution
-
-**Does Phase 8 include native TLS in axum, or is the
-reverse-proxy recipe sufficient?**
-
-- **Doc-only path** (default): Phase 8 documents how to
-  put Caddy or nginx in front of ryll. Caddy auto-fetches
-  certs; nginx + certbot is the manual path. ~5 LoC of
-  unit-file glue, no Rust changes.
-- **Native TLS path**: ~80–120 LoC of Rust changes.
-  Add `--web-tls-cert`/`--web-tls-key` flags. Use
-  `axum-server` with `RustlsConfig`. Adds an extra config
-  surface and a small ongoing maintenance load. The
-  WebRTC layer already does its own DTLS-SRTP — adding
-  TLS to the signalling page is purely about not leaking
-  the URL token over plain HTTP between browser and
-  server.
-
-The doc-only path is recommended for MVP because:
-
-1. Operators who care about TLS termination probably
-   already run a reverse proxy for other services.
-2. Caddy's auto-TLS makes the reverse-proxy story
-   genuinely two-line.
-3. Native TLS adds a config surface that can drift from
-   the axum/rustls version pinning.
-
-If the user picks the native-TLS path, the plan grows by
-one extra commit (8d′ or similar). The plan as written
-defaults to doc-only and flags this for confirmation.
 
 ## Scope
 
 In:
 
+- **Native TLS in axum** — `ryll/Cargo.toml`,
+  `ryll/src/main.rs`, `ryll/src/web/server.rs`,
+  `ryll/src/web/mod.rs`. Add `axum-server = { version,
+  features = ["tls-rustls"] }` (it already pins
+  rustls 0.23 with ring, matching the workspace).
+  CLI flags `--web-tls-cert <PATH>` and
+  `--web-tls-key <PATH>` (both must be supplied or
+  neither). When present, bind the server with
+  `axum_server::bind_rustls(addr, RustlsConfig)`.
+  Otherwise, behaviour stays plain-HTTP via existing
+  `axum::serve(...).with_graceful_shutdown(...)` path.
+  Print `https://...` in the URL line when TLS is on.
+- **Graceful shutdown parity** — axum-server uses a
+  `Handle` for shutdown, not the `with_graceful_shutdown`
+  pattern. Wire `Handle::graceful_shutdown(Some(timeout))`
+  to fire when SHUTDOWN_REQUESTED flips, mirroring the
+  Phase 6 fix. Phase 7c's `tools/web-smoke.sh` SIGTERM
+  test must still pass for both the plain-HTTP and TLS
+  paths.
+- **Tests** — extend `ryll/src/web/server.rs` (or a new
+  `tls.rs` integration test) to cover: flag parsing
+  (both / neither / one-of-pair-missing); cert loading
+  errors are surfaced clearly; a self-signed cert
+  generated via `rcgen` (dev-dep) binds and serves the
+  embedded HTML over HTTPS.
+- **Smoke test extension** — `tools/web-smoke.sh` gains
+  a TLS variant or grows a `--tls` flag. CI's Linux
+  step exercises both. Generates a throwaway cert via
+  openssl in the script's tempdir.
 - `docs/web-frontend.md` — extend with:
-  - **Service mode** section: systemd unit file,
-    user/group recommendations, `EnvironmentFile`
-    pattern for the `.vv` path, `Restart=on-failure`,
-    `KillSignal=SIGTERM` (Phase 6's graceful shutdown),
-    log capture via `StandardOutput=journal`.
-  - **TLS via reverse proxy** section: Caddy two-line
-    recipe, nginx server-block recipe, where to find the
-    upstream port (the URL ryll prints).
-  - **Cert recipes**: mkcert for LAN dev, Let's Encrypt
-    via Caddy auto, certbot for nginx.
-  - **Troubleshooting**: no video; ICE failure (NAT
-    traversal hints; STUN/TURN not used in MVP);
-    no audio (autoplay policy; PCM-only servers);
-    "Click to reconnect" loops; Ctrl-C ignored
-    (already-shipped fix in Phase 6 — note as historic
-    context).
-  - **Deployment patterns** appendix: localhost-only,
-    LAN-only, behind-Caddy with public DNS, behind-nginx
-    in an existing reverse proxy.
-- `examples/ryll-web.service` — reference systemd unit.
-- `examples/Caddyfile` — reference Caddy config.
-- `examples/nginx-ryll-web.conf` — reference nginx server
-  block.
-- `kerbside/docs/index.md` (or capabilities.md / proxy-
-  architecture.md, whichever fits) — one-paragraph note
-  pointing at ryll `--web` for browser access.
+  - **Service mode** section: systemd unit, user/group,
+    `EnvironmentFile` for `.vv` and cert paths,
+    `Restart=on-failure`, `KillSignal=SIGTERM` ties
+    Phase 6 shutdown, journalctl URL extraction.
+  - **Native TLS** section: how to invoke
+    `--web-tls-cert/--web-tls-key`, how to obtain a
+    cert (mkcert, certbot, internal CA recipe), how
+    to rotate a cert (kill + restart; no inline
+    reload in MVP).
+  - **Cert recipes**: mkcert for LAN dev; certbot
+    standalone for public DNS; openssl for one-off
+    self-signed; pointer to internal CA workflow.
+  - **Reverse proxy fallback**: brief Caddy two-line
+    recipe + warning callout that WebRTC media is
+    NOT proxied (UDP RTP must reach ryll's host
+    directly regardless).
+  - **Troubleshooting**: no video; ICE failure (UDP
+    blocked); no audio (autoplay policy / PCM-only
+    server); "Click to reconnect" loops; cert-load
+    errors; Ctrl-C historic note (Phase 6).
+  - **Deployment patterns** appendix: localhost-only;
+    LAN-only with mkcert; public-DNS with certbot;
+    behind a corporate proxy (the fallback).
+- `examples/ryll-web.service` — reference systemd unit
+  (TLS-enabled invocation).
+- `kerbside/docs/<file>.md` — one-paragraph note pointing
+  at ryll `--web` for browser access (separate repo;
+  separate commit).
 - `README.md` — flip the multi-modal table from "0–7 of
-  8 complete" to "Complete (8/8)" or similar; bump the
-  `--web` row from "In progress" / "Pending" to
-  "Shipping".
-- `docs/plans/PLAN-web-frontend.md` — Phase 8 row flipped
-  to Complete; project status flips to Complete.
-- `docs/plans/index.md` — web-frontend project marked
-  Complete.
+  8" to Complete; flip the `--web` row to Shipping with
+  a "TLS native" qualifier in the description so the
+  README reflects the security posture.
+- `docs/plans/PLAN-web-frontend.md` — Phase 8 row
+  Complete; project status Complete.
+- `docs/plans/index.md` — web-frontend project Complete.
 
 Out:
 
@@ -153,10 +172,108 @@ Out:
 - Reorganising the existing `docs/web-frontend.md` —
   append, don't refactor.
 - A Container/Docker recipe (deferred).
+- A reverse-proxy "primary" path. The Caddy recipe ships
+  as a fallback only and that framing matters.
 
 ## Approach
 
-### Service mode (8a)
+### Native TLS (8a)
+
+Use `axum-server` (the maintained companion crate to axum
+that exposes a binding loop with TLS support). It already
+talks to rustls 0.23 via the `tls-rustls` feature, which
+matches the workspace's existing rustls + ring pinning.
+No extra crypto provider work needed.
+
+API sketch:
+
+```rust
+use axum_server::{tls_rustls::RustlsConfig, Handle};
+
+let handle = Handle::new();
+// Wire SHUTDOWN_REQUESTED → handle.graceful_shutdown(...).
+let shutdown_handle = handle.clone();
+tokio::spawn(async move {
+    while !SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    shutdown_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+});
+
+if let (Some(cert), Some(key)) = (&args.web_tls_cert, &args.web_tls_key) {
+    let config = RustlsConfig::from_pem_file(cert, key).await
+        .with_context(|| format!("loading TLS cert/key from {} / {}", cert.display(), key.display()))?;
+    axum_server::bind_rustls(addr, config)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await?;
+} else {
+    axum_server::bind(addr)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await?;
+}
+```
+
+Both branches use `axum_server` (not the existing
+`axum::serve`) so the shutdown semantics are uniform.
+This is a small migration; the existing
+`with_graceful_shutdown(shutdown_signal())` pattern goes
+away in favour of `Handle::graceful_shutdown`.
+
+CLI flag pair, mutually-required:
+
+```rust
+/// PEM-encoded TLS certificate chain. If supplied, --web-tls-key
+/// is also required and the web frontend serves over HTTPS.
+#[arg(long, requires = "web_tls_key")]
+pub web_tls_cert: Option<PathBuf>,
+
+/// PEM-encoded TLS private key. Required if --web-tls-cert is
+/// supplied.
+#[arg(long, requires = "web_tls_cert")]
+pub web_tls_key: Option<PathBuf>,
+```
+
+The `requires =` clap attribute enforces the both-or-
+neither constraint at parse time.
+
+URL printing — when TLS is on, the URL line becomes
+`https://host:port/?token=...` instead of `http://...`.
+Affects the operator-visible startup log line and the
+journalctl extraction recipe in the systemd doc.
+
+Test surface:
+
+1. Unit test for flag parsing (both / neither / one-of-
+   pair-missing — clap's `requires` should reject the
+   last case).
+2. Cert-load error path (nonexistent file, malformed
+   PEM) surfaces a clear `anyhow::Error` chain.
+3. Integration test in `ryll/src/web/` that uses
+   `rcgen` (dev-dep) to generate a self-signed cert,
+   binds, and serves the embedded HTML over HTTPS via
+   a reqwest client with cert verification disabled.
+
+### Smoke test extension (still 8a, same commit)
+
+`tools/web-smoke.sh` gains an optional second invocation
+that:
+
+1. Generates a throwaway cert pair via `openssl req
+   -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem
+   -days 1 -nodes -subj "/CN=localhost"` in the temp
+   dir.
+2. Launches `ryll --web --web-tls-cert ... --web-tls-key ...`.
+3. curls `https://localhost:port/` with `-k` and asserts
+   200 OK on the embedded HTML.
+4. SIGTERMs and verifies clean exit (5 s ceiling, same
+   as plain).
+
+CI workflow runs the smoke script twice on the Linux
+matrix entry: once plain, once TLS.
+
+### Service mode (8b)
 
 systemd unit at `examples/ryll-web.service`:
 
@@ -171,8 +288,18 @@ Type=simple
 User=ryll
 Group=ryll
 EnvironmentFile=/etc/ryll/web.env
-# web.env declares: VV_FILE=/etc/ryll/session.vv WEB_HOST=0.0.0.0 WEB_PORT=8080
-ExecStart=/usr/bin/ryll --web --file ${VV_FILE} --web-host ${WEB_HOST} --web-port ${WEB_PORT}
+# web.env declares:
+#   VV_FILE=/etc/ryll/session.vv
+#   WEB_HOST=0.0.0.0
+#   WEB_PORT=8443
+#   WEB_TLS_CERT=/etc/ryll/tls/cert.pem
+#   WEB_TLS_KEY=/etc/ryll/tls/key.pem
+ExecStart=/usr/bin/ryll --web \
+    --file ${VV_FILE} \
+    --web-host ${WEB_HOST} \
+    --web-port ${WEB_PORT} \
+    --web-tls-cert ${WEB_TLS_CERT} \
+    --web-tls-key ${WEB_TLS_KEY}
 Restart=on-failure
 RestartSec=5s
 KillSignal=SIGTERM
@@ -204,7 +331,7 @@ The `web-frontend.md` "Service mode" section explains:
   protects against accidental override) so Phase 6's
   graceful-shutdown path engages.
 
-### TLS via reverse proxy (8b)
+### TLS recipes + reverse-proxy fallback (8c)
 
 Caddyfile (the canonical recipe — autocert handles the
 cert lifecycle):
@@ -265,7 +392,7 @@ HTTP signalling page + `/offer` POST. This means:
 This caveat is the section's most important takeaway
 and goes in a callout box in `docs/web-frontend.md`.
 
-### Cert recipes (8b cont.)
+### Cert recipes (8c cont.)
 
 - **Let's Encrypt via Caddy**: nothing to do; Caddy
   fetches and renews. Document the prerequisite (DNS A
@@ -289,7 +416,7 @@ and goes in a callout box in `docs/web-frontend.md`.
   Browser will show a warning — acceptable for one-off
   diagnostic access.
 
-### Troubleshooting (8b cont.)
+### Troubleshooting (8c cont.)
 
 Section structure: symptom → likely cause → fix.
 
@@ -327,7 +454,7 @@ Section structure: symptom → likely cause → fix.
   - Pre-Phase-6 only — Phase 6's `with_graceful_shutdown`
     fixed this. Update to ryll ≥ Phase 6.
 
-### kerbside cross-reference (8c)
+### kerbside cross-reference (8d)
 
 Find the right home in `kerbside/docs/`. Likely
 candidates: `index.md` (a "Related projects" or
@@ -342,7 +469,7 @@ A single paragraph, ~3 sentences, with a link back to
 `https://github.com/shakenfist/ryll` and the relevant
 section of `docs/web-frontend.md`.
 
-### Status flips (8d)
+### Status flips (8e)
 
 - `docs/plans/PLAN-web-frontend.md` — Phase 8 row
   Complete. Master plan project status: Complete.
@@ -358,24 +485,93 @@ section of `docs/web-frontend.md`.
 
 - Phase 7 complete on `thought-bubble`. (It is — last
   commit `5d14b053`.)
-- User decision on the **Open question** (native TLS
-  vs doc-only). The plan defaults to doc-only.
+- User decision on native TLS confirmed: native TLS in.
 
 ## Steps
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 8a   | medium | sonnet | none     | Service mode. Add `examples/ryll-web.service` (systemd unit per the plan). Add a "Service mode" section to `docs/web-frontend.md` covering installation, the EnvironmentFile pattern, journalctl URL extraction, and how Phase 6's graceful shutdown integrates with `KillSignal=SIGTERM`. Single commit. |
-| 8b   | medium | sonnet | none     | TLS via reverse proxy + cert recipes + troubleshooting. Add `examples/Caddyfile` and `examples/nginx-ryll-web.conf`. Add a "TLS via reverse proxy", "Cert recipes", and "Troubleshooting" section to `docs/web-frontend.md`. Include the WebRTC-media-not-proxied callout prominently. Single commit. |
-| 8c   | low    | sonnet | none     | kerbside cross-reference. Open `/srv/kasm_profiles/mikal/vscode/src/shakenfist/kerbside/docs/`, pick the right file (most likely `index.md` or `proxy-architecture.md`), add a one-paragraph pointer to ryll `--web` mode. Commit in the kerbside repo (separate git context). Single commit. |
-| 8d   | medium | sonnet | none     | Status flips + README + ARCHITECTURE polish. Flip Phase 8 + project status in master plan, index, README. Add a brief paragraph to ARCHITECTURE.md noting the project landed end-to-end. Single commit. |
+| 8a   | high   | opus   | worktree | Native TLS in axum. Add `axum-server = { version = "0.7", features = ["tls-rustls"] }` to `ryll/Cargo.toml`. Add `--web-tls-cert/--web-tls-key` flags (clap `requires =` enforces both-or-neither). Migrate the existing `axum::serve(...).with_graceful_shutdown(...)` path to `axum_server::bind(...)/bind_rustls(...).handle(handle).serve(...)` with a `Handle::graceful_shutdown` shim driven by `SHUTDOWN_REQUESTED`. Print `https://...` in the URL log line when TLS is on. Add `rcgen` as a dev-dep and write an integration test that loads a self-signed cert and serves the embedded HTML over HTTPS. Extend `tools/web-smoke.sh` (or add `tools/web-smoke-tls.sh`) and add a second CI step on Linux that runs the TLS variant. Single commit. |
+| 8b   | medium | sonnet | none     | Service mode. Add `examples/ryll-web.service` (TLS-enabled per the plan). Add a "Service mode" section to `docs/web-frontend.md` covering EnvironmentFile pattern (including cert paths), journalctl URL extraction (now `https://`), how `KillSignal=SIGTERM` ties Phase 6's graceful shutdown. Document that cert rotation is "kill + restart" in MVP. Single commit. |
+| 8c   | medium | sonnet | none     | Native TLS docs + cert recipes + reverse-proxy fallback + troubleshooting. Add **Native TLS**, **Cert recipes** (mkcert / certbot / openssl one-off), **Reverse-proxy fallback** (Caddy two-line, with WebRTC-not-proxied callout), and **Troubleshooting** sections to `docs/web-frontend.md`. Update the existing "Security note" to reflect that TLS is now a first-class option. Single commit. |
+| 8d   | low    | sonnet | none     | kerbside cross-reference. Open `/srv/kasm_profiles/mikal/vscode/src/shakenfist/kerbside/docs/`, pick the right file (likely `index.md` or `proxy-architecture.md`), add a one-paragraph pointer to ryll `--web` mode noting native TLS. Commit in the kerbside repo (separate git context). Single commit. |
+| 8e   | medium | sonnet | none     | Status flips + README + ARCHITECTURE polish. Flip Phase 8 + project status in master plan, index, README. Mention native TLS in the README's `--web` line. Add a brief paragraph to ARCHITECTURE.md noting the project landed end-to-end with native TLS. Single commit. |
 
-After 8d, Phase 8 is done and the web-frontend project is
+After 8e, Phase 8 is done and the web-frontend project is
 **Complete**.
 
 ## Step details
 
 ### Step 8a expanded brief
+
+The single biggest moving part is the migration from
+`axum::serve(...).with_graceful_shutdown(...)` to
+`axum_server::bind(...).handle(handle).serve(...)`. The
+existing path uses `with_graceful_shutdown(shutdown_signal())`
+where `shutdown_signal()` polls SHUTDOWN_REQUESTED on a
+small interval. The new path uses
+`Handle::graceful_shutdown(Some(timeout))` from a spawned
+task that polls SHUTDOWN_REQUESTED the same way.
+
+Migration steps:
+
+1. Add `axum-server = { version = "0.7", features = ["tls-rustls"] }`
+   to `ryll/Cargo.toml`. Add `rcgen = "0.13"` (or current
+   stable) to `[dev-dependencies]`.
+2. In `ryll/src/web/server.rs` (or wherever the bind+serve
+   lives — read `web::run` to confirm), replace the
+   `axum::serve(...).await` with the axum-server bind
+   pattern. Wire the Handle shutdown through the same
+   SHUTDOWN_REQUESTED polling pattern that
+   `with_graceful_shutdown` uses today.
+3. In `ryll/src/main.rs`, accept the new `--web-tls-cert/
+   --web-tls-key` args. Pass them through to `web::run`
+   or build the `RustlsConfig` in main.rs and pass the
+   prepared config (your call — wherever the existing
+   bind code already lives).
+4. The URL log line at `web::run` startup needs to know
+   whether TLS is on. Pass a bool or read it from state.
+5. The Phase 6 explicit-bridge-close + reaper-abort
+   shutdown sequence stays unchanged; it executes after
+   the server returns regardless of which bind variant
+   was used.
+
+Tests to add:
+
+- `web_tls_flags_require_both` — clap rejects supplying
+  only one of the pair.
+- `web_tls_loads_self_signed_cert` — uses rcgen to
+  generate a cert, calls `RustlsConfig::from_pem_file`
+  with the resulting bytes, asserts no error.
+- An integration test that binds a TLS server in a
+  tokio test, hits `https://localhost:port/?token=...`
+  with a reqwest client (`danger_accept_invalid_certs(true)`),
+  and asserts 200 OK + the embedded HTML body.
+
+For `tools/web-smoke.sh`, the cleanest extension is a
+new flag `--tls`:
+
+```bash
+"$BIN" --web --web-port "$PORT" \
+    --web-tls-cert "$cert" --web-tls-key "$key" \
+    --file "$tmpvv" &
+```
+
+Use `curl -sk https://localhost:$PORT/` to verify the
+HTTPS path serves the index. Generate the throwaway cert
+inline:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout "$tmpdir/key.pem" \
+    -out "$tmpdir/cert.pem" -days 1 -nodes \
+    -subj "/CN=localhost" 2>/dev/null
+```
+
+CI: in `.github/workflows/ci.yml`, add a second
+`Run --web smoke test (TLS)` step on the Linux matrix
+entry. Both steps run on every PR.
+
+### Step 8b expanded brief
 
 The systemd unit needs:
 
@@ -407,13 +603,20 @@ Document journalctl recipe for token extraction:
 journalctl -u ryll-web -n 50 --no-pager | grep -oE 'http://[^ ]+token=[^ ]+' | tail -1
 ```
 
-### Step 8b expanded brief
+### Step 8c expanded brief
 
 The TLS section's most important content is the
-WebRTC-media-not-proxied callout. Make it prominent
-(blockquote / admonition / bold call-out). Operators
-who don't read this will hit "page loads, video black"
-because their proxy doesn't forward the UDP RTP flow.
+WebRTC-media-not-proxied callout (still applies even
+when the operator chooses the reverse-proxy fallback).
+Make it prominent (blockquote / admonition / bold
+call-out). Operators who don't read this will hit
+"page loads, video black" because their proxy doesn't
+forward the UDP RTP flow.
+
+The Native TLS section is the primary recommendation
+and goes first. Frame the reverse-proxy section as a
+fallback for operators who already terminate TLS at a
+proxy for unrelated reasons.
 
 Caddy recipe is two lines because Caddy handles the
 cert lifecycle automatically. nginx recipe is longer
@@ -430,7 +633,7 @@ Troubleshooting: each entry follows the same shape:
 likely causes with concrete logs to check. Don't write
 essays.
 
-### Step 8c expanded brief
+### Step 8d expanded brief
 
 Read `kerbside/docs/index.md` and
 `kerbside/docs/proxy-architecture.md` to choose the
@@ -448,12 +651,12 @@ conventions (check that repo's recent commit log).
 Use the standard Co-Authored-By + Signed-off-by
 trailers.
 
-### Step 8d expanded brief
+### Step 8e expanded brief
 
 Mechanical doc updates:
 
 - `docs/plans/PLAN-web-frontend.md`: Phase 8 row →
-  Complete with the four 8a–8d commit SHAs. Master
+  Complete with the five 8a–8e commit SHAs. Master
   plan's overall project status (top of the file or
   wherever it lives) → Complete.
 - `docs/plans/index.md`: web-frontend project status
@@ -469,90 +672,115 @@ is the right tone.
 
 ## Acceptance criteria
 
-- `make lint` and `make test` pass after each step (no
-  Rust changes expected, but verify).
-- After 8a: `examples/ryll-web.service` exists and parses
-  cleanly with `systemd-analyze verify` (run locally if
-  available; the syntax is mechanical and the agent can
-  cross-check against `man systemd.service`).
-- After 8b: `examples/Caddyfile` validates with
-  `caddy validate` (if the agent has caddy locally;
-  otherwise visual review). nginx config is syntactically
-  valid (`nginx -t -c <path>` or visual review).
-- After 8c: kerbside repo has a new commit referencing
+- `make lint` and `make test` pass after each step.
+- After 8a: native TLS unit + integration tests pass
+  (rcgen-based self-signed serving over HTTPS); both
+  plain and TLS smoke-test variants run green in CI;
+  flag-pair-required clap test passes; URL log line
+  reports `https://` when TLS is on.
+- After 8b: `examples/ryll-web.service` parses cleanly
+  with `systemd-analyze verify` (or visual review
+  against `man systemd.service`).
+- After 8c: docs are coherent (Native TLS comes first,
+  reverse-proxy is fallback, WebRTC callout prominent).
+- After 8d: kerbside repo has a new commit referencing
   ryll `--web`.
-- After 8d: master plan, index, README all flip to
+- After 8e: master plan, index, README all flip to
   Complete.
 - `pre-commit run --all-files` passes after each commit
   in the ryll repo.
 
 ## Risks
 
-- **WebRTC-not-proxied caveat being missed.** This is the
-  single highest-impact risk in the troubleshooting
-  story. Make it prominent.
+- **axum-server graceful-shutdown semantics differ.**
+  axum-server's `Handle::graceful_shutdown(Some(timeout))`
+  is one-shot and signals all in-flight connections to
+  close. The existing `with_graceful_shutdown(future)`
+  pattern is a future-driven trigger. Behaviour is
+  equivalent but the wiring is different — verify the
+  Phase 6 explicit-bridge-close sequence still runs
+  after the bind future returns.
+- **rustls feature drift.** axum-server's `tls-rustls`
+  feature pulls a specific rustls version; verify it
+  matches the workspace's existing rustls 0.23 + ring
+  pinning. If it drifts, pin axum-server to a version
+  that matches.
+- **WebRTC-not-proxied caveat being missed.** Even with
+  native TLS as the primary path, operators who choose
+  the reverse-proxy fallback can still hit this. Keep
+  the callout in the fallback section.
 - **systemd unit hardening too aggressive.**
   `ProtectSystem=strict` + `ReadOnlyPaths=/etc/ryll`
   works for the common case but blocks an operator who
   wants to write logs to disk via `--log-file`. If the
-  user uses --log-file routinely, relax `ReadWritePaths`
-  appropriately. Document the constraint.
+  operator uses --log-file routinely, relax
+  `ReadWritePaths` appropriately. Document the
+  constraint.
+- **Cert file permissions.** The systemd unit runs as
+  user `ryll`; the key file must be readable by that
+  user. Document the chmod recipe.
 - **kerbside repo conventions.** This plan does NOT
   bundle the kerbside change with the ryll commits.
   Each repo gets its own commit; the kerbside change is
-  pushed separately. Sub-agent for 8c works in the
+  pushed separately. Sub-agent for 8d works in the
   kerbside checkout.
-- **Native TLS deferred.** If user wants native TLS, the
-  plan grows by one step (8b′ or similar). Flagged as
-  Open Question.
 - **Existing TLS reference in `docs/web-frontend.md`**
   ("wait for Phase 8's TLS support") needs editing to
-  match the doc-only path. 8b should rewrite that
-  paragraph.
-- **README "TLS support" line** at line 26 references
-  inline CA certs from `.vv` files — a separate feature
-  unrelated to web-mode TLS. Leave alone.
+  reflect that TLS is now native. 8c should rewrite
+  that paragraph.
+- **README "TLS support" line** (around line 26)
+  references inline CA certs from `.vv` files — a
+  separate feature unrelated to web-mode TLS. Don't
+  conflate. The README's `--web` row is the place to
+  call out native HTTPS.
 
 ## Documentation updates
 
-After 8d:
+After 8e:
 
 - `docs/web-frontend.md` extended with Service mode,
-  TLS, Cert recipes, Troubleshooting, Deployment
-  patterns.
-- `examples/ryll-web.service`, `examples/Caddyfile`,
-  `examples/nginx-ryll-web.conf` created.
+  Native TLS, Cert recipes, Reverse-proxy fallback,
+  Troubleshooting, Deployment patterns.
+- `examples/ryll-web.service` created (TLS-enabled).
 - `docs/plans/PLAN-web-frontend.md` Phase 8 → Complete;
   project Complete.
 - `docs/plans/index.md` web-frontend project → Complete.
-- `README.md` `--web` mode → Shipping.
+- `README.md` `--web` mode → Shipping with native HTTPS.
 - `ARCHITECTURE.md` web-frontend section → "shipped".
 - `kerbside/docs/<file>.md` — ryll `--web` cross-ref.
 
 ## Estimated total scope
 
-~600–900 lines across four commits. Heaviest in 8b
-(~300 LoC of docs + two example config files) and 8a
-(~150 LoC unit file + docs section). 8c is ~30 LoC in
-the kerbside repo. 8d is ~80 LoC of status flips and
+~900–1300 lines across five commits. Heaviest in 8a
+(~400 LoC of Rust changes + tests + smoke-test
+extension + CI step) and 8c (~300 LoC of docs). 8b is
+~150 LoC unit file + docs section. 8d is ~30 LoC in
+the kerbside repo. 8e is ~80 LoC of status flips and
 prose polish.
 
 ## Back brief
 
 Before executing 8a, the implementing agent should
-back-brief: which directory examples live in (look for
-existing `examples/`, `packaging/`, or `etc/` directories
-to match the repo's convention), and confirm whether
-`Type=simple` matches ryll's actual blocking behaviour
-(yes — main.rs's `runtime.block_on` blocks the main
-thread).
+back-brief:
 
-For 8b, agent should back-brief on whether to put the
-Caddyfile and nginx config under `examples/` or some
-other dir if the repo prefers (e.g., `packaging/` for
-.deb/.rpm-related config; `examples/` for operator
-recipes is more natural).
+- The exact axum-server version chosen and confirmation
+  that its `tls-rustls` feature pulls rustls 0.23 + ring,
+  matching the workspace pinning.
+- The migration plan from `axum::serve` →
+  `axum_server::bind`/`bind_rustls` and how the Phase 6
+  explicit-bridge-close sequence remains intact.
+- How clap's `requires =` enforces the both-or-neither
+  flag pair, including the test that exercises it.
+- The `tools/web-smoke.sh` extension shape (new flag vs
+  new script), and the CI changes to invoke it.
 
-For 8c, the agent should back-brief which kerbside
-file is the most natural home for the cross-ref before
-editing.
+Before executing 8b, the agent should back-brief: which
+directory examples live in (look for existing
+`examples/`, `packaging/`, or `etc/` directories to match
+the repo's convention), and confirm `Type=simple`
+matches ryll's actual blocking behaviour (yes — main.rs's
+`runtime.block_on` blocks the main thread).
+
+Before executing 8d, the agent should back-brief which
+kerbside file is the most natural home for the cross-ref
+before editing.
