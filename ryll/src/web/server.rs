@@ -1,9 +1,11 @@
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{Request, State},
     http::{header, StatusCode},
@@ -12,11 +14,12 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_server::tls_rustls::RustlsConfig;
+use axum_server::Handle;
 use rand::RngCore;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::info;
 
@@ -216,43 +219,131 @@ async fn check_token(
     }
 }
 
-/// Bind a TcpListener on `host:port` (port=0 -> ephemeral),
-/// build the router with `state`, print the URL to stdout,
-/// and run the server until the process-wide `SHUTDOWN_REQUESTED`
-/// flag is raised (e.g. via Ctrl+C) or `axum::serve` exits for
-/// another reason.
+/// Load a [`RustlsConfig`] from PEM-encoded cert and key files.
+/// Surfaces an `anyhow` error chain on missing / malformed files.
+/// Phase 8a uses this from `run_web` to build the config before
+/// handing it to [`run_with_tls`].
+pub async fn load_tls_config(cert: &Path, key: &Path) -> Result<RustlsConfig> {
+    RustlsConfig::from_pem_file(cert, key)
+        .await
+        .with_context(|| {
+            format!(
+                "loading --web TLS cert/key from {} / {}",
+                cert.display(),
+                key.display()
+            )
+        })
+}
+
+/// Bind on `host:port` (port=0 -> ephemeral), build the router
+/// with `state`, print the URL to stdout, and run the server
+/// until the process-wide `SHUTDOWN_REQUESTED` flag is raised
+/// (e.g. via Ctrl+C) or the bind future exits for another
+/// reason.
+///
+/// Plain-HTTP entry point. For HTTPS, see [`run_with_tls`]. Both
+/// branches drive `axum_server` so the graceful-shutdown wiring
+/// (a `Handle` + a SHUTDOWN_REQUESTED watcher task) is uniform
+/// regardless of TLS mode. The Phase 6 explicit-bridge-close
+/// sequence in `main::run_web` runs after this future returns
+/// either way.
 pub async fn run(state: Arc<WebState>, host: &str, port: u16) -> Result<()> {
+    run_inner(state, host, port, None, &crate::SHUTDOWN_REQUESTED).await
+}
+
+/// HTTPS variant of [`run`]. Same shutdown semantics; binds via
+/// `axum_server::bind_rustls`. Caller is responsible for loading
+/// the [`RustlsConfig`] (typically via [`load_tls_config`]).
+pub async fn run_with_tls(
+    state: Arc<WebState>,
+    host: &str,
+    port: u16,
+    config: RustlsConfig,
+) -> Result<()> {
+    run_inner(state, host, port, Some(config), &crate::SHUTDOWN_REQUESTED).await
+}
+
+/// Shared implementation behind [`run`] / [`run_with_tls`]. The
+/// `flag` parameter is the SHUTDOWN_REQUESTED-shaped watcher;
+/// passing it explicitly lets tests inject a private
+/// `AtomicBool`.
+async fn run_inner(
+    state: Arc<WebState>,
+    host: &str,
+    port: u16,
+    tls: Option<RustlsConfig>,
+    flag: &'static AtomicBool,
+) -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind address {}:{}: {}", host, port, e))?;
-    let listener = TcpListener::bind(addr).await?;
-    let local_addr = listener.local_addr()?;
-    println!(
-        "ryll: serving web frontend at http://{}/?token={}",
-        local_addr, state.token
-    );
-    info!("web: listening on {}", local_addr);
-    axum::serve(listener, build_router(state))
-        .with_graceful_shutdown(shutdown_signal(&crate::SHUTDOWN_REQUESTED))
-        .await?;
-    Ok(())
-}
 
-/// Future that resolves when `flag` is set to `true`. Polls at
-/// 100 ms cadence to match the headless-mode bridge in `main.rs`.
-/// Passing the flag as a parameter (rather than hard-coding
-/// `crate::SHUTDOWN_REQUESTED`) lets tests inject a private
-/// `AtomicBool` and avoid interfering with other tests.
-async fn shutdown_signal(flag: &'static AtomicBool) {
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-    loop {
-        if flag.load(Ordering::Relaxed) {
-            tracing::info!("web: shutdown requested; draining axum");
-            return;
+    // axum-server's Handle exposes both `listening()` (so we can
+    // discover the ephemeral port post-bind) and
+    // `graceful_shutdown(timeout)` (replacing the
+    // `with_graceful_shutdown(future)` pattern that
+    // axum::serve used pre-Phase-8a).
+    let handle = Handle::new();
+
+    // Watcher task: poll SHUTDOWN_REQUESTED at the same 100 ms
+    // cadence the old `shutdown_signal` future used. When the
+    // flag flips, signal `axum_server` to drain in-flight
+    // requests and stop accepting new ones, with a 5 s ceiling
+    // matching the Phase 6 graceful-shutdown budget.
+    let shutdown_handle = handle.clone();
+    let watcher = tokio::spawn(async move {
+        use std::sync::atomic::Ordering;
+        loop {
+            if flag.load(Ordering::Relaxed) {
+                tracing::info!("web: shutdown requested; draining axum");
+                shutdown_handle.graceful_shutdown(Some(Duration::from_secs(5)));
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    });
+
+    // Reporter task: prints the URL once the listener is bound.
+    // axum-server doesn't hand back a TcpListener pre-serve
+    // (unlike axum::serve), so we use Handle::listening() —
+    // resolves to `Some(local_addr)` once the bind succeeds.
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let token = state.token.clone();
+    let reporter_handle = handle.clone();
+    let reporter = tokio::spawn(async move {
+        if let Some(local_addr) = reporter_handle.listening().await {
+            println!(
+                "ryll: serving web frontend at {}://{}/?token={}",
+                scheme, local_addr, token
+            );
+            info!("web: listening on {}", local_addr);
+        }
+    });
+
+    let app = build_router(state);
+
+    let result = match tls {
+        Some(config) => {
+            axum_server::bind_rustls(addr, config)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+        }
+        None => {
+            axum_server::bind(addr)
+                .handle(handle)
+                .serve(app.into_make_service())
+                .await
+        }
+    };
+
+    // Either the watcher signalled graceful shutdown and the
+    // serve future returned `Ok(())`, or the bind itself errored
+    // (e.g. address-in-use, malformed cert at runtime). Either
+    // way, tear down the helper tasks before propagating.
+    watcher.abort();
+    reporter.abort();
+    result.map_err(anyhow::Error::from)
 }
 
 #[cfg(test)]
@@ -474,38 +565,219 @@ mod tests {
         assert!(ct.to_str().unwrap().starts_with("text/css"));
     }
 
-    /// Verify that `shutdown_signal` stays pending while the flag
-    /// is false and resolves within 500 ms after the flag is set.
-    /// Uses a private static so the test never touches the
-    /// process-wide `SHUTDOWN_REQUESTED` flag.
+    /// Verify that the SHUTDOWN_REQUESTED watcher inside
+    /// `run_inner` fires `Handle::graceful_shutdown` shortly
+    /// after the flag flips. We exercise the plain-HTTP path
+    /// (port 0 → ephemeral) and assert the bind future returns
+    /// promptly. Uses a private static so the test never
+    /// touches the process-wide `SHUTDOWN_REQUESTED` flag.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn shutdown_signal_observes_flag() {
+    async fn run_inner_observes_shutdown_flag() {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
         static TEST_FLAG: AtomicBool = AtomicBool::new(false);
-        // Ensure a clean starting state in case of test re-runs.
         TEST_FLAG.store(false, Ordering::SeqCst);
 
-        // Spawn the shutdown_signal future; it must NOT complete
-        // while the flag is false.
-        let handle = tokio::spawn(shutdown_signal(&TEST_FLAG));
+        let state = Arc::new(WebState::new());
+        let server = tokio::spawn(super::run_inner(state, "127.0.0.1", 0, None, &TEST_FLAG));
 
+        // Give the bind a moment to come up.
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
-            !handle.is_finished(),
-            "shutdown_signal completed before flag was set"
+            !server.is_finished(),
+            "run_inner returned before shutdown flag was set"
         );
 
-        // Raise the flag and confirm the future resolves quickly.
+        // Raise the flag and confirm the server drains promptly.
         TEST_FLAG.store(true, Ordering::SeqCst);
-        let res = tokio::time::timeout(Duration::from_millis(500), handle).await;
+        let res = tokio::time::timeout(Duration::from_secs(2), server).await;
         assert!(
             res.is_ok(),
-            "shutdown_signal did not return within 500 ms after flag was set"
+            "run_inner did not return within 2 s of flag flip"
         );
 
-        // Reset for safety (no other test uses TEST_FLAG, but be tidy).
         TEST_FLAG.store(false, Ordering::SeqCst);
+    }
+
+    /// rcgen-backed integration test: generate a self-signed
+    /// cert + key into a tempdir, load it via
+    /// `load_tls_config`, bind axum-server with TLS on, and
+    /// hit `https://127.0.0.1:port/?token=...` with reqwest
+    /// (cert verification disabled). Asserts 200 OK + the
+    /// embedded HTML body contains the expected markers, then
+    /// signals shutdown via a private SHUTDOWN_REQUESTED-shaped
+    /// flag.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn web_tls_loads_self_signed_cert() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Install the rustls ring provider once for the test
+        // process. Mirrors the production install in main.rs.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        static TLS_FLAG: AtomicBool = AtomicBool::new(false);
+        TLS_FLAG.store(false, Ordering::SeqCst);
+
+        // Generate a self-signed cert for CN=localhost.
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed cert");
+        let tmp = tempfile::tempdir().unwrap();
+        let cert_path = tmp.path().join("cert.pem");
+        let key_path = tmp.path().join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+
+        let config = super::load_tls_config(&cert_path, &key_path)
+            .await
+            .expect("load_tls_config");
+
+        // Bind on an ephemeral port so parallel test runs do
+        // not collide. We need to discover the local port
+        // post-bind, so reach into axum-server directly here
+        // rather than going through `run_with_tls` (which prints
+        // to stdout only).
+        let state = Arc::new(WebState::new());
+        let token = state.token.clone();
+        let app = build_router(state);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local_addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                if TLS_FLAG.load(Ordering::Relaxed) {
+                    shutdown_handle.graceful_shutdown(Some(Duration::from_secs(2)));
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        });
+
+        let server = tokio::spawn(async move {
+            let server = axum_server::from_tcp_rustls(listener, config)
+                .expect("axum-server from_tcp_rustls")
+                .handle(handle);
+            server
+                .serve(app.into_make_service())
+                .await
+                .expect("axum-server tls test serve")
+        });
+
+        // Give the listener a moment to actually start
+        // accepting; from_tcp_rustls is synchronous up to
+        // accept loop entry but the spawn boundary is async.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Hit https://localhost:port/?token=... with cert
+        // verification disabled. reqwest's default-tls
+        // (native-tls) handles a self-signed cert fine when
+        // `danger_accept_invalid_certs` is on.
+        let url = format!("https://{}/?token={}", local_addr, token);
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let resp = client.get(&url).send().await.expect("https GET");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body = resp.text().await.unwrap();
+        assert!(
+            body.contains("<video"),
+            "TLS-served HTML should contain <video>: {}",
+            body
+        );
+        assert!(
+            body.contains(&format!("/static/app.js?token={}", token)),
+            "TLS-served HTML should embed the token in app.js src: {}",
+            body
+        );
+
+        // Drain.
+        TLS_FLAG.store(true, Ordering::SeqCst);
+        let _ = tokio::time::timeout(Duration::from_secs(3), server).await;
+        watcher.abort();
+        TLS_FLAG.store(false, Ordering::SeqCst);
+    }
+
+    /// Bad cert path should produce a clear `anyhow` error
+    /// chain mentioning the file we tried to load.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn web_tls_missing_cert_file_errors_clearly() {
+        let err = super::load_tls_config(
+            std::path::Path::new("/no/such/cert.pem"),
+            std::path::Path::new("/no/such/key.pem"),
+        )
+        .await
+        .expect_err("expected error for missing cert file");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("/no/such/cert.pem"),
+            "error should mention the cert path: {}",
+            msg
+        );
+    }
+
+    /// Clap rejects supplying only one of the --web-tls-cert /
+    /// --web-tls-key pair. The `requires =` attribute on each
+    /// flag enforces this at parse time.
+    #[test]
+    fn web_tls_flags_require_both() {
+        use clap::Parser;
+        // Cert without key: rejected.
+        let res = crate::config::Args::try_parse_from([
+            "ryll",
+            "--web",
+            "--file",
+            "x.vv",
+            "--web-tls-cert",
+            "cert.pem",
+        ]);
+        assert!(
+            res.is_err(),
+            "clap should reject --web-tls-cert without --web-tls-key"
+        );
+
+        // Key without cert: rejected.
+        let res = crate::config::Args::try_parse_from([
+            "ryll",
+            "--web",
+            "--file",
+            "x.vv",
+            "--web-tls-key",
+            "key.pem",
+        ]);
+        assert!(
+            res.is_err(),
+            "clap should reject --web-tls-key without --web-tls-cert"
+        );
+
+        // Both: accepted.
+        let res = crate::config::Args::try_parse_from([
+            "ryll",
+            "--web",
+            "--file",
+            "x.vv",
+            "--web-tls-cert",
+            "cert.pem",
+            "--web-tls-key",
+            "key.pem",
+        ]);
+        assert!(
+            res.is_ok(),
+            "clap should accept both flags: {:?}",
+            res.err()
+        );
+
+        // Neither: accepted (plain-HTTP is the default).
+        let res = crate::config::Args::try_parse_from(["ryll", "--web", "--file", "x.vv"]);
+        assert!(
+            res.is_ok(),
+            "clap should accept --web with neither TLS flag: {:?}",
+            res.err()
+        );
     }
 }

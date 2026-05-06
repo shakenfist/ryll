@@ -101,6 +101,10 @@ jobs:
         if: runner.os == 'Linux'
         run: tools/web-smoke.sh target/release/ryll
 
+      - name: Run --web smoke test (TLS)
+        if: runner.os == 'Linux'
+        run: tools/web-smoke.sh --tls target/release/ryll
+
       - name: Run tests
         run: cargo test --workspace ${{ matrix.features }}
 

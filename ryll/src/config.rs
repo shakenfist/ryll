@@ -118,6 +118,17 @@ pub struct Args {
     /// Listen port for --web mode (default ephemeral).
     #[arg(long, default_value_t = 0u16)]
     pub web_port: u16,
+
+    /// PEM-encoded TLS certificate chain for --web mode. If
+    /// supplied, --web-tls-key is also required and the web
+    /// frontend serves over HTTPS instead of plain HTTP.
+    #[arg(long, requires = "web_tls_key")]
+    pub web_tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded TLS private key for --web mode. Required if
+    /// --web-tls-cert is supplied.
+    #[arg(long, requires = "web_tls_cert")]
+    pub web_tls_key: Option<PathBuf>,
 }
 
 /// SPICE connection configuration

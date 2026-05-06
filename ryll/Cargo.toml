@@ -122,6 +122,14 @@ http-body-util = "0.1"
 # HTTP server and routing for --web mode
 axum = "0.8"
 
+# TLS-capable axum bind path. `tls-rustls-no-provider` keeps the
+# rustls 0.23 + ring provider pinning the workspace already chose
+# (main.rs installs `rustls::crypto::ring::default_provider()`)
+# rather than forcing the aws-lc-rs surface that the plain
+# `tls-rustls` feature would activate. `RustlsConfig::from_pem_file`
+# picks up the process-wide default provider at runtime.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+
 # TLS crypto provider — needed by --web mode to install the
 # rustls ring provider at startup before any WebRTC offers
 # arrive. webrtc-rs pulls it in transitively but an explicit
@@ -142,6 +150,8 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# Self-signed cert generation for the --web TLS integration tests.
+rcgen = "0.13"
 # Phase 4 step 4c uses a real webrtc-rs client PC to drive an
 # SDP offer through the in-process axum router. rustls is
 # pinned to ring because both aws-lc-rs and ring are pulled in

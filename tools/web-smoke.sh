@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
 # Smoke-test that ryll --web starts, binds, and shuts down cleanly.
 #
-# Usage: tools/web-smoke.sh [RYLL_BINARY]
+# Usage: tools/web-smoke.sh [--tls] [RYLL_BINARY]
+#
+# Without --tls: verifies the plain-HTTP path. Hits http://localhost:PORT/
+# is NOT performed because the token is per-launch and reading it from
+# stdout adds flakiness — the bind+SIGTERM round-trip is the contract.
+#
+# With --tls: generates a throwaway self-signed cert via openssl into
+# the temp dir, launches ryll --web with --web-tls-cert / --web-tls-key,
+# verifies https://localhost:PORT/ responds at all (curl -sk -o /dev/null
+# returns 0 even on 401, which is what we expect without the token), then
+# SIGTERMs and verifies clean exit.
 #
 # Does NOT verify a full WebRTC handshake — that is what
 # tests/loopback.rs covers. This test verifies only that the HTTP
@@ -14,7 +24,19 @@
 
 set -euo pipefail
 
-BIN="${1:-target/release/ryll}"
+USE_TLS=0
+BIN=""
+for arg in "$@"; do
+    case "$arg" in
+        --tls)
+            USE_TLS=1
+            ;;
+        *)
+            BIN="$arg"
+            ;;
+    esac
+done
+BIN="${BIN:-target/release/ryll}"
 PORT="${WEB_PORT:-18080}"
 
 if [ ! -x "$BIN" ]; then
@@ -36,8 +58,31 @@ host=127.0.0.1
 port=1
 VV
 
-echo "Starting ryll --web on port $PORT with stub .vv ..."
-"$BIN" --web --web-port "$PORT" --file "$TMPDIR_WORK/test.vv" \
+EXTRA_ARGS=()
+if [ "$USE_TLS" -eq 1 ]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "ERROR: --tls requires openssl on PATH"
+        exit 1
+    fi
+    echo "Generating throwaway self-signed cert ..."
+    openssl req -x509 -newkey rsa:2048 \
+        -keyout "$TMPDIR_WORK/key.pem" \
+        -out "$TMPDIR_WORK/cert.pem" \
+        -days 1 -nodes \
+        -subj "/CN=localhost" 2>/dev/null
+    EXTRA_ARGS+=(--web-tls-cert "$TMPDIR_WORK/cert.pem"
+                 --web-tls-key  "$TMPDIR_WORK/key.pem")
+    SCHEME="https"
+    CURL_FLAGS="-sk"
+    MODE_LABEL="TLS"
+else
+    SCHEME="http"
+    CURL_FLAGS="-s"
+    MODE_LABEL="plain-HTTP"
+fi
+
+echo "Starting ryll --web ($MODE_LABEL) on port $PORT with stub .vv ..."
+"$BIN" --web --web-port "$PORT" --file "$TMPDIR_WORK/test.vv" "${EXTRA_ARGS[@]}" \
     >"$TMPDIR_WORK/ryll.stdout" 2>"$TMPDIR_WORK/ryll.stderr" &
 PID=$!
 
@@ -51,6 +96,33 @@ if ! kill -0 "$PID" 2>/dev/null; then
     echo "--- stderr ---"
     cat "$TMPDIR_WORK/ryll.stderr" || true
     exit 1
+fi
+
+# Connectivity probe: in TLS mode, prove the listener actually
+# responds. Without the token we expect 401 from the auth
+# middleware, which is fine — we only care that the TLS handshake
+# completes and an HTTP status comes back.
+if [ "$USE_TLS" -eq 1 ]; then
+    if ! curl $CURL_FLAGS -o /dev/null \
+            "$SCHEME://localhost:$PORT/" --max-time 5; then
+        echo "FAIL: TLS connectivity probe to $SCHEME://localhost:$PORT/ failed"
+        echo "--- stdout ---"
+        cat "$TMPDIR_WORK/ryll.stdout" || true
+        echo "--- stderr ---"
+        cat "$TMPDIR_WORK/ryll.stderr" || true
+        kill -TERM "$PID" 2>/dev/null || true
+        exit 1
+    fi
+    echo "TLS connectivity probe OK"
+
+    # Also verify ryll printed an https:// URL line.
+    if ! grep -q "https://" "$TMPDIR_WORK/ryll.stdout"; then
+        echo "FAIL: ryll did not print https:// URL line"
+        echo "--- stdout ---"
+        cat "$TMPDIR_WORK/ryll.stdout" || true
+        kill -TERM "$PID" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 echo "Process $PID is alive — sending SIGTERM ..."
@@ -75,4 +147,4 @@ done
 # is acceptable; we only care that it exited promptly after SIGTERM.
 wait "$PID" || true
 
-echo "smoke test passed"
+echo "smoke test passed ($MODE_LABEL)"

@@ -354,6 +354,8 @@ fn run_web(
 
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
+    let web_tls_cert = args.web_tls_cert.clone();
+    let web_tls_key = args.web_tls_key.clone();
     let monitors = args.monitors;
 
     let runtime = tokio::runtime::Runtime::new()
@@ -591,7 +593,21 @@ fn run_web(
         // path after axum::serve returns.
         let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(state.clone()));
 
-        let server_result = crate::web::run(state.clone(), &web_host, web_port).await;
+        // Phase 8a: load the optional TLS config before binding.
+        // Clap's `requires =` enforces both-or-neither, so seeing
+        // one flag without the other here would already have
+        // been rejected at parse time.
+        let tls_config = match (&web_tls_cert, &web_tls_key) {
+            (Some(cert), Some(key)) => Some(crate::web::server::load_tls_config(cert, key).await?),
+            _ => None,
+        };
+
+        let server_result = match tls_config {
+            Some(cfg) => {
+                crate::web::server::run_with_tls(state.clone(), &web_host, web_port, cfg).await
+            }
+            None => crate::web::run(state.clone(), &web_host, web_port).await,
+        };
 
         // Phase 6b: explicit bridge close. After axum::serve
         // returns (Ctrl+C raised SHUTDOWN_REQUESTED, or axum
