@@ -303,20 +303,23 @@ async fn run_inner(
         }
     });
 
-    // Reporter task: prints the URL once the listener is bound.
+    // Reporter task: emits the URL once the listener is bound.
     // axum-server doesn't hand back a TcpListener pre-serve
     // (unlike axum::serve), so we use Handle::listening() —
     // resolves to `Some(local_addr)` once the bind succeeds.
+    // Goes through tracing rather than raw stdout so the line
+    // respects the operator's logging configuration. The
+    // workspace's tracing-subscriber writes fmt::layer to stdout
+    // by default, so the smoke test continues to grep stdout.
     let scheme = if tls.is_some() { "https" } else { "http" };
     let token = state.token.clone();
     let reporter_handle = handle.clone();
     let reporter = tokio::spawn(async move {
         if let Some(local_addr) = reporter_handle.listening().await {
-            println!(
+            info!(
                 "ryll: serving web frontend at {}://{}/?token={}",
                 scheme, local_addr, token
             );
-            info!("web: listening on {}", local_addr);
         }
     });
 

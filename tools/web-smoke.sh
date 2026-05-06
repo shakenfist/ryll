@@ -115,9 +115,11 @@ if [ "$USE_TLS" -eq 1 ]; then
     fi
     echo "TLS connectivity probe OK"
 
-    # Also verify ryll printed an https:// URL line.
+    # Also verify ryll emitted an https:// URL line. The URL goes
+    # through tracing's fmt::layer (stdout by default) so it
+    # respects the operator's RUST_LOG configuration.
     if ! grep -q "https://" "$TMPDIR_WORK/ryll.stdout"; then
-        echo "FAIL: ryll did not print https:// URL line"
+        echo "FAIL: ryll did not emit https:// URL line on stdout"
         echo "--- stdout ---"
         cat "$TMPDIR_WORK/ryll.stdout" || true
         kill -TERM "$PID" 2>/dev/null || true
