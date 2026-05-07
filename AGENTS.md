@@ -220,6 +220,26 @@ Ryll uses:
     matters because the traffic pcap is what makes a pedantic report
     actionable for debugging.
 
+20b. **Auto-disconnect snapshots and the bug-report directory chain** -
+    Every `ChannelEvent::Error` / `ChannelEvent::Disconnected` calls
+    `RyllApp::maybe_write_disconnect_snapshot`, which builds a
+    `bugreport::DisconnectCause` (channel name, error message,
+    keepalive-timeout flag from `MainSnapshot`, session uptime,
+    per-channel diagnostics map) and invokes
+    `BugReport::write_disconnect`. The fire-on-every-channel scope
+    is deliberate: under ticket-based deployments (oVirt, Kerbside)
+    every channel disconnect is permanent, so the data must be
+    captured at the moment of failure. A 60 s cooldown is enforced
+    via `RyllApp::last_disconnect_report_at` and is updated even on
+    write failure to avoid retry storms. Output directory resolution
+    (shared with the manual F8 button via `manual_bug_report_dir`):
+    `--bug-report-dir` → `<--capture>/bug-reports/` → CWD. The
+    `--pedantic-dir` flag falls back through the same chain when
+    unspecified: `--pedantic-dir` → `--bug-report-dir` →
+    `./ryll-pedantic-reports/`. Runtime metrics are deliberately
+    `RuntimeMetrics::unavailable(...)` here — sampling on the GUI
+    thread blocks the render loop for ~1 s.
+
 21. **Notifications go through the unified store, not direct UI
     calls** - The notification store at `ryll/src/notifications.rs`
     is the single producer boundary. Channel handlers, the bug-report

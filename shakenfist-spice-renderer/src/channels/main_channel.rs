@@ -139,6 +139,14 @@ pub struct MainChannel {
     bytes_in: u64,
     bytes_out: u64,
     last_ping_at: Option<Instant>,
+    /// Local cache of disconnect-cause diagnostic fields,
+    /// flushed to `snapshot` by `update_snapshot()`. Mirrors the
+    /// matching fields on `MainSnapshot`.
+    last_recv_ts_secs: Option<f64>,
+    last_send_ts_secs: Option<f64>,
+    ping_recv_count: u32,
+    pong_send_count: u32,
+    last_ping_recv_ts_secs: Option<f64>,
     /// True after `maybe_request_client_mouse_mode` sends a
     /// `MOUSE_MODE_REQUEST(CLIENT)` and until a MOUSE_MODE
     /// message confirms we're in CLIENT mode. Stops a flappy
@@ -187,6 +195,11 @@ impl MainChannel {
             bytes_in: 0,
             bytes_out: 0,
             last_ping_at: None,
+            last_recv_ts_secs: None,
+            last_send_ts_secs: None,
+            ping_recv_count: 0,
+            pong_send_count: 0,
+            last_ping_recv_ts_secs: None,
             mouse_mode_request_pending: false,
         }
     }
@@ -248,6 +261,7 @@ impl MainChannel {
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
+                    self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
                     self.process_messages().await?;
                 }
@@ -282,6 +296,12 @@ impl MainChannel {
                 }
                 _ = tokio::time::sleep_until(last_data_received + keepalive_timeout) => {
                     info!("main: no data received for {}s, assuming disconnected", keepalive_timeout.as_secs());
+                    // Mark the snapshot before emitting Disconnected so
+                    // the disconnect-cause record can distinguish "we
+                    // timed ourselves out" from a real EOF / RST.
+                    if let Ok(mut snap) = self.snapshot.lock() {
+                        snap.keepalive_timeout_fired = true;
+                    }
                     self.event_tx
                         .send(ChannelEvent::Disconnected(ChannelType::Main))
                         .await
@@ -515,6 +535,8 @@ impl MainChannel {
                     self.repaint_notify.notify_one();
                 }
                 self.last_ping_at = Some(now);
+                self.ping_recv_count = self.ping_recv_count.saturating_add(1);
+                self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
                 let ping = Ping::read(payload)?;
 
@@ -531,6 +553,7 @@ impl MainChannel {
                 let response = make_message(main_client::PONG, &pong_payload);
 
                 self.send_with_log(main_client::PONG, &response).await?;
+                self.pong_send_count = self.pong_send_count.saturating_add(1);
 
                 // Request channel list on first large ping
                 if ping.id > 0 && self.session_id.is_some() && !self.channels_requested {
@@ -666,12 +689,21 @@ impl MainChannel {
         Ok(())
     }
 
-    /// Sync local state to the shared snapshot.
+    /// Sync local state to the shared snapshot. Note that
+    /// `keepalive_timeout_fired` is poked into the snapshot
+    /// directly at the timeout site, not flushed here, since it
+    /// is set once on a terminal path and then read by the
+    /// disconnect-cause assembly.
     fn update_snapshot(&self) {
         let mut snap = self.snapshot.lock().unwrap();
         snap.session_id = self.session_id;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
+        snap.last_recv_ts_secs = self.last_recv_ts_secs;
+        snap.last_send_ts_secs = self.last_send_ts_secs;
+        snap.ping_recv_count = self.ping_recv_count;
+        snap.pong_send_count = self.pong_send_count;
+        snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1005,6 +1037,7 @@ impl MainChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
         Ok(())
     }
 }

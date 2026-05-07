@@ -177,7 +177,7 @@ table top-to-bottom is always safe.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Auto-snapshot ring buffer at disconnect moment | PLAN-session-001-feedback-phase-01-disconnect-snapshot.md | Not started |
+| 1. Auto-snapshot ring buffer at disconnect moment | PLAN-session-001-feedback-phase-01-disconnect-snapshot.md | Done |
 | 2. Main-channel auto-reconnect / keepalive (K1 fix) | PLAN-session-001-feedback-phase-02-reconnect.md | Not started |
 | 3. Preserve audio volume across reconnect | PLAN-session-001-feedback-phase-03-audio-volume.md | Not started |
 | 4. Region-select zero-width guard | PLAN-session-001-feedback-phase-04-region-select.md | Not started |

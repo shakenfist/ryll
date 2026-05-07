@@ -143,21 +143,29 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "capture"))]
     let capture: Option<Arc<CaptureSession>> = None;
 
-    // Eager-failure `mkdir -p` for the --pedantic output directory so the
-    // user hears about disk/permission problems before the session starts.
-    // The actual gap-observer registration happens inside the app
-    // constructors (app::RyllApp::new / app::run_headless) once the live
-    // traffic / channel-snapshot handles have been built.
+    // Resolve the pedantic output directory. Priority:
+    //   1. --pedantic-dir if set
+    //   2. --bug-report-dir if set
+    //   3. ./ryll-pedantic-reports (historical default)
+    // Eager-failure `mkdir -p` so the user hears about
+    // disk/permission problems before the session starts. The
+    // actual gap-observer registration happens inside the app
+    // constructors (app::RyllApp::new / app::run_headless) once
+    // the live traffic / channel-snapshot handles have been
+    // built.
     let pedantic_config = if args.pedantic {
-        std::fs::create_dir_all(&args.pedantic_dir).with_context(|| {
+        let pedantic_dir = args
+            .pedantic_dir
+            .clone()
+            .or_else(|| args.bug_report_dir.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("./ryll-pedantic-reports"));
+        std::fs::create_dir_all(&pedantic_dir).with_context(|| {
             format!(
                 "failed to create pedantic directory {}",
-                args.pedantic_dir.display()
+                pedantic_dir.display()
             )
         })?;
-        Some(PedanticConfig {
-            dir: args.pedantic_dir.clone(),
-        })
+        Some(PedanticConfig { dir: pedantic_dir })
     } else {
         None
     };
@@ -681,6 +689,7 @@ fn run_gui(
     let monitors = args.monitors;
     let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
     let paste_char_delay_ms = args.paste_char_delay_ms;
+    let bug_report_dir = args.bug_report_dir.clone();
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -696,6 +705,7 @@ fn run_gui(
                 capture,
                 monitors,
                 pedantic_config,
+                bug_report_dir,
                 obey_guest_size,
             )))
         }),

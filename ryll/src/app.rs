@@ -293,6 +293,15 @@ pub struct RyllApp {
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
 
+    // Override for bug-report output directory (--bug-report-dir).
+    // None means fall back to capture/cwd; see manual_bug_report_dir().
+    bug_report_dir: Option<PathBuf>,
+
+    // Cooldown for auto-disconnect snapshots so a flapping
+    // channel can't dump one zip per disconnect storm. 60 s
+    // window; see maybe_write_disconnect_snapshot().
+    last_disconnect_report_at: Option<Instant>,
+
     // USB command sender and state
     usb_tx: Option<mpsc::Sender<UsbCommand>>,
     usb_channel_ready: bool,
@@ -469,6 +478,7 @@ impl RyllApp {
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
         pedantic_config: Option<PedanticConfig>,
+        bug_report_dir: Option<PathBuf>,
         obey_guest_size: bool,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
@@ -537,12 +547,7 @@ impl RyllApp {
         let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
             traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
         let log_config_clone = settings::log_config();
-        let snaps_for_conn = ChannelSnapshots {
-            display: channel_snapshots.display.clone(),
-            inputs: channel_snapshots.inputs.clone(),
-            cursor: channel_snapshots.cursor.clone(),
-            main: channel_snapshots.main.clone(),
-        };
+        let snaps_for_conn = channel_snapshots.clone();
 
         let vol_for_conn = volume_control.clone();
         let vd_clone = virtual_disks.clone();
@@ -624,6 +629,8 @@ impl RyllApp {
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
+            bug_report_dir,
+            last_disconnect_report_at: None,
             usb_tx: Some(usb_tx),
             webdav_tx: Some(webdav_tx),
             usb_channel_ready: false,
@@ -770,12 +777,7 @@ impl RyllApp {
         let counter_clone = byte_counter;
         let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
             traffic as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
-        let snaps_for_conn = ChannelSnapshots {
-            display: self.channel_snapshots.display.clone(),
-            inputs: self.channel_snapshots.inputs.clone(),
-            cursor: self.channel_snapshots.cursor.clone(),
-            main: self.channel_snapshots.main.clone(),
-        };
+        let snaps_for_conn = self.channel_snapshots.clone();
         let monitors = self.monitors;
         let virtual_disks = self.reconnect_virtual_disks.clone();
         let share_dir = self.reconnect_share_dir.clone();
@@ -1090,6 +1092,10 @@ impl RyllApp {
 
                 ChannelEvent::Error(msg) => {
                     error!("app: channel error: {}", msg);
+                    // Snapshot first so the resulting zip captures
+                    // the run-up to the failure rather than the
+                    // post-disconnect cleanup state.
+                    self.maybe_write_disconnect_snapshot("error", &msg);
                     self.connected = false;
                     self.surfaces.clear();
                     self.cursor_image = None;
@@ -1177,6 +1183,17 @@ impl RyllApp {
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
+
+                    // Snapshot for every channel disconnect, including
+                    // non-critical ones. Under ticket-based deployments
+                    // (oVirt, Kerbside) a dropped channel is permanently
+                    // lost — the user silently loses audio / USB / etc.
+                    // Even if the session keeps running, we want
+                    // diagnostic data on why the channel went down.
+                    self.maybe_write_disconnect_snapshot(
+                        channel.name(),
+                        &format!("channel {} disconnected", channel.name()),
+                    );
 
                     // Channel-specific cleanup
                     if channel == ChannelType::Usbredir {
@@ -1507,13 +1524,95 @@ impl RyllApp {
             precomputed_screenshot_png,
         )?;
 
-        // Determine output directory
-        let output_dir = match &self.capture {
+        let output_dir = self.manual_bug_report_dir();
+        report.write_zip(&output_dir)
+    }
+
+    /// Resolve the output directory for a manual (F8) or
+    /// auto-disconnect bug report. Priority:
+    ///   1. --bug-report-dir if set
+    ///   2. <--capture>/bug-reports/ if --capture is set
+    ///   3. current working directory
+    fn manual_bug_report_dir(&self) -> PathBuf {
+        if let Some(d) = &self.bug_report_dir {
+            return d.clone();
+        }
+        match &self.capture {
             Some(cap) => cap.dir.join("bug-reports"),
             None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        }
+    }
+
+    /// Auto-write a disconnect-snapshot bug report, best-effort.
+    /// Subject to a 60 s cooldown to bound disk usage during a
+    /// disconnect storm. Failures are logged but never block
+    /// the disconnect modal. Runtime metrics are reported as
+    /// unavailable here (a 1 s sample on the GUI thread would
+    /// freeze the UI); pcap and snapshots are the load-bearing
+    /// data for diagnosing the disconnect.
+    fn maybe_write_disconnect_snapshot(&mut self, channel: &str, message: &str) {
+        if let Some(at) = self.last_disconnect_report_at {
+            if at.elapsed() < Duration::from_secs(60) {
+                debug!(
+                    "app: disconnect snapshot cooldown active ({}s remaining), skipping for {}",
+                    60u64.saturating_sub(at.elapsed().as_secs()),
+                    channel
+                );
+                return;
+            }
+        }
+
+        let keepalive_timeout_fired = self
+            .channel_snapshots
+            .main
+            .lock()
+            .map(|s| s.keepalive_timeout_fired)
+            .unwrap_or(false);
+
+        let cause = crate::bugreport::DisconnectCause {
+            channel: channel.to_string(),
+            error_message: message.to_string(),
+            error_kind: None,
+            keepalive_timeout_fired,
+            session_uptime_secs: self.traffic.elapsed().as_secs_f64(),
+            per_channel: crate::bugreport::DisconnectCause::collect_per_channel(
+                &self.channel_snapshots,
+            ),
         };
 
-        report.write_zip(&output_dir)
+        let runtime_metrics = shakenfist_spice_renderer::metrics::RuntimeMetrics::unavailable(
+            "runtime metrics are not sampled on the GUI thread for auto-disconnect snapshots",
+        );
+
+        let output_dir = self.manual_bug_report_dir();
+        match BugReport::write_disconnect(
+            &output_dir,
+            cause,
+            &self.target_host,
+            self.target_port,
+            &self.traffic,
+            &self.channel_snapshots,
+            &self.app_snapshot,
+            &self.notifications,
+            runtime_metrics,
+        ) {
+            Ok(path) => {
+                info!("app: disconnect snapshot saved to {}", path.display());
+                self.push_notification(
+                    NotifySeverity::Info,
+                    NotificationSource::BugReport,
+                    format!("Disconnect snapshot saved to {}", path.display()),
+                );
+                self.last_disconnect_report_at = Some(Instant::now());
+            }
+            Err(e) => {
+                error!("app: failed to write disconnect snapshot: {}", e);
+                // Still update the cooldown so a write that fails
+                // for an environmental reason (no disk space, bad
+                // dir) doesn't retry on every disconnect event.
+                self.last_disconnect_report_at = Some(Instant::now());
+            }
+        }
     }
 
     /// Push a notification entry into the shared store.

@@ -242,6 +242,8 @@ pub async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        traffic.clone(),
+                        snapshots.usbredir.clone(),
                         log_config,
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
@@ -266,6 +268,8 @@ pub async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        traffic.clone(),
+                        snapshots.webdav.clone(),
                         log_config,
                     );
                     handles.push(tokio::spawn(async move { channel.run().await }));
@@ -287,6 +291,7 @@ pub async fn run_connection(
                     repaint_notify.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
+                    snapshots.playback.clone(),
                     volume_control.clone(),
                     log_config,
                     cancel.clone(),

@@ -7,7 +7,7 @@
 /// `shakenfist_spice_renderer::snapshots`; this module re-exports
 /// them so callers in `ryll/` can keep importing them from
 /// `crate::bugreport::*`.
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -632,6 +632,14 @@ pub enum BugReportType {
     Pedantic {
         gap_key: String,
     },
+    /// Auto-generated when ryll observes a channel disconnect
+    /// (transport error, EOF, or its own keepalive timeout).
+    /// `channel` is the channel name that fired the disconnect
+    /// signal, or "error" for `ChannelEvent::Error` paths
+    /// without a specific channel attribution.
+    Disconnect {
+        channel: String,
+    },
 }
 
 impl BugReportType {
@@ -652,6 +660,16 @@ impl BugReportType {
                 Some("usbredir") => "usbredir",
                 _ => "display",
             },
+            BugReportType::Disconnect { channel } => match channel.as_str() {
+                "main" => "main",
+                "display" => "display",
+                "inputs" => "inputs",
+                "cursor" => "cursor",
+                "playback" => "playback",
+                "usbredir" => "usbredir",
+                "webdav" => "webdav",
+                _ => "main",
+            },
         }
     }
 }
@@ -663,6 +681,162 @@ pub struct ReportRegion {
     pub top: u32,
     pub right: u32,
     pub bottom: u32,
+}
+
+/// Per-channel diagnostic snapshot embedded in
+/// `disconnect-cause.json`. Lets a maintainer reading the zip
+/// compare the channel that fired the disconnect against the
+/// other channels' last-known state — were they all silent at
+/// the same time, or just the one that dropped?
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PerChannelDiagnostics {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub last_recv_ts_secs: Option<f64>,
+    pub last_send_ts_secs: Option<f64>,
+    pub ping_recv_count: u32,
+    pub pong_send_count: u32,
+    pub last_ping_recv_ts_secs: Option<f64>,
+}
+
+/// Structured cause record for an auto-disconnect bug report.
+/// Goal: a maintainer reading the resulting zip should be able
+/// to tell which side dropped the connection and what each
+/// channel was doing at the moment of failure, without having
+/// to re-run the session.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisconnectCause {
+    /// Channel name that fired the disconnect signal, or
+    /// "error" for `ChannelEvent::Error` without a specific
+    /// channel.
+    pub channel: String,
+    /// Free-form cause / reason captured at the disconnect
+    /// site (the `info!`/`error!` log line text).
+    pub error_message: String,
+    /// `std::io::ErrorKind` debug string when known. None for
+    /// EOF / clean close / our own keepalive timeout.
+    pub error_kind: Option<String>,
+    /// True if the main-channel client-side keepalive timeout
+    /// (`main_channel.rs`, 30 s) fired. Distinguishes "we
+    /// timed ourselves out" from a real EOF/RST.
+    pub keepalive_timeout_fired: bool,
+    /// Session uptime at the moment of failure.
+    pub session_uptime_secs: f64,
+    /// Per-channel last-known state. Keys are channel names
+    /// ("main", "display", "inputs", "cursor", "playback",
+    /// "usbredir", "webdav").
+    pub per_channel: BTreeMap<String, PerChannelDiagnostics>,
+}
+
+impl DisconnectCause {
+    /// Snapshot every channel's last-known diagnostic state into
+    /// a `BTreeMap` keyed by channel name. Used by the
+    /// disconnect-snapshot hook to populate
+    /// `DisconnectCause::per_channel`.
+    pub fn collect_per_channel(
+        snapshots: &ChannelSnapshots,
+    ) -> BTreeMap<String, PerChannelDiagnostics> {
+        let mut out = BTreeMap::new();
+        if let Ok(s) = snapshots.main.lock() {
+            out.insert(
+                "main".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.display.lock() {
+            out.insert(
+                "display".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.inputs.lock() {
+            out.insert(
+                "inputs".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.cursor.lock() {
+            out.insert(
+                "cursor".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.playback.lock() {
+            out.insert(
+                "playback".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.usbredir.lock() {
+            out.insert(
+                "usbredir".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.webdav.lock() {
+            out.insert(
+                "webdav".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                },
+            );
+        }
+        out
+    }
 }
 
 /// Captured at the moment a bug-report dialog opened, or at
@@ -830,10 +1004,11 @@ impl BugReport {
                 // No dedicated usbredir snapshot yet; pcap traffic is captured via channel_name()
                 "{}".to_string()
             }
-            BugReportType::Pedantic { .. } => {
-                // Pick the snapshot based on the channel the gap came from.
-                // For unknown channels we picked "display" as the fallback
-                // in channel_name(), so this match mirrors that.
+            BugReportType::Pedantic { .. } | BugReportType::Disconnect { .. } => {
+                // Pick the snapshot based on the channel the gap / disconnect
+                // came from. For unknown channels we picked "main" or
+                // "display" as the fallback in channel_name(), so this match
+                // mirrors that.
                 match report_type.channel_name() {
                     "cursor" => {
                         let snap = channel_snapshots.cursor.lock().unwrap().clone();
@@ -847,9 +1022,17 @@ impl BugReport {
                         let snap = channel_snapshots.main.lock().unwrap().clone();
                         serde_json::to_string_pretty(&snap)?
                     }
+                    "playback" => {
+                        let snap = channel_snapshots.playback.lock().unwrap().clone();
+                        serde_json::to_string_pretty(&snap)?
+                    }
                     "usbredir" => {
-                        // No dedicated usbredir snapshot yet.
-                        "{}".to_string()
+                        let snap = channel_snapshots.usbredir.lock().unwrap().clone();
+                        serde_json::to_string_pretty(&snap)?
+                    }
+                    "webdav" => {
+                        let snap = channel_snapshots.webdav.lock().unwrap().clone();
+                        serde_json::to_string_pretty(&snap)?
                     }
                     _ => {
                         let snap = channel_snapshots.display.lock().unwrap().clone();
@@ -1090,6 +1273,107 @@ impl BugReport {
         Ok(path)
     }
 
+    /// Auto-generate a bug report for a channel disconnect,
+    /// write it to `dir`, and return the path. Used by the
+    /// app's disconnect-snapshot hook so the next disconnect
+    /// captures the run-up to the failure rather than
+    /// post-reconnect noise.
+    ///
+    /// Mirrors `write_pedantic` for the assemble-and-write
+    /// plumbing, plus a new `disconnect-cause.json` carrying the
+    /// structured `DisconnectCause` record. The pcap section is
+    /// the channel that fired the disconnect (per
+    /// `BugReportType::Disconnect::channel_name`); if the channel
+    /// is "error" or otherwise unknown, the main-channel pcap
+    /// is included as a fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_disconnect(
+        dir: &std::path::Path,
+        cause: DisconnectCause,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
+        runtime_metrics: RuntimeMetrics,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let description = format!(
+            "auto: connection lost on {} ({})",
+            cause.channel, cause.error_message
+        );
+        let report = Self::assemble(
+            BugReportType::Disconnect {
+                channel: cause.channel.clone(),
+            },
+            description,
+            None,
+            target_host,
+            target_port,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            notifications,
+            None,
+            runtime_metrics,
+            None,
+            None,
+        )?;
+
+        std::fs::create_dir_all(dir)?;
+
+        let safe_channel = cause
+            .channel
+            .chars()
+            .map(|c| match c {
+                ':' | '/' | '\\' | ' ' => '-',
+                c if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' => c,
+                _ => '_',
+            })
+            .collect::<String>();
+        let filename = format!(
+            "ryll-disconnect-{}-{}.zip",
+            safe_channel,
+            filename_timestamp()
+        );
+        let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(report.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(report.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(report.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = report.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(report.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&report.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
+
+        let cause_json = serde_json::to_string_pretty(&cause)?;
+        zip.start_file("disconnect-cause.json", opts)?;
+        zip.write_all(cause_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
     /// Build the --pedantic observer closure and register it
     /// with the warn_once registry. Called from
     /// `app::RyllApp::new` (GUI) and `app::run_headless`
@@ -1323,6 +1607,7 @@ mod tests {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
+            ..Default::default()
         };
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
@@ -2432,5 +2717,201 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message, "first-gap-key");
         assert_eq!(entries[1].message, "second-spice-message");
+    }
+
+    #[test]
+    fn test_disconnect_channel_name_routing() {
+        for ch in [
+            "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
+        ] {
+            assert_eq!(
+                BugReportType::Disconnect {
+                    channel: ch.to_string()
+                }
+                .channel_name(),
+                ch,
+                "channel {} should round-trip",
+                ch
+            );
+        }
+        // Unknown / "error" channels fall back to main, since the
+        // main pcap is the most useful default for an auto-disconnect
+        // bug report when the originating channel is not known.
+        assert_eq!(
+            BugReportType::Disconnect {
+                channel: "error".to_string()
+            }
+            .channel_name(),
+            "main"
+        );
+        assert_eq!(
+            BugReportType::Disconnect {
+                channel: "bogus".to_string()
+            }
+            .channel_name(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn test_collect_per_channel_round_trips_keepalive_and_traffic() {
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.main.lock().unwrap();
+            s.bytes_in = 1234;
+            s.bytes_out = 5678;
+            s.last_recv_ts_secs = Some(12.5);
+            s.last_send_ts_secs = Some(11.5);
+            s.ping_recv_count = 3;
+            s.pong_send_count = 3;
+            s.last_ping_recv_ts_secs = Some(12.5);
+            s.keepalive_timeout_fired = true;
+        }
+        {
+            let mut s = snapshots.display.lock().unwrap();
+            s.bytes_in = 99;
+        }
+
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
+        let main = per_channel.get("main").expect("main entry missing");
+        assert_eq!(main.bytes_in, 1234);
+        assert_eq!(main.bytes_out, 5678);
+        assert_eq!(main.last_recv_ts_secs, Some(12.5));
+        assert_eq!(main.ping_recv_count, 3);
+        assert_eq!(main.pong_send_count, 3);
+
+        // keepalive_timeout_fired isn't in PerChannelDiagnostics; it
+        // is read separately at the disconnect site, but we verify
+        // here that the snapshot retains the flag the caller set.
+        assert!(snapshots.main.lock().unwrap().keepalive_timeout_fired);
+
+        // Every channel name should appear, even ones we didn't touch.
+        for ch in [
+            "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
+        ] {
+            assert!(per_channel.contains_key(ch), "per_channel missing {}", ch);
+        }
+    }
+
+    #[test]
+    fn test_write_disconnect_produces_zip_with_cause_json() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.main.lock().unwrap();
+            s.bytes_in = 4096;
+        }
+        let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
+        let metrics = stub_metrics();
+
+        let cause = DisconnectCause {
+            channel: "main".to_string(),
+            error_message: "test disconnect".to_string(),
+            error_kind: None,
+            keepalive_timeout_fired: true,
+            session_uptime_secs: 10.0,
+            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+        };
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let path = BugReport::write_disconnect(
+            &tmp,
+            cause,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            metrics,
+        )
+        .unwrap();
+
+        assert!(path.exists(), "disconnect zip does not exist: {:?}", path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            filename.starts_with("ryll-disconnect-main-"),
+            "filename does not encode channel: {}",
+            filename
+        );
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"session.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        assert!(names.contains(&"runtime-metrics.json".to_string()));
+        assert!(names.contains(&"disconnect-cause.json".to_string()));
+
+        // disconnect-cause.json should round-trip the fields we set,
+        // including keepalive_timeout_fired and the per-channel map.
+        let mut cf = archive.by_name("disconnect-cause.json").unwrap();
+        let mut json = String::new();
+        std::io::Read::read_to_string(&mut cf, &mut json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["channel"], "main");
+        assert_eq!(parsed["error_message"], "test disconnect");
+        assert_eq!(parsed["keepalive_timeout_fired"], true);
+        assert_eq!(parsed["session_uptime_secs"], 10.0);
+        assert_eq!(parsed["per_channel"]["main"]["bytes_in"], 4096);
+        assert!(parsed["per_channel"]
+            .as_object()
+            .unwrap()
+            .contains_key("playback"));
+        assert!(parsed["per_channel"]
+            .as_object()
+            .unwrap()
+            .contains_key("webdav"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_disconnect_sanitises_channel_in_filename() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
+
+        let cause = DisconnectCause {
+            channel: "weird/name with:colons".to_string(),
+            error_message: "x".to_string(),
+            error_kind: Some("ConnectionReset".to_string()),
+            keepalive_timeout_fired: false,
+            session_uptime_secs: 0.0,
+            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+        };
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect-sanitise");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let path = BugReport::write_disconnect(
+            &tmp,
+            cause,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            stub_metrics(),
+        )
+        .unwrap();
+
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !filename.contains('/') && !filename.contains(':') && !filename.contains(' '),
+            "filename was not sanitised: {}",
+            filename
+        );
+        assert!(filename.starts_with("ryll-disconnect-weird-name-with-colons-"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

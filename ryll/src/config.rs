@@ -79,10 +79,21 @@ pub struct Args {
     #[arg(long)]
     pub pedantic: bool,
 
-    /// Directory for --pedantic-mode bug reports. Created
-    /// if missing.
-    #[arg(long, default_value = "./ryll-pedantic-reports")]
-    pub pedantic_dir: std::path::PathBuf,
+    /// Directory for --pedantic-mode bug reports. Created if
+    /// missing. If unset, falls back to --bug-report-dir, then
+    /// to the historical default of ./ryll-pedantic-reports.
+    #[arg(long)]
+    pub pedantic_dir: Option<std::path::PathBuf>,
+
+    /// Default directory for bug-report zip files (F8 reports,
+    /// pedantic reports, and auto-disconnect snapshots).
+    /// Created if missing. Each flavour can be overridden
+    /// individually (e.g. by --pedantic-dir). If neither this
+    /// nor a flavour-specific flag is set, the per-flavour
+    /// fallback applies (cwd for F8 / auto-disconnect,
+    /// ./ryll-pedantic-reports for pedantic).
+    #[arg(long)]
+    pub bug_report_dir: Option<std::path::PathBuf>,
 
     /// Enable paste-as-keystrokes fallback for guests without vdagent
     #[arg(long)]

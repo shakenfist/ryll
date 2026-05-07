@@ -43,6 +43,19 @@ pub struct DisplaySnapshot {
     pub last_ack: u32,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// Session-relative seconds when the most recent server
+    /// message of any kind was parsed on this channel. Used for
+    /// disconnect-cause diagnostics.
+    pub last_recv_ts_secs: Option<f64>,
+    /// Session-relative seconds when the most recent client
+    /// message of any kind was sent on this channel.
+    pub last_send_ts_secs: Option<f64>,
+    /// Number of server PINGs received since session start.
+    pub ping_recv_count: u32,
+    /// Number of client PONGs sent since session start.
+    pub pong_send_count: u32,
+    /// Session-relative seconds of the most recent server PING.
+    pub last_ping_recv_ts_secs: Option<f64>,
 }
 
 /// A recorded input event for the inputs channel snapshot.
@@ -70,6 +83,16 @@ pub struct InputsSnapshot {
     pub recent_events: VecDeque<InputEventRecord>,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// See `DisplaySnapshot::last_recv_ts_secs`.
+    pub last_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::last_send_ts_secs`.
+    pub last_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::ping_recv_count`.
+    pub ping_recv_count: u32,
+    /// See `DisplaySnapshot::pong_send_count`.
+    pub pong_send_count: u32,
+    /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
+    pub last_ping_recv_ts_secs: Option<f64>,
 }
 
 /// Summary of a cached cursor shape.
@@ -93,6 +116,16 @@ pub struct CursorSnapshot {
     pub last_ack: u32,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// See `DisplaySnapshot::last_recv_ts_secs`.
+    pub last_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::last_send_ts_secs`.
+    pub last_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::ping_recv_count`.
+    pub ping_recv_count: u32,
+    /// See `DisplaySnapshot::pong_send_count`.
+    pub pong_send_count: u32,
+    /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
+    pub last_ping_recv_ts_secs: Option<f64>,
 }
 
 /// Snapshot of the main channel's mutable state.
@@ -101,15 +134,82 @@ pub struct MainSnapshot {
     pub session_id: Option<u32>,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// See `DisplaySnapshot::last_recv_ts_secs`.
+    pub last_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::last_send_ts_secs`.
+    pub last_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::ping_recv_count`.
+    pub ping_recv_count: u32,
+    /// See `DisplaySnapshot::pong_send_count`.
+    pub pong_send_count: u32,
+    /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
+    pub last_ping_recv_ts_secs: Option<f64>,
+    /// Set to true by the main channel's read loop when its
+    /// 30 s client-side keepalive timeout fires (i.e. ryll
+    /// considered itself disconnected because no main-channel
+    /// message arrived for 30 s). Distinguishes that path from
+    /// a real EOF / RST when the disconnect-cause record is
+    /// captured. Reset on reconnect by the app layer.
+    pub keepalive_timeout_fired: bool,
 }
 
-/// Holds all four per-channel snapshot `Arc<Mutex<T>>`s.
+/// Generic snapshot for non-critical channels (playback,
+/// usbredir, webdav). These don't carry channel-specific
+/// state worth surfacing in bug reports today, but we want
+/// disconnect-cause diagnostics to include them so a dropped
+/// non-critical channel produces actionable data.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PlaybackSnapshot {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    /// See `DisplaySnapshot::last_recv_ts_secs`.
+    pub last_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::last_send_ts_secs`.
+    pub last_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::ping_recv_count`.
+    pub ping_recv_count: u32,
+    /// See `DisplaySnapshot::pong_send_count`.
+    pub pong_send_count: u32,
+    /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
+    pub last_ping_recv_ts_secs: Option<f64>,
+}
+
+/// See `PlaybackSnapshot`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UsbredirSnapshot {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub last_recv_ts_secs: Option<f64>,
+    pub last_send_ts_secs: Option<f64>,
+    pub ping_recv_count: u32,
+    pub pong_send_count: u32,
+    pub last_ping_recv_ts_secs: Option<f64>,
+}
+
+/// See `PlaybackSnapshot`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WebdavSnapshot {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub last_recv_ts_secs: Option<f64>,
+    pub last_send_ts_secs: Option<f64>,
+    pub ping_recv_count: u32,
+    pub pong_send_count: u32,
+    pub last_ping_recv_ts_secs: Option<f64>,
+}
+
+/// Holds every per-channel snapshot `Arc<Mutex<T>>`. Includes
+/// non-critical channels so disconnect-cause records can
+/// describe a dropped audio / USB / file-share channel.
 #[derive(Clone)]
 pub struct ChannelSnapshots {
     pub display: Arc<Mutex<DisplaySnapshot>>,
     pub inputs: Arc<Mutex<InputsSnapshot>>,
     pub cursor: Arc<Mutex<CursorSnapshot>>,
     pub main: Arc<Mutex<MainSnapshot>>,
+    pub playback: Arc<Mutex<PlaybackSnapshot>>,
+    pub usbredir: Arc<Mutex<UsbredirSnapshot>>,
+    pub webdav: Arc<Mutex<WebdavSnapshot>>,
 }
 
 impl ChannelSnapshots {
@@ -119,6 +219,9 @@ impl ChannelSnapshots {
             inputs: Arc::new(Mutex::new(InputsSnapshot::default())),
             cursor: Arc::new(Mutex::new(CursorSnapshot::default())),
             main: Arc::new(Mutex::new(MainSnapshot::default())),
+            playback: Arc::new(Mutex::new(PlaybackSnapshot::default())),
+            usbredir: Arc::new(Mutex::new(UsbredirSnapshot::default())),
+            webdav: Arc::new(Mutex::new(WebdavSnapshot::default())),
         }
     }
 }

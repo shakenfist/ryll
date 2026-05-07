@@ -494,6 +494,7 @@ ryll/src/
 │                        #   runner, reconnect, egui trait impls
 ├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,
 │                        #   implements TrafficSink), bug-report ZIP
+│                        #   assembly, write_disconnect / DisconnectCause
 ├── capture.rs           # Pcap + MP4 capture (CaptureSession,
 │                        #   implements CaptureSink)
 ├── clipboard_arboard.rs # Host clipboard (implements ClipboardBackend)
@@ -931,6 +932,36 @@ panel polls `warn_once_count()` each frame; clicking opens
 a floating window listing every fired key. The counter
 works without `--pedantic` — `--pedantic` only adds the
 bug-report-per-gap automation on top.
+
+### Auto-snapshot on channel disconnect
+
+Because oVirt and Kerbside hand out one-time-use SPICE
+tickets, any channel that disconnects mid-session is
+permanently lost — the client cannot reconnect that
+channel without a fresh ticket. To make those events
+diagnosable after the fact, every `ChannelEvent::Error`
+or `ChannelEvent::Disconnected` triggers a best-effort
+auto-snapshot via `BugReport::write_disconnect`. The
+zip carries a `disconnect-cause.json` record alongside
+the usual pcap / channel-state / metadata files. The
+record names the channel that fired, captures whether
+the main-channel client-side keepalive timeout fired
+(distinguishing "we timed ourselves out" from a server
+RST), and embeds a per-channel diagnostics map so a
+maintainer can compare the dropped channel against the
+others' last-known traffic state.
+
+A 60 s cooldown bounds disk usage during a disconnect
+storm; the cooldown is updated even on write failure so
+a misconfigured output directory does not retry on every
+disconnect event. Snapshots land in (in order of
+preference) `--bug-report-dir`, `<--capture>/bug-reports/`,
+or the current working directory. The same resolution
+chain is used for the manual F8 button. Runtime metrics
+are recorded as unavailable in this path — sampling
+them on the GUI thread would freeze the UI for ~1 s,
+and the pcap and channel snapshots are the load-bearing
+diagnostic data anyway.
 
 ## Multi-Monitor Support
 
