@@ -17,6 +17,19 @@
         "digest"
       ],
       "automerge": false
+    },
+    {
+      "description": "Group RustCrypto digest-ecosystem crates so they upgrade in lockstep. The `digest` trait crate is shared by sha*, hmac, rsa, signature, etc., and a major bump of one (e.g. sha1 0.10 -> 0.11 moves to digest 0.11) breaks compilation against any sibling still on the old `digest` major. Keeping them in one PR forces them to land together.",
+      "matchPackageNames": [
+        "digest",
+        "hmac",
+        "md-5",
+        "rsa",
+        "sha1",
+        "sha2",
+        "signature"
+      ],
+      "groupName": "rustcrypto digest ecosystem"
     }
   ],
   "minimumReleaseAge": "3 days",
