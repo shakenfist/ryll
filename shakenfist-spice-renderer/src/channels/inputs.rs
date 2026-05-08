@@ -79,12 +79,35 @@ pub struct InputsChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
+    /// Most recent KEY_MODIFIERS value we've sent. Restated by
+    /// the idle keepalive (Phase 02 K1 fix) with the same value
+    /// to keep the inputs channel non-idle without changing
+    /// guest state.
+    last_modifiers_sent: u16,
+    /// Wall-clock time (tokio runtime) of the last inbound *or*
+    /// outbound activity on the channel. The idle keepalive
+    /// fires at `last_activity + KEEPALIVE_IDLE`. Updated on
+    /// every recv and every send via `mark_activity()`.
+    last_activity: tokio::time::Instant,
+    /// Number of idle keepalive messages sent. Surfaced via the
+    /// snapshot for disconnect-cause diagnostics.
+    client_keepalive_send_count: u32,
+    /// Session-relative seconds at the most recent keepalive
+    /// send.
+    last_client_keepalive_send_ts_secs: Option<f64>,
     enable_paste: bool,
     ctrl_held: bool,
     shift_held: bool,
     alt_held: bool,
     paste_state: Option<PasteState>,
 }
+
+/// Idle window before the inputs-channel keepalive fires.
+/// Conservative against the empirically observed
+/// 300 s server-side per-channel silence threshold (see
+/// session-001b data and the Phase 02 plan's Diagnosis section);
+/// 10 s leaves ample headroom for jitter and clock skew.
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl InputsChannel {
     #[allow(clippy::too_many_arguments)]
@@ -122,6 +145,10 @@ impl InputsChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
+            last_modifiers_sent: 0,
+            last_activity: tokio::time::Instant::now(),
+            client_keepalive_send_count: 0,
+            last_client_keepalive_send_ts_secs: None,
             enable_paste,
             ctrl_held: false,
             shift_held: false,
@@ -139,6 +166,10 @@ impl InputsChannel {
             .await?;
 
         loop {
+            // Capture before reborrows so the closure can move it
+            // into the keepalive branch without a self conflict.
+            let keepalive_deadline = self.last_activity + KEEPALIVE_IDLE;
+
             // Borrow fields separately to avoid borrow checker issues in select!
             let stream = &mut self.stream;
             let buffer = &mut self.buffer;
@@ -188,6 +219,7 @@ impl InputsChannel {
                         }
                         Ok(_) => {
                             self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+                            self.last_activity = tokio::time::Instant::now();
                             self.process_messages().await?;
                         }
                         Err(e) => {
@@ -265,6 +297,18 @@ impl InputsChannel {
                     }
                 } => {
                     self.advance_paste().await?;
+                }
+
+                // Idle keepalive (Phase 02 K1 fix). When the channel
+                // has been silent in both directions for KEEPALIVE_IDLE,
+                // re-send the most recent KEY_MODIFIERS value. The
+                // guest sees no change (same modifier state); the
+                // server sees a client→server byte and resets its
+                // per-channel idle timer. Hypothesis under test:
+                // keeping inputs busy may also keep main alive,
+                // sidestepping the K1 main-channel rcc disconnect.
+                _ = tokio::time::sleep_until(keepalive_deadline) => {
+                    self.send_idle_keepalive().await?;
                 }
             }
         }
@@ -765,13 +809,36 @@ impl InputsChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+        snap.client_keepalive_send_count = self.client_keepalive_send_count;
+        snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
     }
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
         let mut payload = Vec::new();
         InputsKeyModifiers { modifiers }.write(&mut payload)?;
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
-        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg).await
+        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg)
+            .await?;
+        self.last_modifiers_sent = modifiers;
+        Ok(())
+    }
+
+    /// Restate the last KEY_MODIFIERS we sent. Triggered by the
+    /// idle-keepalive select branch in `run()` after
+    /// `KEEPALIVE_IDLE` of channel silence. Re-sending the same
+    /// modifier value is a no-op for the guest but generates a
+    /// client→server byte on the inputs channel, which keeps the
+    /// channel non-idle from the server's perspective.
+    async fn send_idle_keepalive(&mut self) -> Result<()> {
+        let modifiers = self.last_modifiers_sent;
+        self.send_key_modifiers(modifiers).await?;
+        self.client_keepalive_send_count = self.client_keepalive_send_count.saturating_add(1);
+        // last_send_ts_secs is updated by send_with_log via
+        // update_snapshot; mirror the fact here for the dedicated
+        // keepalive timestamp.
+        self.last_client_keepalive_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.update_snapshot();
+        Ok(())
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
@@ -794,6 +861,7 @@ impl InputsChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.last_activity = tokio::time::Instant::now();
         Ok(())
     }
 

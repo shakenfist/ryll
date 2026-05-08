@@ -697,6 +697,12 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// Idle keepalives this client sent on this channel
+    /// (Phase 02 K1 fix). Today only the inputs channel sends
+    /// these; the field is present on every entry for
+    /// uniform JSON shape, with 0 / None where unimplemented.
+    pub client_keepalive_send_count: u32,
+    pub last_client_keepalive_send_ts_secs: Option<f64>,
 }
 
 /// Structured cause record for an auto-disconnect bug report.
@@ -748,6 +754,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -762,6 +770,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -776,6 +786,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: s.client_keepalive_send_count,
+                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
                 },
             );
         }
@@ -790,6 +802,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -804,6 +818,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -818,6 +834,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -832,6 +850,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -2790,6 +2810,41 @@ mod tests {
             "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
         ] {
             assert!(per_channel.contains_key(ch), "per_channel missing {}", ch);
+        }
+    }
+
+    #[test]
+    fn test_collect_per_channel_surfaces_inputs_keepalive_fields() {
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.inputs.lock().unwrap();
+            s.client_keepalive_send_count = 7;
+            s.last_client_keepalive_send_ts_secs = Some(305.5);
+        }
+
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
+        let inputs = per_channel.get("inputs").expect("inputs entry missing");
+        assert_eq!(inputs.client_keepalive_send_count, 7);
+        assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
+
+        // Other channels do not yet implement keepalive, so the
+        // fields default to 0 / None on every other entry.
+        for ch in [
+            "main", "display", "cursor", "playback", "usbredir", "webdav",
+        ] {
+            let entry = per_channel
+                .get(ch)
+                .unwrap_or_else(|| panic!("missing {}", ch));
+            assert_eq!(
+                entry.client_keepalive_send_count, 0,
+                "{} should report zero keepalives sent",
+                ch
+            );
+            assert_eq!(
+                entry.last_client_keepalive_send_ts_secs, None,
+                "{} should report no last-keepalive-send timestamp",
+                ch
+            );
         }
     }
 
