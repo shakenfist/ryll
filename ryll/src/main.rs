@@ -71,6 +71,17 @@ fn main() -> Result<()> {
     })
     .expect("failed to set Ctrl+C handler");
 
+    // Idempotent rustls CryptoProvider install. rustls 0.23 panics
+    // at the no-arg `ClientConfig::builder()` call site
+    // (shakenfist-spice-protocol/src/client.rs) when feature
+    // unification across the workspace enables both `ring` and
+    // `aws-lc-rs` and no process-level default has been installed.
+    // The Linux devcontainer's resolver lands on a single provider
+    // and silently auto-detects; macOS resolves with both enabled
+    // and panics. Installing a default explicitly at startup
+    // covers every entry path (--web already did this internally).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Parse command line arguments
     let args = Args::parse();
 
