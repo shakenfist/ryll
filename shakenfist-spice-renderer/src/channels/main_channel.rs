@@ -216,7 +216,15 @@ impl MainChannel {
         let mut clipboard_interval = tokio::time::interval(std::time::Duration::from_millis(500));
         clipboard_interval.tick().await;
         let mut last_data_received = tokio::time::Instant::now();
-        let keepalive_timeout = std::time::Duration::from_secs(30);
+        // Backstop for an unreachable / dead server, not a primary
+        // mechanism. The SPICE server's own connectivity check is at
+        // 30 s (CLIENT_CONNECTIVITY_TIMEOUT, main-channel-client.cpp:38)
+        // and produces a more informative log line than our local
+        // timer. Setting this above 30 s ensures the server-side
+        // check fires unambiguously first when the server is still
+        // alive, leaving our timer to catch the case where the
+        // server disappears without any FIN/RST.
+        let keepalive_timeout = std::time::Duration::from_secs(90);
 
         loop {
             let mut chunk = [0u8; 65536];
