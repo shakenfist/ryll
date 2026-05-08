@@ -42,7 +42,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-cargo-audit
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -60,7 +60,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -80,7 +80,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -98,7 +98,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-shellcheck
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
@@ -113,7 +113,7 @@ jobs:
       group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Scan tree for bidi and zero-width characters
         run: ./tools/check-bidi.sh
