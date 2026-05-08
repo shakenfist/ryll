@@ -152,7 +152,7 @@ jobs:
 
       - name: Upload .deb artifact
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-deb-${{ matrix.target }}
           path: target/debian/*.deb
@@ -167,7 +167,7 @@ jobs:
 
       - name: Upload .rpm artifact
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-rpm-${{ matrix.target }}
           path: target/generate-rpm/*.rpm
@@ -182,7 +182,7 @@ jobs:
 
       - name: Upload macOS tarball
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-macos
           path: target/release/ryll-*.tar.gz
@@ -199,7 +199,7 @@ jobs:
 
       - name: Upload Windows zip
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-windows-${{ matrix.target }}
           path: target/release/ryll-*.zip
