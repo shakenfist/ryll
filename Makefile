@@ -21,7 +21,7 @@ GID := $(shell id -g)
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
 	test-qemu test-qemu-usb test-qemu-stop \
-	macos-build macos-release
+	macos-prereqs macos-build macos-release
 
 all: build
 
@@ -163,38 +163,47 @@ lint-fix: ensure-cache
 
 # Native macOS build. Run this on a Mac — the devcontainer can't
 # produce a binary that talks to the host window server, and ryll
-# is a GUI app. Sets the same MACOSX_DEPLOYMENT_TARGET as CI
-# (.github/workflows/{ci,release}.yml) so locally-built binaries
-# behave like CI artifacts.
-macos-build:
+# is a GUI app. Mirrors the CI matrix in
+# .github/workflows/{ci,release}.yml: same
+# MACOSX_DEPLOYMENT_TARGET, same CMAKE_POLICY_VERSION_MINIMUM
+# (audiopus_sys source-builds libopus and the bundled CMakeLists
+# uses a pre-3.5 cmake_minimum_required which CMake 4.x rejects
+# without this override).
+macos-prereqs:
 	@if [ "$$(uname -s)" != "Darwin" ]; then \
-		echo "error: macos-build must run on macOS (uname -s says $$(uname -s))"; \
-		echo "       use 'make build' for the Linux devcontainer build."; \
+		echo "error: macOS targets must run on macOS (uname -s says $$(uname -s))."; \
+		echo "       use 'make build' / 'make release' for the Linux devcontainer."; \
 		exit 1; \
 	fi
-	@command -v cargo >/dev/null 2>&1 || { \
-		echo "error: cargo not found on PATH."; \
-		echo "       install via 'brew install rustup-init && rustup-init -y'"; \
-		echo "       or follow https://rustup.rs/."; \
+	@missing=""; \
+	for tool in cargo cmake pkg-config; do \
+		if ! command -v $$tool >/dev/null 2>&1; then \
+			missing="$$missing $$tool"; \
+		fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "error: missing required tool(s):$$missing"; \
+		echo ""; \
+		echo "  install with:"; \
+		echo "    brew install cmake pkg-config"; \
+		echo "    brew install rustup-init && rustup-init -y    # if cargo missing"; \
+		echo ""; \
+		echo "  cmake is needed because audiopus_sys source-builds libopus."; \
+		echo "  pkg-config lets the build find system libraries cleanly."; \
 		exit 1; \
-	}
-	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p ryll
+	fi
+
+macos-build: macos-prereqs
+	MACOSX_DEPLOYMENT_TARGET=14.0 \
+	CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		cargo build -p ryll
 	@echo ""
 	@echo "Built debug binary: target/debug/ryll"
 
-macos-release:
-	@if [ "$$(uname -s)" != "Darwin" ]; then \
-		echo "error: macos-release must run on macOS (uname -s says $$(uname -s))"; \
-		echo "       use 'make release' for the Linux devcontainer build."; \
-		exit 1; \
-	fi
-	@command -v cargo >/dev/null 2>&1 || { \
-		echo "error: cargo not found on PATH."; \
-		echo "       install via 'brew install rustup-init && rustup-init -y'"; \
-		echo "       or follow https://rustup.rs/."; \
-		exit 1; \
-	}
-	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release -p ryll
+macos-release: macos-prereqs
+	MACOSX_DEPLOYMENT_TARGET=14.0 \
+	CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		cargo build --release -p ryll
 	@echo ""
 	@echo "Built release binary: target/release/ryll"
 
