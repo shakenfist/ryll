@@ -20,7 +20,8 @@ GID := $(shell id -g)
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
-	test-qemu test-qemu-usb test-qemu-stop
+	test-qemu test-qemu-usb test-qemu-stop \
+	macos-build macos-release
 
 all: build
 
@@ -35,6 +36,10 @@ help:
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
 	@echo "  make devcontainer           - Build the development container"
 	@echo "  make clean                  - Remove build artifacts"
+	@echo ""
+	@echo "macOS native (run on a Mac, not in the devcontainer):"
+	@echo "  make macos-build            - Native debug build for the host Mac"
+	@echo "  make macos-release          - Native release build for the host Mac"
 	@echo ""
 	@echo "Test SPICE server:"
 	@echo "  make test-qemu              - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
@@ -155,6 +160,43 @@ lint-fix: ensure-cache
 		-e HOME=/build \
 		$(RYLL_IMAGE) \
 		sh -c "cargo fmt --all && cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings"
+
+# Native macOS build. Run this on a Mac — the devcontainer can't
+# produce a binary that talks to the host window server, and ryll
+# is a GUI app. Sets the same MACOSX_DEPLOYMENT_TARGET as CI
+# (.github/workflows/{ci,release}.yml) so locally-built binaries
+# behave like CI artifacts.
+macos-build:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "error: macos-build must run on macOS (uname -s says $$(uname -s))"; \
+		echo "       use 'make build' for the Linux devcontainer build."; \
+		exit 1; \
+	fi
+	@command -v cargo >/dev/null 2>&1 || { \
+		echo "error: cargo not found on PATH."; \
+		echo "       install via 'brew install rustup-init && rustup-init -y'"; \
+		echo "       or follow https://rustup.rs/."; \
+		exit 1; \
+	}
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build -p ryll
+	@echo ""
+	@echo "Built debug binary: target/debug/ryll"
+
+macos-release:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "error: macos-release must run on macOS (uname -s says $$(uname -s))"; \
+		echo "       use 'make release' for the Linux devcontainer build."; \
+		exit 1; \
+	fi
+	@command -v cargo >/dev/null 2>&1 || { \
+		echo "error: cargo not found on PATH."; \
+		echo "       install via 'brew install rustup-init && rustup-init -y'"; \
+		echo "       or follow https://rustup.rs/."; \
+		exit 1; \
+	}
+	MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --release -p ryll
+	@echo ""
+	@echo "Built release binary: target/release/ryll"
 
 # Clean build artifacts
 clean:
