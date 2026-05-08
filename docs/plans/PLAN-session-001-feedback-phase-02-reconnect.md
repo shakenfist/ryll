@@ -415,65 +415,122 @@ appended below "Approach" before any C-block code lands.
 
 ### Block C — Root-cause fix (one of)
 
-#### C.1 Proactive client-side PING
+#### C.1 Proactive client-side PING on every channel
 
-If diagnosis is "server stopped PINGing", introduce a
-client-driven PING on the main channel. Send `SPICE_MSGC_PING`
-every **10 s** in the absence of recent server PING activity.
-The server (and spice-gtk-style proxies) will respond with
-PONG, resetting both sides' liveness timers.
+(Scope expanded from the original draft. The original specified
+main-channel only at 10 s. The session-001b data — see
+"Diagnosis" — shows the failing channels are inputs / cursor /
+playback / usbredir, all of which sit completely silent in
+both directions for the last hundreds of seconds before
+disconnect. Main and display were both still active. So the
+PING needs to land on whichever channel has gone idle, not
+just main.)
+
+Introduce a client-driven `SPICE_MSGC_PING` on **every channel
+ryll runs** (main, display, inputs, cursor, playback, usbredir,
+webdav). On each channel, if no inbound bytes have been
+received for **15 s**, send a PING. The server responds with
+PONG, the byte-flow on the channel is restored, and the
+server's per-channel idle timer (whatever its actual constant
+is — see Diagnosis) resets. 15 s is conservative against the
+observed 300 s server-side window with a wide safety margin.
 
 The `Ping` opcode is a symmetric protocol message — the SPICE
-spec defines it for both directions (`spice-gtk/src/channel-base.c:43`
-treats inbound PING uniformly). The server side at
+spec defines it for both directions
+(`/srv/src-reference/spice/spice-gtk/src/channel-base.c:43`
+treats inbound PING uniformly, and the universal PONG handler
+is added to *every* channel via `spice_channel_add_base_handlers`
+at `channel-base.c:210-234`). The server side at
 `/srv/src-reference/spice/spice/server/red-channel-client.cpp`
 handles client-sent PINGs in the same connectivity-timer reset
-path as any other inbound byte; we won't surprise it.
+path as any other inbound byte. spice-gtk does not itself emit
+proactive client PINGs as far as we can tell — but the
+universality of the handler means the server is required to
+accept them on any channel, so doing so is protocol-legal.
 
-Site: extend the main-channel select loop at
-`main_channel.rs:212-313` with a fourth branch:
+Site: every channel handler's `tokio::select!` read loop gains
+a new branch:
 
 ```rust
-_ = tokio::time::sleep_until(last_send_or_pong_recv + Duration::from_secs(10)) => {
+_ = tokio::time::sleep_until(last_recv_or_send + Duration::from_secs(15)) => {
     let ping = build_client_ping();  // SPICE_MSGC_PING
     self.send(ping).await?;
-    // last_data_received does NOT reset here — we want to know
-    // when the *server* last spoke to us, not us to it.
+    last_recv_or_send = tokio::time::Instant::now();
 }
 ```
 
-`last_send_or_pong_recv` is a new local (not added to the
-snapshot — it's transient) tracking either our last send or
-the last server PONG, whichever is later. This ensures we
-don't flood with PINGs immediately after the user moves the
-mouse (which already produces inputs traffic, keeping the
-server happy on a different channel — but the server's
-connectivity check is per-channel; main needs main-channel
-traffic).
+`last_recv_or_send` is a new local (not added to the snapshot —
+transient) tracking the more recent of the channel's last
+inbound byte and last outbound byte. This ensures:
 
-Snapshot fields to add on `MainSnapshot`:
+- A channel actively receiving server traffic (display under
+  load, main while clipboard sync is running) does not emit
+  redundant client PINGs on top.
+- A channel actively *sending* (e.g. cursor position updates
+  while the user is using the session) does not emit client
+  PINGs either — the user-driven traffic is doing the job.
+- Only fully-idle channels emit the proactive PING, at most
+  once per 15 s.
+
+Snapshot fields to add on **every channel snapshot** (not just
+main):
 
 ```rust
 pub client_ping_send_count: u32,
 pub last_client_ping_send_ts_secs: Option<f64>,
 ```
 
-So a future disconnect-cause.json shows whether the proactive
-PING was firing as expected.
+A future disconnect-cause.json then shows whether the
+proactive PING was firing on the affected channel — critical
+diagnostic if a session-002b reproduction shows the disconnect
+returning despite the fix.
 
-Cost: one 11-byte message every 10 s = 1.1 byte/s during idle.
-Trivially below the noise floor of any other traffic.
+Cost: in the worst case (full idle on all 7 channels) one
+~11-byte message every 15 s × 7 channels = ~5 byte/s.
+Indistinguishable from noise. The expected case is 1–2
+channels needing PINGs at any given moment (display and main
+are virtually always active during use).
 
-#### C.2 Disable App Nap on macOS
+Caveats:
 
-If diagnosis is "client-side runtime starvation":
+- The webdav channel is only present when shared-folder
+  redirection is active. Its handler should still gain the
+  proactive-PING branch but only run when the channel is
+  established.
+- The PONG handler on every channel already increments
+  `pong_send_count` (Phase 01 work). The reverse — counting
+  PONGs we *receive* from the server in response to our PING —
+  is new. Add `client_pong_recv_count: u32` to the snapshot
+  alongside the send-side counter so we can confirm round-trip.
+- Cancel any in-flight client-PING send if the channel goes
+  through `Disconnected` — don't write to a closed socket.
 
-macOS App Nap is the most likely culprit — it activates when
-an app is not the active window and not playing audio,
-suspending its runloop / GCD queues. tokio sleeps and socket
-reads are subject to it. ryll's audio playback is on a
-separate channel and may not always be active (no audio in the
-guest = no playback channel data = nothing keeping us awake).
+#### C.2 Disable App Nap on macOS (opportunistic, not selected by Block B)
+
+The session-001b data did not strongly support the
+client-side starvation hypothesis: timing was indistinguishable
+across foreground / background / different-virtual-desktop
+cases. App Nap typically activates only when backgrounded, so
+if it were the dominant cause the foreground capture should
+have looked different. It didn't.
+
+That said, App Nap could be a contributing factor on the
+*idle channels' tokio tasks* even when ryll's main thread is
+foregrounded — and disabling it is a small, defensible
+hardening that any interactive remote-display app should
+probably do. Therefore: keep the design here, but treat C.2
+as **a follow-on if a session-002b reproduction shows the
+disconnect persisting after C.1 + Block A**, not as a
+required part of this phase.
+
+If implemented:
+
+macOS App Nap activates when an app is not the active window
+and not playing audio, suspending its runloop / GCD queues.
+tokio sleeps and socket reads are subject to it. ryll's audio
+playback is on a separate channel and may not always be active
+(no audio in the guest = no playback channel data = nothing
+keeping us awake).
 
 Fix: call `NSProcessInfo.beginActivityWithOptions:reason:` on
 startup with `NSActivityUserInitiated | NSActivityIdleSystemSleepDisabled`
@@ -495,11 +552,9 @@ Implementation:
 - Drop the guard when the session ends (Drop on `RyllApp` or
   on the connection-thread cleanup).
 
-This is a no-regret fix even if the actual root cause is
-something else, **as long as we are confident App Nap could
-cause issues** — but introducing a permanent runloop-pin to
-work around an unconfirmed cause is worse than confirming
-first. Hence the Block B gate.
+Treat as an opportunistic follow-on. If C.1 + Block A close
+out the K1 reproduction successfully, C.2 may still be worth
+landing as macOS hardening but does not block this phase.
 
 Cost: zero additional traffic. Slight increase in idle CPU
 when ryll is not the active app (macOS will not throttle
@@ -551,6 +606,217 @@ comment at the timeout site explaining why 90 s and not 30 s
 ("server's own check is 30 s; this is a backstop for when the
 server itself is dead or unreachable, not a primary
 mechanism").
+
+## Diagnosis
+
+(This section is the "Output of Block B" promised under
+"Approach". It captures the conclusions from session-001b
+data — three disconnect-cause.json zips at
+`~/ryll-test-sessions/test-session-001b/` — and pins down the
+C-block branch to follow.)
+
+### Reproduction
+
+Three captures by the user, all on macOS, all reproducing K1:
+
+| Zip | App position | Disconnect timing | Failing channel |
+|---|---|---|---|
+| `…05-16-29Z.zip` | foreground, user wandered off | T+510 s | inputs |
+| `…05-34-16Z.zip` | backgrounded, host actively used | T+510 s | inputs |
+| `…05-44-21Z.zip` | backgrounded on different virtual desktop | T+540 s | inputs |
+
+All three: error message identical
+("`inputs: read error: peer closed connection without sending
+TLS close_notify`"), `keepalive_timeout_fired: false`, channel
+filename literally `error` because `ChannelEvent::Error`
+doesn't carry channel attribution (a Phase 01 plumbing
+limitation worth fixing later).
+
+### Per-channel state at the moment of failure
+
+`disconnect-cause.json[*].per_channel`:
+
+| Channel | Last recv (median across 3 runs) | PINGs received |
+|---|---|---|
+| main | T+465 s | 66–67 |
+| display | T+496–527 s | 68–72 |
+| **inputs** | **T+300.3 s** | **4** |
+| cursor | T+300 s | 4 |
+| playback | T+300 s | 4 |
+| usbredir | T+300 s | 4 |
+| webdav | never connected | 0 |
+
+The 300-second mark is sharp and reproducible across all
+three runs. Cursor / inputs / playback / usbredir all stop
+receiving server traffic at almost the same instant; main
+and display keep going.
+
+### Reconciling three different time constants
+
+Three numbers come up in this failure mode and they do not
+trivially line up:
+
+| Number | Source | What it represents |
+|---|---|---|
+| **30 s (30 000 ms)** | QEMU/libvirt log line: `kvm: warning: Spice: main:0 (...): rcc 0x558a785cd310 has been unresponsive for more than 30000 ms, disconnecting` | The server's `CLIENT_CONNECTIVITY_TIMEOUT` at `main-channel-client.cpp:38`. Definitively 30 s; the user has confirmed the log line is unambiguous. |
+| **300 s** | T+300 mark in disconnect-cause.json `last_recv_ts_secs` | When the four idle channels stop receiving any server traffic at all. |
+| **75 s** | T+465 (main's last byte) → T+540 (disconnect detection in zip 3) | Gap between main going silent and ryll observing the read error. Matches `TCP_KEEPIDLE 30 + 3 × TCP_KEEPINTVL 15 = 75 s` exactly. |
+
+A coherent story that fits all three:
+
+1. At **T+300** the server stops sending traffic on the four
+   idle channels. *Why* this happens at 300 s is the
+   unresolved part — the SPICE server's `connectivity_timer`
+   does not have a 300 s constant. Possibilities:
+   - Server's per-channel ping_timer logic gates on channel
+     activity in some way that produces a ~300 s tail.
+   - Some interaction with `PING_TEST_IDLE_NET_TIMEOUT_MS`
+     (100 ms) and the `CONNECTIVITY_STATE_BLOCKED` state
+     transitions yields this number.
+   - Something else (caps negotiation, agent state) gates
+     server behaviour around the 5-minute mark.
+   - **Or it's a coincidence with user behaviour** despite
+     the user's belief otherwise — the channels going silent
+     may simply reflect a 5-minute baseline of "stuff the
+     user does at session start" tapering off uniformly. This
+     is testable by reproducing while continuously moving the
+     mouse: if the inputs channel still goes silent at T+300
+     under continuous mouse movement, it's server-side; if
+     not, it's a user-activity artefact.
+2. From T+300 to T+465 the inputs/cursor/playback/usbredir
+   sockets are silent in both directions. Main is still
+   active (SET_ACKs every 15 s, server PINGs every ~7 s).
+   The server's `CLIENT_CONNECTIVITY_TIMEOUT` for those
+   channels' rcc is presumably resetting because the
+   *server-side* `received_bytes` flag is set when ryll
+   replies to PINGs on main — but that's per-channel
+   monitoring, so this should not be the explanation.
+   Another unresolved question.
+3. At T+465 main itself goes silent (no more SET_ACKs from
+   server, no client traffic to drive new ones). The
+   server's main-channel rcc check now has nothing to reset
+   on. 30 s later (T+495) the server's check fires and logs
+   `unresponsive for more than 30000 ms`. Server tears down.
+   The kernel TCP stack on macOS surfaces the FIN on the
+   inputs socket at ~T+540; ryll's read on inputs returns
+   the rustls "peer closed without TLS close_notify" error
+   first because the inputs task happens to be polling at
+   that moment. The ~45 s delta between server-side log
+   (T+495) and client-side detection (T+540) is consistent
+   with the 75 s TCP keepalive backstop on the inputs socket
+   firing slightly before the server's actual FIN propagates.
+
+This story explains the 30 s log line truthfully (no QEMU
+typo — the rcc check really is 30 s, and it really fires at
+T+495 once main is genuinely silent for 30 s). It does **not**
+explain the 300 s mark or why the four idle channels go
+silent simultaneously. That is left as an open question; C.1
+(below) sidesteps the need to resolve it because making ryll
+send proactive bytes on every channel renders the server's
+exact PING-gating logic irrelevant.
+
+### What kills the session
+
+After the channels go silent at T+300, ryll's read on the
+inputs TCP socket returns EOF only at T+510–540 — 210–240 s
+later. This is consistent with the 75 s TCP keepalive
+detection cycle (`TCP_KEEPIDLE 30 + 3 × TCP_KEEPINTVL 15 = 75 s`)
+running on the *main* channel, not the inputs one. Main's
+last bytes are at T+465 s; T+465 + 75 = T+540 s, which lines
+up with zip 3's disconnect detection. The inputs channel's
+own TCP keepalive should fire faster (channels are independent
+TCP sockets), so either the inputs socket's keepalive is
+quiescent on macOS until something else wakes the runtime, or
+the kernel buffers the inputs FIN until main's death wakes
+ryll's tokio runtime to drain pending reads.
+
+### What spice-gtk does that ryll doesn't (probably)
+
+Re-checked: spice-gtk's PONG handler is universal (added to
+*every* channel via `spice_channel_add_base_handlers` at
+`spice-gtk/src/channel-base.c:210-234`), same as ryll's. So
+"spice-gtk PONGs and ryll doesn't" is not the answer. We did
+not find evidence of spice-gtk emitting proactive client PINGs
+or any other periodic per-channel send. Three remaining
+hypotheses for "why doesn't remote-viewer hit this":
+
+1. **It does, but is not as systematically dogfood-tested in
+   long-idle scenarios.** virt-viewer users typically aren't
+   leaving sessions running for 5–10 minutes idle and then
+   coming back; or when they do, the disconnect dialog is
+   easy to dismiss and the failure mode isn't reported.
+2. **Capability negotiation differences alter server
+   behaviour.** spice-gtk negotiates a wider set of
+   capabilities. The server may be selectively gating PING
+   send on certain caps; ryll, with fewer caps, may be in a
+   server code path that stops PINGing inputs/cursor/etc. once
+   the channel is "set up" but no traffic flows.
+3. **A session-property or initial handshake message** that
+   spice-gtk sends and ryll doesn't, indirectly nudging the
+   server to keep the channel "active".
+
+This open question is worth chasing, but the fix proposed
+below (proactive client PING on every idle channel) does not
+depend on resolving it. C.1 makes ryll *send bytes*
+client-side, which trivially keeps the server's per-channel
+timer happy regardless of what the server's exact PING-send
+gating logic is. Whatever spice-gtk relies on, our PING
+sidesteps it.
+
+### Selected branch: C.1, with scope expanded
+
+Original C.1 in the plan said "main channel only, every 10 s".
+The data invalidates the scope: main is fine; the failing
+channels are inputs / cursor / playback / usbredir.
+
+Revised C.1: send `SPICE_MSGC_PING` on **every channel** when
+that channel has been silent (in both directions) for ≥ 15 s.
+15 s is conservative against the observed 300 s window, with
+ample margin for clock skew, scheduling jitter, and any
+shorter timeout we don't yet know about. Cost is negligible
+(see C.1 for the math).
+
+C.2 (App Nap opt-out) is **demoted from "selected branch" to
+"opportunistic follow-on"** — the foreground/background timing
+parity argues against it being load-bearing. Keep the design
+in the plan; revisit only if a session-002b reproduction after
+C.1 + Block A still shows disconnects.
+
+C.3 (server-side close investigation) is no longer on the
+critical path — the data fits within the K1 hypothesis;
+nothing here invalidates the master-plan triage.
+
+Block A (auto-reconnect with backoff) is unchanged. It's a
+UX win regardless of root cause, and once C.1 prevents the
+disconnect class entirely, A becomes a backstop for the
+remaining "real network died" cases (laptop sleep, server
+restart, etc.).
+
+Block D (extend ryll's mirror keepalive to 90 s) is unchanged
+and correctly motivated by `keepalive_timeout_fired: false`
+across all three captures — our local timer is harmless in
+this failure mode but extending it means the server's check
+fires unambiguously first whenever it does fire.
+
+### Two minor improvements for Phase 01 plumbing, surfaced by this data
+
+(Not strictly Phase 02 work, but worth landing alongside.)
+
+- `ChannelEvent::Error(String)` carries no channel
+  attribution. The disconnect-cause filename ends up as
+  `ryll-disconnect-error-…` rather than
+  `ryll-disconnect-inputs-…`, which is mildly confusing. Phase
+  01's `BugReportType::Disconnect { channel }` already supports
+  the per-channel form; the gap is in the event itself.
+  Consider a small refactor to `ChannelEvent::Error { channel:
+  ChannelType, message: String }` so the snapshot pipeline
+  picks up the channel name. Defer to a follow-up phase if it
+  bloats this one.
+- `RuntimeMetrics::unavailable("not sampled on the GUI thread")`
+  in the auto-disconnect zip is a known limitation but the
+  error message is opaque to a maintainer reading the zip
+  cold. Tighten the wording or link to the explanation in
+  ARCHITECTURE.md.
 
 ## Open questions
 
@@ -683,55 +949,76 @@ mechanism").
       section to this plan with the chosen branch and
       evidence.
 
-### Block C (one of, conditional on Block B)
+### Block C (selected: C.1; C.2 opportunistic, C.3 not applicable)
 
-#### Block C.1 — Proactive client PING
+#### Block C.1 — Proactive client PING on every channel (selected)
+
+(Scope expanded from the original "main only, every 10 s" to
+"every channel, every 15 s when idle" per the Diagnosis.)
 
 - [ ] Add `SPICE_MSGC_PING` builder in
       `shakenfist-spice-protocol/src/messages` (verify name —
-      it should mirror the existing `SPICE_MSG_PING` but
-      client→server; if not present yet, add).
-- [ ] In `main_channel.rs:212-313` select loop, add fourth
-      branch driven by `last_send_or_pong_recv + 10 s`. On
-      fire, send a client PING and update the local timestamp.
-- [ ] Add `client_ping_send_count` and
-      `last_client_ping_send_ts_secs` to `MainSnapshot`
-      (`shakenfist-spice-renderer/src/snapshots.rs`); update
-      at the send site.
-- [ ] Extend `PerChannelDiagnostics` and `DisconnectCause`
-      (`ryll/src/bugreport.rs`) to surface the new fields, so
-      future disconnect-cause.json shows whether proactive PING
-      was firing.
-- [ ] Unit test: select loop fires the PING branch when no
-      send or PONG within 10 s; does not fire when traffic is
-      flowing.
+      symmetric to the existing server `SPICE_MSG_PING`; if
+      the client→server form is not present yet, add it).
+- [ ] In **every channel handler**'s `tokio::select!` read
+      loop, add a new branch driven by `last_recv_or_send +
+      Duration::from_secs(15)`. On fire: send a client PING
+      and reset the local timestamp. Channels:
+  - `main_channel.rs` (lines around 212-313)
+  - `display.rs`
+  - `inputs.rs`
+  - `cursor.rs`
+  - `playback.rs`
+  - `usbredir.rs`
+  - `webdav.rs` (only when the channel is established —
+    skip the PING branch otherwise)
+- [ ] Add `client_ping_send_count: u32`,
+      `last_client_ping_send_ts_secs: Option<f64>`, and
+      `client_pong_recv_count: u32` to **every channel
+      snapshot** in
+      `shakenfist-spice-renderer/src/snapshots.rs`
+      (MainSnapshot, DisplaySnapshot, InputsSnapshot,
+      CursorSnapshot, PlaybackSnapshot, UsbredirSnapshot,
+      WebdavSnapshot).
+- [ ] Maintain the new counters: bump send-side in the new
+      select branch; bump recv-side in the existing PONG
+      handler (which today only counts server-PING / our-PONG —
+      add the symmetric path for our-PING / server-PONG).
+- [ ] Extend `PerChannelDiagnostics` and `DisconnectCause` in
+      `ryll/src/bugreport.rs` to surface the three new fields,
+      so a session-002b disconnect-cause.json shows whether
+      proactive PING was firing on the channel that died.
+- [ ] Cancel-safety: ensure the new select branch interacts
+      cleanly with `Disconnected` — don't write to a closed
+      socket. The existing send-error paths already handle
+      this for user-driven traffic; the same shape applies
+      to the proactive PING path.
+- [ ] Unit tests:
+  - The new select branch fires after 15 s of channel silence
+    in either direction and updates the timestamp.
+  - The branch does not fire when bytes are flowing (active
+    receive resets the timer; active send resets the timer).
+  - Round-trip: incoming server PONG bumps
+    `client_pong_recv_count`.
 
-#### Block C.2 — Disable App Nap on macOS
+#### Block C.2 — Disable App Nap on macOS (opportunistic only)
 
-- [ ] Add a `ryll/src/macos.rs` module
-      (`#[cfg(target_os = "macos")]`) with
-      `begin_user_activity()` → opaque guard via
-      `NSProcessInfo.beginActivityWithOptions:reason:`
-      (`NSActivityUserInitiated | NSActivityLatencyCritical`).
-- [ ] Add a no-op stub for non-macOS targets so the call site
-      compiles unconditionally.
-- [ ] Hold the guard on `RyllApp` for the lifetime of the
-      session. Drop on session end / app close.
-- [ ] Choose between `objc2` (workspace already pulls a tree
-      of objc bindings via egui's macOS backend — verify and
-      reuse) or a small hand-rolled `extern "C"` against
-      `Foundation`. Pick whichever requires fewer new deps.
-- [ ] Document in README's macOS section: ryll opts out of App
-      Nap to keep the SPICE session responsive when not in
-      foreground.
-- [ ] Manual integration check: with build C.2, leave ryll in
-      background overnight on macOS. Verify no disconnect.
+(Demoted from "selected" per the Diagnosis. Implement only if a
+session-002b reproduction after C.1 + Block A still shows
+disconnects, or as standalone macOS hardening once Phase 02 is
+otherwise complete.)
 
-#### Block C.3 — Server-side close investigation
+- [ ] If implemented: per the design in the Approach section
+      above. Tasks unchanged from earlier draft (objc2-based
+      `begin_user_activity()` guard module under
+      `#[cfg(target_os = "macos")]`, README macOS section,
+      manual overnight integration check).
 
-- [ ] Stop. Reopen master plan triage; the K1 hypothesis is
-      wrong. Capture findings in NOTES.md for the triage
-      session.
+#### Block C.3 — Server-side close investigation (not selected)
+
+The session-001b data fits the K1 hypothesis. C.3 would only
+be invoked if a future reproduction *invalidates* the
+hypothesis. No tasks here.
 
 ### Block D (independent, lands with C-block)
 
