@@ -460,9 +460,9 @@ impl PlaybackChannel {
     /// Public entry point. Wraps `run_loop` so errors
     /// propagating out of the inner select! arms are logged
     /// before the task ends — see `MainChannel::run` for the
-    /// rationale.
+    /// rationale (including the `Box::pin` reason).
     pub async fn run(&mut self) -> Result<()> {
-        let result = self.run_loop().await;
+        let result = Box::pin(self.run_loop()).await;
         match &result {
             Ok(()) => info!("playback: run loop exited cleanly"),
             Err(e) => error!("playback: run loop exited with error: {:#}", e),

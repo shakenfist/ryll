@@ -242,8 +242,16 @@ impl MainChannel {
     /// (`client_keepalive_send_count` plateaued at 31 well
     /// before the session disconnect, with no log line
     /// explaining why).
+    ///
+    /// `Box::pin` heap-allocates the inner state machine so
+    /// the wrapper does not inline `run_loop`'s entire async
+    /// state into its own frame. Without this, debug builds
+    /// overflowed the tokio worker stack at channel startup
+    /// (verified on macOS with session-001e: stack overflow
+    /// in `tokio-rt-worker` before the first PING was even
+    /// processed).
     pub async fn run(&mut self) -> Result<()> {
-        let result = self.run_loop().await;
+        let result = Box::pin(self.run_loop()).await;
         match &result {
             Ok(()) => info!("main: run loop exited cleanly"),
             Err(e) => error!("main: run loop exited with error: {:#}", e),
