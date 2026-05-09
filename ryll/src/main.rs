@@ -122,6 +122,17 @@ fn main() -> Result<()> {
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
 
+    // Log build identity early — answers "am I running the build
+    // I just made?" without needing to inspect the binary or
+    // open a bug-report zip. RYLL_GIT_SHA is populated by
+    // ryll/build.rs (preferred: Makefile-passed env var; fallback:
+    // `git rev-parse` at compile time; last resort: "unknown").
+    info!(
+        "ryll v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("RYLL_GIT_SHA"),
+    );
+
     // Load configuration. Phase 5 step 5a removed the
     // `--web` stub: every mode now requires a real `.vv` /
     // `--url` / `--direct` because `run_web` now spawns

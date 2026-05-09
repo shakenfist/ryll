@@ -509,6 +509,7 @@ impl CaptureSession {
         let mut f = File::create(&path)?;
 
         let version = env!("CARGO_PKG_VERSION");
+        let git_sha = env!("RYLL_GIT_SHA");
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
         let tls_str = match tls_port {
@@ -521,6 +522,7 @@ impl CaptureSession {
             f,
             "{{\n\
              \x20 \"ryll_version\": \"{}\",\n\
+             \x20 \"ryll_git_sha\": \"{}\",\n\
              \x20 \"platform_os\": \"{}\",\n\
              \x20 \"platform_arch\": \"{}\",\n\
              \x20 \"target_host\": \"{}\",\n\
@@ -529,6 +531,7 @@ impl CaptureSession {
              \x20 \"capture_started\": \"{}\"\n\
              }}\n",
             version,
+            git_sha,
             os,
             arch,
             host.replace('\\', "\\\\").replace('"', "\\\""),

@@ -882,6 +882,13 @@ pub struct TriggerTimestamps {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportMetadata {
     pub ryll_version: String,
+    /// Short git SHA of the build (with `-dirty` suffix when the
+    /// working tree had uncommitted changes at build time).
+    /// Populated from `env!("RYLL_GIT_SHA")` at compile time;
+    /// falls back to "unknown" when the build environment can't
+    /// reach git. Lets a maintainer reading a bug-report zip
+    /// confirm exactly which commit produced the binary.
+    pub ryll_git_sha: String,
     pub platform_os: String,
     pub platform_arch: String,
     pub report_type: BugReportType,
@@ -1124,6 +1131,7 @@ impl BugReport {
         };
         let metadata = ReportMetadata {
             ryll_version: env!("CARGO_PKG_VERSION").to_string(),
+            ryll_git_sha: env!("RYLL_GIT_SHA").to_string(),
             platform_os: std::env::consts::OS.to_string(),
             platform_arch: std::env::consts::ARCH.to_string(),
             channel: channel_name.to_string(),
@@ -1695,6 +1703,7 @@ mod tests {
     fn test_report_metadata_serialises() {
         let meta = ReportMetadata {
             ryll_version: "0.1.0".to_string(),
+            ryll_git_sha: "deadbeef".to_string(),
             platform_os: "linux".to_string(),
             platform_arch: "x86_64".to_string(),
             report_type: BugReportType::Display,

@@ -18,6 +18,16 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
+# Embed the current git SHA into the binary so a running ryll can
+# identify which build it is. Computed once on the host (the
+# devcontainer can't see the worktree's gitdir) and passed as an
+# env var to ryll/build.rs. Falls back to "unknown" if git is
+# unavailable. "-dirty" is appended when the working tree has
+# uncommitted changes, so dogfooding a quick edit doesn't quietly
+# masquerade as the last committed SHA.
+RYLL_GIT_SHA := $(shell git rev-parse --short=8 HEAD 2>/dev/null)$(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
+RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
+
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
 	test-qemu test-qemu-usb test-qemu-stop \
@@ -74,6 +84,7 @@ build: ensure-cache
 		-w /workspace \
 		-u $(UID):$(GID) \
 		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build -p ryll
 
@@ -86,6 +97,7 @@ release: ensure-cache
 		-w /workspace \
 		-u $(UID):$(GID) \
 		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
 
