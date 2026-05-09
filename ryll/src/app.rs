@@ -417,6 +417,14 @@ pub struct RyllApp {
     /// returns. Mirrors the cooperative-cancel shape of the global
     /// `SHUTDOWN_REQUESTED` flag, scoped per attempt.
     connection_cancel: Option<Arc<AtomicBool>>,
+
+    /// True while ryll's window is focused. Updated on every
+    /// `update()` call from `ctx.input(|i| i.focused)`. Read by
+    /// the `FocusGatedClipboard` decorator so the host
+    /// pasteboard is only polled while the user is looking at
+    /// ryll — a Phase 02 K1 follow-up to the spawn_blocking
+    /// fix in commit 54155e99.
+    app_focused: Arc<AtomicBool>,
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -554,6 +562,12 @@ impl RyllApp {
         let sd_clone = share_dir.clone();
         let connection_cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_conn = connection_cancel.clone();
+        // Initialise to true so a session connecting at startup
+        // (before egui has fired its first focus event) polls the
+        // clipboard normally. RyllApp::update overwrites this on
+        // every frame.
+        let app_focused = Arc::new(AtomicBool::new(true));
+        let focused_for_conn = app_focused.clone();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             runtime.block_on(async {
@@ -566,8 +580,12 @@ impl RyllApp {
                     }
                 });
 
-                let clipboard: Option<Arc<dyn ClipboardBackend>> =
-                    Some(Arc::new(ArboardClipboard::new()));
+                let clipboard: Option<Arc<dyn ClipboardBackend>> = Some(Arc::new(
+                    crate::clipboard_arboard::FocusGatedClipboard::new(
+                        Arc::new(ArboardClipboard::new()),
+                        focused_for_conn,
+                    ),
+                ));
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
@@ -695,6 +713,7 @@ impl RyllApp {
             reconnect_share_dir: share_dir,
             egui_ctx: cc.egui_ctx.clone(),
             connection_cancel: Some(connection_cancel),
+            app_focused,
         }
     }
 
@@ -787,6 +806,7 @@ impl RyllApp {
         let connection_cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_conn = connection_cancel.clone();
         self.connection_cancel = Some(connection_cancel);
+        let focused_for_conn = self.app_focused.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -800,8 +820,12 @@ impl RyllApp {
                     }
                 });
 
-                let clipboard: Option<Arc<dyn ClipboardBackend>> =
-                    Some(Arc::new(ArboardClipboard::new()));
+                let clipboard: Option<Arc<dyn ClipboardBackend>> = Some(Arc::new(
+                    crate::clipboard_arboard::FocusGatedClipboard::new(
+                        Arc::new(ArboardClipboard::new()),
+                        focused_for_conn,
+                    ),
+                ));
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
@@ -1848,6 +1872,16 @@ impl RyllApp {
 
 impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Mirror egui's per-frame focus state into the shared
+        // AtomicBool that the FocusGatedClipboard reads. The
+        // value flips on the same frame egui sees the
+        // platform-level focus event, so the next 500 ms
+        // clipboard tick on the renderer side will see the
+        // updated state.
+        let focused = ctx.input(|i| i.focused);
+        self.app_focused
+            .store(focused, std::sync::atomic::Ordering::Relaxed);
+
         // Graceful shutdown on Ctrl+C: close capture session (flushes
         // the MP4 moov atom) then ask eframe to exit. Also flip the
         // per-connection cancel flag so the renderer's session
