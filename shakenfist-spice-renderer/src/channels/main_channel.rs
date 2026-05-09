@@ -1004,7 +1004,35 @@ impl MainChannel {
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        let text = self.clipboard.as_ref().and_then(|cb| cb.get_text());
+                        // Same spawn_blocking + timeout shape as
+                        // poll_host_clipboard: cb.get_text() can
+                        // hang macOS NSPasteboard when ryll is
+                        // backgrounded.
+                        let text = match self.clipboard.as_ref() {
+                            Some(c) => {
+                                let cb = c.clone();
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(1),
+                                    tokio::task::spawn_blocking(move || cb.get_text()),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(opt)) => opt,
+                                    Ok(Err(e)) => {
+                                        warn!("main: clipboard request task panicked: {}", e);
+                                        None
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "main: clipboard request timed out (1 s), \
+                                             ignoring guest request"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
                         if let Some(text) = text {
                             // Log byte count only — clipboard content may contain
                             // passwords or sensitive data.
@@ -1037,9 +1065,47 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match self.clipboard.as_ref().and_then(|cb| cb.get_text()) {
-            Some(t) => t,
+        // arboard::Clipboard::get_text() is synchronous and on
+        // macOS reaches into NSPasteboard. When the ryll process
+        // is backgrounded / on a different virtual desktop /
+        // App Nap'd, that call has been observed to block the
+        // calling thread for many seconds at a time. Until
+        // session-001f, this lived directly on main's tokio
+        // worker — a single hung clipboard poll would wedge
+        // main's `select!` loop, which on backgrounded macOS
+        // sessions reproducibly silenced main at the same
+        // ~7-minute mark across every K1 reproduction. Other
+        // channels (on different workers) kept running, so the
+        // server eventually tore the session down for client
+        // unresponsiveness.
+        //
+        // Push the call to `spawn_blocking` so it runs on
+        // tokio's blocking thread pool, then wrap in a
+        // `tokio::time::timeout` so a genuinely-stuck
+        // pasteboard query gives up rather than starving the
+        // pool indefinitely. A timed-out poll is logged at
+        // warn level and treated like an empty clipboard;
+        // the next 500 ms tick retries.
+        let cb = match self.clipboard.as_ref() {
+            Some(c) => c.clone(),
             None => return Ok(()),
+        };
+        let text = match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || cb.get_text()),
+        )
+        .await
+        {
+            Ok(Ok(Some(t))) => t,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(e)) => {
+                warn!("main: clipboard poll task panicked: {}", e);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("main: clipboard poll timed out (1 s), skipping");
+                return Ok(());
+            }
         };
 
         if text.is_empty() {
