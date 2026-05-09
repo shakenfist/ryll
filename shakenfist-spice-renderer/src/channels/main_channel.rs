@@ -259,12 +259,37 @@ impl MainChannel {
         result
     }
 
+    // `last_arm` is observable only when the heartbeat arm fires
+    // before the next iteration overwrites it; all other reads of
+    // it look "dead" to clippy. The lint is correct in the strict
+    // sense but uninformative for diagnostic state, so suppress
+    // it for this function only. Will go away when the heartbeat
+    // is removed.
+    #[allow(unused_assignments)]
     async fn run_loop(&mut self) -> Result<()> {
         info!("main: channel started");
 
         let mut resize_debounce: Option<tokio::time::Instant> = None;
         let mut clipboard_interval = tokio::time::interval(std::time::Duration::from_millis(500));
         clipboard_interval.tick().await;
+        // Diagnostic heartbeat for the K1 hang investigation
+        // (sessions 001b/c/d/f/g). main's task has been observed
+        // to silently stop polling some time after T+465 across
+        // every K1 reproduction — neither the read branch nor the
+        // keepalive branch fires after that, but the task also
+        // doesn't exit. The wrapper-level "exited cleanly" /
+        // "exited with error" log lines never appear for main,
+        // confirming run_loop doesn't return — it's blocked on
+        // an `.await` somewhere we can't see from snapshots.
+        //
+        // This heartbeat fires every 1 s. Each tick logs which
+        // select arm fired most recently, so when main goes
+        // dark we can read backwards to "the last arm that
+        // ran was X" and narrow the hang to a specific code
+        // path. Removing this when K1 is closed.
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+        heartbeat.tick().await;
+        let mut last_arm: &'static str = "startup";
         let mut last_data_received = tokio::time::Instant::now();
         // Backstop for an unreachable / dead server, not a primary
         // mechanism. The SPICE server's own connectivity check is at
@@ -301,6 +326,7 @@ impl MainChannel {
                         }
                     }
                 } => {
+                    last_arm = "read";
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
@@ -322,9 +348,12 @@ impl MainChannel {
                     self.bytes_in += n as u64;
                     self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
+                    last_arm = "read+process_messages";
                     self.process_messages().await?;
+                    last_arm = "read+process_messages_done";
                 }
                 resize = monitors_config_rx.recv() => {
+                    last_arm = "monitors_config_rx";
                     let Some((width, height)) = resize else {
                         continue;
                     };
@@ -337,6 +366,7 @@ impl MainChannel {
                     resize_debounce = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
                 }
                 _ = debounce_sleep => {
+                    last_arm = "debounce_sleep";
                     resize_debounce = None;
                     if let Some((width, height)) = self.pending_monitors_config {
                         info!("main: resize debounced: {}x{}", width, height);
@@ -349,11 +379,15 @@ impl MainChannel {
                     }
                 }
                 _ = clipboard_interval.tick() => {
+                    last_arm = "clipboard_interval";
                     if self.agent_connected && self.agent_caps_announced {
+                        last_arm = "clipboard_interval+poll";
                         self.poll_host_clipboard().await?;
+                        last_arm = "clipboard_interval+poll_done";
                     }
                 }
                 _ = tokio::time::sleep_until(last_data_received + keepalive_timeout) => {
+                    last_arm = "keepalive_timeout";
                     info!("main: no data received for {}s, assuming disconnected", keepalive_timeout.as_secs());
                     // Mark the snapshot before emitting Disconnected so
                     // the disconnect-cause record can distinguish "we
@@ -376,7 +410,21 @@ impl MainChannel {
                 // because main itself goes silent at T+465 in every
                 // reproduction; this branch closes that gap.
                 _ = tokio::time::sleep_until(self.last_activity + KEEPALIVE_IDLE) => {
+                    last_arm = "keepalive_idle";
                     self.send_idle_keepalive().await?;
+                    last_arm = "keepalive_idle_done";
+                }
+                _ = heartbeat.tick() => {
+                    info!(
+                        "main: heartbeat T+{:.1}s last_arm={} last_recv={:?} \
+                         last_send={:?} keepalives={} pongs={}",
+                        self.traffic.elapsed().as_secs_f64(),
+                        last_arm,
+                        self.last_recv_ts_secs,
+                        self.last_send_ts_secs,
+                        self.client_keepalive_send_count,
+                        self.pong_send_count,
+                    );
                 }
             }
         }
