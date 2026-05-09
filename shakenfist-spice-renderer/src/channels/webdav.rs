@@ -140,8 +140,20 @@ impl WebdavChannel {
         }
     }
 
-    /// Run the WebDAV channel event loop
+    /// Run the WebDAV channel event loop. Wraps `run_loop`
+    /// so errors propagating out of the inner select! arms
+    /// are logged before the task ends — see `MainChannel::run`
+    /// for the rationale.
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("webdav: run loop exited cleanly"),
+            Err(e) => error!("webdav: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("webdav: channel started");
         self.event_tx
             .send(ChannelEvent::WebdavChannelReady)

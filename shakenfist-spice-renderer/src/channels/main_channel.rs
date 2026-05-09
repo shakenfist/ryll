@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::snapshots::MainSnapshot;
 use crate::{
@@ -234,7 +234,24 @@ impl MainChannel {
         self.session_id
     }
 
+    /// Public entry point. Wraps `run_loop` so any error
+    /// propagating out of the inner select! arms is logged
+    /// before the task ends. Without this, `?` propagations
+    /// inside the loop end the task silently, which in
+    /// session-001d hid the cause of main going dark mid-run
+    /// (`client_keepalive_send_count` plateaued at 31 well
+    /// before the session disconnect, with no log line
+    /// explaining why).
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("main: run loop exited cleanly"),
+            Err(e) => error!("main: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("main: channel started");
 
         let mut resize_debounce: Option<tokio::time::Instant> = None;

@@ -10,7 +10,7 @@ use anyhow::Result;
 #[cfg(target_os = "linux")]
 use nusb::MaybeFuture;
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
@@ -130,8 +130,20 @@ impl UsbredirChannel {
         }
     }
 
-    /// Run the usbredir channel event loop
+    /// Run the usbredir channel event loop. Wraps `run_loop`
+    /// so errors propagating out of the inner select! arms
+    /// are logged before the task ends — see `MainChannel::run`
+    /// for the rationale.
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("usbredir: run loop exited cleanly"),
+            Err(e) => error!("usbredir: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("usbredir: channel started");
         self.event_tx.send(ChannelEvent::UsbChannelReady).await.ok();
         self.repaint_notify.notify_one();

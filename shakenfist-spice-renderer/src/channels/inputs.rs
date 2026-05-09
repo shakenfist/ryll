@@ -157,8 +157,20 @@ impl InputsChannel {
         }
     }
 
-    /// Run the inputs channel event loop
+    /// Run the inputs channel event loop. Wraps `run_loop`
+    /// so any error propagating out of the inner select! arms
+    /// is logged before the task ends — see the rationale on
+    /// `MainChannel::run`.
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("inputs: run loop exited cleanly"),
+            Err(e) => error!("inputs: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("inputs: channel started");
 
         // Send initial key modifiers (NumLock on)

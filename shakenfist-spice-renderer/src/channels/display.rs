@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::snapshots::{DecodeResult, DisplaySnapshot};
 use crate::{
@@ -583,8 +583,20 @@ impl DisplayChannel {
         }
     }
 
-    /// Run the display channel event loop
+    /// Run the display channel event loop. Wraps `run_loop`
+    /// so errors propagating out of the inner select! arms
+    /// are logged before the task ends — see `MainChannel::run`
+    /// for the rationale.
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("display: run loop exited cleanly"),
+            Err(e) => error!("display: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("display: channel started");
 
         // Send display init message

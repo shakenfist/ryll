@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ByteCounter, LogConfig, NotificationEntry, NotificationSource, OpusPacketSink, TrafficSink,
@@ -457,7 +457,20 @@ impl PlaybackChannel {
         }
     }
 
+    /// Public entry point. Wraps `run_loop` so errors
+    /// propagating out of the inner select! arms are logged
+    /// before the task ends — see `MainChannel::run` for the
+    /// rationale.
     pub async fn run(&mut self) -> Result<()> {
+        let result = self.run_loop().await;
+        match &result {
+            Ok(()) => info!("playback: run loop exited cleanly"),
+            Err(e) => error!("playback: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("playback: channel started");
         loop {
             let mut chunk = [0u8; 65536];
