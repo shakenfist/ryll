@@ -145,14 +145,49 @@ after T+465–466 specifically for this task.** This is either
 a bug in tokio's runtime bookkeeping or an extremely subtle
 interaction in our code that triggers exactly that condition.
 
+## Tests against current dep versions
+
+| Test | Tokio | Rustls | Tokio-rustls | Mio | Result |
+|---|---|---|---|---|---|
+| Original (session-001b–001s) | 1.51.1 | 0.23.37 | 0.26.4 | 1.x | K1 reproduces |
+| Test #11 (001t) | **1.52.3** | 0.23.37 | 0.26.4 | 1.x | K1 reproduces |
+| Test #12 (001u) | 1.52.3 | **0.23.40** | 0.26.4 | **1.2.0** | K1 reproduces |
+
+All semver-compatible bumps to the relevant async-IO crates
+(via `cargo update`) leave the K1 signature identical:
+`pong_send_count: 66`, `client_keepalive_send_count: 31`,
+`last_send_ts: 465.x`, main hangs.
+
+Searched upstream tokio issues and discussions for matching
+symptoms (waker registered but never fires, task suspended
+indefinitely with select!, similar). Closest hits — #4730
+(one task halts executor — *ruled out*, our other tasks run),
+#7632 (wake_by_ref weak-memory bug — *ruled out*, x86 Linux
+reproduces and is sequentially consistent), #2565 (interval
+inside select — *ruled out*, user error in that case) — none
+match our specific signature. No open issue currently
+documents "select! arm with sleep_until + interval +
+tokio-rustls TcpStream loses both registered wakers after
+specific server-driven event".
+
 ## Next steps (in order of cheapness)
 
-1. **Bump tokio to the latest 1.x release.** We are on
-   1.51.1. There may be a fix in a newer point release. Same
-   goes for `tokio-rustls` (0.26.4 → latest), `mio`, `rustls`.
-2. **Test against `uefi-latency-guest`** via `make test-qemu`
+1. **Bisect ryll's history** via `make build` checkout-by-
+   checkout to find when K1 was first introduced. The pattern
+   (always at T+510 disconnect) suggests it's been latent for
+   a while and only became visible once the user's dogfooding
+   hit the trigger window.
+2. **Try replacing `tokio::select!` with `tokio_util::time::FuturesUnordered`
+   or hand-rolled future polling** in main_channel — different
+   waker subscription shape, might dodge the trigger even if
+   it doesn't fix the underlying tokio bug.
+3. **Test against `uefi-latency-guest`** via `make test-qemu`
    to rule in or out GNOME-display-traffic shape.
-3. **Construct a minimal reproducer** suitable for filing a
+4. **Try major bumps**: tokio-rustls 0.26 → 0.27 (may need
+   rustls 0.24), eframe 0.29 → 0.34 (significant API churn).
+   Bigger code change, but exhaustively rules out
+   dep-version dependence.
+5. **Construct a minimal reproducer** suitable for filing a
    tokio issue. The shape is: a single channel reading a
    tokio-rustls TcpStream inside a `tokio::select!` with
    several `sleep_until` and `interval.tick()` arms; under
@@ -160,15 +195,11 @@ interaction in our code that triggers exactly that condition.
    firing reliably; after some specific server-driven event
    the task suspends with non-zero registered Wakers that
    never fire.
-4. **Bisect ryll's history** via `make build` checkout-by-
-   checkout to find when K1 was first introduced. The pattern
-   (always at T+510 disconnect) suggests it's been latent for
-   a while and only became visible once the user's dogfooding
-   hit the trigger window.
-5. **Try replacing `tokio::select!` with `tokio_util::time::FuturesUnordered`
-   or hand-rolled future polling** in main_channel — different
-   waker subscription shape, might dodge the trigger even if
-   it doesn't fix the underlying tokio bug.
+6. **Pivot to Phase 02 Block A** (auto-reconnect with backoff)
+   so the user-visible failure mode improves regardless of K1's
+   root cause. K1 becomes a survivable "session blip" rather
+   than a hard hang. ~several hours of solid implementation
+   work; valuable on its own merits.
 
 ## Open questions
 

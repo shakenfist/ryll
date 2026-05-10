@@ -95,6 +95,17 @@ pub struct Args {
     #[arg(long)]
     pub bug_report_dir: Option<std::path::PathBuf>,
 
+    /// Diagnostic flag for the K1 hang investigation
+    /// (PLAN-session-001-feedback Phase 02). When set, ryll's
+    /// per-connection tokio runtime is built with
+    /// `Builder::new_current_thread()` instead of the default
+    /// multi-threaded `Runtime::new()`. Disambiguates a real
+    /// blocking call (would still hang) from a multi-threaded
+    /// scheduler / Waker registration bug (would not hang).
+    /// Will be removed after K1 is closed.
+    #[arg(long)]
+    pub debug_single_thread_runtime: bool,
+
     /// Enable paste-as-keystrokes fallback for guests without vdagent
     #[arg(long)]
     pub enable_paste_as_keystrokes: bool,

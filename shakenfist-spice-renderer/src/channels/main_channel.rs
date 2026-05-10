@@ -270,8 +270,134 @@ impl MainChannel {
         info!("main: channel started");
 
         let mut resize_debounce: Option<tokio::time::Instant> = None;
-        let mut clipboard_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        clipboard_interval.tick().await;
+        // Diagnostic env var for the K1 hang investigation. When
+        // RYLL_DISABLE_CLIPBOARD_POLL=1 is set in the environment,
+        // the clipboard_interval is replaced by `None` and the
+        // corresponding select! arm becomes a never-resolving
+        // future (`std::future::pending`), effectively removing
+        // it from main's loop. If K1 stops reproducing under this
+        // flag, the clipboard arm is the trigger; if it still
+        // reproduces, the bug is elsewhere. Will be removed when
+        // K1 is closed.
+        let disable_clipboard_poll = std::env::var("RYLL_DISABLE_CLIPBOARD_POLL")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if disable_clipboard_poll {
+            info!("main: clipboard polling disabled via RYLL_DISABLE_CLIPBOARD_POLL");
+        }
+        let mut clipboard_interval = if disable_clipboard_poll {
+            None
+        } else {
+            let mut i = tokio::time::interval(std::time::Duration::from_millis(500));
+            i.tick().await;
+            Some(i)
+        };
+
+        // K1 watchdog. Spawns a plain std::thread (NOT a tokio
+        // task — by design: if tokio's runtime is somehow
+        // wedged, this thread is unaffected) that monitors the
+        // heartbeat timestamp. If main's heartbeat goes silent
+        // for >5 s, the watchdog shells out to `gdb --batch -p
+        // $$ -ex 'thread apply all bt'` to capture all-thread
+        // backtraces at the moment of the freeze, *before* the
+        // server-side rcc disconnect tears everything down.
+        // Output lands in /tmp with a timestamped filename. The
+        // watchdog fires once per silence period to avoid
+        // multiple dumps for the same hang.
+        //
+        // Opt-in via RYLL_WATCHDOG_GDB=1. Requires `gdb` on
+        // PATH and either a permissive `kernel.yama.ptrace_scope`
+        // (=0) or `cap_sys_ptrace`.
+        let last_heartbeat_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        if std::env::var("RYLL_WATCHDOG_GDB")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let hb = last_heartbeat_ms.clone();
+            let pid = std::process::id();
+            info!(
+                "main: K1 watchdog enabled (pid {}); will dump backtraces if heartbeat silent >5 s",
+                pid
+            );
+            std::thread::Builder::new()
+                .name("ryll-watchdog".into())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let mut fired = false;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        let last = hb.load(Ordering::Relaxed);
+                        if last == 0 {
+                            continue;
+                        }
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let gap_ms = now.saturating_sub(last);
+                        if gap_ms > 5_000 {
+                            if !fired {
+                                fired = true;
+                                let bt_path = format!("/tmp/ryll-watchdog-bt-{}-{}.txt", pid, now);
+                                eprintln!(
+                                    "ryll-watchdog: main heartbeat silent for {} ms, \
+                                     capturing all-thread backtrace via gdb -> {}",
+                                    gap_ms, bt_path
+                                );
+                                let bt_file = match std::fs::File::create(&bt_path) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "ryll-watchdog: could not create {}: {}",
+                                            bt_path, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let status = std::process::Command::new("gdb")
+                                    .args([
+                                        "--batch",
+                                        "-p",
+                                        &pid.to_string(),
+                                        "-ex",
+                                        "set pagination off",
+                                        "-ex",
+                                        "thread apply all bt",
+                                        "-ex",
+                                        "detach",
+                                        "-ex",
+                                        "quit",
+                                    ])
+                                    .stdout(bt_file)
+                                    .stderr(std::process::Stdio::null())
+                                    .status();
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        eprintln!(
+                                            "ryll-watchdog: backtrace captured to {}",
+                                            bt_path
+                                        );
+                                    }
+                                    Ok(s) => {
+                                        eprintln!(
+                                            "ryll-watchdog: gdb exited with status {:?}; \
+                                             check {} for partial output",
+                                            s.code(),
+                                            bt_path
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("ryll-watchdog: failed to spawn gdb: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            fired = false;
+                        }
+                    }
+                })
+                .expect("failed to spawn ryll-watchdog thread");
+        }
         // Diagnostic heartbeat for the K1 hang investigation
         // (sessions 001b/c/d/f/g). main's task has been observed
         // to silently stop polling some time after T+465 across
@@ -290,6 +416,14 @@ impl MainChannel {
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
         heartbeat.tick().await;
         let mut last_arm: &'static str = "startup";
+        // Iteration counter for K1 hang investigation. Incremented at
+        // the top of every loop body. Logged from the heartbeat arm
+        // alongside last_arm. If iter_count keeps climbing while
+        // last_arm stays the same, the loop is iterating but no
+        // non-heartbeat arm is firing (timer wakers/IO wakers are
+        // silent). If iter_count stops climbing entirely, the loop
+        // body itself is stuck somewhere.
+        let mut iter_count: u64 = 0;
         let mut last_data_received = tokio::time::Instant::now();
         // Backstop for an unreachable / dead server, not a primary
         // mechanism. The SPICE server's own connectivity check is at
@@ -302,6 +436,7 @@ impl MainChannel {
         let keepalive_timeout = std::time::Duration::from_secs(90);
 
         loop {
+            iter_count = iter_count.wrapping_add(1);
             let mut chunk = [0u8; 65536];
             let stream = &mut self.stream;
             let monitors_config_rx = &mut self.monitors_config_rx;
@@ -378,7 +513,12 @@ impl MainChannel {
                         self.maybe_send_agent_monitors_config().await?;
                     }
                 }
-                _ = clipboard_interval.tick() => {
+                _ = async {
+                    match &mut clipboard_interval {
+                        Some(i) => { i.tick().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
                     last_arm = "clipboard_interval";
                     if self.agent_connected && self.agent_caps_announced {
                         last_arm = "clipboard_interval+poll";
@@ -415,10 +555,16 @@ impl MainChannel {
                     last_arm = "keepalive_idle_done";
                 }
                 _ = heartbeat.tick() => {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    last_heartbeat_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                     info!(
-                        "main: heartbeat T+{:.1}s last_arm={} last_recv={:?} \
+                        "main: heartbeat T+{:.1}s iter={} last_arm={} last_recv={:?} \
                          last_send={:?} keepalives={} pongs={}",
                         self.traffic.elapsed().as_secs_f64(),
+                        iter_count,
                         last_arm,
                         self.last_recv_ts_secs,
                         self.last_send_ts_secs,

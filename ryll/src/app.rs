@@ -425,6 +425,31 @@ pub struct RyllApp {
     /// ryll — a Phase 02 K1 follow-up to the spawn_blocking
     /// fix in commit 54155e99.
     app_focused: Arc<AtomicBool>,
+
+    /// Persisted copy of the `--debug-single-thread-runtime`
+    /// flag so reconnect can build a runtime of the same
+    /// shape as the initial connect. Diagnostic-only.
+    debug_single_thread_runtime: bool,
+}
+
+/// Build the per-connection tokio runtime, honouring the
+/// `--debug-single-thread-runtime` flag. The current_thread
+/// flavour runs every spawned task on the calling thread,
+/// which lets us tell a real blocking call (still hangs
+/// because there's nowhere else to make progress) from a
+/// multi-threaded scheduler / Waker-registration anomaly
+/// (does not hang). Used by both the initial-connect and
+/// reconnect spawn sites.
+fn build_connection_runtime(single_thread: bool) -> tokio::runtime::Runtime {
+    if single_thread {
+        info!("app: building current_thread tokio runtime (debug single-thread mode)");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build current_thread tokio runtime")
+    } else {
+        tokio::runtime::Runtime::new().expect("failed to build multi-threaded tokio runtime")
+    }
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -488,6 +513,7 @@ impl RyllApp {
         pedantic_config: Option<PedanticConfig>,
         bug_report_dir: Option<PathBuf>,
         obey_guest_size: bool,
+        debug_single_thread_runtime: bool,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -568,8 +594,9 @@ impl RyllApp {
         // every frame.
         let app_focused = Arc::new(AtomicBool::new(true));
         let focused_for_conn = app_focused.clone();
+        let single_thread_for_conn = debug_single_thread_runtime;
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let runtime = build_connection_runtime(single_thread_for_conn);
             runtime.block_on(async {
                 // Repaint bridge: wake egui whenever a channel handler
                 // signals notify_one() after pushing a ChannelEvent.
@@ -714,6 +741,7 @@ impl RyllApp {
             egui_ctx: cc.egui_ctx.clone(),
             connection_cancel: Some(connection_cancel),
             app_focused,
+            debug_single_thread_runtime,
         }
     }
 
@@ -807,9 +835,10 @@ impl RyllApp {
         let cancel_for_conn = connection_cancel.clone();
         self.connection_cancel = Some(connection_cancel);
         let focused_for_conn = self.app_focused.clone();
+        let single_thread_for_conn = self.debug_single_thread_runtime;
 
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let runtime = build_connection_runtime(single_thread_for_conn);
             runtime.block_on(async {
                 // Repaint bridge: wake egui whenever a channel handler
                 // signals notify_one() after pushing a ChannelEvent.

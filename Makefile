@@ -31,7 +31,8 @@ RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
 	test-qemu test-qemu-usb test-qemu-stop \
-	macos-prereqs macos-build macos-release
+	macos-prereqs macos-build macos-release \
+	build-tokio-console
 
 all: build
 
@@ -87,6 +88,26 @@ build: ensure-cache
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build -p ryll
+
+# Diagnostic-only build: compile ryll with the tokio-console
+# feature on, plus RUSTFLAGS=--cfg tokio_unstable so tokio's
+# instrumentation hooks are active. The resulting binary, when
+# run with RYLL_TOKIO_CONSOLE=1, exposes a unix socket on
+# 127.0.0.1:6669 that the `tokio-console` TUI viewer connects
+# to. Used during the K1 hang investigation; will go away when
+# the feature is removed.
+build-tokio-console: ensure-cache
+	docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
+		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
+		-w /workspace \
+		-u $(UID):$(GID) \
+		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
+		-e RUSTFLAGS="--cfg tokio_unstable" \
+		$(RYLL_IMAGE) \
+		cargo build -p ryll --features tokio-console
 
 # Build release version
 release: ensure-cache

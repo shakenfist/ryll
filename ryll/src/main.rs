@@ -82,6 +82,32 @@ fn main() -> Result<()> {
     // covers every entry path (--web already did this internally).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Optional tokio-console initialisation for the K1 hang
+    // investigation. Requires `--features tokio-console` AND
+    // `RUSTFLAGS=--cfg tokio_unstable` at compile time, plus
+    // `RYLL_TOKIO_CONSOLE=1` at runtime. Console-subscriber
+    // installs itself as the global tracing subscriber, so we
+    // skip the regular tracing_subscriber init below when it
+    // is active. tokio-console viewers connect over a unix
+    // socket (default 127.0.0.1:6669) and show every running
+    // task's state, registered Wakers, last poll time, etc.
+    #[cfg(feature = "tokio-console")]
+    let console_subscriber_active = std::env::var("RYLL_TOKIO_CONSOLE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    #[cfg(not(feature = "tokio-console"))]
+    let console_subscriber_active = false;
+    #[cfg(feature = "tokio-console")]
+    {
+        if console_subscriber_active {
+            console_subscriber::init();
+            eprintln!(
+                "ryll: tokio-console subscriber active. Connect with `tokio-console` \
+                 from another terminal. The default endpoint is 127.0.0.1:6669."
+            );
+        }
+    }
+
     // Parse command line arguments
     let args = Args::parse();
 
@@ -98,7 +124,15 @@ fn main() -> Result<()> {
 
     // When verbose, also log to /tmp/ryll.log
     let _file_guard;
-    if args.verbose {
+    if console_subscriber_active {
+        // console-subscriber installed itself globally; don't
+        // try to install another subscriber here. ryll's normal
+        // logs go nowhere in this mode — the operator should
+        // run with `RUST_LOG=info` and the console-subscriber's
+        // own output, or accept the trade-off for the duration
+        // of the K1 investigation.
+        _file_guard = None;
+    } else if args.verbose {
         let file_appender = tracing_appender::rolling::never("/tmp", "ryll.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         _file_guard = Some(guard);
@@ -712,6 +746,7 @@ fn run_gui(
     let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let bug_report_dir = args.bug_report_dir.clone();
+    let debug_single_thread_runtime = args.debug_single_thread_runtime;
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -729,6 +764,7 @@ fn run_gui(
                 pedantic_config,
                 bug_report_dir,
                 obey_guest_size,
+                debug_single_thread_runtime,
             )))
         }),
     )

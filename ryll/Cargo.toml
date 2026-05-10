@@ -10,6 +10,13 @@ description = "A Rust SPICE VDI test client"
 [features]
 default = ["capture"]
 capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
+# Diagnostic-only feature for the K1 hang investigation. Adds
+# `console-subscriber` and a startup hook that exposes ryll's
+# tokio runtime to a `tokio-console` TUI viewer over a unix
+# socket. Build with `make build-tokio-console`, then run ryll
+# with `RYLL_TOKIO_CONSOLE=1` set. Connect from another terminal
+# with `tokio-console`. Will be removed when K1 is closed.
+tokio-console = ["dep:console-subscriber"]
 
 [dependencies]
 # GUI framework
@@ -44,6 +51,12 @@ rtrb = "0.3"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Optional tokio-console diagnostic subscriber. Pulled in only by
+# the `tokio-console` feature. Requires the rest of the build to
+# be compiled with `RUSTFLAGS=--cfg tokio_unstable` so that
+# tokio's instrumentation hooks are enabled.
+console-subscriber = { version = "0.5", optional = true }
 
 # Config file parsing
 configparser = "3"
