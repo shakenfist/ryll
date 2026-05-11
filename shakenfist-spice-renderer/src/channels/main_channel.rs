@@ -3,8 +3,8 @@ use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::snapshots::MainSnapshot;
@@ -167,6 +167,15 @@ pub struct MainChannel {
     /// or hostile server from amplifying outbound requests
     /// 1:1 on inbound MOUSE_MODE messages.
     mouse_mode_request_pending: bool,
+    /// Fired once when the INIT message arrives. The session
+    /// orchestrator awaits this to learn the session id before
+    /// connecting secondary channels. Wrapped in Option so the
+    /// signal can be consumed exactly once via `take()`.
+    session_init_signal: Option<oneshot::Sender<u32>>,
+    /// Fired once when CHANNELS_LIST arrives. Carries the list of
+    /// (ChannelType, channel_id) tuples the server advertised,
+    /// which the orchestrator uses to spawn secondary channels.
+    channels_avail_signal: Option<oneshot::Sender<Vec<(ChannelType, u8)>>>,
 }
 
 /// Idle window before the main-channel keepalive fires. The
@@ -191,6 +200,8 @@ impl MainChannel {
         monitors: u8,
         log_config: LogConfig,
         clipboard: Option<Arc<dyn ClipboardBackend>>,
+        session_init_signal: oneshot::Sender<u32>,
+        channels_avail_signal: oneshot::Sender<Vec<(ChannelType, u8)>>,
     ) -> Self {
         MainChannel {
             stream,
@@ -226,6 +237,8 @@ impl MainChannel {
             client_keepalive_send_count: 0,
             last_client_keepalive_send_ts_secs: None,
             mouse_mode_request_pending: false,
+            session_init_signal: Some(session_init_signal),
+            channels_avail_signal: Some(channels_avail_signal),
         }
     }
 
@@ -465,10 +478,8 @@ impl MainChannel {
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.event_tx
-                            .send(ChannelEvent::Disconnected(ChannelType::Main))
-                            .await
-                            .ok();
+                        self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                            .await;
                         self.repaint_notify.notify_one();
                         break;
                     }
@@ -505,10 +516,8 @@ impl MainChannel {
                     resize_debounce = None;
                     if let Some((width, height)) = self.pending_monitors_config {
                         info!("main: resize debounced: {}x{}", width, height);
-                        self.event_tx
-                            .send(ChannelEvent::MonitorsConfig { width, height })
-                            .await
-                            .ok();
+                        self.send_event(ChannelEvent::MonitorsConfig { width, height })
+                            .await;
                         self.repaint_notify.notify_one();
                         self.maybe_send_agent_monitors_config().await?;
                     }
@@ -535,10 +544,8 @@ impl MainChannel {
                     if let Ok(mut snap) = self.snapshot.lock() {
                         snap.keepalive_timeout_fired = true;
                     }
-                    self.event_tx
-                        .send(ChannelEvent::Disconnected(ChannelType::Main))
-                        .await
-                        .ok();
+                    self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                        .await;
                     self.repaint_notify.notify_one();
                     break;
                 }
@@ -648,18 +655,20 @@ impl MainChannel {
                 self.agent_tokens = init.agent_tokens;
                 self.agent_caps_announced = false;
 
+                // Signal the session orchestrator before any awaits so it
+                // can proceed with secondary channel setup immediately.
+                if let Some(sig) = self.session_init_signal.take() {
+                    let _ = sig.send(init.session_id);
+                }
+
                 if self.agent_connected {
                     self.connect_agent().await?;
                 }
 
-                self.event_tx
-                    .send(ChannelEvent::SessionInitialized(init.session_id))
-                    .await
-                    .ok();
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(self.agent_connected))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::SessionInitialized(init.session_id))
+                    .await;
+                self.send_event(ChannelEvent::AgentConnected(self.agent_connected))
+                    .await;
                 self.repaint_notify.notify_one();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
@@ -673,10 +682,8 @@ impl MainChannel {
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
                 );
-                self.event_tx
-                    .send(ChannelEvent::MouseMode(init.current_mouse_mode))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::MouseMode(init.current_mouse_mode))
+                    .await;
                 self.repaint_notify.notify_one();
 
                 // Request client mouse mode (absolute positioning) if
@@ -717,10 +724,8 @@ impl MainChannel {
                     if current as u32 == MOUSE_MODE_CLIENT {
                         self.mouse_mode_request_pending = false;
                     }
-                    self.event_tx
-                        .send(ChannelEvent::MouseMode(current as u32))
-                        .await
-                        .ok();
+                    self.send_event(ChannelEvent::MouseMode(current as u32))
+                        .await;
                     self.repaint_notify.notify_one();
 
                     // The server often reverts to SERVER mode after a
@@ -775,10 +780,14 @@ impl MainChannel {
                     }
                 }
 
-                self.event_tx
-                    .send(ChannelEvent::ChannelsAvailable(channels))
-                    .await
-                    .ok();
+                // Signal the session orchestrator before any awaits so it
+                // can proceed with secondary channel setup immediately.
+                if let Some(sig) = self.channels_avail_signal.take() {
+                    let _ = sig.send(channels.clone());
+                }
+
+                self.send_event(ChannelEvent::ChannelsAvailable(channels))
+                    .await;
                 self.repaint_notify.notify_one();
             }
 
@@ -789,12 +798,10 @@ impl MainChannel {
                     // Vec<f32>; loss of precision is irrelevant for a
                     // sub-millisecond sparkline.
                     let sample_ms = (now - last).as_secs_f64() * 1000.0;
-                    self.event_tx
-                        .send(ChannelEvent::Latency {
-                            sample_ms: sample_ms as f32,
-                        })
-                        .await
-                        .ok();
+                    self.send_event(ChannelEvent::Latency {
+                        sample_ms: sample_ms as f32,
+                    })
+                    .await;
                     self.repaint_notify.notify_one();
                 }
                 self.last_ping_at = Some(now);
@@ -871,39 +878,28 @@ impl MainChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::Notification(entry)).await;
                 self.repaint_notify.notify_one();
             }
 
             main_server::DISCONNECTING => {
                 info!("main: server sent disconnect notification");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Main))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                    .await;
                 self.repaint_notify.notify_one();
             }
 
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(true))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::AgentConnected(true)).await;
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(false))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
             }
@@ -974,6 +970,28 @@ impl MainChannel {
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    /// Send a `ChannelEvent` to the renderer with a 5 s timeout
+    /// and silent-drop on closed-receiver. K1 (session-001) was an
+    /// abandoned-receiver deadlock where main blocked forever on
+    /// `event_tx.send().await`; the root cause was fixed by
+    /// removing the intermediate temp channel, but this helper is
+    /// defense-in-depth so the next time something similar
+    /// regresses we see a `warn!` line within 5 seconds instead of
+    /// a silent multi-minute hang.
+    async fn send_event(&self, ev: ChannelEvent) {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), self.event_tx.send(ev)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_closed)) => {}
+            Err(_elapsed) => {
+                warn!(
+                    "main: event_tx.send() timed out after 5 s; \
+                     renderer event consumer is wedged or starved"
+                );
+            }
+        }
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{error, info};
 
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
@@ -93,16 +93,23 @@ pub async fn run_connection(
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
-    // Wait for session initialization
-
-    // Connect main channel and run until we get session ID and channel list
-    let (event_tx_clone, mut temp_rx) = mpsc::channel(64);
+    // Connect main channel and run it. The main channel sends
+    // ChannelEvents directly into the caller-provided `event_tx`
+    // (no intermediate bounded buffer); session id and channels
+    // list arrive out-of-band via oneshot channels. The earlier
+    // intermediate `mpsc::channel(64)` was the root cause of K1:
+    // it was drained only until session+channels were known, then
+    // abandoned while main kept sending Latency events into it.
+    // After ~65 pings (~7m45s of idle time) the buffer filled and
+    // main blocked forever on send().await.
+    let (session_init_tx, session_init_rx) = oneshot::channel();
+    let (channels_avail_tx, channels_avail_rx) = oneshot::channel();
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
     let mut main_channel = MainChannel::new(
         main_stream,
-        event_tx_clone,
+        event_tx.clone(),
         repaint_notify.clone(),
         capture.clone(),
         byte_counter.clone(),
@@ -112,51 +119,19 @@ pub async fn run_connection(
         monitors,
         log_config,
         clipboard,
+        session_init_tx,
+        channels_avail_tx,
     );
 
     // Spawn main channel task
     let main_handle = tokio::spawn(async move { main_channel.run().await });
 
-    // Wait for session init and channel list
-    let mut got_session = false;
-    let mut got_channels = false;
-    let mut temp_session_id = 0u32;
-    let mut temp_channels = Vec::new();
-
-    loop {
-        match temp_rx.recv().await {
-            Some(ChannelEvent::SessionInitialized(id)) => {
-                temp_session_id = id;
-                got_session = true;
-                event_tx
-                    .send(ChannelEvent::SessionInitialized(id))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(ChannelEvent::ChannelsAvailable(chs)) => {
-                temp_channels = chs;
-                got_channels = true;
-                event_tx
-                    .send(ChannelEvent::ChannelsAvailable(temp_channels.clone()))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(other) => {
-                event_tx.send(other).await.ok();
-                repaint_notify.notify_one();
-            }
-            None => break,
-        }
-
-        if got_session && got_channels {
-            break;
-        }
-    }
-
-    let session_id = temp_session_id;
-    let channels = temp_channels;
+    let session_id = session_init_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("main channel dropped before SessionInitialized"))?;
+    let channels = channels_avail_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("main channel dropped before ChannelsAvailable"))?;
 
     info!(
         "Session {} ready with {} channels",
