@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
@@ -89,6 +89,30 @@ const RECONNECT_BACKOFF_SECS: [u64; MAX_RECONNECT_ATTEMPTS as usize] = [1, 4, 16
 /// bang away forever. A fresh budget unlocks after this elapses.
 const RECONNECT_CLUSTER_RESET: Duration = Duration::from_secs(5 * 60);
 
+/// Discriminator for the disconnect-modal. The variant
+/// determines title, body copy, and which buttons render. The
+/// `OneShotConsumed` and `TicketExpired` variants are entered
+/// when the .vv file's `delete-this-file` / `ticket-valid-until`
+/// keys (see `kerbside-wt-docs/docs/spice/console-vv-extensions.md`)
+/// indicate that any further reconnect is doomed; the
+/// `Generic` variant covers everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModalVariant {
+    /// Auto-reconnect budget exhausted on a reusable ticket.
+    /// `latest_error` is the most recent attempt's failure
+    /// string, shown in the modal body for context.
+    Generic { latest_error: String },
+    /// The .vv file's `delete-this-file=1` flag marked the
+    /// ticket as single-use; the first link consumed it, and
+    /// any reconnect would be rejected by the server. Reconnect
+    /// button hidden.
+    OneShotConsumed,
+    /// `ticket-valid-until` has elapsed (wall-clock time). The
+    /// server will reject any link from now on; auto-reconnect
+    /// is suppressed and the modal explains why.
+    TicketExpired { expired_at: SystemTime },
+}
+
 /// Auto-reconnect state machine. Replaces the implicit
 /// `show_disconnect_dialog: bool` + `disconnect_reason` pair so
 /// every disconnect path either auto-recovers or surfaces a
@@ -104,8 +128,44 @@ enum ReconnectState {
         next_at: Instant,
         latest_error: String,
     },
-    /// Budget exhausted; the user takes over via the modal.
-    Modal { latest_error: String },
+    /// Budget exhausted (or ticket-related auto-suppression);
+    /// the user takes over via the modal. Variant carries the
+    /// reason and any context needed to render copy + buttons.
+    Modal(ModalVariant),
+}
+
+/// Policy bits derived from the .vv file's ticket-related keys.
+/// Bundled so the state-machine transition can take a single
+/// argument rather than threading two unrelated booleans.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReconnectPolicy {
+    /// `delete-this-file=1` was set: the previous link consumed
+    /// the ticket, so the server will reject any reconnect. All
+    /// disconnects go straight to `Modal(OneShotConsumed)`.
+    ticket_is_single_use: bool,
+    /// `ticket-valid-until=<unix-ts>` was set: when this wall
+    /// time has passed, any reconnect would be doomed. The
+    /// state machine consults this on entry and at every
+    /// `Pending` tick so the modal trips immediately rather
+    /// than burning the 3-attempt budget on dead retries.
+    ticket_valid_until: Option<SystemTime>,
+}
+
+impl ReconnectPolicy {
+    /// If the ticket policy forbids any further reconnect, return
+    /// the appropriate `ModalVariant`. `Ok(())` means the normal
+    /// retry path is permitted.
+    fn forbid_retry(&self, now_wall: SystemTime) -> Option<ModalVariant> {
+        if self.ticket_is_single_use {
+            return Some(ModalVariant::OneShotConsumed);
+        }
+        if let Some(expiry) = self.ticket_valid_until {
+            if now_wall >= expiry {
+                return Some(ModalVariant::TicketExpired { expired_at: expiry });
+            }
+        }
+        None
+    }
 }
 
 impl ReconnectState {
@@ -119,19 +179,40 @@ impl ReconnectState {
     /// called `reconnect()` from a `Pending` tick and are now
     /// hearing back). `false` for the initial disconnect or for
     /// duplicate storm events.
+    ///
+    /// `policy` derived from the .vv file's ticket-related
+    /// keys. When it forbids retries (single-use ticket
+    /// consumed, or `ticket-valid-until` elapsed) we skip the
+    /// auto-retry path entirely and land in the matching
+    /// `Modal` variant on the first disconnect.
     fn on_disconnect(
         &self,
         awaiting_outcome: bool,
         last_modal_at: Option<Instant>,
         now: Instant,
+        now_wall: SystemTime,
+        policy: ReconnectPolicy,
         latest_error: String,
     ) -> Option<Self> {
+        // Ticket-bound deployments: any further reconnect would
+        // be rejected, so trip the modal on the first disconnect
+        // event of any kind — no point in burning the budget.
+        if let Some(variant) = policy.forbid_retry(now_wall) {
+            // Already in the matching Modal? Ignore the storm.
+            if matches!(self, ReconnectState::Modal(v) if v == &variant) {
+                return None;
+            }
+            return Some(ReconnectState::Modal(variant));
+        }
+
         if awaiting_outcome {
             match self {
                 ReconnectState::Pending { attempt, .. } => {
                     let next_attempt = attempt + 1;
                     if next_attempt > MAX_RECONNECT_ATTEMPTS {
-                        Some(ReconnectState::Modal { latest_error })
+                        Some(ReconnectState::Modal(ModalVariant::Generic {
+                            latest_error,
+                        }))
                     } else {
                         let backoff = Duration::from_secs(
                             RECONNECT_BACKOFF_SECS[(next_attempt - 1) as usize],
@@ -144,16 +225,21 @@ impl ReconnectState {
                     }
                 }
                 // `awaiting_outcome` should imply we were in
-                // Pending; defensively land in Modal so we don't
-                // silently re-arm a retry from a stale state.
-                _ => Some(ReconnectState::Modal { latest_error }),
+                // Pending; defensively land in Generic Modal so
+                // we don't silently re-arm a retry from a stale
+                // state.
+                _ => Some(ReconnectState::Modal(ModalVariant::Generic {
+                    latest_error,
+                })),
             }
         } else {
             match self {
                 ReconnectState::Idle => {
                     if let Some(t) = last_modal_at {
                         if now.duration_since(t) < RECONNECT_CLUSTER_RESET {
-                            return Some(ReconnectState::Modal { latest_error });
+                            return Some(ReconnectState::Modal(ModalVariant::Generic {
+                                latest_error,
+                            }));
                         }
                     }
                     let backoff = Duration::from_secs(RECONNECT_BACKOFF_SECS[0]);
@@ -164,7 +250,7 @@ impl ReconnectState {
                     })
                 }
                 // Already disconnected — ignore the duplicate.
-                ReconnectState::Pending { .. } | ReconnectState::Modal { .. } => None,
+                ReconnectState::Pending { .. } | ReconnectState::Modal(_) => None,
             }
         }
     }
@@ -346,6 +432,11 @@ pub struct RyllApp {
     /// session's lifetime, surfaced in `session.json` for
     /// post-hoc analysis of how rocky the session was.
     auto_reconnect_count: u32,
+    /// Has the T-30s `ticket-valid-until` pre-expiry warning
+    /// been pushed for the current session? Latches to `true`
+    /// once fired so the notification panel does not see a
+    /// stream of duplicates as the deadline approaches.
+    ticket_expiry_warned: bool,
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
@@ -585,6 +676,27 @@ fn build_connection_runtime(single_thread: bool) -> tokio::runtime::Runtime {
 /// ("foo.bar.png",      2) → ["foo.bar-1.png", "foo.bar-2.png"]
 /// ("/tmp/foo.png",     2) → ["/tmp/foo-1.png", "/tmp/foo-2.png"]
 /// ```
+/// Format a `SystemTime` as a `HH:MM:SS` clock string in UTC
+/// for the `TicketExpired` modal body. UTC is unambiguous for a
+/// modal that explains "the ticket expired at …" — the user is
+/// usually in the same TZ as their issuing system anyway, and
+/// pulling in a TZ-aware crate just for one line of modal copy
+/// would be disproportionate. Falls back to the raw unix
+/// timestamp if the time is before the epoch (impossible in
+/// practice but cheap to handle).
+fn format_expiry_local(t: SystemTime) -> String {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs() % 86400;
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            format!("{:02}:{:02}:{:02} UTC", h, m, s)
+        }
+        Err(_) => "before 1970-01-01".to_string(),
+    }
+}
+
 fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
     if count <= 1 {
         return vec![base.to_path_buf()];
@@ -778,6 +890,7 @@ impl RyllApp {
             awaiting_reconnect_outcome: false,
             last_modal_at: None,
             auto_reconnect_count: 0,
+            ticket_expiry_warned: false,
             last_mouse_pos: None,
             last_modifiers: None,
             forwarded_buttons: 0,
@@ -1028,9 +1141,16 @@ impl RyllApp {
     fn handle_critical_disconnect(&mut self, message: String) {
         let awaiting = self.awaiting_reconnect_outcome;
         let now = Instant::now();
-        let new_state =
-            self.reconnect_state
-                .on_disconnect(awaiting, self.last_modal_at, now, message.clone());
+        let now_wall = SystemTime::now();
+        let policy = self.reconnect_policy();
+        let new_state = self.reconnect_state.on_disconnect(
+            awaiting,
+            self.last_modal_at,
+            now,
+            now_wall,
+            policy,
+            message.clone(),
+        );
 
         // Even if the state machine ignores the event, the
         // connection itself has gone — clear surfaces / cursor so
@@ -1062,11 +1182,12 @@ impl RyllApp {
                 );
             }
         }
-        if let ReconnectState::Modal { .. } = &new_state {
+        if let ReconnectState::Modal(variant) = &new_state {
             self.last_modal_at = Some(now);
-            // The transition into Modal is itself an attempt
-            // failure — the user's three retries have been spent.
-            if awaiting {
+            // The transition into Modal{Generic} via the
+            // awaiting-outcome path is itself an attempt failure —
+            // the user's three retries have been spent.
+            if awaiting && matches!(variant, ModalVariant::Generic { .. }) {
                 self.push_notification(
                     NotifySeverity::Warn,
                     NotificationSource::BugReport,
@@ -1076,9 +1197,38 @@ impl RyllApp {
                     ),
                 );
             }
+            // Clock-skew check: when we land in Generic Modal,
+            // the ticket should have been good (otherwise we'd
+            // have taken the OneShotConsumed/TicketExpired path).
+            // If `ticket-valid-until` is set and still in the
+            // future, the 3 failures are suspicious — log a hook
+            // so future investigations have something to grep.
+            if let (ModalVariant::Generic { .. }, Some(expiry)) =
+                (variant, policy.ticket_valid_until)
+            {
+                if now_wall < expiry {
+                    warn!(
+                        "app: 3 reconnect attempts failed but ticket-valid-until \
+                         is still in the future ({:?}); possible clock skew or \
+                         server-side issue independent of ticket expiry",
+                        expiry
+                    );
+                }
+            }
         }
 
         self.reconnect_state = new_state;
+    }
+
+    /// Derive the `ReconnectPolicy` from the active `.vv`
+    /// config. Read at every disconnect / tick — cheap, and
+    /// avoids caching state that would have to be re-synced if
+    /// Config ever became mutable.
+    fn reconnect_policy(&self) -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: self.config.ticket_is_single_use,
+            ticket_valid_until: self.config.ticket_valid_until,
+        }
     }
 
     fn process_events(&mut self) {
@@ -2125,6 +2275,26 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
+        // Pre-expiry warning: if `ticket-valid-until` is set and
+        // we are within 30 s of expiry, push a one-shot warn
+        // notification so the user knows the session is about
+        // to end. Latched via `ticket_expiry_warned` to fire
+        // exactly once per session.
+        if !self.ticket_expiry_warned {
+            if let Some(expiry) = self.config.ticket_valid_until {
+                if let Ok(remaining) = expiry.duration_since(SystemTime::now()) {
+                    if remaining <= Duration::from_secs(30) {
+                        self.push_notification(
+                            NotifySeverity::Warn,
+                            NotificationSource::BugReport,
+                            "Session ticket expires in 30 seconds.".to_string(),
+                        );
+                        self.ticket_expiry_warned = true;
+                    }
+                }
+            }
+        }
+
         // Auto-reconnect tick: when the Pending deadline has
         // passed AND we are not already awaiting the outcome of
         // a prior fire, kick off the next attempt. The flag
@@ -2133,6 +2303,23 @@ impl eframe::App for RyllApp {
         // (SessionInitialized → success, or a disconnect →
         // advance/Modal).
         if !self.awaiting_reconnect_outcome {
+            // Re-check the ticket policy at the moment of fire —
+            // a long Pending window can outlive
+            // `ticket-valid-until`, and there is no point firing
+            // a reconnect we know the server will reject. This
+            // tripwire fires from either Pending(N) directly to
+            // Modal{TicketExpired}, bypassing the remaining
+            // attempts.
+            if matches!(self.reconnect_state, ReconnectState::Pending { .. }) {
+                if let Some(variant) = self.reconnect_policy().forbid_retry(SystemTime::now()) {
+                    info!(
+                        "app: ticket policy now forbids retry mid-Pending; \
+                         transitioning to Modal directly"
+                    );
+                    self.last_modal_at = Some(Instant::now());
+                    self.reconnect_state = ReconnectState::Modal(variant);
+                }
+            }
             if let ReconnectState::Pending {
                 attempt, next_at, ..
             } = &self.reconnect_state
@@ -3499,12 +3686,35 @@ impl eframe::App for RyllApp {
         // (rendered in the bottom stats panel) instead, so the
         // user is not interrupted while we are still trying.
         let mut wants_reconnect = false;
-        if let ReconnectState::Modal { latest_error } = &self.reconnect_state {
-            let body = format!(
-                "Three automatic reconnect attempts failed: {}",
-                latest_error
-            );
-            egui::Window::new("Connection lost")
+        if let ReconnectState::Modal(variant) = &self.reconnect_state {
+            let (title, body, allow_reconnect) = match variant {
+                ModalVariant::Generic { latest_error } => (
+                    "Connection lost",
+                    format!(
+                        "Three automatic reconnect attempts failed: {}",
+                        latest_error
+                    ),
+                    true,
+                ),
+                ModalVariant::OneShotConsumed => (
+                    "Session ended — cannot reconnect",
+                    "This connection used a single-use ticket. \
+                     Request a new connection from the system that \
+                     issued the original link."
+                        .to_string(),
+                    false,
+                ),
+                ModalVariant::TicketExpired { expired_at } => (
+                    "Session ended — ticket expired",
+                    format!(
+                        "The ticket for this session expired at {}. \
+                         Request a new connection.",
+                        format_expiry_local(*expired_at),
+                    ),
+                    false,
+                ),
+            };
+            egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -3512,7 +3722,7 @@ impl eframe::App for RyllApp {
                     ui.label(body);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Reconnect").clicked() {
+                        if allow_reconnect && ui.button("Reconnect").clicked() {
                             wants_reconnect = true;
                         }
                         if ui.button("Close").clicked() {
@@ -4068,10 +4278,19 @@ mod tests {
         s.to_string()
     }
 
+    fn no_policy() -> ReconnectPolicy {
+        ReconnectPolicy::default()
+    }
+
+    fn epoch() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    }
+
     #[test]
     fn reconnect_idle_to_pending_on_first_disconnect() {
         let now = Instant::now();
-        let next = ReconnectState::Idle.on_disconnect(false, None, now, err("eof"));
+        let next =
+            ReconnectState::Idle.on_disconnect(false, None, now, epoch(), no_policy(), err("eof"));
         match next {
             Some(ReconnectState::Pending {
                 attempt,
@@ -4094,25 +4313,48 @@ mod tests {
         let now = Instant::now();
         // Initial disconnect: Idle → Pending(1).
         let s1 = ReconnectState::Idle
-            .on_disconnect(false, None, now, err("e1"))
+            .on_disconnect(false, None, now, epoch(), no_policy(), err("e1"))
             .unwrap();
         // Attempt 1 failure: Pending(1) → Pending(2).
         let s2 = s1
-            .on_disconnect(true, None, now + Duration::from_secs(1), err("e2"))
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(1),
+                epoch(),
+                no_policy(),
+                err("e2"),
+            )
             .unwrap();
         assert!(matches!(s2, ReconnectState::Pending { attempt: 2, .. }));
         // Attempt 2 failure: Pending(2) → Pending(3).
         let s3 = s2
-            .on_disconnect(true, None, now + Duration::from_secs(5), err("e3"))
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(5),
+                epoch(),
+                no_policy(),
+                err("e3"),
+            )
             .unwrap();
         assert!(matches!(s3, ReconnectState::Pending { attempt: 3, .. }));
-        // Attempt 3 failure: Pending(3) → Modal with latest error.
+        // Attempt 3 failure: Pending(3) → Modal(Generic) with latest error.
         let s4 = s3
-            .on_disconnect(true, None, now + Duration::from_secs(20), err("final"))
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(20),
+                epoch(),
+                no_policy(),
+                err("final"),
+            )
             .unwrap();
         match s4 {
-            ReconnectState::Modal { latest_error } => assert_eq!(latest_error, "final"),
-            other => panic!("expected Modal, got {:?}", other),
+            ReconnectState::Modal(ModalVariant::Generic { latest_error }) => {
+                assert_eq!(latest_error, "final");
+            }
+            other => panic!("expected Modal(Generic), got {:?}", other),
         }
     }
 
@@ -4120,12 +4362,19 @@ mod tests {
     fn reconnect_storm_event_during_pending_is_ignored() {
         let now = Instant::now();
         let pending = ReconnectState::Idle
-            .on_disconnect(false, None, now, err("first"))
+            .on_disconnect(false, None, now, epoch(), no_policy(), err("first"))
             .unwrap();
         // A non-awaiting second event (channel storm) must not
         // advance the attempt counter — that would burn budget
         // for a single underlying failure.
-        let next = pending.on_disconnect(false, None, now + Duration::from_millis(10), err("dup"));
+        let next = pending.on_disconnect(
+            false,
+            None,
+            now + Duration::from_millis(10),
+            epoch(),
+            no_policy(),
+            err("dup"),
+        );
         assert!(next.is_none());
     }
 
@@ -4136,8 +4385,18 @@ mod tests {
         // land directly in Modal. Otherwise a flapping server
         // would have us banging away forever.
         let modal_at = now - Duration::from_secs(60);
-        let next = ReconnectState::Idle.on_disconnect(false, Some(modal_at), now, err("flap"));
-        assert!(matches!(next, Some(ReconnectState::Modal { .. })));
+        let next = ReconnectState::Idle.on_disconnect(
+            false,
+            Some(modal_at),
+            now,
+            epoch(),
+            no_policy(),
+            err("flap"),
+        );
+        assert!(matches!(
+            next,
+            Some(ReconnectState::Modal(ModalVariant::Generic { .. }))
+        ));
     }
 
     #[test]
@@ -4146,7 +4405,14 @@ mod tests {
         // Beyond the 5-min reset window, a fresh budget unlocks.
         let modal_at = now - RECONNECT_CLUSTER_RESET - Duration::from_secs(1);
         let next = ReconnectState::Idle
-            .on_disconnect(false, Some(modal_at), now, err("later"))
+            .on_disconnect(
+                false,
+                Some(modal_at),
+                now,
+                epoch(),
+                no_policy(),
+                err("later"),
+            )
             .unwrap();
         assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
     }
@@ -4156,10 +4422,10 @@ mod tests {
         // Once we're in Modal, additional non-awaiting events
         // must not change state — the user is in control.
         let now = Instant::now();
-        let modal = ReconnectState::Modal {
+        let modal = ReconnectState::Modal(ModalVariant::Generic {
             latest_error: "x".into(),
-        };
-        let next = modal.on_disconnect(false, None, now, err("y"));
+        });
+        let next = modal.on_disconnect(false, None, now, epoch(), no_policy(), err("y"));
         assert!(next.is_none());
     }
 
@@ -4170,5 +4436,84 @@ mod tests {
         // constant array is caught by the test suite.
         assert_eq!(RECONNECT_BACKOFF_SECS, [1, 4, 16]);
         assert_eq!(MAX_RECONNECT_ATTEMPTS, 3);
+    }
+
+    // ── Ticket-policy paths ─────────────────────────────────
+
+    fn one_shot_policy() -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: true,
+            ticket_valid_until: None,
+        }
+    }
+
+    fn expiring_at(t: SystemTime) -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: false,
+            ticket_valid_until: Some(t),
+        }
+    }
+
+    #[test]
+    fn ticket_single_use_skips_pending_and_lands_in_oneshot_modal() {
+        // delete-this-file=1: a fresh disconnect must short-circuit
+        // straight to OneShotConsumed without ever entering
+        // Pending. Auto-retry would only produce server-side
+        // ticket-validation failures.
+        let now = Instant::now();
+        let next = ReconnectState::Idle
+            .on_disconnect(
+                false,
+                None,
+                now,
+                epoch(),
+                one_shot_policy(),
+                err("anything"),
+            )
+            .unwrap();
+        assert!(matches!(
+            next,
+            ReconnectState::Modal(ModalVariant::OneShotConsumed)
+        ));
+    }
+
+    #[test]
+    fn ticket_single_use_storm_event_is_noop_in_modal() {
+        // After landing in OneShotConsumed, a duplicate disconnect
+        // (channel storm) must not refire the modal transition.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal(ModalVariant::OneShotConsumed);
+        let next = modal.on_disconnect(false, None, now, epoch(), one_shot_policy(), err("storm"));
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn ticket_expired_in_past_lands_in_ticket_expired_modal() {
+        let now = Instant::now();
+        let expiry = epoch() - Duration::from_secs(60);
+        let policy = expiring_at(expiry);
+        // Disconnect arrives after the ticket has already expired
+        // (per our wall clock). Skip Pending entirely.
+        let next = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), policy, err("dead"))
+            .unwrap();
+        match next {
+            ReconnectState::Modal(ModalVariant::TicketExpired { expired_at }) => {
+                assert_eq!(expired_at, expiry);
+            }
+            other => panic!("expected Modal(TicketExpired), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ticket_valid_in_future_takes_normal_pending_path() {
+        let now = Instant::now();
+        // Ticket good for another hour: a disconnect should enter
+        // Pending(1) as usual.
+        let expiry = epoch() + Duration::from_secs(3600);
+        let next = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), expiring_at(expiry), err("blip"))
+            .unwrap();
+        assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
     }
 }

@@ -154,6 +154,33 @@ ryll --url http://example.com/vm.vv
 ryll --file /path/to/connection.vv
 ```
 
+#### console.vv keys ryll honours
+
+ryll parses the standard `host`, `port`, `tls-port`, `password`,
+`ca`, and `host-subject` keys. It also reads two ticket-related
+keys with ryll-specific behaviour:
+
+- **`delete-this-file=1`** — the standard "remove this file
+  after reading" hint. ryll additionally treats this as a
+  signal that the SPICE ticket is **single-use**: any
+  reconnect attempt would be rejected by the server, so
+  auto-reconnect is suppressed and a "single-use ticket"
+  modal is shown instead of the normal retry sequence.
+- **`ticket-valid-until=<unix-ts>`** — a ryll extension key
+  (no equivalent in remote-viewer). When set, ryll surfaces a
+  T-30s warning notification, suppresses auto-reconnect once
+  the deadline has passed, and shows a "ticket expired" modal
+  with the expiry time.
+
+Both keys degrade gracefully — absent values mean the previous
+ryll behaviour. Producer-side documentation lives in the
+companion doc
+[`console-vv-extensions.md`](https://github.com/shakenfist/kerbside-wt-docs/blob/main/docs/spice/console-vv-extensions.md)
+in the kerbside-wt-docs repository, which is the canonical
+reference for SPICE deployment authors (Kerbside, oVirt,
+custom gateways) who want their .vv output to drive ryll's
+reconnect UX correctly.
+
 ### Direct connection
 
 ```bash

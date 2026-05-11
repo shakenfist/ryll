@@ -1008,38 +1008,54 @@ fires unambiguously first whenever it does fire.
       attempt failure (source `NotificationSource::BugReport`
       to keep the producer set tidy). Fires for failures of
       attempts 1, 2, and 3 within a cluster.
-- [~] Render the three modal variants from §A.6 at
-      `app.rs:3119` — Step 5 lands the `Generic` form
-      (Reconnect + Close, with `latest_error` from the state
-      machine). `OneShotConsumed` and `TicketExpired` move to
-      Step 6 since they depend on the new .vv keys.
-- [ ] Extend the .vv parser at `ryll/src/config.rs:266` to
-      read `delete-this-file` (existing standard key) into a
-      new `Config::ticket_is_single_use: bool` field. Plumb
-      through to `RyllApp` via `Config::from_args`.
-- [ ] Extend the .vv parser to read the new
+- [x] Render the three modal variants from §A.6 — Step 5
+      landed `Generic`; Step 6 added `OneShotConsumed`
+      (Close only, "single-use ticket" body) and
+      `TicketExpired { expired_at }` (Close only, "ticket
+      expired at HH:MM:SS UTC" body). Dispatched on
+      `ModalVariant` inside `ReconnectState::Modal(_)`.
+- [x] Extend the .vv parser at `ryll/src/config.rs` to read
+      `delete-this-file` (existing standard key) into a new
+      `Config::ticket_is_single_use: bool` field. Plumbs
+      through `Config::from_args` automatically — Config flows
+      by value into `RyllApp` and is read via
+      `RyllApp::reconnect_policy()`.
+- [x] Extend the .vv parser to read the new
       `ticket-valid-until=<unix-ts>` extension key into
-      `Config::ticket_valid_until: Option<SystemTime>`. Plumb
-      through to `RyllApp`. Tolerate missing or malformed
-      values (key absent → `None`; malformed → log a `warn!`
-      and treat as `None`, do not fail the connect).
-- [ ] When `ticket_is_single_use` is true, the auto-reconnect
-      state machine refuses to enter `Pending`; disconnect
-      goes straight to `Modal { OneShotConsumed }`.
-- [ ] When `ticket_valid_until` is set and now() >= it at any
-      `Pending` deadline check, transition to
-      `Modal { TicketExpired { expired_at } }` instead of
-      retrying.
-- [ ] Pre-disconnect warning: in the GUI tick, when
+      `Config::ticket_valid_until: Option<SystemTime>`.
+      Malformed values log a `warn!` and yield `None`; absent
+      keys yield `None`. Parsing failure does not fail the
+      connect.
+- [x] When `ticket_is_single_use` is true, the auto-reconnect
+      state machine refuses to enter `Pending`; first
+      disconnect goes straight to `Modal(OneShotConsumed)` via
+      `ReconnectPolicy::forbid_retry()`.
+- [x] When `ticket_valid_until` is set and `SystemTime::now()
+      >= expiry`, transition to `Modal(TicketExpired { expired_at })`
+      both at disconnect time and at every Pending tick fire
+      (so a long Pending window outliving the ticket
+      short-circuits to Modal rather than firing a doomed
+      reconnect).
+- [x] Pre-disconnect warning: in the GUI tick, when
       `ticket_valid_until` is set and within 30 s of expiry
       (and notification not yet pushed for this session), push
-      a `NotifySeverity::Warn` "Session ticket expires in 30
-      seconds." Track a `ticket_expiry_warned: bool` on
-      `RyllApp` to fire once.
-- [ ] If `ticket_valid_until` is set but in the future at
-      disconnect time, render `TicketExpired` anyway and log
-      `warn!` "ticket-valid-until in the future at disconnect
-      time, possible clock skew" (§A.6 edge case).
+      `NotifySeverity::Warn` "Session ticket expires in 30
+      seconds." Latched via `RyllApp::ticket_expiry_warned`
+      so the warning fires exactly once per session.
+- [~] Edge case: `ticket_valid_until` set but in the future at
+      disconnect time. Deviated from the plan's exact wording.
+      Instead of rendering `TicketExpired` regardless, ryll
+      lands in `Modal(Generic)` (since `forbid_retry()` returns
+      `None` while the ticket is still valid by our clock) and
+      logs a `warn!` "3 reconnect attempts failed but
+      ticket-valid-until is still in the future ... possible
+      clock skew or server-side issue independent of ticket
+      expiry" when we land in Generic with a future expiry.
+      Reason: ryll cannot detect "ticket expired" specifically
+      from a disconnect — only the wall-clock comparison is
+      available. Rendering `TicketExpired` for every disconnect
+      on a ticketed session would mislabel real network
+      failures.
 - [x] In `RyllApp::reconnect()`, clear
       `MainSnapshot::keepalive_timeout_fired` (Phase 01 OQ #3
       done here, not in Phase 01).
@@ -1066,25 +1082,41 @@ fires unambiguously first whenever it does fire.
       attempting. (Snapshot cooldown is exercised by existing
       bugreport.rs tests; integration verification deferred to
       the manual check below.)
-- [ ] `delete-this-file=1` path: disconnect → Modal{OneShotConsumed}
-      without entering Pending. — Step 6.
-- [ ] `ticket-valid-until` past: disconnect at any point →
-      Modal{TicketExpired}; Pending deadline check honours
-      expiry mid-cluster. — Step 6.
-- [ ] `ticket-valid-until` future: warning fires once at T-30 s.
-      — Step 6.
-- [ ] .vv parser: round-trips both keys; malformed
-      `ticket-valid-until` logs warn and yields `None`. — Step 6.
-- [ ] Update README's "console.vv support" section to note
-    ryll's interpretation of `delete-this-file=1` (skip auto-
-    reconnect) and the new `ticket-valid-until` extension key
-    (link to the kerbside-wt-docs extensions doc).
-- [ ] Manual integration check (notes only): kill SPICE server
-    while connected with a regular .vv, observe three attempts
-    then Generic modal. Repeat with `delete-this-file=1`,
-    observe immediate OneShotConsumed modal. Repeat with a
-    `ticket-valid-until` in the past, observe TicketExpired
-    modal.
+- [x] `delete-this-file=1` path: disconnect →
+      `Modal(OneShotConsumed)` without entering Pending. Test:
+      `ticket_single_use_skips_pending_and_lands_in_oneshot_modal`.
+- [x] `ticket-valid-until` past: disconnect →
+      `Modal(TicketExpired)` at disconnect time. Test:
+      `ticket_expired_in_past_lands_in_ticket_expired_modal`.
+      Tick-time mid-Pending expiry transition exercised in
+      app code path (not a pure state-machine path; manual
+      check in Step 7).
+- [~] `ticket-valid-until` future: warning fires once at
+      T-30 s. App-level latch via `ticket_expiry_warned`;
+      pure-state test not feasible (it's a `update()` tick
+      side effect, not a state-machine transition). Manual
+      verification deferred to Step 7.
+- [x] .vv parser: round-trips both keys; malformed
+      `ticket-valid-until` logs warn and yields `None`. Tests:
+      `vv_delete_this_file_1_sets_single_use`,
+      `vv_delete_this_file_0_leaves_single_use_off`,
+      `vv_ticket_valid_until_parses_unix_ts`,
+      `vv_ticket_valid_until_malformed_logs_warn_and_yields_none`,
+      `vv_ticket_valid_until_absent_yields_none`,
+      `vv_defaults_have_ticket_fields_unset`.
+- [x] Update README's ".vv configuration file" section with a
+      "console.vv keys ryll honours" subsection covering
+      ryll's interpretation of `delete-this-file=1` (skip
+      auto-reconnect) and the new `ticket-valid-until`
+      extension key, linking to the kerbside-wt-docs
+      `console-vv-extensions.md` doc.
+- [ ] Manual integration check (deferred to Step 7): kill
+      SPICE server while connected with a regular .vv,
+      observe three attempts then Generic modal. Repeat with
+      `delete-this-file=1`, observe immediate OneShotConsumed
+      modal. Repeat with a `ticket-valid-until` in the past,
+      observe TicketExpired modal. Manual checks of the
+      pre-expiry T-30s warning and clock-skew log line.
 
 ### Block B (analysis, no code)
 
