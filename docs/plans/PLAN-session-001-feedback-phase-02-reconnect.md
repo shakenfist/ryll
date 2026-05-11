@@ -1241,18 +1241,32 @@ hypothesis. No tasks here.
 
 ### Wrap-up
 
-- [ ] Update `ARCHITECTURE.md`: new "Auto-reconnect with
-      backoff" section describing the state machine and the
-      three modal variants. New sub-section under "Auto-snapshot
-      on channel disconnect" describing the C.1 proactive PING
-      (if applied) or C.2 App Nap opt-out (if applied). Note
-      `delete-this-file` interpretation and the new
-      `ticket-valid-until` extension key with a link to the
-      companion doc.
-- [ ] Update `AGENTS.md` with the new `ReconnectState`
-      pattern (§20-style entry).
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `ARCHITECTURE.md`: added "Auto-reconnect with
+      backoff" and "Modal variants and console.vv ticket
+      keys" sections following the "Auto-snapshot on channel
+      disconnect" section. Describes the state machine, the
+      three modal variants, `ReconnectPolicy`, the pre-expiry
+      warning, and links to the companion
+      `console-vv-extensions.md` doc. The C.1 proactive PING
+      and C.2 App Nap opt-out sections noted in the original
+      plan are not applicable — both were demoted to "not
+      pursued" once K1 was resolved at the root in commit
+      `370d8ce5`.
+- [x] Update `AGENTS.md` with the new `ReconnectState`
+      pattern (§22, the slot after the §21 notifications
+      entry). Covers the pure-transition / side-effects-at-
+      call-site split, the `awaiting_outcome` flag, the three
+      modal variants, and the `ReconnectPolicy` short-circuit
+      path.
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       status for Phase 02 → Done.
+- [ ] Manual integration check (deferred operator action,
+      not a code task): with a real SPICE server, exercise
+      all three modal paths and verify the T-30s
+      pre-expiry warning and the clock-skew log line fire as
+      documented in `console-vv-extensions.md`. Bundled here
+      for visibility — see "Phase 02 manual verification
+      notes" at the bottom of this document for a checklist.
 
 ## Companion docs
 
@@ -1323,3 +1337,80 @@ because absent keys are no-ops.
   equivalent; Windows has connected-standby restrictions but
   ryll has not been observed to hit them. Revisit only if
   reproduced.
+
+## Phase 02 manual verification notes
+
+The state-machine paths are unit-tested (see
+`app.rs::tests::reconnect_*` and `ticket_*`), but the
+end-to-end UX needs a real SPICE server to verify the modal
+copy, button layout, and notification timing. This checklist
+is intentionally low-ceremony — tick boxes against a real
+session, not a CI run.
+
+1. **Generic modal — auto-retry exhaustion.**
+   - Connect with a reusable .vv (no `delete-this-file`, no
+     `ticket-valid-until`).
+   - Once session is live, kill the SPICE server (e.g. `virsh
+     destroy <domain>`).
+   - Expected: status bar shows "Reconnecting… (1/3)" within
+     ~1 s; updates to (2/3) at ~5 s; (3/3) at ~21 s. A `Warn`
+     notification fires per attempt failure (visible in the
+     notifications side panel via the bell).
+   - At ~21 s the modal opens with title "Connection lost"
+     and body "Three automatic reconnect attempts failed:
+     …". Buttons: **Reconnect**, **Close**.
+   - Click Reconnect: the modal closes, status bar shows
+     "Reconnecting… (1/3)" again (cluster reset because of
+     manual intervention).
+
+2. **OneShotConsumed modal — single-use ticket.**
+   - Connect with `delete-this-file=1` in the .vv.
+   - Once session is live, drop the connection (server side
+     or `iptables` on the host).
+   - Expected: status bar does **not** show "Reconnecting…"
+     at all. The modal opens immediately, title "Session
+     ended — cannot reconnect", body "This connection used
+     a single-use ticket. …". Buttons: **Close** only (no
+     Reconnect button).
+
+3. **TicketExpired modal — `ticket-valid-until` elapsed.**
+   - Connect with `ticket-valid-until=<unix-ts in past>` in
+     the .vv. (The server has to accept the link, since the
+     server's own ticket validation is independent. For a
+     test fixture, set `ticket-valid-until` to a few seconds
+     after `now` so the link succeeds but the deadline passes
+     during the session.)
+   - Wait for the deadline to pass while connected; nothing
+     visible should change yet (`ticket-valid-until` is only
+     consulted at disconnect / Pending tick).
+   - Drop the connection.
+   - Expected: the modal opens immediately, title "Session
+     ended — ticket expired", body "The ticket for this
+     session expired at HH:MM:SS UTC. …". Buttons: **Close**
+     only.
+
+4. **Pre-expiry T-30s warning.**
+   - Connect with `ticket-valid-until=<unix-ts at now+90s>`.
+   - Wait ~60 s.
+   - Expected: at T-30s, exactly **one** `Warn` notification
+     pushes "Session ticket expires in 30 seconds." Confirm
+     by opening the notifications panel — only one entry,
+     not a stream of duplicates as the deadline approaches.
+
+5. **Clock-skew log line.**
+   - Connect with `ticket-valid-until=<unix-ts in distant
+     future>` (a day from now is fine).
+   - Kill the SPICE server and let auto-reconnect exhaust
+     its three attempts.
+   - Expected: the modal that opens is `Generic` (not
+     `TicketExpired`, since our clock says the ticket is
+     still good). Inspect logs for the `warn!` line "3
+     reconnect attempts failed but ticket-valid-until is
+     still in the future …". This is the diagnostic hook
+     for the scenario where the server invalidates a ticket
+     before its declared expiry (server-side revocation,
+     clock skew, etc.).
+
+The expected outputs above match what the Step 5 and Step 6
+unit tests assert at the state-machine level; this checklist
+just confirms the GUI surfaces match.

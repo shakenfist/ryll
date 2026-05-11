@@ -189,7 +189,7 @@ table top-to-bottom is always safe.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Auto-snapshot ring buffer at disconnect moment | PLAN-session-001-feedback-phase-01-disconnect-snapshot.md | Done |
-| 2. Main-channel auto-reconnect / keepalive (originally framed as the K1 fix; K1 root cause is now fixed independently in `370d8ce5`. Phase 02 continues as general-purpose disconnect/reconnect UX — steps 1, 2, 2b, 2c, 2e, 2f, 3 landed during the investigation; steps 4, 5, 6, 7 remain.) | PLAN-session-001-feedback-phase-02-reconnect.md | In progress |
+| 2. Main-channel auto-reconnect / keepalive (originally framed as the K1 fix; K1 root cause is now fixed independently in `370d8ce5`. Phase 02 reframed as general-purpose disconnect/reconnect UX — steps 1, 2, 2b, 2c, 2e, 2f, 3 landed during the investigation; steps 4, 5, 6 landed as session-001-feedback follow-ups; step 7 is this doc wrap-up.) | PLAN-session-001-feedback-phase-02-reconnect.md | Done |
 | 3. Preserve audio volume across reconnect | PLAN-session-001-feedback-phase-03-audio-volume.md | Not started |
 | 4. Region-select zero-width guard | PLAN-session-001-feedback-phase-04-region-select.md | Not started |
 | 5. Handle `STREAM_DESTROY_ALL` (display msg 126) | PLAN-session-001-feedback-phase-05-stream-destroy-all.md | Not started |

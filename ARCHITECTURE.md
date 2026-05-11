@@ -963,6 +963,91 @@ them on the GUI thread would freeze the UI for ~1 s,
 and the pcap and channel snapshots are the load-bearing
 diagnostic data anyway.
 
+### Auto-reconnect with backoff
+
+When a critical channel (Main, Display, Inputs) goes down
+mid-session, ryll attempts to recover transparently rather
+than presenting a modal immediately. The `ReconnectState`
+enum on `RyllApp` (`ryll/src/app.rs`) drives the flow:
+
+- `Idle` — connected normally, or never disconnected.
+- `Pending { attempt, next_at, latest_error }` — retry
+  scheduled. `attempt` ∈ 1..=3; `next_at` is the wall time
+  the next `reconnect()` call should fire.
+- `Modal(ModalVariant)` — auto-retry has given up and the
+  user has to intervene. The variant determines copy and
+  available buttons.
+
+Backoff is `[1s, 4s, 16s]` — short first attempt for blip
+recovery, longer windows for server restarts; worst-case
+~21 s before the modal pops. After three failures the state
+machine lands in `Modal(Generic { latest_error })`. The
+`latest_error` field carries the most recent attempt's
+failure string into the modal body.
+
+A `last_modal_at: Option<Instant>` field tracks when the
+modal last opened; further disconnects within 5 minutes
+skip the retry budget and go straight back to Modal — a
+flapping server cannot make ryll bang away forever. The
+manual Reconnect button clears `last_modal_at` so a
+user-initiated retry re-arms the full 3-attempt budget.
+
+The transition function `ReconnectState::on_disconnect()`
+is pure — it takes the current state, an `awaiting_outcome`
+bool, the cluster-reset timestamp, the wall clock, a
+`ReconnectPolicy`, and the latest error string, and returns
+the next state (or `None` if the event should be ignored as
+a channel-storm duplicate). Side effects — pushing
+notifications, bumping `auto_reconnect_count`, writing the
+disconnect snapshot — live at the call site in
+`RyllApp::handle_critical_disconnect`. This keeps the state
+machine unit-testable without spinning up the full app.
+
+The `awaiting_outcome` flag distinguishes "the in-flight
+reconnect attempt just failed" (advance the attempt
+counter) from "another channel in the storm just
+disconnected" (no-op). It is set to `true` when the
+GUI-tick poll calls `reconnect()` from a `Pending` state
+and cleared on the next event (success or failure).
+
+### Modal variants and console.vv ticket keys
+
+The `Modal` variant carries one of three discriminants:
+
+- `Generic { latest_error }` — auto-reconnect budget
+  exhausted on a reusable ticket. Buttons: Reconnect, Close.
+- `OneShotConsumed` — the .vv file set `delete-this-file=1`,
+  which ryll interprets as a single-use ticket signal. The
+  first link consumed the ticket; auto-reconnect skips
+  `Pending` entirely. Buttons: Close only.
+- `TicketExpired { expired_at }` — the .vv file set
+  `ticket-valid-until=<unix-ts>` and that wall time has
+  passed. Auto-reconnect is suppressed and the modal shows
+  the expiry time. Buttons: Close only.
+
+`ReconnectPolicy::forbid_retry(now_wall)` consults the two
+ticket-related `Config` fields and returns the appropriate
+`ModalVariant` when retry would be doomed. The state-machine
+transition consults it first, so a single-use ticket
+disconnects directly to Modal without burning the budget.
+
+The GUI tick also re-checks the policy at every `Pending`
+fire — a long Pending window can outlive
+`ticket-valid-until`, and there is no point firing a
+reconnect we know the server will reject. A pre-expiry
+notification ("Session ticket expires in 30 seconds.")
+fires once at T-30s, latched via `ticket_expiry_warned`.
+
+The non-spec `delete-this-file=1` interpretation and the new
+`ticket-valid-until` extension key are documented for
+producers (Kerbside, oVirt, custom gateways) in
+[`console-vv-extensions.md`](https://github.com/shakenfist/kerbside-wt-docs/blob/main/docs/spice/console-vv-extensions.md)
+in the kerbside-wt-docs repository.
+
+`auto_reconnect_count: u32` on `AppSnapshot` (serialized into
+the bug-report `session.json`) increments on every entry into
+`Pending`, so a future zip shows how rocky the session was.
+
 ## Multi-Monitor Support
 
 Ryll supports multiple monitors via the `--monitors N` CLI option.
