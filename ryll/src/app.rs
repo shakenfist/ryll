@@ -73,6 +73,103 @@ const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
 /// How often the traffic viewer refreshes from the ring buffers.
 const TRAFFIC_VIEWER_REFRESH_MS: u64 = 250;
 
+/// Auto-reconnect retry budget per disconnect cluster.
+const MAX_RECONNECT_ATTEMPTS: u8 = 3;
+
+/// Backoff (seconds) before each reconnect attempt within a
+/// cluster. Index 0 is the wait before attempt 1, index 1 before
+/// attempt 2, etc. Shape matches spice-gtk's reconnect policy:
+/// short first attempt for blip recovery, longer windows for
+/// server restarts. Total worst-case wait ~21 s before the modal.
+const RECONNECT_BACKOFF_SECS: [u64; MAX_RECONNECT_ATTEMPTS as usize] = [1, 4, 16];
+
+/// After the auto-reconnect budget is exhausted (Modal shown),
+/// further disconnects within this window go straight back to
+/// Modal without re-trying — a flapping server cannot make us
+/// bang away forever. A fresh budget unlocks after this elapses.
+const RECONNECT_CLUSTER_RESET: Duration = Duration::from_secs(5 * 60);
+
+/// Auto-reconnect state machine. Replaces the implicit
+/// `show_disconnect_dialog: bool` + `disconnect_reason` pair so
+/// every disconnect path either auto-recovers or surfaces a
+/// well-typed modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReconnectState {
+    /// Connected normally, or not yet attempted.
+    Idle,
+    /// Auto-reconnect is in progress. `attempt` ∈ 1..=MAX_ATTEMPTS;
+    /// `next_at` is when the next `reconnect()` call should fire.
+    Pending {
+        attempt: u8,
+        next_at: Instant,
+        latest_error: String,
+    },
+    /// Budget exhausted; the user takes over via the modal.
+    Modal { latest_error: String },
+}
+
+impl ReconnectState {
+    /// Pure transition for a disconnect event. Returns the new
+    /// state, or `None` if the event should be ignored (e.g. a
+    /// duplicate channel-storm event while we're already in
+    /// `Pending` or `Modal`).
+    ///
+    /// `awaiting_outcome` is `true` when the disconnect is the
+    /// failure of an in-flight reconnect attempt (we previously
+    /// called `reconnect()` from a `Pending` tick and are now
+    /// hearing back). `false` for the initial disconnect or for
+    /// duplicate storm events.
+    fn on_disconnect(
+        &self,
+        awaiting_outcome: bool,
+        last_modal_at: Option<Instant>,
+        now: Instant,
+        latest_error: String,
+    ) -> Option<Self> {
+        if awaiting_outcome {
+            match self {
+                ReconnectState::Pending { attempt, .. } => {
+                    let next_attempt = attempt + 1;
+                    if next_attempt > MAX_RECONNECT_ATTEMPTS {
+                        Some(ReconnectState::Modal { latest_error })
+                    } else {
+                        let backoff = Duration::from_secs(
+                            RECONNECT_BACKOFF_SECS[(next_attempt - 1) as usize],
+                        );
+                        Some(ReconnectState::Pending {
+                            attempt: next_attempt,
+                            next_at: now + backoff,
+                            latest_error,
+                        })
+                    }
+                }
+                // `awaiting_outcome` should imply we were in
+                // Pending; defensively land in Modal so we don't
+                // silently re-arm a retry from a stale state.
+                _ => Some(ReconnectState::Modal { latest_error }),
+            }
+        } else {
+            match self {
+                ReconnectState::Idle => {
+                    if let Some(t) = last_modal_at {
+                        if now.duration_since(t) < RECONNECT_CLUSTER_RESET {
+                            return Some(ReconnectState::Modal { latest_error });
+                        }
+                    }
+                    let backoff = Duration::from_secs(RECONNECT_BACKOFF_SECS[0]);
+                    Some(ReconnectState::Pending {
+                        attempt: 1,
+                        next_at: now + backoff,
+                        latest_error,
+                    })
+                }
+                // Already disconnected — ignore the duplicate.
+                ReconnectState::Pending { .. } | ReconnectState::Modal { .. } => None,
+            }
+        }
+    }
+}
+
 /// Statistics tracking
 #[derive(Default)]
 struct Statistics {
@@ -231,8 +328,24 @@ pub struct RyllApp {
     connected: bool,
     error_message: Option<String>,
     mouse_mode: u32,
-    show_disconnect_dialog: bool,
-    disconnect_reason: Option<String>,
+    /// Auto-reconnect state machine; supplants the old
+    /// `show_disconnect_dialog` + `disconnect_reason` pair.
+    reconnect_state: ReconnectState,
+    /// `true` once a `Pending` tick has actually called
+    /// `reconnect()` and is awaiting the new connection's
+    /// outcome. Distinguishes "we just kicked off attempt N"
+    /// from "we're seeing yet another channel-storm event for
+    /// the disconnect that put us into Pending."
+    awaiting_reconnect_outcome: bool,
+    /// Wall time the most recent `Modal` was entered; used to
+    /// gate the cluster-reset window. Cleared on manual
+    /// reconnect from the modal (user intervention starts a
+    /// fresh budget).
+    last_modal_at: Option<Instant>,
+    /// Count of `Pending` entries (per-attempt) over the
+    /// session's lifetime, surfaced in `session.json` for
+    /// post-hoc analysis of how rocky the session was.
+    auto_reconnect_count: u32,
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
@@ -661,8 +774,10 @@ impl RyllApp {
             connected: false,
             error_message: None,
             mouse_mode: 0,
-            show_disconnect_dialog: false,
-            disconnect_reason: None,
+            reconnect_state: ReconnectState::Idle,
+            awaiting_reconnect_outcome: false,
+            last_modal_at: None,
+            auto_reconnect_count: 0,
             last_mouse_pos: None,
             last_modifiers: None,
             forwarded_buttons: 0,
@@ -782,8 +897,12 @@ impl RyllApp {
         self.connected = false;
         self.error_message = None;
         self.mouse_mode = 0;
-        self.show_disconnect_dialog = false;
-        self.disconnect_reason = None;
+        // Clear the main-channel keepalive-timeout flag so a
+        // subsequent disconnect reports its own cause cleanly
+        // rather than inheriting the previous attempt's state.
+        if let Ok(mut snap) = self.channel_snapshots.main.lock() {
+            snap.keepalive_timeout_fired = false;
+        }
         self.last_mouse_pos = None;
         self.last_modifiers = None;
         self.forwarded_buttons = 0;
@@ -888,12 +1007,95 @@ impl RyllApp {
         info!("app: reconnecting...");
     }
 
+    /// Driven by the disconnect modal's Reconnect button. Counts
+    /// as user intervention: clears the cluster-reset window so a
+    /// failed manual attempt re-arms the full 3-attempt budget
+    /// rather than going straight back to Modal.
+    fn reconnect_manual(&mut self) {
+        self.reconnect_state = ReconnectState::Idle;
+        self.awaiting_reconnect_outcome = false;
+        self.last_modal_at = None;
+        self.reconnect();
+    }
+
+    /// Drive the `ReconnectState` machine in response to a critical
+    /// disconnect (Main/Display/Inputs going down, or any
+    /// `ChannelEvent::Error`). Callers are responsible for writing
+    /// the disconnect snapshot before invoking this — keeping the
+    /// snapshot at the call site avoids double-writing when the
+    /// `Disconnected` handler has already snapshotted for the
+    /// channel-storm path.
+    fn handle_critical_disconnect(&mut self, message: String) {
+        let awaiting = self.awaiting_reconnect_outcome;
+        let now = Instant::now();
+        let new_state =
+            self.reconnect_state
+                .on_disconnect(awaiting, self.last_modal_at, now, message.clone());
+
+        // Even if the state machine ignores the event, the
+        // connection itself has gone — clear surfaces / cursor so
+        // the next paint shows a clean canvas.
+        self.connected = false;
+        self.surfaces.clear();
+        self.cursor_image = None;
+        self.cursor_texture = None;
+
+        let Some(new_state) = new_state else {
+            // Duplicate storm event — state unchanged, no-op.
+            return;
+        };
+
+        if awaiting {
+            self.awaiting_reconnect_outcome = false;
+        }
+
+        if let ReconnectState::Pending { attempt, .. } = &new_state {
+            self.auto_reconnect_count = self.auto_reconnect_count.saturating_add(1);
+            // attempt == 1 is the initial disconnect (no prior
+            // reconnect to report on); attempt > 1 means the
+            // previous attempt just failed.
+            if *attempt > 1 {
+                self.push_notification(
+                    NotifySeverity::Warn,
+                    NotificationSource::BugReport,
+                    format!("Reconnect attempt {} failed: {}", attempt - 1, message,),
+                );
+            }
+        }
+        if let ReconnectState::Modal { .. } = &new_state {
+            self.last_modal_at = Some(now);
+            // The transition into Modal is itself an attempt
+            // failure — the user's three retries have been spent.
+            if awaiting {
+                self.push_notification(
+                    NotifySeverity::Warn,
+                    NotificationSource::BugReport,
+                    format!(
+                        "Reconnect attempt {} failed: {}",
+                        MAX_RECONNECT_ATTEMPTS, message,
+                    ),
+                );
+            }
+        }
+
+        self.reconnect_state = new_state;
+    }
+
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
                     info!("app: session {} initialized", session_id);
                     self.connected = true;
+                    // A fresh successful link clears any pending
+                    // reconnect state. Whether this resulted from
+                    // an auto-retry or a user clicking Reconnect,
+                    // the cycle is done.
+                    if self.reconnect_state != ReconnectState::Idle {
+                        info!("app: reconnect succeeded, returning to Idle");
+                        self.reconnect_state = ReconnectState::Idle;
+                    }
+                    self.awaiting_reconnect_outcome = false;
                 }
 
                 ChannelEvent::SurfaceCreated {
@@ -1145,17 +1347,11 @@ impl RyllApp {
 
                 ChannelEvent::Error { channel, message } => {
                     error!("app: {} channel error: {}", channel.name(), message);
-                    // Snapshot first so the resulting zip captures
-                    // the run-up to the failure rather than the
-                    // post-disconnect cleanup state.
+                    // Snapshot before driving the state machine so
+                    // the zip captures the run-up to the failure.
                     self.maybe_write_disconnect_snapshot(channel.name(), &message);
-                    self.connected = false;
-                    self.surfaces.clear();
-                    self.cursor_image = None;
-                    self.cursor_texture = None;
-                    self.show_disconnect_dialog = true;
-                    self.disconnect_reason =
-                        Some(format!("{} channel error: {}", channel.name(), message));
+                    let reason = format!("{} channel error: {}", channel.name(), message);
+                    self.handle_critical_disconnect(reason);
                 }
 
                 ChannelEvent::UsbChannelReady => {
@@ -1263,27 +1459,23 @@ impl RyllApp {
                         self.webdav_connected_at = None;
                     }
 
-                    // Only show disconnect dialog for critical channels.
-                    // Non-critical channels (USB, WebDAV, Cursor, Playback)
-                    // have independent lifecycles and their disconnect does
-                    // not mean the session is over.
+                    // Only the critical channels drive the
+                    // session-level reconnect state. Non-critical
+                    // channels (USB, WebDAV, Cursor, Playback) have
+                    // independent lifecycles; their disconnects
+                    // are snapshotted above but do not tear down
+                    // the session.
                     match channel {
                         ChannelType::Main | ChannelType::Display | ChannelType::Inputs => {
-                            self.connected = false;
-                            // Drop the rendered guest surface and cursor so the
-                            // window does not retain a stale frame after the
-                            // session ends; the reconnect path needs a clean
-                            // canvas.
-                            self.surfaces.clear();
-                            self.cursor_image = None;
-                            self.cursor_texture = None;
-                            if !self.show_disconnect_dialog {
-                                self.show_disconnect_dialog = true;
-                                self.disconnect_reason = Some(format!(
-                                    "Connection lost ({} channel disconnected)",
-                                    channel.name()
-                                ));
-                            }
+                            let reason = format!(
+                                "Connection lost ({} channel disconnected)",
+                                channel.name()
+                            );
+                            // Snapshot was already written above
+                            // by the unconditional call near the
+                            // top of this arm; the helper now only
+                            // drives the state machine.
+                            self.handle_critical_disconnect(reason);
                         }
                         _ => {
                             debug!(
@@ -1415,6 +1607,7 @@ impl RyllApp {
         snap.mouse_mode = self.mouse_mode;
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
+        snap.auto_reconnect_count = self.auto_reconnect_count;
     }
 
     /// Clone the largest surface's RGBA pixels, capture trigger
@@ -1932,6 +2125,26 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
+        // Auto-reconnect tick: when the Pending deadline has
+        // passed AND we are not already awaiting the outcome of
+        // a prior fire, kick off the next attempt. The flag
+        // doubles as a "don't re-fire on the next frame" gate;
+        // it clears only when the outcome arrives
+        // (SessionInitialized → success, or a disconnect →
+        // advance/Modal).
+        if !self.awaiting_reconnect_outcome {
+            if let ReconnectState::Pending {
+                attempt, next_at, ..
+            } = &self.reconnect_state
+            {
+                if Instant::now() >= *next_at {
+                    info!("app: auto-reconnect attempt {} firing", attempt);
+                    self.awaiting_reconnect_outcome = true;
+                    self.reconnect();
+                }
+            }
+        }
+
         // Resize viewport to match the remote surface (plus stats
         // bar) whenever a new primary surface differs from the
         // size we last fitted to. Maximised/fullscreen windows
@@ -2129,6 +2342,14 @@ impl eframe::App for RyllApp {
                     if self.cadence_enabled {
                         ui.separator();
                         ui.label("Cadence: ON");
+                    }
+
+                    if let ReconnectState::Pending { attempt, .. } = &self.reconnect_state {
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 160, 60),
+                            format!("Reconnecting… ({}/{})", attempt, MAX_RECONNECT_ATTEMPTS),
+                        );
                     }
 
                     if let Some(ref desc) = self.usb_device_description {
@@ -3273,18 +3494,22 @@ impl eframe::App for RyllApp {
                 }
             });
 
+        // The modal only appears when auto-reconnect has given
+        // up. Pending state shows the status-bar indicator
+        // (rendered in the bottom stats panel) instead, so the
+        // user is not interrupted while we are still trying.
         let mut wants_reconnect = false;
-        if self.show_disconnect_dialog {
-            let reason = self
-                .disconnect_reason
-                .as_deref()
-                .unwrap_or("Unknown reason");
-            egui::Window::new("Disconnected")
+        if let ReconnectState::Modal { latest_error } = &self.reconnect_state {
+            let body = format!(
+                "Three automatic reconnect attempts failed: {}",
+                latest_error
+            );
+            egui::Window::new("Connection lost")
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(reason);
+                    ui.label(body);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Reconnect").clicked() {
@@ -3300,7 +3525,7 @@ impl eframe::App for RyllApp {
                 });
         }
         if wants_reconnect {
-            self.reconnect();
+            self.reconnect_manual();
         }
 
         if self.cursor_image.is_some()
@@ -3835,5 +4060,115 @@ mod tests {
             ),
             None,
         );
+    }
+
+    // ── ReconnectState transitions ──────────────────────────
+
+    fn err(s: &str) -> String {
+        s.to_string()
+    }
+
+    #[test]
+    fn reconnect_idle_to_pending_on_first_disconnect() {
+        let now = Instant::now();
+        let next = ReconnectState::Idle.on_disconnect(false, None, now, err("eof"));
+        match next {
+            Some(ReconnectState::Pending {
+                attempt,
+                next_at,
+                latest_error,
+            }) => {
+                assert_eq!(attempt, 1);
+                assert_eq!(
+                    next_at - now,
+                    Duration::from_secs(RECONNECT_BACKOFF_SECS[0])
+                );
+                assert_eq!(latest_error, "eof");
+            }
+            other => panic!("expected Pending(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reconnect_full_failure_cluster_lands_in_modal() {
+        let now = Instant::now();
+        // Initial disconnect: Idle → Pending(1).
+        let s1 = ReconnectState::Idle
+            .on_disconnect(false, None, now, err("e1"))
+            .unwrap();
+        // Attempt 1 failure: Pending(1) → Pending(2).
+        let s2 = s1
+            .on_disconnect(true, None, now + Duration::from_secs(1), err("e2"))
+            .unwrap();
+        assert!(matches!(s2, ReconnectState::Pending { attempt: 2, .. }));
+        // Attempt 2 failure: Pending(2) → Pending(3).
+        let s3 = s2
+            .on_disconnect(true, None, now + Duration::from_secs(5), err("e3"))
+            .unwrap();
+        assert!(matches!(s3, ReconnectState::Pending { attempt: 3, .. }));
+        // Attempt 3 failure: Pending(3) → Modal with latest error.
+        let s4 = s3
+            .on_disconnect(true, None, now + Duration::from_secs(20), err("final"))
+            .unwrap();
+        match s4 {
+            ReconnectState::Modal { latest_error } => assert_eq!(latest_error, "final"),
+            other => panic!("expected Modal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reconnect_storm_event_during_pending_is_ignored() {
+        let now = Instant::now();
+        let pending = ReconnectState::Idle
+            .on_disconnect(false, None, now, err("first"))
+            .unwrap();
+        // A non-awaiting second event (channel storm) must not
+        // advance the attempt counter — that would burn budget
+        // for a single underlying failure.
+        let next = pending.on_disconnect(false, None, now + Duration::from_millis(10), err("dup"));
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn reconnect_cluster_reset_window_blocks_retry() {
+        let now = Instant::now();
+        // Recent modal: a fresh disconnect must skip Pending and
+        // land directly in Modal. Otherwise a flapping server
+        // would have us banging away forever.
+        let modal_at = now - Duration::from_secs(60);
+        let next = ReconnectState::Idle.on_disconnect(false, Some(modal_at), now, err("flap"));
+        assert!(matches!(next, Some(ReconnectState::Modal { .. })));
+    }
+
+    #[test]
+    fn reconnect_cluster_reset_window_expires() {
+        let now = Instant::now();
+        // Beyond the 5-min reset window, a fresh budget unlocks.
+        let modal_at = now - RECONNECT_CLUSTER_RESET - Duration::from_secs(1);
+        let next = ReconnectState::Idle
+            .on_disconnect(false, Some(modal_at), now, err("later"))
+            .unwrap();
+        assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
+    }
+
+    #[test]
+    fn reconnect_modal_ignores_extra_storm_events() {
+        // Once we're in Modal, additional non-awaiting events
+        // must not change state — the user is in control.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal {
+            latest_error: "x".into(),
+        };
+        let next = modal.on_disconnect(false, None, now, err("y"));
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn reconnect_backoff_progression_matches_spec() {
+        // The backoffs published in plan §A.1 are 1s/4s/16s.
+        // Lock them in with a direct check so a typo in the
+        // constant array is caught by the test suite.
+        assert_eq!(RECONNECT_BACKOFF_SECS, [1, 4, 16]);
+        assert_eq!(MAX_RECONNECT_ATTEMPTS, 3);
     }
 }

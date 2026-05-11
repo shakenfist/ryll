@@ -985,28 +985,34 @@ fires unambiguously first whenever it does fire.
 
 ### Block A (no-regret, lands without Phase 01 data)
 
-- [ ] Add `ReconnectState` enum on `RyllApp` (`app.rs`),
+- [x] Add `ReconnectState` enum on `RyllApp` (`app.rs`),
       replacing the implicit boolean `show_disconnect_dialog`.
       State transitions only via the central event handler and
-      the GUI tick.
-- [ ] In the GUI tick (`update()` in `app.rs`), poll
+      the GUI tick. Pure `on_disconnect()` transition with
+      `awaiting_outcome` flag distinguishes retry-failure from
+      channel-storm events.
+- [x] In the GUI tick (`update()` in `app.rs`), poll
       `ReconnectState::Pending` deadlines and trigger
-      `reconnect()` when reached.
-- [ ] Wire `ChannelEvent::Disconnected` / `Error` handlers to
+      `reconnect()` when reached. Gated on
+      `awaiting_reconnect_outcome` so a deadline-past frame
+      doesn't re-fire `reconnect()` on every paint.
+- [x] Wire `ChannelEvent::Disconnected` / `Error` handlers to
       transition Idle → Pending(1) — preserving the existing
       Phase 01 disconnect-snapshot call. Do not bypass the 60 s
       cooldown; auto-reconnect attempts that fail will mostly
       hit cooldown after the first.
-- [ ] Add status-bar "Reconnecting… (n/3)" widget in the
+- [x] Add status-bar "Reconnecting… (n/3)" widget in the
       bottom panel. Match the existing FPS/connected widget
       style.
-- [ ] Push a `NotifySeverity::Warn` notification on each
+- [x] Push a `NotifySeverity::Warn` notification on each
       attempt failure (source `NotificationSource::BugReport`
-      to keep the producer set tidy).
-- [ ] Render the three modal variants from §A.6 at
-      `app.rs:3119` — `Generic` (Reconnect + Quit),
-      `OneShotConsumed` (Quit only), `TicketExpired` (Quit
-      only). Track `latest_error` in `Generic` for context.
+      to keep the producer set tidy). Fires for failures of
+      attempts 1, 2, and 3 within a cluster.
+- [~] Render the three modal variants from §A.6 at
+      `app.rs:3119` — Step 5 lands the `Generic` form
+      (Reconnect + Close, with `latest_error` from the state
+      machine). `OneShotConsumed` and `TicketExpired` move to
+      Step 6 since they depend on the new .vv keys.
 - [ ] Extend the .vv parser at `ryll/src/config.rs:266` to
       read `delete-this-file` (existing standard key) into a
       new `Config::ticket_is_single_use: bool` field. Plumb
@@ -1034,26 +1040,41 @@ fires unambiguously first whenever it does fire.
       disconnect time, render `TicketExpired` anyway and log
       `warn!` "ticket-valid-until in the future at disconnect
       time, possible clock skew" (§A.6 edge case).
-- [ ] In `RyllApp::reconnect()`, clear
+- [x] In `RyllApp::reconnect()`, clear
       `MainSnapshot::keepalive_timeout_fired` (Phase 01 OQ #3
       done here, not in Phase 01).
-- [ ] Add `auto_reconnect_count: u32` to the channel-state
-      JSON (open question 5). Bump it on every transition into
-      Pending.
-- [ ] Unit tests:
-  - State machine transitions: Idle → Pending(1) → Pending(2)
-    → Pending(3) → Modal{Generic} on three failures.
-  - Cooldown and auto-reconnect interact correctly: each
-    failed attempt within 60 s skips snapshot but continues
-    attempting.
-  - `delete-this-file=1` path: disconnect → Modal{OneShotConsumed}
-    without entering Pending.
-  - `ticket-valid-until` past: disconnect at any point →
-    Modal{TicketExpired}; Pending deadline check honours
-    expiry mid-cluster.
-  - `ticket-valid-until` future: warning fires once at T-30 s.
-  - .vv parser: round-trips both keys; malformed
-    `ticket-valid-until` logs warn and yields `None`.
+- [x] Add `auto_reconnect_count: u32` for the bug-report
+      pipeline (open question 5). Bump it on every transition
+      into Pending. **Lives on `AppSnapshot` (session.json)**
+      rather than the per-channel state JSON the plan originally
+      named — auto-reconnect is session-level, not
+      channel-level, so the session-summary file is the natural
+      home.
+- [x] State-machine unit tests in `app.rs`:
+  - Idle → Pending(1) on first disconnect with correct
+    backoff.
+  - Idle → Pending(1) → Pending(2) → Pending(3) → Modal on
+    three awaiting-outcome failures, latest_error tracked.
+  - Storm-event idempotency: a non-awaiting second event while
+    Pending returns None (state unchanged).
+  - Cluster-reset window blocks retry within 5 min of Modal.
+  - Cluster-reset window expires after 5 min — fresh Pending.
+  - Modal ignores extra non-awaiting events.
+  - Backoff array and MAX_ATTEMPTS pinned at [1, 4, 16] / 3.
+- [ ] Cooldown and auto-reconnect interact correctly: each
+      failed attempt within 60 s skips snapshot but continues
+      attempting. (Snapshot cooldown is exercised by existing
+      bugreport.rs tests; integration verification deferred to
+      the manual check below.)
+- [ ] `delete-this-file=1` path: disconnect → Modal{OneShotConsumed}
+      without entering Pending. — Step 6.
+- [ ] `ticket-valid-until` past: disconnect at any point →
+      Modal{TicketExpired}; Pending deadline check honours
+      expiry mid-cluster. — Step 6.
+- [ ] `ticket-valid-until` future: warning fires once at T-30 s.
+      — Step 6.
+- [ ] .vv parser: round-trips both keys; malformed
+      `ticket-valid-until` logs warn and yields `None`. — Step 6.
 - [ ] Update README's "console.vv support" section to note
     ryll's interpretation of `delete-this-file=1` (skip auto-
     reconnect) and the new `ticket-valid-until` extension key

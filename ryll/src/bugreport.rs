@@ -457,6 +457,10 @@ pub struct AppSnapshot {
     pub mouse_mode: u32,
     pub connected: bool,
     pub uptime_secs: f64,
+    /// Number of auto-reconnect attempts (Pending entries) the
+    /// session has accumulated. 0 for a session that never lost
+    /// its connection; rising values indicate a rocky session.
+    pub auto_reconnect_count: u32,
 }
 
 impl Default for AppSnapshot {
@@ -473,6 +477,7 @@ impl Default for AppSnapshot {
             mouse_mode: 0,
             connected: false,
             uptime_secs: 0.0,
+            auto_reconnect_count: 0,
         }
     }
 }
