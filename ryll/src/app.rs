@@ -3584,18 +3584,33 @@ impl eframe::App for RyllApp {
             if region_completed {
                 let (sx, sy) = self.region_drag_start.unwrap();
                 let (ex, ey) = self.region_drag_end.unwrap();
-                let region = ReportRegion {
-                    left: sx.min(ex),
-                    top: sy.min(ey),
-                    right: sx.max(ex),
-                    bottom: sy.max(ey),
-                };
-                let report_type = self.bug_report_type.clone();
-                let description = self.bug_description.clone();
-                self.finish_bug_report(report_type, description, Some(region));
-                self.region_select_active = false;
-                self.region_drag_start = None;
-                self.region_drag_end = None;
+                match validate_region(sx, sy, ex, ey) {
+                    Some(region) => {
+                        let report_type = self.bug_report_type.clone();
+                        let description = self.bug_description.clone();
+                        self.finish_bug_report(report_type, description, Some(region));
+                        self.region_select_active = false;
+                        self.region_drag_start = None;
+                        self.region_drag_end = None;
+                    }
+                    None => {
+                        // Click without drag, or any other
+                        // degenerate input (K4 guard). Stay in
+                        // region-select mode and tell the user
+                        // what went wrong; reset the drag state
+                        // so they can try again without having
+                        // to re-enter region-select.
+                        self.push_notification(
+                            NotifySeverity::Warn,
+                            NotificationSource::BugReport,
+                            "Drag a region with non-zero area, or press \
+                             Escape to cancel."
+                                .to_string(),
+                        );
+                        self.region_drag_start = None;
+                        self.region_drag_end = None;
+                    }
+                }
             }
         }
 
@@ -3887,6 +3902,41 @@ fn resolution_notification_due(
         return None;
     }
     Some(target)
+}
+
+/// Build a `ReportRegion` from the raw drag-start / drag-end
+/// coordinates produced by the region-select widget, iff the
+/// resulting rectangle has strictly positive area. Returns
+/// `None` for click-without-drag (the K4 case in Phase 04) —
+/// the GUI handler uses this to keep the user in
+/// region-select mode and surface a "drag a non-zero region"
+/// notification rather than emitting a degenerate
+/// `ReportRegion` into `report.json`.
+///
+/// "Strictly positive area" means `right > left AND
+/// bottom > top` — a deliberate 1-pixel drag is allowed
+/// since it points at a specific pixel, and rejecting it
+/// would require a jitter threshold that no current data
+/// justifies.
+///
+/// Reversed drags (bottom-right to top-left) are normalised
+/// here so the produced region always satisfies
+/// `left ≤ right && top ≤ bottom`.
+fn validate_region(sx: u32, sy: u32, ex: u32, ey: u32) -> Option<ReportRegion> {
+    let left = sx.min(ex);
+    let right = sx.max(ex);
+    let top = sy.min(ey);
+    let bottom = sy.max(ey);
+    if right > left && bottom > top {
+        Some(ReportRegion {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    } else {
+        None
+    }
 }
 
 /// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
@@ -4548,5 +4598,63 @@ mod tests {
         assert!(other.muted());
         other.set_volume(60);
         assert_eq!(vc.volume(), 60);
+    }
+
+    // ── Region-select validation (K4 guard) ─────────────────
+
+    #[test]
+    fn validate_region_click_without_drag_returns_none() {
+        // Press and release at the same point: degenerate 0×0
+        // rectangle, must be rejected at the GUI layer so we
+        // never serialise it into report.json.
+        assert!(validate_region(100, 100, 100, 100).is_none());
+    }
+
+    #[test]
+    fn validate_region_zero_width_returns_none() {
+        // Same x, non-zero vertical drag — still degenerate.
+        assert!(validate_region(50, 10, 50, 80).is_none());
+    }
+
+    #[test]
+    fn validate_region_zero_height_returns_none() {
+        // Non-zero horizontal drag, same y — still degenerate.
+        assert!(validate_region(10, 40, 100, 40).is_none());
+    }
+
+    #[test]
+    fn validate_region_one_by_one_returns_some() {
+        // A deliberate 1-pixel drag points at a specific pixel
+        // and must be allowed; rejecting it would require a
+        // jitter floor without supporting data.
+        let r = validate_region(7, 11, 8, 12).expect("1x1 region valid");
+        assert_eq!(r.left, 7);
+        assert_eq!(r.top, 11);
+        assert_eq!(r.right, 8);
+        assert_eq!(r.bottom, 12);
+    }
+
+    #[test]
+    fn validate_region_normal_drag_returns_some() {
+        // Happy path: a 30×40 region produced by a normal
+        // top-left → bottom-right drag.
+        let r = validate_region(10, 20, 40, 60).expect("normal region valid");
+        assert_eq!(r.left, 10);
+        assert_eq!(r.top, 20);
+        assert_eq!(r.right, 40);
+        assert_eq!(r.bottom, 60);
+    }
+
+    #[test]
+    fn validate_region_reversed_drag_normalises() {
+        // Drag from bottom-right to top-left must produce the
+        // same canonical {left ≤ right, top ≤ bottom} region
+        // as the forward drag — the bug-report consumers
+        // assume this invariant.
+        let r = validate_region(40, 60, 10, 20).expect("reversed drag valid");
+        assert_eq!(r.left, 10);
+        assert_eq!(r.top, 20);
+        assert_eq!(r.right, 40);
+        assert_eq!(r.bottom, 60);
     }
 }

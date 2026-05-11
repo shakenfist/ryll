@@ -248,19 +248,18 @@ bug-report producer chain.
 
 ## Tasks
 
-- [ ] Add `validate_region(sx, sy, ex, ey) -> Option<ReportRegion>`
+- [x] Add `validate_region(sx, sy, ex, ey) -> Option<ReportRegion>`
       as a free function in `ryll/src/app.rs` near the other
-      pure helpers (`compute_auto_resize`,
-      `resolution_notification_due`, etc.). Doc comment
+      pure helpers (above `default_arrow_cursor`). Doc comment
       explains the K4 context and the "strictly positive
       area" rule.
-- [ ] In the region-completion block at `app.rs:3584`,
+- [x] In the region-completion block at `app.rs:3584`,
       dispatch on `validate_region`. On `Some`, behave as
       today. On `None`, push a `NotifySeverity::Warn`
       notification, reset `region_drag_start` and
       `region_drag_end`, and leave `region_select_active`
       true so the user can try again.
-- [ ] Add unit tests in `ryll/src/app.rs::tests`:
+- [x] Add unit tests in `ryll/src/app.rs::tests`:
   - `validate_region_click_without_drag_returns_none`
   - `validate_region_zero_width_returns_none`
   - `validate_region_zero_height_returns_none`
@@ -271,10 +270,9 @@ bug-report producer chain.
   - `validate_region_reversed_drag_normalises` (drag from
     bottom-right to top-left should still produce a
     canonical {left ≤ right, top ≤ bottom} region)
-- [ ] Update `PLAN-session-001-feedback.md` K4 row in the
-      "Confirmed bugs" table — append the resolution pointer
-      after the fix lands.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `PLAN-session-001-feedback.md` K4 row in the
+      "Confirmed bugs" table with the resolution pointer.
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       row for Phase 04 → Done.
 - [ ] Manual integration check (deferred operator action,
       can bundle with Phase 02 and Phase 03 manual
