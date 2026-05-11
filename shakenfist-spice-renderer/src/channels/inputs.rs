@@ -236,7 +236,10 @@ impl InputsChannel {
                         }
                         Err(e) => {
                             self.event_tx
-                                .send(ChannelEvent::Error(format!("inputs: read error: {}", e)))
+                                .send(ChannelEvent::Error {
+                                    channel: ChannelType::Inputs,
+                                    message: format!("read error: {}", e),
+                                })
                                 .await
                                 .ok();
                             self.repaint_notify.notify_one();

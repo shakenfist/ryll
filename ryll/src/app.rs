@@ -1143,18 +1143,19 @@ impl RyllApp {
                     self.latency.record(sample_ms);
                 }
 
-                ChannelEvent::Error(msg) => {
-                    error!("app: channel error: {}", msg);
+                ChannelEvent::Error { channel, message } => {
+                    error!("app: {} channel error: {}", channel.name(), message);
                     // Snapshot first so the resulting zip captures
                     // the run-up to the failure rather than the
                     // post-disconnect cleanup state.
-                    self.maybe_write_disconnect_snapshot("error", &msg);
+                    self.maybe_write_disconnect_snapshot(channel.name(), &message);
                     self.connected = false;
                     self.surfaces.clear();
                     self.cursor_image = None;
                     self.cursor_texture = None;
                     self.show_disconnect_dialog = true;
-                    self.disconnect_reason = Some(msg);
+                    self.disconnect_reason =
+                        Some(format!("{} channel error: {}", channel.name(), message));
                 }
 
                 ChannelEvent::UsbChannelReady => {

@@ -140,7 +140,10 @@ pub async fn run_connection(
     );
 
     // Connect other channels
-    let mut handles = vec![main_handle];
+    let mut handles: Vec<(
+        ChannelType,
+        tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+    )> = vec![(ChannelType::Main, main_handle)];
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
     let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
@@ -171,7 +174,10 @@ pub async fn run_connection(
                     shared_glz_dictionary.clone(),
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Display,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             ChannelType::Cursor => {
@@ -188,7 +194,10 @@ pub async fn run_connection(
                     snapshots.cursor.clone(),
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Cursor,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             ChannelType::Inputs => {
@@ -207,7 +216,10 @@ pub async fn run_connection(
                     enable_paste,
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Inputs,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
                 // input_rx is moved, can't connect more inputs channels
                 break;
             }
@@ -229,7 +241,10 @@ pub async fn run_connection(
                         snapshots.usbredir.clone(),
                         log_config,
                     );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
+                    handles.push((
+                        ChannelType::Usbredir,
+                        tokio::spawn(async move { channel.run().await }),
+                    ));
                 } else {
                     info!(
                         "Skipping additional usbredir channel (id={}): only one supported",
@@ -255,7 +270,10 @@ pub async fn run_connection(
                         snapshots.webdav.clone(),
                         log_config,
                     );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
+                    handles.push((
+                        ChannelType::Webdav,
+                        tokio::spawn(async move { channel.run().await }),
+                    ));
                 } else {
                     info!(
                         "Skipping additional webdav channel (id={}): only one supported",
@@ -280,7 +298,10 @@ pub async fn run_connection(
                     cancel.clone(),
                     opus_sink.clone(),
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Playback,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             _ => {
@@ -300,7 +321,7 @@ pub async fn run_connection(
     // polls at 100 ms; that latency is well inside human reaction
     // time and avoids adding any awaitable signalling primitive.
     let cancel_watcher = {
-        let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+        let abort_handles: Vec<_> = handles.iter().map(|(_, h)| h.abort_handle()).collect();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -319,18 +340,24 @@ pub async fn run_connection(
     };
 
     // Wait for all channel tasks
-    for handle in handles {
+    for (channel_type, handle) in handles {
         match handle.await {
             Err(e) if e.is_cancelled() => {
                 // Aborted by the cancel watcher; not an error.
             }
             Err(e) => {
-                error!("Channel task panic: {}", e);
+                error!("Channel task panic on {}: {}", channel_type.name(), e);
             }
             Ok(Err(e)) => {
-                let msg = format!("channel error: {}", e);
-                error!("session: {}", msg);
-                event_tx.send(ChannelEvent::Error(msg)).await.ok();
+                let message = format!("channel error: {}", e);
+                error!("session: {}: {}", channel_type.name(), message);
+                event_tx
+                    .send(ChannelEvent::Error {
+                        channel: channel_type,
+                        message,
+                    })
+                    .await
+                    .ok();
                 repaint_notify.notify_one();
             }
             Ok(Ok(())) => {}
@@ -514,8 +541,8 @@ pub async fn run_headless(
                     ChannelEvent::AgentConnected(connected) => {
                         info!("headless: vdagent connected={}", connected);
                     }
-                    ChannelEvent::Error(msg) => {
-                        error!("Error: {}", msg);
+                    ChannelEvent::Error { channel, message } => {
+                        error!("Error on {}: {}", channel.name(), message);
                     }
                     ChannelEvent::Notification(entry) => {
                         notifications.push(entry);

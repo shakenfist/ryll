@@ -635,8 +635,9 @@ pub enum BugReportType {
     /// Auto-generated when ryll observes a channel disconnect
     /// (transport error, EOF, or its own keepalive timeout).
     /// `channel` is the channel name that fired the disconnect
-    /// signal, or "error" for `ChannelEvent::Error` paths
-    /// without a specific channel attribution.
+    /// signal — every `ChannelEvent::Disconnected` and
+    /// `ChannelEvent::Error` carries a structured `ChannelType`,
+    /// so the attribution is always known.
     Disconnect {
         channel: String,
     },
@@ -712,9 +713,10 @@ pub struct PerChannelDiagnostics {
 /// to re-run the session.
 #[derive(Debug, Clone, Serialize)]
 pub struct DisconnectCause {
-    /// Channel name that fired the disconnect signal, or
-    /// "error" for `ChannelEvent::Error` without a specific
-    /// channel.
+    /// Channel name that fired the disconnect signal. Both
+    /// `ChannelEvent::Disconnected` and `ChannelEvent::Error`
+    /// carry a structured `ChannelType`, so attribution is
+    /// always known.
     pub channel: String,
     /// Free-form cause / reason captured at the disconnect
     /// site (the `info!`/`error!` log line text).

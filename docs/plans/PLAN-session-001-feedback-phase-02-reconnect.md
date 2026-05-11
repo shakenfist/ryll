@@ -34,10 +34,15 @@ with a different framing:
 
 Pending steps as of resolution date (see active task list):
 
-- Step 4: `ChannelEvent::Error` channel attribution
-- Step 5: ReconnectState state machine + auto-reconnect UX
-- Step 6: console.vv extensions + modal variants
-- Step 7: wrap-up docs and master-plan status
+- Step 4: `ChannelEvent::Error` channel attribution — see
+  **Block E** in the Approach section for the design and
+  the Block E Tasks subsection for the concrete change list.
+- Step 5: ReconnectState state machine + auto-reconnect UX —
+  Block A in the Approach section.
+- Step 6: console.vv extensions + modal variants — Block A
+  sections A.4 / A.5 / A.6 in the Approach section.
+- Step 7: wrap-up docs and master-plan status — the "Wrap-up"
+  Tasks subsection.
 
 Two related deferrals also remain open:
 
@@ -657,6 +662,76 @@ comment at the timeout site explaining why 90 s and not 30 s
 server itself is dead or unreachable, not a primary
 mechanism").
 
+### Block E — `ChannelEvent::Error` channel attribution
+
+Originally raised as a "minor Phase 01 plumbing improvement"
+under the Diagnosis section. Promoted to a first-class Phase 02
+step because the auto-reconnect UX in Block A wants per-channel
+attribution on every disconnect path — `Disconnected` already
+carries it, `Error` does not, and the resulting asymmetry leaks
+into modal copy, snapshot filenames, and any future
+per-channel reconnect telemetry.
+
+**Variant change.** `ChannelEvent::Error(String)` becomes
+`ChannelEvent::Error { channel: ChannelType, message: String }`
+in `shakenfist-spice-renderer/src/channels/mod.rs:174`. Mirrors
+`Disconnected(ChannelType)`.
+
+**Three emit sites:**
+
+- `channels/inputs.rs:239` — straightforward; pass
+  `ChannelType::Inputs`. The `"inputs: "` prefix is dropped from
+  the message string since the structured field carries the same
+  information.
+- `session.rs:333` — currently inside a flat `for handle in
+  handles` loop where channel attribution has already been lost.
+  Fix at construction: pair each `JoinHandle` with its
+  `ChannelType` so the wait loop can pass it through. Specifically:
+  - `session.rs:143` becomes
+    `vec![(ChannelType::Main, main_handle)]`.
+  - Every `handles.push(tokio::spawn(...))` at lines 174, 191,
+    210, 232, 258, 283 becomes
+    `handles.push((channel_type, tokio::spawn(...)))`.
+  - The `abort_handles` collection at line 303 iterates
+    `.map(|(_, h)| h.abort_handle())`.
+  - The wait loop at line 322 destructures
+    `(channel_type, handle)` and forwards the type into the
+    event.
+- (No third emit site today, but the variant must remain
+  composable for future channels that surface
+  application-level errors — webdav and usbredir are the
+  likely future emitters.)
+
+**Two consume sites:**
+
+- `session.rs:517` (headless `error!` log) — include channel
+  name in the log line so headless-mode operators see the
+  attribution.
+- `ryll/src/app.rs:1146` — destructure `{ channel, message }`
+  and pass `channel.name()` to
+  `maybe_write_disconnect_snapshot` in place of the hard-coded
+  `"error"`. Also include the channel name in
+  `disconnect_reason` so the existing modal text reads
+  ("inputs channel error: ...") rather than just
+  ("Connection error: ...").
+
+**Doc fixups:** the two doc comments in `bugreport.rs` at
+lines 638 and 716 currently say `"error" for ChannelEvent::Error
+paths without a specific channel attribution` — both become
+unconditional, since every `Error` now names its channel. The
+`_ =>` fallback arm in `BugReportType::channel_name()` at
+line 671 stays as a defensive default but should never fire
+after this change.
+
+No new tests required; the change is mechanical and the
+existing unit / integration suite exercises the affected
+paths. Verified by `make build`, `make lint`, `make test`. The
+filename change (`ryll-disconnect-inputs-…` instead of
+`ryll-disconnect-error-…`) is the user-visible signal.
+
+Block E is independent of Blocks A/B/C/D and may land before
+Block A. It does not require Phase 01 data.
+
 ## Diagnosis
 
 (This section is the "Output of Block B" promised under
@@ -858,10 +933,10 @@ fires unambiguously first whenever it does fire.
   `ryll-disconnect-inputs-…`, which is mildly confusing. Phase
   01's `BugReportType::Disconnect { channel }` already supports
   the per-channel form; the gap is in the event itself.
-  Consider a small refactor to `ChannelEvent::Error { channel:
-  ChannelType, message: String }` so the snapshot pipeline
-  picks up the channel name. Defer to a follow-up phase if it
-  bloats this one.
+  **Promoted to Block E (Approach section) and tracked as
+  Step 4 of this phase** — a small mechanical refactor to
+  `ChannelEvent::Error { channel: ChannelType, message: String }`
+  so the snapshot pipeline picks up the channel name.
 - `RuntimeMetrics::unavailable("not sampled on the GUI thread")`
   in the auto-disconnect zip is a known limitation but the
   error message is opaque to a maintainer reading the zip
@@ -1082,6 +1157,34 @@ hypothesis. No tasks here.
       `test_collect_per_channel_round_trips_keepalive_and_traffic`
       assertion if it referenced 30 s anywhere (grep — it
       shouldn't, but verify).
+
+### Block E (`ChannelEvent::Error` attribution, independent of A/B/C/D)
+
+- [ ] Change `ChannelEvent::Error(String)` to
+      `ChannelEvent::Error { channel: ChannelType, message: String }`
+      in `shakenfist-spice-renderer/src/channels/mod.rs:174`.
+- [ ] Update `channels/inputs.rs:239` to construct the new
+      variant with `ChannelType::Inputs`; drop the `"inputs: "`
+      message prefix.
+- [ ] Pair each channel `JoinHandle` with its `ChannelType` in
+      `session.rs`:
+  - `let mut handles = vec![(ChannelType::Main, main_handle)];`
+    at line 143.
+  - Adjust every `handles.push(tokio::spawn(...))` site (lines
+    174, 191, 210, 232, 258, 283) to push the tuple.
+  - `abort_handles` at line 303 maps `(_, h) => h.abort_handle()`.
+  - Wait loop at line 322 destructures and forwards the channel
+    type into `ChannelEvent::Error { channel, message }`.
+- [ ] Update the headless consumer at `session.rs:517` to log
+      the channel name.
+- [ ] Update `ryll/src/app.rs:1146` to destructure
+      `{ channel, message }`; pass `channel.name()` to
+      `maybe_write_disconnect_snapshot` and embed it in
+      `disconnect_reason`.
+- [ ] Update the two doc comments in `ryll/src/bugreport.rs`
+      (lines 638, 716) that describe the now-impossible
+      "no channel attribution" case.
+- [ ] Verify with `make build`, `make lint`, `make test`.
 
 ### Wrap-up
 
