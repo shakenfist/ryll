@@ -234,3 +234,60 @@ retention is still too short to be useful after Phase 06.
 Out of scope for this plan (tracked elsewhere):
 G1 → `PLAN-macos-runtime-metrics.md`;
 U1 → `PLAN-video-keeping-up.md`.
+
+## Deferred side-quests from the K1 investigation
+
+These three items surfaced as possible angles while
+investigating K1 (the "main channel wedges after long idle"
+bug, since resolved at the root in commit `370d8ce5`). Each
+was deemed worth keeping but not blocking on, and none ended
+up load-bearing for K1's resolution. Captured here so the
+ideas are not lost — pick up only if a future session brings
+fresh motivation.
+
+- **Step 2d — macOS screen-lock detection.** Detect when the
+  macOS user has locked their screen
+  (`CGSessionCopyCurrentDictionary` →
+  `kCGSSessionScreenIsLocked` is the documented entry point;
+  alternatively the distributed notification
+  `com.apple.screenIsLocked`). Originally investigated as a
+  K1 trigger hypothesis (does App Nap or screen lock change
+  scheduling enough to wedge the runtime?). Syslog grep
+  ruled lock state out as a K1 trigger, but a real
+  screen-lock signal still has standalone value: suspend
+  clipboard polling while locked (cheaper, and avoids
+  surprising the user with stale paste content on unlock),
+  push a Warn notification on lock so the notifications
+  panel records the transition. Linux/Windows equivalents
+  exist (XScreenSaver / `gnome-screensaver-command -q`;
+  `WTSRegisterSessionNotification`) but should land as
+  separate phases — macOS is the only platform where this
+  was actively suspected.
+
+- **Step 22 — macOS app icon.** ryll launches on macOS with
+  the default egui placeholder icon in the Dock. A proper
+  app icon (multi-resolution .icns or asset-catalog
+  AppIcon.appiconset) wired into the `cargo bundle` /
+  custom Info.plist path would make ryll look less like a
+  prototype in screenshots and the Dock. Surfaced during K1
+  investigation when the user was switching between many
+  ryll windows during reproductions; trivially deferrable
+  once we confirmed the icon was not a K1 factor. Probably
+  ~half a day's work: source SVG, render to the macOS icon
+  matrix, plumb through the packaging Makefile target.
+
+- **Step 23 — stack-trace capture in disconnect bug
+  reports.** When `BugReport::write_disconnect` fires, also
+  capture a current-thread stack trace (and, where
+  available, all-thread snapshots — `tokio::runtime::dump()`
+  was added behind an unstable feature flag in tokio 1.32+
+  but is still gated on `tokio_unstable`). Would have
+  pointed us at the abandoned-receiver wedge in
+  `session.rs` much faster during K1 — the channel state
+  showed "waiting" but we had no view into *what* it was
+  waiting on. Defer because it requires `tokio_unstable`
+  (project-wide toolchain decision, not a one-file change)
+  and the simpler `backtrace` crate would give us only the
+  GUI-thread frame which would have been less useful in
+  K1's case. Revisit if another wedge-class bug shows up
+  and conventional snapshots prove insufficient again.

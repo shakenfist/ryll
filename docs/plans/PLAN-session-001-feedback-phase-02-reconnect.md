@@ -44,12 +44,14 @@ Pending steps as of resolution date (see active task list):
 - Step 7: wrap-up docs and master-plan status — the "Wrap-up"
   Tasks subsection.
 
-Two related deferrals also remain open:
+Three K1-investigation side-quests were captured as
+deferred work in the master plan's "Deferred side-quests
+from the K1 investigation" section
+(`PLAN-session-001-feedback.md`) rather than re-listed here:
 
-- Step 2d: screen-lock detection on macOS (deferred during K1
-  investigation; syslog grep ruled lock state out as a K1
-  trigger but the feature still has standalone value)
-- Stack-trace capture in disconnect bug reports
+- Step 2d: screen-lock detection on macOS.
+- Step 22: macOS app icon.
+- Step 23: stack-trace capture in disconnect bug reports.
 
 The rest of this document is preserved unmodified for context
 on why each Phase 02 step was originally proposed and how it
