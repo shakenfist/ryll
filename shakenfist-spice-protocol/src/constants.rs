@@ -187,6 +187,7 @@ pub mod display_server {
     pub const STREAM_DATA: u16 = 123;
     pub const STREAM_CLIP: u16 = 124;
     pub const STREAM_DESTROY: u16 = 125;
+    pub const STREAM_DESTROY_ALL: u16 = 126;
 
     // Draw operations (302+)
     pub const DRAW_FILL: u16 = 302;
@@ -452,5 +453,15 @@ mod tests {
         assert_eq!(SpiceVisibility::from_u32(1), Some(SpiceVisibility::Medium));
         assert_eq!(SpiceVisibility::from_u32(2), Some(SpiceVisibility::High));
         assert_eq!(SpiceVisibility::from_u32(99), None);
+    }
+
+    #[test]
+    fn display_stream_destroy_all_opcode_pinned() {
+        // Phase 05 (K5) guard. The opcode value is defined in
+        // spice-protocol/spice/enums.h:497 and any drift would
+        // silently break ryll's handler. The opcode is also
+        // exercised end-to-end via display.rs's match arm —
+        // this assertion is just the constant-value backstop.
+        assert_eq!(display_server::STREAM_DESTROY_ALL, 126);
     }
 }

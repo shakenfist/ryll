@@ -1141,6 +1141,19 @@ impl DisplayChannel {
                 }
             }
 
+            display_server::STREAM_DESTROY_ALL => {
+                // Empty payload — server signals "tear down every
+                // active stream", typically before a resolution
+                // change or surface reconfiguration. Equivalent to
+                // spice-gtk's clear_streams() at
+                // channel-display.c:1855.
+                info!(
+                    "display: stream_destroy_all (clearing {} streams)",
+                    self.streams.len()
+                );
+                self.streams.clear();
+            }
+
             display_server::STREAM_ACTIVATE_REPORT => {
                 debug!("display: stream_activate_report");
             }

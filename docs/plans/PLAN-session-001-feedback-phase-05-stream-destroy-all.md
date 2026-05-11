@@ -205,25 +205,25 @@ would invent semantics the protocol doesn't guarantee.
 
 ## Tasks
 
-- [ ] Add `pub const STREAM_DESTROY_ALL: u16 = 126;` to
+- [x] Add `pub const STREAM_DESTROY_ALL: u16 = 126;` to
       `shakenfist-spice-protocol/src/constants.rs` in the
       `display_server` module, immediately after
       `STREAM_DESTROY`.
-- [ ] Add `display_server::STREAM_DESTROY_ALL => "stream_destroy_all"`
+- [x] Add `display_server::STREAM_DESTROY_ALL => "stream_destroy_all"`
       to the message-name lookup in
-      `shakenfist-spice-protocol/src/logging.rs:383`.
-- [ ] Add a new match arm in
+      `shakenfist-spice-protocol/src/logging.rs`.
+- [x] Add a new match arm in
       `shakenfist-spice-renderer/src/channels/display.rs`
       after the existing `STREAM_DESTROY` arm. Body:
       `info!` log with current stream count, then
       `self.streams.clear()`. Comment cites the spice-gtk
       equivalent for traceability.
-- [ ] Add a sanity unit test in `shakenfist-spice-protocol`
+- [x] Add a sanity unit test in `shakenfist-spice-protocol`
+      (`constants::tests::display_stream_destroy_all_opcode_pinned`)
       asserting `display_server::STREAM_DESTROY_ALL == 126`.
-      Pure constant guard, no harness needed.
-- [ ] Update `PLAN-session-001-feedback.md` K5 row in the
+- [x] Update `PLAN-session-001-feedback.md` K5 row in the
       "Confirmed bugs" table with the resolution pointer.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       row for Phase 05 → Done.
 - [ ] Manual integration check (deferred operator action,
       bundles with the running Phase 02–04 manual

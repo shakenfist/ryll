@@ -56,7 +56,7 @@ description), `D#` (derived from the report data).
 | **K2** | Ring-buffer frame builder drops SPICE messages > 64 KB (missing TCP segmentation in `bugreport.rs:317`; live writer already segments via `capture.rs:78`) | N4, B1 (10:12:15Z), B2 (10:15:01Z) | Medium — silently drops large display messages from bug-report pcaps | Phase 08 — own plan; mirror `write_segmented`; pairs with Phase 07 (entry-per-segment fits `Arc<[u8]>`) |
 | **K3** | Reconnect resets client audio volume | B6 (10:40:51Z) | Low–Medium — surprises user after every reconnect | **Resolved** in Phase 03 — `RyllApp::reconnect()` now reuses `self.volume_control` instead of allocating a fresh `VolumeControl`. See `PLAN-session-001-feedback-phase-03-audio-volume.md`. |
 | **K4** | Region-select can produce a zero-width rectangle | D2 (B4, B6 metadata) | Low — bad-data path in bug reports | **Resolved** in Phase 04 — GUI-layer guard via new `validate_region` helper rejects zero-area inputs with a Warn notification, keeping the user in region-select for another attempt. See `PLAN-session-001-feedback-phase-04-region-select.md`. |
-| **K5** | Unhandled `SPICE_MSG_DISPLAY_STREAM_DESTROY_ALL` (msg type 126) | pedantic zip 08:36Z (`display:hexdump:126`) | Low — streams are torn down individually elsewhere, but unhandled batch destroy leaves stale stream state on resolution change | Phase 05 — own plan (small); empty payload, one-line equivalent in spice-gtk (`channel-display.c:1880`) |
+| **K5** | Unhandled `SPICE_MSG_DISPLAY_STREAM_DESTROY_ALL` (msg type 126) | pedantic zip 08:36Z (`display:hexdump:126`) | Low — streams are torn down individually elsewhere, but unhandled batch destroy leaves stale stream state on resolution change | **Resolved** in Phase 05 — new opcode constant + display-channel match arm calls `self.streams.clear()`, mirroring spice-gtk's `clear_streams`. See `PLAN-session-001-feedback-phase-05-stream-destroy-all.md`. |
 
 ### Confirmed feature requests
 
@@ -192,7 +192,7 @@ table top-to-bottom is always safe.
 | 2. Main-channel auto-reconnect / keepalive (originally framed as the K1 fix; K1 root cause is now fixed independently in `370d8ce5`. Phase 02 reframed as general-purpose disconnect/reconnect UX — steps 1, 2, 2b, 2c, 2e, 2f, 3 landed during the investigation; steps 4, 5, 6 landed as session-001-feedback follow-ups; step 7 is this doc wrap-up.) | PLAN-session-001-feedback-phase-02-reconnect.md | Done |
 | 3. Preserve audio volume across reconnect | PLAN-session-001-feedback-phase-03-audio-volume.md | Done |
 | 4. Region-select zero-width guard | PLAN-session-001-feedback-phase-04-region-select.md | Done |
-| 5. Handle `STREAM_DESTROY_ALL` (display msg 126) | PLAN-session-001-feedback-phase-05-stream-destroy-all.md | Not started |
+| 5. Handle `STREAM_DESTROY_ALL` (display msg 126) | PLAN-session-001-feedback-phase-05-stream-destroy-all.md | Done |
 | 6. Rebalance per-channel ring-buffer split by expected traffic | PLAN-session-001-feedback-phase-06-channel-rebalance.md | Not started |
 | 7. `Arc<[u8]>` refactor for `TrafficEntry::pcap_frame` | PLAN-session-001-feedback-phase-07-traffic-arc.md | Not started |
 | 8. Segment large messages in ring-buffer frame builder | PLAN-session-001-feedback-phase-08-ring-segmentation.md | Not started |
