@@ -180,28 +180,27 @@ catches accidental re-introduction of the bug via a future
 
 ## Tasks
 
-- [ ] In `RyllApp::reconnect()` (`ryll/src/app.rs` ~line
+- [x] In `RyllApp::reconnect()` (`ryll/src/app.rs` ~line
       995), remove the `let volume_control =
       VolumeControl::new();` allocation and the
       `self.volume_control = volume_control.clone();`
       reassignment. Change `let vol_for_conn = volume_control;`
       to `let vol_for_conn = self.volume_control.clone();`.
-      Add a one-sentence comment above the `vol_for_conn`
-      binding explaining that volume is host-side state that
-      survives reconnects.
-- [ ] Add a unit test in `ryll/src/app.rs::tests`
+      Comment above the `vol_for_conn` binding explains that
+      volume is host-side state that survives reconnects.
+- [x] Add a unit test in `ryll/src/app.rs::tests`
       `volume_control_round_trip` that constructs a
       `VolumeControl`, calls `set_volume(25)` and
       `set_muted(true)`, and asserts `volume() == 25` and
-      `muted() == true`. Comment in the test body explains
-      the K3 context: the fix relies on the same `Arc<VolumeControl>`
-      surviving the reconnect path, so the test pins the
-      external API the fix depends on.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
-      row for Phase 03 → Done after the fix lands.
-- [ ] Update `PLAN-session-001-feedback.md` K3 row in the
-      "Confirmed bugs" table — append "Resolved in
-      `<commit-sha>`" pointer.
+      `muted() == true`. Also exercises the Arc-shared-read
+      path (one clone sees writes from another) since that
+      is the property the fix's `self.volume_control.clone()`
+      hand-off relies on.
+- [x] Update `PLAN-session-001-feedback.md` Execution table
+      row for Phase 03 → Done.
+- [x] Update `PLAN-session-001-feedback.md` K3 row in the
+      "Confirmed bugs" table with the resolution pointer
+      (this phase's plan file is named in the row).
 - [ ] Manual integration check (deferred operator action,
       bundled with the Phase 02 manual checklist if you run
       them together): connect, set volume to 25%, mute, kill

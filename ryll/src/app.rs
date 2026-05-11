@@ -992,13 +992,13 @@ impl RyllApp {
         let byte_counter = Arc::new(ByteCounter::new());
         let traffic = Arc::new(TrafficBuffers::new());
         let channel_snapshots = ChannelSnapshots::new();
-        let volume_control = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
 
         self.event_rx = event_rx;
         self.input_tx = Some(input_tx);
         self.resize_tx = Some(resize_tx);
         self.last_sent_resize = None;
-        self.volume_control = volume_control.clone();
+        // volume_control is intentionally NOT replaced — see the
+        // `vol_for_conn` binding below for the rationale.
         self.surfaces.clear();
         self.cursor_pos = (0, 0);
         self.cursor_visible = true;
@@ -1060,7 +1060,12 @@ impl RyllApp {
         let monitors = self.monitors;
         let virtual_disks = self.reconnect_virtual_disks.clone();
         let share_dir = self.reconnect_share_dir.clone();
-        let vol_for_conn = volume_control;
+        // Volume slider position and mute state are host-side
+        // state (the cpal output gain), not session state. Hand
+        // the *existing* Arc<VolumeControl> to the new connection
+        // task so the user's prior choices survive the swap; the
+        // old playback channel's clone drops as that task exits.
+        let vol_for_conn = self.volume_control.clone();
         let enable_paste = self.enable_paste;
         let log_config_clone = settings::log_config();
         let connection_cancel = Arc::new(AtomicBool::new(false));
@@ -4515,5 +4520,33 @@ mod tests {
             .on_disconnect(false, None, now, epoch(), expiring_at(expiry), err("blip"))
             .unwrap();
         assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
+    }
+
+    // ── VolumeControl round-trip (K3 guard) ─────────────────
+
+    #[test]
+    fn volume_control_round_trip() {
+        // K3 (Phase 03) fixed RyllApp::reconnect() leaving the
+        // user's volume slider at 80% / unmuted after every
+        // reconnect. The fix relies on the existing
+        // Arc<VolumeControl> surviving the swap, with the same
+        // get/set semantics on both sides of the boundary. Pin
+        // the contract so a future refactor of VolumeControl's
+        // storage cannot quietly re-introduce the regression.
+        let vc = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
+        assert_eq!(vc.volume(), 80);
+        assert!(!vc.muted());
+        vc.set_volume(25);
+        vc.set_muted(true);
+        assert_eq!(vc.volume(), 25);
+        assert!(vc.muted());
+        // The same Arc must reflect updates from any clone — the
+        // app holds one Arc and hands a clone to the playback
+        // channel, so reads via either must see the same value.
+        let other = vc.clone();
+        assert_eq!(other.volume(), 25);
+        assert!(other.muted());
+        other.set_volume(60);
+        assert_eq!(vc.volume(), 60);
     }
 }
