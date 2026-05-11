@@ -30,7 +30,7 @@ RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
-	test-qemu test-qemu-usb test-qemu-stop \
+	test-qemu test-qemu-usb test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console
 
@@ -285,6 +285,14 @@ test-qemu-stop:
 		echo "Stopped test QEMU instance"; \
 	fi
 	@rm -f $(QEMU_VARS_COPY)
+
+# Long-idle regression test for K1 (main-channel-wedge). Requires a
+# SPICE server reachable at $(HOST_PORT) — typically start one with
+# `make test-qemu` first. Default idle window is 540s (~9 min, well
+# past the historical T+466s wedge threshold). See
+# tools/test-k1-idle.sh for the full assertion set.
+test-k1-idle:
+	./tools/test-k1-idle.sh
 
 # Create a test RAW image for USB disk passthrough
 testdata/usb-test.raw:

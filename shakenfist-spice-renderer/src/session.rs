@@ -145,7 +145,15 @@ pub async fn run_connection(
     let mut webdav_rx = Some(webdav_rx);
     let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
 
+    let main_only = std::env::var("RYLL_K1_MAIN_ONLY").is_ok();
+    if main_only {
+        info!("RYLL_K1_MAIN_ONLY set — skipping all secondary channels (main only)");
+    }
+
     for (channel_type, channel_id) in channels {
+        if main_only {
+            continue;
+        }
         match channel_type {
             ChannelType::Display => {
                 let stream = client
