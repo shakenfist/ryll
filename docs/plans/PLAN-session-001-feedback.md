@@ -52,7 +52,7 @@ description), `D#` (derived from the report data).
 
 | ID | Title | Sources | Severity | Disposition |
 |----|-------|---------|----------|-------------|
-| **K1** | Main channel rcc 30 s unresponsive timeout tears down session (perceived as inputs-channel disconnect) | N3, B3 (10:31:53Z), B5 (10:40:28Z), QEMU log | High — disrupts dogfooding workflow | Phase 02 — own plan; **gated on Phase 01 data** (current pcaps don't capture the disconnect moment) |
+| **K1** | Main channel rcc 30 s unresponsive timeout tears down session (perceived as inputs-channel disconnect) | N3, B3 (10:31:53Z), B5 (10:40:28Z), QEMU log | High — disrupts dogfooding workflow | **Resolved** in `370d8ce5` (root-cause fix) and `cf3d31f5` (regression test). Root cause was an abandoned-receiver deadlock in our own session orchestrator, not a tokio / rustls / kernel bug. See `docs/TOKIO-WEDGING.md` for the chronology. |
 | **K2** | Ring-buffer frame builder drops SPICE messages > 64 KB (missing TCP segmentation in `bugreport.rs:317`; live writer already segments via `capture.rs:78`) | N4, B1 (10:12:15Z), B2 (10:15:01Z) | Medium — silently drops large display messages from bug-report pcaps | Phase 08 — own plan; mirror `write_segmented`; pairs with Phase 07 (entry-per-segment fits `Arc<[u8]>`) |
 | **K3** | Reconnect resets client audio volume | B6 (10:40:51Z) | Low–Medium — surprises user after every reconnect | Phase 03 — own plan (small) |
 | **K4** | Region-select can produce a zero-width rectangle | D2 (B4, B6 metadata) | Low — bad-data path in bug reports | Phase 04 — own plan (small); investigate before deciding fix vs. validation |
@@ -119,39 +119,50 @@ description), `D#` (derived from the report data).
    per-channel rebalancing in Phase 06 captures most of the
    value without the dynamic-shrink/grow complexity.
 
-2. **K1 root cause: PARTIALLY RESOLVED — needs more data.**
-   QEMU log evidence (`kvm: warning: Spice: main:0 ... rcc has
-   been unresponsive for more than 30000 ms, disconnecting`)
-   confirms:
-   - The timeout is **30 s, not 300 s** as NOTES.md hypothesised.
-   - It's a **SPICE-server-side rcc liveness check** on the main
-     channel, not a TCP idle timeout.
-   - The user perceives it as inputs-channel disconnect because
-     the whole client session drops when main is torn down.
+2. **K1 root cause: RESOLVED (2026-05-11).** Three days of
+   dogfooding-driven investigation across two sub-phases (the
+   "diagnostic infrastructure" rollup in `5ba933da` and the
+   "fix and regression test" pair `370d8ce5` / `cf3d31f5`)
+   eventually localised K1 to our own session orchestrator, not
+   anything in tokio / rustls / mio / the kernel.
 
-   What we *don't* know yet:
-   - **Why** ryll's main channel goes 30 s without server-visible
-     traffic. ryll already responds to PINGs sub-millisecond on
-     every channel (verified across all four session-001 pcaps);
-     ryll already sets the same TCP keepalives as spice-gtk
-     (`ARCHITECTURE.md:615`); spice-gtk has no other proactive
-     keepalive mechanism (`channel-base.c:43`,
-     `spice-session.c:2300`).
-   - The session-001 pcaps **do not capture the moment of
-     disconnect** — they show post-reconnect activity, with no
-     FIN/RST in the synthetic frames. We're flying blind on the
-     actual failure.
-   - Whether ryll's own 30 s client-side keepalive-timeout
-     (`main_channel.rs:206`) is racing with the server's check
-     and closing the socket from our side.
+   The 30 s server-side rcc timeout was a **downstream** symptom:
+   what actually happened is that `shakenfist-spice-renderer/src/
+   session.rs` created an intermediate `mpsc::channel(64)`,
+   drained it only until `SessionInitialized` and
+   `ChannelsAvailable` arrived, then dropped it on the floor.
+   `MainChannel` kept producing `ChannelEvent::Latency` on every
+   PING; after ~65 pings (the exact T+466 s fingerprint we kept
+   seeing) the bounded buffer filled and main blocked forever
+   inside `event_tx.send().await`. With main's entire `select!`
+   suspended, no pongs went out, and the server's rcc timer
+   tore the connection down 30 s later. The "tokio waker bug"
+   appearance in `docs/TOKIO-WEDGING.md` was real but downstream
+   — the waker the runtime was waiting for was the mpsc
+   permit-available waker, which would never fire because the
+   receiver had been dropped while the buffer was full.
 
-   Resolution plan: **Phase 01 (disconnect-moment snapshot)**
-   lands first to give us a pcap that actually contains the
-   run-up to the failure, plus a structured cause record. Phase
-   02 (the keepalive / auto-reconnect fix) is gated on data from
-   Phase 01 — it would be premature to design the fix before we
-   know whether the trigger is server-side, client-side, or
-   network-path.
+   Fix replaces the temp mpsc with two `oneshot` channels for
+   the session id and channels list, so main sends events
+   directly into the real caller-owned `event_tx` (capacity
+   1024, actually drained by the renderer). All
+   `event_tx.send()` sites in `main_channel.rs` are now wrapped
+   in a 5 s timeout helper as defense-in-depth.
+
+   Regression test: `make test-k1-idle` (driver in
+   `tools/test-k1-idle.sh`) idles a ryll session for 540 s and
+   asserts no wedge / no timeout / sufficient pong count.
+   Verified passing against spi2eth (TLS) and the local
+   `test-qemu` target.
+
+   This also retroactively explains why the previously-landed
+   Phase 02 mitigations (mirror keepalive, KEY_MODIFIERS idle
+   keepalive on inputs, spurious-PONG main keepalive at 10 s,
+   etc.) **never made K1 go away** — they all kept *other*
+   channels alive while main itself was suspended on a deadlock
+   they couldn't break. Those mitigations remain useful
+   defense-in-depth and stay landed, but they're no longer
+   load-bearing for K1.
 
 3. **K2 reproduction: RESOLVED — not an MTU issue.** Code walk
    showed the trigger is **missing TCP segmentation in the ring
@@ -178,7 +189,7 @@ table top-to-bottom is always safe.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Auto-snapshot ring buffer at disconnect moment | PLAN-session-001-feedback-phase-01-disconnect-snapshot.md | Done |
-| 2. Main-channel auto-reconnect / keepalive (K1 fix) | PLAN-session-001-feedback-phase-02-reconnect.md | Not started |
+| 2. Main-channel auto-reconnect / keepalive (originally framed as the K1 fix; K1 root cause is now fixed independently in `370d8ce5`. Phase 02 continues as general-purpose disconnect/reconnect UX — steps 1, 2, 2b, 2c, 2e, 2f, 3 landed during the investigation; steps 4, 5, 6, 7 remain.) | PLAN-session-001-feedback-phase-02-reconnect.md | In progress |
 | 3. Preserve audio volume across reconnect | PLAN-session-001-feedback-phase-03-audio-volume.md | Not started |
 | 4. Region-select zero-width guard | PLAN-session-001-feedback-phase-04-region-select.md | Not started |
 | 5. Handle `STREAM_DESTROY_ALL` (display msg 126) | PLAN-session-001-feedback-phase-05-stream-destroy-all.md | Not started |
@@ -190,10 +201,13 @@ table top-to-bottom is always safe.
 
 Hard dependencies the order respects:
 
-- **Phase 02 needs data from Phase 01** — the K1 fix is designed
-  against a real disconnect-moment pcap, not from speculation.
-  Phase 01 lands, the next disconnect produces an actionable
-  zip, then Phase 02 designs against that.
+- **Phase 02 needs data from Phase 01** — *originally* the K1
+  fix needed a real disconnect-moment pcap. With K1 now resolved
+  independently of Phase 02's reconnect work (see resolution
+  note above), this dependency is historical only. The
+  remaining Phase 02 steps (channel-error attribution, reconnect
+  state machine, console.vv extensions, docs wrap-up) do not
+  depend on Phase 01 data.
 - **Phase 08 benefits from Phase 07's `Arc<[u8]>` model** —
   segmenting into multiple entries is cleaner when each segment
   is a cheap `Arc`-shared chunk. Not strictly required, but

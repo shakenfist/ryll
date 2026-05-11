@@ -1,6 +1,44 @@
 # K1: tokio waker silently lost on main channel after T+465 s
 
-## TL;DR
+## Status: RESOLVED (2026-05-11)
+
+Root cause was **not** a tokio waker bug. It was an
+abandoned-receiver deadlock in our own session orchestrator
+(`shakenfist-spice-renderer/src/session.rs`): an intermediate
+`mpsc::channel(64)` was drained only until `SessionInitialized`
+and `ChannelsAvailable` had arrived, then dropped on the floor
+while `MainChannel` kept producing `ChannelEvent::Latency` on
+every server PING. After ~65 pings (~T+466 s, the exact
+fingerprint described below) the buffer filled and main blocked
+forever inside `event_tx.send().await`. The "wakers never fire"
+appearance was real but downstream: main's whole task was
+suspended on the mpsc backpressure, so heartbeat/keepalive arms
+of its `tokio::select!` couldn't be polled, and the server's
+30 s rcc timer eventually tore the channel down.
+
+**Fix (commit `370d8ce5`)**: replaced the temp mpsc with two
+`oneshot` channels for the session id and channels list, so
+main now sends every event directly into the real caller-owned
+`event_tx` (capacity 1024, actually drained by the renderer).
+All `event_tx.send()` calls in `main_channel.rs` are now
+wrapped in a 5 s timeout helper as defense-in-depth.
+
+**Regression test (commit `cf3d31f5`)**: `make test-k1-idle`
+(driver in `tools/test-k1-idle.sh`) connects ryll headless,
+idles 540 s, and asserts no wedge / no timeout / sufficient
+pong count. Verified passing against both spi2eth (TLS) and
+the local QEMU `test-qemu` target.
+
+The chronology below is preserved as a record of how the
+diagnosis went, including everything we ruled out before we
+caught the real culprit. **The original "TL;DR" framing below
+described the symptom, not the cause.**
+
+---
+
+## Original investigation (preserved for history)
+
+### TL;DR (as written during the investigation)
 
 After ~7 minutes 45 seconds of an idle SPICE session, ryll's
 main-channel tokio task suspends with two valid Wakers

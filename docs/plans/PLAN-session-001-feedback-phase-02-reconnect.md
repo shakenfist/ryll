@@ -1,4 +1,54 @@
-# Phase 02: Main-channel reconnect / keepalive (K1 fix)
+# Phase 02: Main-channel reconnect / keepalive (originally framed as the K1 fix)
+
+## Resolution update (2026-05-11)
+
+K1 itself is now **resolved at the root** in commits `370d8ce5`
+(fix) and `cf3d31f5` (regression test). Root cause was not a
+keepalive issue, a server rcc timeout, or any tokio / rustls /
+kernel bug — it was an abandoned-receiver deadlock in our own
+session orchestrator (`shakenfist-spice-renderer/src/
+session.rs`'s intermediate `mpsc::channel(64)`). See
+`docs/TOKIO-WEDGING.md` and the resolution note in
+`PLAN-session-001-feedback.md` for the full chronology.
+
+This means the rest of this phase plan applies *as written* but
+with a different framing:
+
+- The keepalive mitigations already landed (mirror keepalive,
+  KEY_MODIFIERS idle keepalive on inputs, spurious-PONG idle
+  keepalive on main, channel-exit logging, app-focus gating
+  of clipboard polling, etc.) are no longer load-bearing
+  *for K1 specifically*. They stay landed as defense-in-depth
+  against unrelated mid-session liveness failures.
+- The remaining Phase 02 steps (channel-error attribution,
+  reconnect state machine + auto-reconnect UX, console.vv
+  extensions and modal variants, docs wrap-up) are still
+  worth doing — they handle disconnects in general, not just
+  K1. **Reframe** any work below from "fix K1" to "make ryll
+  recover gracefully from arbitrary mid-session
+  disconnects."
+- The "gated on Phase 01 data" prerequisite below is now
+  historical only. Phase 01 produced rich `disconnect-cause`
+  zips that were valuable during the K1 investigation but are
+  not a hard input for the remaining UX work.
+
+Pending steps as of resolution date (see active task list):
+
+- Step 4: `ChannelEvent::Error` channel attribution
+- Step 5: ReconnectState state machine + auto-reconnect UX
+- Step 6: console.vv extensions + modal variants
+- Step 7: wrap-up docs and master-plan status
+
+Two related deferrals also remain open:
+
+- Step 2d: screen-lock detection on macOS (deferred during K1
+  investigation; syslog grep ruled lock state out as a K1
+  trigger but the feature still has standalone value)
+- Stack-trace capture in disconnect bug reports
+
+The rest of this document is preserved unmodified for context
+on why each Phase 02 step was originally proposed and how it
+relates to the (now-defunct) K1 hypotheses.
 
 ## Prompt
 
