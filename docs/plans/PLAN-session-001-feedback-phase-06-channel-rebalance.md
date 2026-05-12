@@ -23,7 +23,7 @@ This phase rebalances the 50 MB total ring-buffer budget
 across ryll's six tracked channels so the bytes flow to the
 channel that consumes them. The master plan classifies this
 as small but load-bearing for the F2 always-fileable
-notification UX laid out in Phase 09: the snapshot-at-fire
+notification UX laid out in Phase 10: the snapshot-at-fire
 window for video-lag complaints is bounded by display ring
 retention.
 
@@ -55,7 +55,7 @@ playback. An 8.33 MB cap holds roughly:
 | usbredir | bursty: ~0 KB/s idle, ~50 MB/s during mass-storage transfer | idle: ∞; active: **~0.17 s** |
 
 The display window is *the* binding constraint on the F2
-notification-snapshot UX. Phase 09 will plumb "snapshot at
+notification-snapshot UX. Phase 10 will plumb "snapshot at
 fire" against this ring buffer; if it holds only 1.5 s of
 display history, a user complaining about a video stutter
 ten seconds ago has nothing useful in the report.
@@ -105,7 +105,7 @@ six tracked channels so that:
 
 The phase succeeds when:
 
-- A Phase 09–shaped notification-snapshot pcap from a busy
+- A Phase 10–shaped notification-snapshot pcap from a busy
   display session contains noticeably more pre-fire display
   history than the same scenario captured today.
 - No regression in low-rate channels — their snapshot pcaps
@@ -239,7 +239,7 @@ only exposed via tests). One-liner, no behaviour change.
 
 ### Manual verification
 
-The integration check pairs with the Phase 09 work it
+The integration check pairs with the Phase 10 work it
 unblocks (notification-snapshot UX). For now, a focused
 manual test:
 
@@ -324,7 +324,7 @@ manual test:
    question to a "Future work" dynamic-sizing item. The
    rebalance is a low-risk static change; bundling a budget
    bump would conflate two decisions and make rollback (if
-   it turns out we mis-sized) harder. Revisit once Phase 09
+   it turns out we mis-sized) harder. Revisit once Phase 10
    is live and we have evidence about whether 50 MB is the
    binding constraint.
 
@@ -335,13 +335,13 @@ manual test:
    needs to retune mid-investigation, a recompile is fine.
 
 3. **Does the asymmetric weighting risk surprising a
-   maintainer reading a pcap?** The Phase 09 notification-
+   maintainer reading a pcap?** The Phase 10 notification-
    snapshot work surfaces "snapshot at fire" vs. "post-event
    only" markers in the report metadata. The same marker
    layer can record per-channel cap diagnostics — but only
    when the cap actually matters (i.e. when the ring evicted
    anything during the captured window). Defer the
-   per-channel-cap-record decision to Phase 09 where the
+   per-channel-cap-record decision to Phase 10 where the
    context is correct.
 
 ## Companion docs

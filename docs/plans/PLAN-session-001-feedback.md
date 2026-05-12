@@ -62,7 +62,7 @@ description), `D#` (derived from the report data).
 
 | ID | Title | Sources | Severity | Disposition |
 |----|-------|---------|----------|-------------|
-| **F1** | Surface (re)connect events in the notifications pane | N1, D1 | Medium — visible UX gap, multiple reports show no transitions | Phase 09 — own plan |
+| **F1** | Surface (re)connect events in the notifications pane | N1, D1 | Medium — visible UX gap, multiple reports show no transitions | **Resolved** in Phase 09 — new `NotificationSource::Connection` variant + 11 producer sites across connect / reconnect cycle / disconnect / error / agent transitions. See `PLAN-session-001-feedback-phase-09-connection-notifications.md`. |
 | **F2** | "Turn this notification into a bug report" button | N2 | Low — quality-of-life | Phase 10 — own plan; Q1 resolved (always-fileable with `at_fire` / `post_event_only` marker); depends on Phase 07 landing first |
 
 ### Tracked under another plan
@@ -196,7 +196,7 @@ table top-to-bottom is always safe.
 | 6. Rebalance per-channel ring-buffer split by expected traffic | PLAN-session-001-feedback-phase-06-channel-rebalance.md | Done |
 | 7. `Arc<[u8]>` refactor for `TrafficEntry::pcap_frame` | PLAN-session-001-feedback-phase-07-traffic-arc.md | Done |
 | 8. Segment large messages in ring-buffer frame builder | PLAN-session-001-feedback-phase-08-ring-segmentation.md | Done |
-| 9. Connection events in notifications pane (F1) | PLAN-session-001-feedback-phase-09-connection-notifications.md | Not started |
+| 9. Connection events in notifications pane (F1) | PLAN-session-001-feedback-phase-09-connection-notifications.md | Done |
 | 10. Notification → bug-report button (F2) | PLAN-session-001-feedback-phase-10-notification-bug-button.md | Not started |
 
 Hard dependencies the order respects:

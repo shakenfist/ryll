@@ -253,6 +253,10 @@ Ryll uses:
     `notifications.rs`; the side panel's `NotificationSource::label()`
     impl dictates how the new variant renders. Bug-report zips
     automatically include any new entries via `notifications.json`.
+    Current source inventory: `Gap`, `BugReport`, `Spice {channel,
+    what}`, `Internal`, `Connection` (Phase 09 / F1 — every
+    connection-state transition, pushed via the
+    `RyllApp::push_connection_event` helper).
 
 22. **Auto-reconnect: pure state-machine transition, side effects
     at the call site** - The `ReconnectState` enum on `RyllApp`

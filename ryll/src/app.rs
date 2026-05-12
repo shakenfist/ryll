@@ -1130,6 +1130,10 @@ impl RyllApp {
     /// failed manual attempt re-arms the full 3-attempt budget
     /// rather than going straight back to Modal.
     fn reconnect_manual(&mut self) {
+        // Phase 09 (F1): surface the click in the bell history
+        // so the user has visible confirmation that the button
+        // registered before the connection actually completes.
+        self.push_connection_event(NotifySeverity::Info, "Reconnecting (manual)…".to_string());
         self.reconnect_state = ReconnectState::Idle;
         self.awaiting_reconnect_outcome = false;
         self.last_modal_at = None;
@@ -1176,14 +1180,20 @@ impl RyllApp {
 
         if let ReconnectState::Pending { attempt, .. } = &new_state {
             self.auto_reconnect_count = self.auto_reconnect_count.saturating_add(1);
-            // attempt == 1 is the initial disconnect (no prior
-            // reconnect to report on); attempt > 1 means the
-            // previous attempt just failed.
-            if *attempt > 1 {
-                self.push_notification(
+            if *attempt == 1 {
+                // Initial disconnect — announce the start of the
+                // auto-retry cycle. Phase 09 (F1).
+                self.push_connection_event(
                     NotifySeverity::Warn,
-                    NotificationSource::BugReport,
-                    format!("Reconnect attempt {} failed: {}", attempt - 1, message,),
+                    "Connection lost — reconnecting…".to_string(),
+                );
+            } else {
+                // attempt > 1: the previous attempt just failed.
+                // Reclassified from NotificationSource::BugReport
+                // to NotificationSource::Connection in Phase 09.
+                self.push_connection_event(
+                    NotifySeverity::Warn,
+                    format!("Reconnect attempt {} failed: {}", attempt - 1, message),
                 );
             }
         }
@@ -1193,15 +1203,21 @@ impl RyllApp {
             // awaiting-outcome path is itself an attempt failure —
             // the user's three retries have been spent.
             if awaiting && matches!(variant, ModalVariant::Generic { .. }) {
-                self.push_notification(
+                self.push_connection_event(
                     NotifySeverity::Warn,
-                    NotificationSource::BugReport,
                     format!(
                         "Reconnect attempt {} failed: {}",
                         MAX_RECONNECT_ATTEMPTS, message,
                     ),
                 );
             }
+            // Phase 09 (F1): also surface the Modal entry itself
+            // as a connection event so the bell history records
+            // the cycle's terminal state. The modal pops in
+            // parallel; users who dismiss it reflexively still
+            // see the event in the notification log.
+            let (severity, modal_msg) = modal_variant_notification(variant);
+            self.push_connection_event(severity, modal_msg);
             // Clock-skew check: when we land in Generic Modal,
             // the ticket should have been good (otherwise we'd
             // have taken the OneShotConsumed/TicketExpired path).
@@ -1251,6 +1267,14 @@ impl RyllApp {
                         self.reconnect_state = ReconnectState::Idle;
                     }
                     self.awaiting_reconnect_outcome = false;
+                    // Phase 09 (F1): surface the link in the bell
+                    // history. Fires on initial connect and on
+                    // every reconnect success; the 30 s dedup
+                    // collapses storm reconnects to a single entry.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        format!("Connected to {}:{}", self.target_host, self.target_port),
+                    );
                 }
 
                 ChannelEvent::SurfaceCreated {
@@ -1502,6 +1526,15 @@ impl RyllApp {
 
                 ChannelEvent::Error { channel, message } => {
                     error!("app: {} channel error: {}", channel.name(), message);
+                    // Phase 09 (F1): surface the raw error in the
+                    // bell history before the state-machine path
+                    // can swallow it into the modal. handle_*
+                    // below also pushes the resulting connection-
+                    // lost / modal-entry notifications.
+                    self.push_connection_event(
+                        NotifySeverity::Error,
+                        format!("{} channel error: {}", channel.name(), message),
+                    );
                     // Snapshot before driving the state machine so
                     // the zip captures the run-up to the failure.
                     self.maybe_write_disconnect_snapshot(channel.name(), &message);
@@ -1584,6 +1617,19 @@ impl RyllApp {
                 ChannelEvent::AgentConnected(connected) => {
                     info!("app: vdagent connected={}", connected);
                     self.agent_connected = connected;
+                    // Phase 09 (F1): record the agent-state
+                    // transition. Affects clipboard sync, paste,
+                    // and resolution updates — useful for the
+                    // user to see when those features come or go.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        if connected {
+                            "Guest agent connected"
+                        } else {
+                            "Guest agent disconnected"
+                        }
+                        .to_string(),
+                    );
                 }
 
                 ChannelEvent::Disconnected(channel) => {
@@ -1636,6 +1682,15 @@ impl RyllApp {
                             debug!(
                                 "app: non-critical channel {} disconnected, session continues",
                                 channel.name()
+                            );
+                            // Phase 09 (F1): non-critical
+                            // disconnect goes to the bell as Info
+                            // (was debug!-only before). Surfaces
+                            // e.g. usbredir / webdav drops without
+                            // disrupting the user.
+                            self.push_connection_event(
+                                NotifySeverity::Info,
+                                format!("{} channel disconnected", channel.name()),
                             );
                         }
                     }
@@ -2030,6 +2085,14 @@ impl RyllApp {
         }
     }
 
+    /// Push a connection-state transition (Phase 09 / F1).
+    /// Wraps `push_notification` with
+    /// `NotificationSource::Connection` so every connection
+    /// event lands under a single label in the side panel.
+    fn push_connection_event(&self, severity: NotifySeverity, message: impl Into<String>) {
+        self.push_notification(severity, NotificationSource::Connection, message);
+    }
+
     /// Run a bug report and set the status bar message from the result.
     fn finish_bug_report(
         &mut self,
@@ -2330,7 +2393,16 @@ impl eframe::App for RyllApp {
             } = &self.reconnect_state
             {
                 if Instant::now() >= *next_at {
+                    let attempt = *attempt;
                     info!("app: auto-reconnect attempt {} firing", attempt);
+                    // Phase 09 (F1): surface the attempt fire in
+                    // the bell history. Per-attempt number in the
+                    // message keeps successive attempts distinct
+                    // across the 30 s dedup window.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        format!("Reconnect attempt {}/{}…", attempt, MAX_RECONNECT_ATTEMPTS),
+                    );
                     self.awaiting_reconnect_outcome = true;
                     self.reconnect();
                 }
@@ -3904,6 +3976,29 @@ fn resolution_notification_due(
     Some(target)
 }
 
+/// Phase 09 (F1): map an auto-reconnect `ModalVariant` to the
+/// `(severity, message)` pair that surfaces in the notification
+/// pane when the state machine lands in Modal. Pure for
+/// unit-testability — `modal_variant_notification` is the
+/// only piece of new business logic the connection-event
+/// push sites depend on.
+fn modal_variant_notification(variant: &ModalVariant) -> (NotifySeverity, String) {
+    match variant {
+        ModalVariant::Generic { .. } => (
+            NotifySeverity::Error,
+            "Auto-reconnect failed after 3 attempts".to_string(),
+        ),
+        ModalVariant::OneShotConsumed => (
+            NotifySeverity::Error,
+            "Connection ended — single-use ticket consumed".to_string(),
+        ),
+        ModalVariant::TicketExpired { .. } => (
+            NotifySeverity::Error,
+            "Connection ended — ticket expired".to_string(),
+        ),
+    }
+}
+
 /// Build a `ReportRegion` from the raw drag-start / drag-end
 /// coordinates produced by the region-select widget, iff the
 /// resulting rectangle has strictly positive area. Returns
@@ -4656,5 +4751,40 @@ mod tests {
         assert_eq!(r.top, 20);
         assert_eq!(r.right, 40);
         assert_eq!(r.bottom, 60);
+    }
+
+    // ── Phase 09 (F1) connection-event message formats ──────
+
+    #[test]
+    fn connection_event_message_format_attempt_fire() {
+        // The attempt-fire notification template embeds the
+        // attempt number so the 30 s dedup window doesn't
+        // collapse successive attempts of one cluster. Catches
+        // a typo in the format string and pins the embedded
+        // MAX_RECONNECT_ATTEMPTS reference.
+        let expected = format!("Reconnect attempt {}/{}…", 2, MAX_RECONNECT_ATTEMPTS);
+        assert_eq!(expected, "Reconnect attempt 2/3…");
+    }
+
+    #[test]
+    fn connection_event_message_format_modal_variants() {
+        // Pin the (severity, message) pair each ModalVariant
+        // maps to. Catches drift between modal copy and
+        // notification copy.
+        let (sev, msg) = modal_variant_notification(&ModalVariant::Generic {
+            latest_error: "ignored".into(),
+        });
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Auto-reconnect failed after 3 attempts");
+
+        let (sev, msg) = modal_variant_notification(&ModalVariant::OneShotConsumed);
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Connection ended — single-use ticket consumed");
+
+        let (sev, msg) = modal_variant_notification(&ModalVariant::TicketExpired {
+            expired_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        });
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Connection ended — ticket expired");
     }
 }

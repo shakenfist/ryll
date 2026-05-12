@@ -57,13 +57,13 @@ with display-channel STREAM_DATA / DRAW_COPY messages whose
 `write_segmented` and produces correctly-segmented pcaps. K2
 is strictly about the in-memory ring buffer — which is the
 input to F8 bug reports, disconnect snapshots, and (soon)
-the Phase 09 notification snapshots.
+the Phase 10 notification snapshots.
 
 **Phase 07 just made the type plumbing ready.** With
 `pcap_frame: Arc<[u8]>`, splitting one message across
 multiple ring entries means N atomic refcount bumps if any
 consumer ever wants to clone them — which is exactly what
-Phase 09 will do.
+Phase 10 will do.
 
 ### What we don't yet know
 
@@ -204,7 +204,7 @@ pub struct TrafficEntry {
     /// exceeds the IPv4 frame limit. Empty in the common case
     /// (one segment fits in `pcap_frame`); a few entries for
     /// larger messages. Each segment is an independent
-    /// `Arc<[u8]>` so clones (Phase 09 snapshot path) remain
+    /// `Arc<[u8]>` so clones (Phase 10 snapshot path) remain
     /// O(N atomic refcount bumps).
     pub additional_segments: Vec<Arc<[u8]>>,
 }

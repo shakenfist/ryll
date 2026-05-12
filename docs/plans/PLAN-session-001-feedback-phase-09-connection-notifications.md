@@ -291,54 +291,54 @@ Bundles with the running Phase 02–08 manual checklist:
 
 ## Tasks
 
-- [ ] Add `NotificationSource::Connection` variant in
+- [x] Add `NotificationSource::Connection` variant in
       `shakenfist-spice-renderer/src/notification.rs` with
       matching `label()` arm.
-- [ ] Add `RyllApp::push_connection_event(&self, severity,
+- [x] Add `RyllApp::push_connection_event(&self, severity,
       message)` wrapper in `ryll/src/app.rs` next to
       `push_notification`.
-- [ ] At each producer call site listed in the table
+- [x] At each producer call site listed in the table
       under "Approach", insert the documented
       `push_connection_event` call.
-- [ ] Reclassify the two existing reconnect-attempt-failure
+- [x] Reclassify the two existing reconnect-attempt-failure
       pushes in `handle_critical_disconnect` from
       `NotificationSource::BugReport` to
       `NotificationSource::Connection`. Message text and
       severity unchanged.
-- [ ] In `reconnect_manual()`, push "Reconnecting (manual)…"
+- [x] In `reconnect_manual()`, push "Reconnecting (manual)…"
       Info at the top of the method (before the call to
       `reconnect()`).
-- [ ] In the auto-reconnect tick poll inside `update()`,
+- [x] In the auto-reconnect tick poll inside `update()`,
       push "Reconnect attempt N/3…" Info just before the
       `self.reconnect()` call.
-- [ ] In `process_events` for the `SessionInitialized` arm,
+- [x] In `process_events` for the `SessionInitialized` arm,
       push "Connected to <host>:<port>" Info after
       `connected = true`.
-- [ ] In `process_events` for the `AgentConnected(bool)`
+- [x] In `process_events` for the `AgentConnected(bool)`
       arm, push the appropriate Info notification.
-- [ ] In `process_events` for the `ChannelEvent::Error` arm,
+- [x] In `process_events` for the `ChannelEvent::Error` arm,
       push "<channel> channel error: <message>" Error
       *in addition to* the existing
       `handle_critical_disconnect` dispatch.
-- [ ] In `process_events` for the `Disconnected(channel)`
+- [x] In `process_events` for the `Disconnected(channel)`
       arm, push "<channel> channel disconnected" Info for
       non-critical channels.
-- [ ] In `handle_critical_disconnect`'s Modal-entry branch,
+- [x] In `handle_critical_disconnect`'s Modal-entry branch,
       push the documented per-variant Error notification.
-- [ ] Add two new unit tests in `app.rs::tests`:
+- [x] Add two new unit tests in `app.rs::tests`:
   - `connection_event_message_format_attempt_fire`
   - `connection_event_message_format_modal_variants`
-- [ ] Misattribution cleanup: replace "Phase 09" with
+- [x] Misattribution cleanup: replace "Phase 09" with
       "Phase 10" in the connection-snapshot contexts in:
   - `docs/plans/PLAN-session-001-feedback-phase-06-channel-rebalance.md`
   - `docs/plans/PLAN-session-001-feedback-phase-07-traffic-arc.md`
   - `docs/plans/PLAN-session-001-feedback-phase-08-ring-segmentation.md`
   - `ryll/src/bugreport.rs` (doc comments and the
     cheap-clone test message)
-- [ ] Update `PLAN-session-001-feedback.md` F1 row in the
+- [x] Update `PLAN-session-001-feedback.md` F1 row in the
       "Confirmed feature requests" table with the
       resolution pointer.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       row for Phase 09 → Done.
 - [ ] Manual integration check (deferred operator action,
       bundles with the running Phase 02–08 manual

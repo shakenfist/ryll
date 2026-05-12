@@ -22,7 +22,7 @@ entries is cleaner when each segment is a cheap
 
 This phase is purely structural — no user-visible behaviour
 change, no new tests of business logic, no API surface added.
-It exists to enable Phase 09's notification-snapshot UX
+It exists to enable Phase 10's notification-snapshot UX
 (cheap ring-buffer clones) and to make Phase 08's
 segmentation refactor (entry-per-segment) sit cleanly on a
 type that's already shared-by-default.
@@ -53,7 +53,7 @@ vec![...] }` directly at two stub call sites.
 **Cloning a `TrafficEntry` today is O(payload bytes).** The
 derive `#[derive(Clone)]` on `TrafficEntry` delegates each
 field's clone, and `Vec<u8>::clone` is a heap allocation
-plus byte copy. The Phase 09 notification-snapshot flow ("on
+plus byte copy. The Phase 10 notification-snapshot flow ("on
 notification fire, snapshot the ring buffer to a bounded
 side-buffer") will need to clone N entries; with Vec<u8>
 that's O(total ring bytes per snapshot). With Arc<[u8]> it
@@ -83,7 +83,7 @@ Switch `TrafficEntry::pcap_frame` from `Vec<u8>` to
   cheap-to-clone.
 
 No new behaviour. No new tests of business logic. Phase 08
-and Phase 09 will exercise the cheap-clone property; Phase
+and Phase 10 will exercise the cheap-clone property; Phase
 07's responsibility is just to expose it.
 
 The phase succeeds when:
@@ -137,7 +137,7 @@ pub struct TrafficEntry {
     // ... unchanged fields ...
 
     /// Full pcap frame bytes (Ethernet + IP + TCP + SPICE
-    /// payload). `Arc<[u8]>` so Phase 09's
+    /// payload). `Arc<[u8]>` so Phase 10's
     /// snapshot-on-notification path can clone the ring
     /// buffer's entries in O(N atomic increments) rather
     /// than O(total bytes).
@@ -189,7 +189,7 @@ fn traffic_entry_clone_shares_pcap_frame_via_arc() {
     // The cheap-clone property is the whole point of the
     // refactor — without this test a future change that
     // turns pcap_frame back into Vec<u8> would compile and
-    // silently regress the Phase 09 snapshot path's
+    // silently regress the Phase 10 snapshot path's
     // cost model.
     let entry = TrafficEntry {
         timestamp: Duration::from_millis(0),
@@ -206,7 +206,7 @@ fn traffic_entry_clone_shares_pcap_frame_via_arc() {
         Arc::ptr_eq(&entry.pcap_frame, &cloned.pcap_frame),
         "Clone must share the payload allocation; if this \
          fires, pcap_frame's type was changed back to Vec<u8> \
-         (or another deep-copy type) and Phase 09's snapshot \
+         (or another deep-copy type) and Phase 10's snapshot \
          cost model is broken."
     );
 }
@@ -256,10 +256,10 @@ adjustment.
 
 ## Out of scope
 
-- **Actually exercising the cheap clone.** Phase 09 is the
+- **Actually exercising the cheap clone.** Phase 10 is the
   consumer; Phase 07's only job is to expose the property.
   Wiring `snapshot_at_fire` into the notification flow is
-  the Phase 09 deliverable and uses this phase's foundation.
+  the Phase 10 deliverable and uses this phase's foundation.
 - **Changing `build_frame`'s return type.** Keeps the builder
   flexible for future mutable-buffer needs. The call-site
   conversion is one line.
@@ -277,7 +277,7 @@ adjustment.
   also make clones cheap, but at the cost of forcing every
   consumer through `Arc::deref` and breaking the existing
   by-value APIs. The payload-only change is the minimum
-  necessary to enable Phase 09; that scope is the right
+  necessary to enable Phase 10; that scope is the right
   one.
 
 ## Open questions
@@ -288,7 +288,7 @@ adjustment.
    a workflow test. Same shape as the other in-module unit
    tests.
 
-2. **Should the doc comment on `pcap_frame` cite Phase 09 by
+2. **Should the doc comment on `pcap_frame` cite Phase 10 by
    name?** Yes — it's the consumer of the cheap-clone
    property and the reason the type was chosen. A future
    maintainer reading the field declaration cold should be

@@ -59,20 +59,22 @@ pub struct TrafficEntry {
     /// segment and the rest live in `additional_segments`.
     /// Used by `drain_to_pcap()` for bug-report export.
     ///
-    /// `Arc<[u8]>` so Phase 09's snapshot-on-notification
-    /// path can clone the ring buffer's entries in
-    /// O(N atomic refcount bumps) rather than O(total bytes).
-    /// See `traffic_entry_clone_shares_pcap_frame_via_arc`
-    /// in this file's tests for the cheap-clone invariant.
+    /// `Arc<[u8]>` so Phase 10's snapshot-on-notification
+    /// path (F2 — "file this notification as a bug report")
+    /// can clone the ring buffer's entries in O(N atomic
+    /// refcount bumps) rather than O(total bytes). See
+    /// `traffic_entry_clone_shares_pcap_frame_via_arc` in
+    /// this file's tests for the cheap-clone invariant.
     pub pcap_frame: Arc<[u8]>,
     /// Additional TCP segments produced when a SPICE message
     /// exceeds the IPv4 frame limit (Phase 08 / K2 fix).
     /// Empty in the common case where the message fits in a
     /// single segment; a few entries for larger display-
     /// channel messages. Each segment is an independent
-    /// `Arc<[u8]>` so clones (Phase 09) remain O(N atomic
-    /// refcount bumps). An empty `Vec` does not allocate, so
-    /// the common case has zero per-entry overhead.
+    /// `Arc<[u8]>` so clones (Phase 10 snapshot path) remain
+    /// O(N atomic refcount bumps). An empty `Vec` does not
+    /// allocate, so the common case has zero per-entry
+    /// overhead.
     pub additional_segments: Vec<Arc<[u8]>>,
 }
 
@@ -3200,7 +3202,7 @@ mod tests {
         // The cheap-clone property is the whole point of the
         // refactor — without this test a future change that
         // turns pcap_frame back into Vec<u8> would compile and
-        // silently regress the Phase 09 snapshot path's cost
+        // silently regress the Phase 10 snapshot path's cost
         // model from O(N atomic increments) to O(total bytes).
         let entry = TrafficEntry {
             timestamp: Duration::from_millis(0),
@@ -3218,13 +3220,13 @@ mod tests {
             Arc::ptr_eq(&entry.pcap_frame, &cloned.pcap_frame),
             "Clone must share the payload allocation; if this \
              fires, pcap_frame's type was changed back to \
-             Vec<u8> (or another deep-copy type) and Phase 09's \
+             Vec<u8> (or another deep-copy type) and Phase 10's \
              snapshot cost model is broken."
         );
         // Phase 08: the same invariant for additional_segments.
         // Cloning a Vec<Arc<[u8]>> deep-copies the Vec spine but
         // each Arc<[u8]> stays shared — that's the property the
-        // segmented ring needs for cheap Phase 09 snapshots.
+        // segmented ring needs for cheap Phase 10 snapshots.
         for (orig, clone) in entry
             .additional_segments
             .iter()
