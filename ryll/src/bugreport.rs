@@ -53,9 +53,15 @@ pub struct TrafficEntry {
     /// Payload size (wire_size minus 6-byte header).
     pub payload_size: u32,
     /// Full pcap frame bytes (Ethernet + IP + TCP + SPICE
-    /// payload).  Used by `drain_to_pcap()` for bug report
+    /// payload). Used by `drain_to_pcap()` for bug-report
     /// export.
-    pub pcap_frame: Vec<u8>,
+    ///
+    /// `Arc<[u8]>` so Phase 09's snapshot-on-notification
+    /// path can clone the ring buffer's entries in
+    /// O(N atomic refcount bumps) rather than O(total bytes).
+    /// See `traffic_entry_clone_shares_pcap_frame_via_arc`
+    /// in this file's tests for the cheap-clone invariant.
+    pub pcap_frame: Arc<[u8]>,
 }
 
 /// Lightweight traffic entry for the viewer (no pcap frame).
@@ -150,7 +156,10 @@ impl TrafficRingBuffer {
             let packet = PcapPacket::new(
                 entry.timestamp,
                 entry.pcap_frame.len() as u32,
-                &entry.pcap_frame,
+                // Explicit slice borrow: &entry.pcap_frame
+                // would be &Arc<[u8]> after the Phase 07
+                // refactor and PcapPacket wants &[u8].
+                &entry.pcap_frame[..],
             );
             pcap.write_packet(&packet).ok();
             count += 1;
@@ -303,7 +312,9 @@ impl TrafficBuffers {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        let pcap_frame = self.build_frame(channel, false, raw_message, &mut guard);
+        let pcap_frame: Arc<[u8]> = self
+            .build_frame(channel, false, raw_message, &mut guard)
+            .into();
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -335,7 +346,9 @@ impl TrafficBuffers {
         let payload_size = wire_size.saturating_sub(6);
 
         let mut guard = buf.lock().unwrap();
-        let pcap_frame = self.build_frame(channel, true, raw_message, &mut guard);
+        let pcap_frame: Arc<[u8]> = self
+            .build_frame(channel, true, raw_message, &mut guard)
+            .into();
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -1573,7 +1586,7 @@ mod tests {
                 message_name: "test",
                 wire_size: 20,
                 payload_size: 14,
-                pcap_frame: vec![0u8; 20],
+                pcap_frame: Arc::from(vec![0u8; 20]),
             });
         }
         assert_eq!(rb.len(), 3);
@@ -1589,7 +1602,7 @@ mod tests {
                 message_name: "test",
                 wire_size: 20,
                 payload_size: 14,
-                pcap_frame: vec![0u8; 20],
+                pcap_frame: Arc::from(vec![0u8; 20]),
             });
         }
 
@@ -3123,5 +3136,35 @@ mod tests {
         assert!(DISPLAY_BUFFER_BYTES > CURSOR_BUFFER_BYTES);
         assert!(DISPLAY_BUFFER_BYTES > PLAYBACK_BUFFER_BYTES);
         assert!(DISPLAY_BUFFER_BYTES > USBREDIR_BUFFER_BYTES);
+    }
+
+    // ── Phase 07: cheap-clone invariant ─────────────────────
+
+    #[test]
+    fn traffic_entry_clone_shares_pcap_frame_via_arc() {
+        // Phase 07 (no user-visible behaviour change) guard.
+        // The cheap-clone property is the whole point of the
+        // refactor — without this test a future change that
+        // turns pcap_frame back into Vec<u8> would compile and
+        // silently regress the Phase 09 snapshot path's cost
+        // model from O(N atomic increments) to O(total bytes).
+        let entry = TrafficEntry {
+            timestamp: Duration::from_millis(0),
+            channel: "main",
+            direction: TrafficDirection::Received,
+            message_type: 1,
+            message_name: "test",
+            wire_size: 20,
+            payload_size: 14,
+            pcap_frame: Arc::from(vec![0u8; 20]),
+        };
+        let cloned = entry.clone();
+        assert!(
+            Arc::ptr_eq(&entry.pcap_frame, &cloned.pcap_frame),
+            "Clone must share the payload allocation; if this \
+             fires, pcap_frame's type was changed back to \
+             Vec<u8> (or another deep-copy type) and Phase 09's \
+             snapshot cost model is broken."
+        );
     }
 }

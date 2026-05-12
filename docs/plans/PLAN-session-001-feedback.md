@@ -194,7 +194,7 @@ table top-to-bottom is always safe.
 | 4. Region-select zero-width guard | PLAN-session-001-feedback-phase-04-region-select.md | Done |
 | 5. Handle `STREAM_DESTROY_ALL` (display msg 126) | PLAN-session-001-feedback-phase-05-stream-destroy-all.md | Done |
 | 6. Rebalance per-channel ring-buffer split by expected traffic | PLAN-session-001-feedback-phase-06-channel-rebalance.md | Done |
-| 7. `Arc<[u8]>` refactor for `TrafficEntry::pcap_frame` | PLAN-session-001-feedback-phase-07-traffic-arc.md | Not started |
+| 7. `Arc<[u8]>` refactor for `TrafficEntry::pcap_frame` | PLAN-session-001-feedback-phase-07-traffic-arc.md | Done |
 | 8. Segment large messages in ring-buffer frame builder | PLAN-session-001-feedback-phase-08-ring-segmentation.md | Not started |
 | 9. Connection events in notifications pane (F1) | PLAN-session-001-feedback-phase-09-connection-notifications.md | Not started |
 | 10. Notification → bug-report button (F2) | PLAN-session-001-feedback-phase-10-notification-bug-button.md | Not started |

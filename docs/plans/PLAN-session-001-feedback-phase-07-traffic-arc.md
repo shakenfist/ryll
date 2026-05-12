@@ -227,35 +227,32 @@ adjustment.
 
 ## Tasks
 
-- [ ] Add `use std::sync::Arc;` to the top of
-      `ryll/src/bugreport.rs` if not already imported (it is
-      used elsewhere in the file — verify on the way).
-- [ ] Change `TrafficEntry::pcap_frame` from `Vec<u8>` to
-      `Arc<[u8]>` (`bugreport.rs:58`). Update the doc comment
-      to mention the snapshot-cost rationale.
-- [ ] At the two producer sites (`record_received` ~ line
-      306, `record_sent` ~ line 338), convert
-      `build_frame`'s return value with
-      `let pcap_frame: Arc<[u8]> = ...into();` (or
-      `Arc::from(...)`). Pick one form and use it
-      consistently at both sites.
-- [ ] At the pcap-export read site
-      (`TrafficRingBuffer::write_pcap_to` ~ line 152),
-      change `&entry.pcap_frame` to `&entry.pcap_frame[..]`
-      so the slice borrow is explicit. `.len()` is
-      unchanged.
-- [ ] Update the two test stub literals at
-      `bugreport.rs:1576, 1592` to construct
-      `pcap_frame: Arc::from(vec![0u8; 20])`. Confirm via
-      `make test` that no other test stubs construct
-      `TrafficEntry` (grep — there should be none).
-- [ ] Add the new unit test
-      `traffic_entry_clone_shares_pcap_frame_via_arc` in
-      `bugreport::tests`. Comment in the test body explains
-      the Phase 07 / Phase 09 cost-model rationale.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
-      row for Phase 07 → Done. There is no Confirmed-Bugs
-      row for Phase 07 (it's an enabler, not a bug fix).
+- [x] `use std::sync::Arc;` was already imported at
+      `bugreport.rs:11` — no addition needed.
+- [x] Change `TrafficEntry::pcap_frame` from `Vec<u8>` to
+      `Arc<[u8]>`. Doc comment updated with the
+      snapshot-cost rationale and a pointer to the
+      cheap-clone test.
+- [x] At the two producer sites (`record_received`,
+      `record_sent`), `build_frame`'s `Vec<u8>` return is
+      converted with `let pcap_frame: Arc<[u8]> = ....into();`
+      Same form at both sites.
+- [x] At the pcap-export read site
+      (`TrafficRingBuffer::write_pcap_to`), changed
+      `&entry.pcap_frame` to `&entry.pcap_frame[..]` so the
+      slice borrow is explicit (auto-deref would also work
+      here, but the explicit form documents the intent
+      after the type change).
+- [x] Updated the two test stub literals at
+      `bugreport.rs:1589, 1605` to construct
+      `pcap_frame: Arc::from(vec![0u8; 20])`. Grep confirmed
+      no other test sites construct `TrafficEntry`.
+- [x] Added `traffic_entry_clone_shares_pcap_frame_via_arc`
+      in `bugreport::tests`. Asserts `Arc::ptr_eq` on the
+      original and clone — pins the cheap-clone invariant.
+- [x] Updated `PLAN-session-001-feedback.md` Execution
+      table row for Phase 07 → Done. No K-bug row to
+      update (Phase 07 is an enabler).
 
 ## Out of scope
 
