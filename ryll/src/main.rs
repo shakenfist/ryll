@@ -101,6 +101,12 @@ fn main() -> Result<()> {
     {
         if console_subscriber_active {
             console_subscriber::init();
+            // audit-allow-println — this `eprintln!` fires before
+            // tracing is initialised (`set_global_default` runs a
+            // few lines below), so a `tracing::info!` here would
+            // silently drop. The output is a one-shot operator-
+            // facing startup hint that the tokio-console
+            // subscriber is live and how to connect.
             eprintln!(
                 "ryll: tokio-console subscriber active. Connect with `tokio-console` \
                  from another terminal. The default endpoint is 127.0.0.1:6669."
