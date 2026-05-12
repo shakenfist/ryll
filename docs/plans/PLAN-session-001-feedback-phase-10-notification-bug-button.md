@@ -426,25 +426,25 @@ Bundles with the running Phase 02–09 manual checklist:
 
 ## Tasks
 
-- [ ] Derive `Clone` on `TrafficRingBuffer` in
+- [x] Derive `Clone` on `TrafficRingBuffer` in
       `ryll/src/bugreport.rs`. All field types already
       implement `Clone`; `VecDeque<TrafficEntry>::clone`
       hits the cheap Phase-07 / Phase-08 paths.
-- [ ] Add `TrafficBuffers::snapshot(&self) -> TrafficBuffers`
+- [x] Add `TrafficBuffers::snapshot(&self) -> TrafficBuffers`
       that clones each per-channel `Mutex<TrafficRingBuffer>`
       under brief lock acquisition.
-- [ ] Add `NotificationSnapshotState { AtFire, PostEventOnly }`
+- [x] Add `NotificationSnapshotState { AtFire, PostEventOnly }`
       enum next to `BugReportType` (Debug, Clone, Copy,
       PartialEq, Eq, Serialize).
-- [ ] Add `BugReportType::Notification { notification_id: u64,
+- [x] Add `BugReportType::Notification { notification_id: u64,
       snapshot_state: NotificationSnapshotState }` variant.
       Extend `channel_name()` impl: returns `"main"` for the
       new variant.
-- [ ] Extend `assemble`'s channel-state.json match to cover
+- [x] Extend `assemble`'s channel-state.json match to cover
       `BugReportType::Notification { .. }` — picks
       `channel_snapshots.main` (consistent with the
       `channel_name()` fallback).
-- [ ] Add `BugReport::write_notification` in `bugreport.rs`,
+- [x] Add `BugReport::write_notification` in `bugreport.rs`,
       mirroring `write_disconnect`: takes a
       `NotificationEntry`, a snapshot-state, traffic
       buffers (live or snapshot), channel snapshots, app
@@ -452,7 +452,7 @@ Bundles with the running Phase 02–09 manual checklist:
       zip with filename
       `ryll-notification-<id>-<atfire|postevent>-<ts>.zip`.
       Description is `"notification: [<sev>] <message>"`.
-- [ ] Define `NotificationSnapshotStore` in `ryll/src/app.rs`
+- [x] Define `NotificationSnapshotStore` in `ryll/src/app.rs`
       (or a new module) with:
   - `capture(id, traffic)` — insert/refresh, evict oldest
     on overflow, prune expired.
@@ -462,17 +462,17 @@ Bundles with the running Phase 02–09 manual checklist:
   - `prune()` — drop expired only.
   - Internal time-source pluggable for tests (defaults to
     `Instant::now()`).
-- [ ] Add `RyllApp::notification_snapshots: Mutex<NotificationSnapshotStore>`
+- [x] Add `RyllApp::notification_snapshots: Mutex<NotificationSnapshotStore>`
       field; initialise in `RyllApp::new`.
-- [ ] Modify `RyllApp::push_notification` to call
+- [x] Modify `RyllApp::push_notification` to call
       `notification_snapshots.lock().capture(id, traffic.snapshot())`
       after the push.
-- [ ] Add per-row "File bug report" button in the
+- [x] Add per-row "File bug report" button in the
       notifications side-panel render loop. State driven
       by `has_live(entry.id)`. Click sets a deferred
       `pending_bug_report_id` so the borrow ends before
       the file-and-write work runs.
-- [ ] Add `RyllApp::file_notification_bug_report(id)` that:
+- [x] Add `RyllApp::file_notification_bug_report(id)` that:
   - looks up the snapshot (if any),
   - resolves the notification entry by id (for description
     and severity),
@@ -483,16 +483,16 @@ Bundles with the running Phase 02–09 manual checklist:
   - pushes a `BugReport`-source info notification on
     success ("Bug report saved to …"), error notification
     on failure.
-- [ ] Add tick-time prune call in `RyllApp::update`, gated
+- [x] Add tick-time prune call in `RyllApp::update`, gated
       on a 1-second interval via
       `last_snapshot_prune: Instant` field.
-- [ ] Five new unit tests covering `NotificationSnapshotStore`
+- [x] Five new unit tests covering `NotificationSnapshotStore`
       behaviour (cap, TTL, fold-replace, lookup-after-TTL,
       metadata serialisation).
-- [ ] Update `PLAN-session-001-feedback.md` F2 row in the
+- [x] Update `PLAN-session-001-feedback.md` F2 row in the
       "Confirmed feature requests" table with the
       resolution pointer.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       row for Phase 10 → Done.
 - [ ] Manual integration check (deferred operator action,
       final entry in the running Phase 02–09 manual

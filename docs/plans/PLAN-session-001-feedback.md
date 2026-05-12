@@ -63,7 +63,7 @@ description), `D#` (derived from the report data).
 | ID | Title | Sources | Severity | Disposition |
 |----|-------|---------|----------|-------------|
 | **F1** | Surface (re)connect events in the notifications pane | N1, D1 | Medium — visible UX gap, multiple reports show no transitions | **Resolved** in Phase 09 — new `NotificationSource::Connection` variant + 11 producer sites across connect / reconnect cycle / disconnect / error / agent transitions. See `PLAN-session-001-feedback-phase-09-connection-notifications.md`. |
-| **F2** | "Turn this notification into a bug report" button | N2 | Low — quality-of-life | Phase 10 — own plan; Q1 resolved (always-fileable with `at_fire` / `post_event_only` marker); depends on Phase 07 landing first |
+| **F2** | "Turn this notification into a bug report" button | N2 | Low — quality-of-life | **Resolved** in Phase 10 — per-row "File…" button on every notification entry; bounded snapshot store (5 entries / 60 s TTL) captures pcap + state at fire time so the report includes the run-up to the event when available. See `PLAN-session-001-feedback-phase-10-notification-bug-button.md`. |
 
 ### Tracked under another plan
 
@@ -197,7 +197,18 @@ table top-to-bottom is always safe.
 | 7. `Arc<[u8]>` refactor for `TrafficEntry::pcap_frame` | PLAN-session-001-feedback-phase-07-traffic-arc.md | Done |
 | 8. Segment large messages in ring-buffer frame builder | PLAN-session-001-feedback-phase-08-ring-segmentation.md | Done |
 | 9. Connection events in notifications pane (F1) | PLAN-session-001-feedback-phase-09-connection-notifications.md | Done |
-| 10. Notification → bug-report button (F2) | PLAN-session-001-feedback-phase-10-notification-bug-button.md | Not started |
+| 10. Notification → bug-report button (F2) | PLAN-session-001-feedback-phase-10-notification-bug-button.md | Done |
+
+**Master plan complete.** All five confirmed bugs (K1–K5)
+and both confirmed feature requests (F1, F2) are resolved.
+Every Execution row is "Done". The deferred K1-investigation
+side-quests (Step 2d macOS screen-lock detection, Step 22
+macOS app icon, Step 23 stack-trace capture) remain in the
+"Deferred side-quests from the K1 investigation" section
+below — picked up if a future session brings fresh
+motivation. The running Phase 02–10 manual integration
+checklist is the only outstanding item; bundles into one
+operator session against a real SPICE server.
 
 Hard dependencies the order respects:
 

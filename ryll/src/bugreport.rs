@@ -111,6 +111,12 @@ fn entry_bytes(entry: &TrafficEntry) -> usize {
 }
 
 /// Per-channel ring buffer of recent protocol traffic.
+///
+/// `Clone` is derived (cheap thanks to Phase 07 / Phase 08:
+/// each `TrafficEntry` clones in O(N atomic refcount bumps)
+/// for its `pcap_frame` and `additional_segments` Arc<[u8]>
+/// payloads). Used by Phase 10's notification-snapshot store.
+#[derive(Clone)]
 pub struct TrafficRingBuffer {
     /// Ring of entries, newest at the back.
     entries: VecDeque<TrafficEntry>,
@@ -316,6 +322,33 @@ impl TrafficBuffers {
     /// Get the duration since session start.
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    /// Cheap deep-copy of the live ring state (Phase 10 / F2).
+    ///
+    /// Per-channel locks are held briefly to clone each ring;
+    /// the underlying `TrafficEntry` clones are O(N atomic
+    /// refcount bumps) thanks to Phase 07's `Arc<[u8]>` for
+    /// `pcap_frame` and Phase 08's `Vec<Arc<[u8]>>` for
+    /// `additional_segments`.
+    ///
+    /// The returned `TrafficBuffers` is a standalone value
+    /// suitable for handing to `BugReport::assemble` /
+    /// `write_notification` — its rings are immutable from
+    /// the perspective of the notification-snapshot store
+    /// (nothing pushes to them after capture), but the type
+    /// shape is identical so the bug-report writer needs no
+    /// changes to accept it.
+    pub fn snapshot(&self) -> TrafficBuffers {
+        TrafficBuffers {
+            main: Mutex::new(self.main.lock().unwrap().clone()),
+            display: Mutex::new(self.display.lock().unwrap().clone()),
+            inputs: Mutex::new(self.inputs.lock().unwrap().clone()),
+            cursor: Mutex::new(self.cursor.lock().unwrap().clone()),
+            usbredir: Mutex::new(self.usbredir.lock().unwrap().clone()),
+            playback: Mutex::new(self.playback.lock().unwrap().clone()),
+            start: self.start,
+        }
     }
 
     /// Get the ring buffer for a channel by name.
@@ -747,6 +780,25 @@ pub(crate) struct PedanticConfig {
 /// some reason.
 pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
+/// Whether a notification-derived bug report (Phase 10 / F2)
+/// captured its ring-buffer payload from a live snapshot at
+/// the moment the notification fired, or only from the
+/// post-event ring state. Serialised into the report's
+/// metadata.json via `BugReportType::Notification`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum NotificationSnapshotState {
+    /// The snapshot store had a live capture for this
+    /// notification when the user clicked the button. The
+    /// pcap and channel-state JSON reflect ring contents
+    /// from the moment the notification fired.
+    AtFire,
+    /// The snapshot expired (>60 s old) or fell off the
+    /// 5-entry stack. The pcap and channel-state JSON
+    /// reflect post-event ring contents — useful, but
+    /// without the run-up to the event itself.
+    PostEventOnly,
+}
+
 /// Which channel the bug report is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum BugReportType {
@@ -769,6 +821,16 @@ pub enum BugReportType {
     /// so the attribution is always known.
     Disconnect {
         channel: String,
+    },
+    /// User clicked the "File bug report" button on a
+    /// notification entry (Phase 10 / F2).
+    /// `notification_id` is the entry's stable id within the
+    /// session's `NotificationStore`; `snapshot_state` records
+    /// whether the report's traffic payload came from a live
+    /// snapshot at fire time or only post-event ring contents.
+    Notification {
+        notification_id: u64,
+        snapshot_state: NotificationSnapshotState,
     },
 }
 
@@ -800,6 +862,11 @@ impl BugReportType {
                 "webdav" => "webdav",
                 _ => "main",
             },
+            // Phase 10: notification reports are session-level
+            // — the pcap covers all channels, and the
+            // channel-state.json defaults to main as a
+            // sensible session anchor.
+            BugReportType::Notification { .. } => "main",
         }
     }
 }
@@ -1162,11 +1229,15 @@ impl BugReport {
                 // No dedicated usbredir snapshot yet; pcap traffic is captured via channel_name()
                 "{}".to_string()
             }
-            BugReportType::Pedantic { .. } | BugReportType::Disconnect { .. } => {
-                // Pick the snapshot based on the channel the gap / disconnect
-                // came from. For unknown channels we picked "main" or
-                // "display" as the fallback in channel_name(), so this match
-                // mirrors that.
+            BugReportType::Pedantic { .. }
+            | BugReportType::Disconnect { .. }
+            | BugReportType::Notification { .. } => {
+                // Pick the snapshot based on the channel the gap / disconnect /
+                // notification came from. For unknown channels we picked
+                // "main" or "display" as the fallback in channel_name(),
+                // so this match mirrors that. Notification reports default
+                // to "main" via channel_name() — the pcap covers every
+                // channel regardless.
                 match report_type.channel_name() {
                     "cursor" => {
                         let snap = channel_snapshots.cursor.lock().unwrap().clone();
@@ -1528,6 +1599,106 @@ impl BugReport {
         let cause_json = serde_json::to_string_pretty(&cause)?;
         zip.start_file("disconnect-cause.json", opts)?;
         zip.write_all(cause_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
+    /// Phase 10 (F2): write a bug-report zip triggered by the
+    /// user clicking "File bug report" on a notification entry.
+    /// The `traffic` argument is either a live snapshot
+    /// captured at notification-fire time (`AtFire`) or the
+    /// current `TrafficBuffers` (`PostEventOnly`); the
+    /// `snapshot_state` argument records which case applies
+    /// so the maintainer reading the zip knows whether the
+    /// pcap contains the run-up to the event.
+    ///
+    /// Mirrors `write_disconnect`'s zip-writing shape and
+    /// uses `BugReport::assemble` under the hood so
+    /// metadata / session / channel-state / notifications /
+    /// runtime-metrics are all the standard shape.
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "capture")]
+    pub fn write_notification(
+        dir: &std::path::Path,
+        notification: &shakenfist_spice_renderer::NotificationEntry,
+        snapshot_state: NotificationSnapshotState,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
+        runtime_metrics: RuntimeMetrics,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use shakenfist_spice_protocol::NotifySeverity;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let sev_label = match notification.severity {
+            NotifySeverity::Info => "info",
+            NotifySeverity::Warn => "warn",
+            NotifySeverity::Error => "error",
+        };
+        let description = format!("notification: [{}] {}", sev_label, notification.message);
+
+        let report = Self::assemble(
+            BugReportType::Notification {
+                notification_id: notification.id,
+                snapshot_state,
+            },
+            description,
+            None,
+            target_host,
+            target_port,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            notifications,
+            None,
+            runtime_metrics,
+            None,
+            None,
+        )?;
+
+        std::fs::create_dir_all(dir)?;
+
+        let snapshot_tag = match snapshot_state {
+            NotificationSnapshotState::AtFire => "atfire",
+            NotificationSnapshotState::PostEventOnly => "postevent",
+        };
+        let filename = format!(
+            "ryll-notification-{}-{}-{}.zip",
+            notification.id,
+            snapshot_tag,
+            filename_timestamp(),
+        );
+        let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(report.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(report.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(report.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = report.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(report.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&report.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
 
         zip.finish()?;
         Ok(path)

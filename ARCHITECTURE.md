@@ -963,6 +963,42 @@ them on the GUI thread would freeze the UI for ~1 s,
 and the pcap and channel snapshots are the load-bearing
 diagnostic data anyway.
 
+### Notification snapshots and the "file from notification" button
+
+Phase 10 (F2) adds a per-row "File…" button on every
+notification entry in the side panel. Clicking always
+produces a bug-report zip; the variant depends on whether
+a live snapshot of the traffic-buffer state exists for
+that notification.
+
+On every `RyllApp::push_notification` call, after the
+`NotificationStore::push` returns the entry id, the app
+captures a cheap deep-copy of `TrafficBuffers` keyed by id.
+The clone is O(N atomic refcount bumps) thanks to Phase 07's
+`Arc<[u8]>` for `pcap_frame` and Phase 08's
+`Vec<Arc<[u8]>>` for `additional_segments`. The store is
+bounded: at most 5 active snapshots, 60 s TTL. Oldest is
+evicted on overflow; expired entries are pruned both at
+capture time and once per second from the GUI tick.
+
+When the user clicks the button:
+
+- If `notification_snapshots.take(id)` returns a snapshot,
+  the report uses it and metadata.json records
+  `report_type.snapshot_state: "AtFire"`. The zip filename
+  includes `atfire`. The pcap reflects the ring contents
+  from the moment the notification fired.
+- If the snapshot is missing (expired or evicted), the
+  report uses the current `TrafficBuffers` and tags
+  `PostEventOnly` / `postevent`. Useful, but without the
+  run-up to the event.
+
+The button's visual state reflects which path a click would
+take: weak/dimmed text + a "snapshot expired" hover tooltip
+when no live snapshot exists. `BugReport::write_notification`
+mirrors `write_disconnect`'s zip shape — same set of files,
+different filename prefix and metadata.
+
 ### Auto-reconnect with backoff
 
 When a critical channel (Main, Display, Inputs) goes down
