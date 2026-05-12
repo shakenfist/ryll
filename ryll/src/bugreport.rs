@@ -352,6 +352,19 @@ impl TrafficBuffers {
     }
 
     /// Get the ring buffer for a channel by name.
+    ///
+    /// **Webdav is deliberately absent**: the webdav channel
+    /// (`shakenfist-spice-renderer/src/channels/webdav.rs`)
+    /// does not call `traffic.record_*` today, so plumbing a
+    /// `Mutex<TrafficRingBuffer>` for it would yield an
+    /// always-empty ring. Phase 06's per-channel cap
+    /// rebalance noted this gap as out-of-scope (would
+    /// require channel-side recording plumbing plus a budget
+    /// slice from display); it's tracked in
+    /// `PLAN-session-001-feedback-phase-06-channel-rebalance.md`
+    /// "Out of scope". `ChannelSnapshots` does carry a
+    /// `webdav` field for protocol-level state — that
+    /// asymmetry is intentional, not an oversight.
     fn buffer_for(&self, channel: &str) -> Option<&Mutex<TrafficRingBuffer>> {
         match channel {
             "main" => Some(&self.main),
@@ -1207,67 +1220,31 @@ impl BugReport {
         session.uptime_secs = traffic.elapsed().as_secs_f64();
         let session_json = serde_json::to_string_pretty(&session)?;
 
-        // 2. Channel state snapshot
+        // 2. Channel state snapshot — pick the channel from
+        // report_type.channel_name() and delegate the
+        // lock/clone/serialise to ChannelSnapshots'
+        // snapshot_json_for helper. The Usb variant is the
+        // only special case: it has no dedicated snapshot
+        // (its pcap traffic is captured via channel_name()
+        // → "usbredir" further below), so emit an empty
+        // object.
         let channel_state_json = match &report_type {
-            BugReportType::Display => {
-                let snap = channel_snapshots.display.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Input => {
-                let snap = channel_snapshots.inputs.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Cursor => {
-                let snap = channel_snapshots.cursor.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Connection => {
-                let snap = channel_snapshots.main.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Usb => {
-                // No dedicated usbredir snapshot yet; pcap traffic is captured via channel_name()
-                "{}".to_string()
-            }
-            BugReportType::Pedantic { .. }
-            | BugReportType::Disconnect { .. }
-            | BugReportType::Notification { .. } => {
-                // Pick the snapshot based on the channel the gap / disconnect /
-                // notification came from. For unknown channels we picked
-                // "main" or "display" as the fallback in channel_name(),
-                // so this match mirrors that. Notification reports default
-                // to "main" via channel_name() — the pcap covers every
-                // channel regardless.
-                match report_type.channel_name() {
-                    "cursor" => {
-                        let snap = channel_snapshots.cursor.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "inputs" => {
-                        let snap = channel_snapshots.inputs.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "main" => {
-                        let snap = channel_snapshots.main.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "playback" => {
-                        let snap = channel_snapshots.playback.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "usbredir" => {
-                        let snap = channel_snapshots.usbredir.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "webdav" => {
-                        let snap = channel_snapshots.webdav.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    _ => {
-                        let snap = channel_snapshots.display.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                }
+            BugReportType::Usb => "{}".to_string(),
+            _ => {
+                let name = report_type.channel_name();
+                channel_snapshots
+                    .snapshot_json_for(name)
+                    .unwrap_or_else(|| {
+                        // Defensive: channel_name() can return
+                        // "display" / "main" / etc. as
+                        // fallbacks; snapshot_json_for covers
+                        // all of those. This arm fires only
+                        // if a future channel_name() variant
+                        // returns an unknown name.
+                        channel_snapshots
+                            .snapshot_json_for("display")
+                            .expect("display snapshot must exist")
+                    })?
             }
         };
 

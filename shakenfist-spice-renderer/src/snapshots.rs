@@ -244,6 +244,52 @@ impl ChannelSnapshots {
             webdav: Arc::new(Mutex::new(WebdavSnapshot::default())),
         }
     }
+
+    /// Serialise a single channel's snapshot to a pretty JSON
+    /// string, dispatching on channel name. Returns `None` for
+    /// channel names that don't have a dedicated snapshot
+    /// (currently: anything outside the set
+    /// {`"display"`, `"inputs"`, `"cursor"`, `"main"`,
+    /// `"playback"`, `"usbredir"`, `"webdav"`}).
+    ///
+    /// Used by the bug-report writer's per-report-type
+    /// channel-state.json dispatch — extracted as a helper
+    /// so the dispatch site doesn't duplicate the
+    /// channel-name match and the lock/clone/serialise
+    /// boilerplate per channel.
+    pub fn snapshot_json_for(&self, channel: &str) -> Option<serde_json::Result<String>> {
+        match channel {
+            "display" => {
+                let snap = self.display.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "inputs" => {
+                let snap = self.inputs.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "cursor" => {
+                let snap = self.cursor.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "main" => {
+                let snap = self.main.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "playback" => {
+                let snap = self.playback.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "usbredir" => {
+                let snap = self.usbredir.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            "webdav" => {
+                let snap = self.webdav.lock().unwrap().clone();
+                Some(serde_json::to_string_pretty(&snap))
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Default for ChannelSnapshots {
