@@ -749,4 +749,51 @@ mod tests {
         assert_eq!(extract_seq(&frames[2]), base_seq.wrapping_add(130_990));
         assert_eq!(extract_seq(&frames[3]), base_seq.wrapping_add(196_485));
     }
+
+    // ── Boundary + edge cases (wave 2b audit follow-up) ─────
+
+    #[test]
+    fn segment_payload_empty_data_returns_one_empty_frame() {
+        // Pathological / hardening case from the function's
+        // doc comment: empty payload must still produce
+        // exactly one frame (the empty-frame fallback) so the
+        // caller's "one push = one or more entries" invariant
+        // holds. The frame contains only headers.
+        let frames = segment_payload(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &[]);
+        assert_eq!(
+            frames.len(),
+            1,
+            "empty payload must still produce one frame"
+        );
+        assert_eq!(frames[0].len(), 14 + 20 + 20, "empty frame is headers only");
+    }
+
+    #[test]
+    fn segment_payload_exactly_at_max_payload_one_frame() {
+        // MAX_PAYLOAD = 65 495 — the largest payload that fits
+        // in a single IPv4 frame. Must produce exactly one
+        // frame; off-by-one in the split condition would
+        // silently produce two.
+        let payload = vec![0u8; 65_495];
+        let frames = segment_payload(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &payload);
+        assert_eq!(
+            frames.len(),
+            1,
+            "exactly MAX_PAYLOAD bytes must fit in one frame"
+        );
+        assert_eq!(frames[0].len(), 14 + 20 + 20 + 65_495);
+    }
+
+    #[test]
+    fn segment_payload_one_byte_over_max_payload_splits() {
+        // The next byte past MAX_PAYLOAD must produce two
+        // frames: the first with MAX_PAYLOAD bytes, the
+        // second with 1 byte. Off-by-one in the other
+        // direction would keep this in one frame.
+        let payload = vec![0u8; 65_496];
+        let frames = segment_payload(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &payload);
+        assert_eq!(frames.len(), 2, "one byte past MAX_PAYLOAD must split");
+        assert_eq!(frames[0].len(), 14 + 20 + 20 + 65_495);
+        assert_eq!(frames[1].len(), 14 + 20 + 20 + 1);
+    }
 }

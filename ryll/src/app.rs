@@ -4865,6 +4865,57 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_awaiting_outcome_from_idle_lands_in_modal_defensively() {
+        // Defensive arm of on_disconnect: awaiting_outcome=true
+        // implies we were in Pending (we just called
+        // reconnect() from the GUI tick). If a stale event
+        // somehow arrives while state is Idle, the state
+        // machine doesn't silently re-arm a retry — it lands
+        // in Modal(Generic) so the user takes over. Pin the
+        // safety-net behaviour so a future refactor can't
+        // strip it without the test catching the change.
+        let now = Instant::now();
+        let next = ReconnectState::Idle
+            .on_disconnect(
+                true, // awaiting_outcome from Idle: shouldn't happen, defensive
+                None,
+                now,
+                epoch(),
+                no_policy(),
+                err("stale"),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                &next,
+                ReconnectState::Modal(ModalVariant::Generic { latest_error }) if latest_error == "stale"
+            ),
+            "awaiting_outcome from non-Pending must land in Modal(Generic), got {:?}",
+            next
+        );
+    }
+
+    #[test]
+    fn reconnect_awaiting_outcome_from_modal_lands_in_modal_defensively() {
+        // Same defensive arm, entering from Modal. Replaces
+        // the existing Modal with a fresh Generic carrying
+        // the new error — no silent re-arm, no panic.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal(ModalVariant::OneShotConsumed);
+        let next = modal
+            .on_disconnect(true, None, now, epoch(), no_policy(), err("stale"))
+            .unwrap();
+        assert!(
+            matches!(
+                &next,
+                ReconnectState::Modal(ModalVariant::Generic { latest_error }) if latest_error == "stale"
+            ),
+            "awaiting_outcome from Modal must produce Modal(Generic), got {:?}",
+            next
+        );
+    }
+
+    #[test]
     fn reconnect_backoff_progression_matches_spec() {
         // The backoffs published in plan §A.1 are 1s/4s/16s.
         // Lock them in with a direct check so a typo in the
