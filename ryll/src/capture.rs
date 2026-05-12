@@ -74,7 +74,10 @@ impl PcapChannelWriter {
     }
 
     /// Write data as one or more TCP segments, splitting payloads
-    /// that exceed the IPv4 maximum (65535 - headers ≈ 65495).
+    /// that exceed the IPv4 maximum. Delegates segmentation to
+    /// the shared `segment_payload` helper; this wrapper handles
+    /// the per-direction seq/ack lookup and writes each produced
+    /// frame to the pcap.
     fn write_segmented(
         &mut self,
         src_ip: [u8; 4],
@@ -84,20 +87,14 @@ impl PcapChannelWriter {
         data: &[u8],
         elapsed: std::time::Duration,
     ) {
-        const MAX_PAYLOAD: usize = 65495; // 65535 - 20 (IP) - 20 (TCP)
         let is_client = src_ip == CLIENT_IP;
-        let mut offset = 0;
-        while offset < data.len() {
-            let end = (offset + MAX_PAYLOAD).min(data.len());
-            let chunk = &data[offset..end];
-            let (seq, ack) = if is_client {
-                (self.client_seq.wrapping_add(offset as u32), self.server_seq)
-            } else {
-                (self.server_seq.wrapping_add(offset as u32), self.client_seq)
-            };
-            let frame = build_tcp_frame(src_ip, src_port, dst_ip, dst_port, seq, ack, chunk);
+        let (seq, ack) = if is_client {
+            (self.client_seq, self.server_seq)
+        } else {
+            (self.server_seq, self.client_seq)
+        };
+        for frame in segment_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, data) {
             self.write_frame(&frame, elapsed);
-            offset = end;
         }
     }
 
@@ -105,6 +102,61 @@ impl PcapChannelWriter {
         let packet = PcapPacket::new(elapsed, frame.len() as u32, frame);
         self.writer.write_packet(&packet).ok();
     }
+}
+
+/// Split `data` into one or more TCP segments and produce the
+/// pcap frame bytes for each. Per-segment seq numbers are
+/// `seq + offset`; the caller is responsible for advancing
+/// its own stream-wide seq tracking by `data.len()` after
+/// this call returns.
+///
+/// `MAX_PAYLOAD = 65495 = 65535 − 20 (IP) − 20 (TCP)` is the
+/// IPv4-frame payload ceiling; `build_tcp_frame` itself
+/// fails closed above this, which is the K2 (Phase 08) bug
+/// in the un-segmented ring path.
+///
+/// Always returns at least one frame. SPICE messages carry a
+/// 6-byte header so `data` is non-empty in practice, but if
+/// a caller ever passes an empty slice we fall through to a
+/// single empty frame rather than returning an empty `Vec` —
+/// keeps the "one push = one or more entries" invariant for
+/// both the live and ring callers.
+pub(crate) fn segment_payload(
+    src_ip: [u8; 4],
+    src_port: u16,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    data: &[u8],
+) -> Vec<Vec<u8>> {
+    const MAX_PAYLOAD: usize = 65495; // 65535 − 20 (IP) − 20 (TCP)
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    while offset < data.len() {
+        let end = (offset + MAX_PAYLOAD).min(data.len());
+        let chunk = &data[offset..end];
+        let segment_seq = seq.wrapping_add(offset as u32);
+        frames.push(build_tcp_frame(
+            src_ip,
+            src_port,
+            dst_ip,
+            dst_port,
+            segment_seq,
+            ack,
+            chunk,
+        ));
+        offset = end;
+    }
+    if frames.is_empty() {
+        // Pathological: empty payload. Produce a single empty
+        // frame so callers don't have to special-case an empty
+        // return vec.
+        frames.push(build_tcp_frame(
+            src_ip, src_port, dst_ip, dst_port, seq, ack, data,
+        ));
+    }
+    frames
 }
 
 /// Build a fake Ethernet + IPv4 + TCP frame wrapping `payload`.
@@ -630,5 +682,71 @@ impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
 
     fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) {
         CaptureSession::frame(self, surface_id, pixels, width, height);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segment_payload_single_segment_under_max() {
+        // A 1000-byte payload fits in one IPv4 frame; the
+        // helper must return exactly one frame with the full
+        // payload appended after the headers.
+        let frames = segment_payload(
+            CLIENT_IP,
+            10001,
+            SERVER_IP,
+            SERVER_PORT,
+            1234,
+            5678,
+            &[0u8; 1000],
+        );
+        assert_eq!(frames.len(), 1);
+        // Frame size = ethernet(14) + ipv4(20) + tcp(20) + payload(1000).
+        assert_eq!(frames[0].len(), 14 + 20 + 20 + 1000);
+    }
+
+    #[test]
+    fn segment_payload_split_at_max() {
+        // A 130 000-byte payload must produce 2 frames: the
+        // first with 65 495 bytes of payload, the second with
+        // the 64 505-byte tail. Phase 08 / K2 fix.
+        let payload = vec![0u8; 130_000];
+        let frames = segment_payload(CLIENT_IP, 10002, SERVER_IP, SERVER_PORT, 0, 0, &payload);
+        assert_eq!(frames.len(), 2, "130KB payload should split into 2 frames");
+        const HEADERS: usize = 14 + 20 + 20;
+        assert_eq!(frames[0].len(), HEADERS + 65_495);
+        assert_eq!(frames[1].len(), HEADERS + (130_000 - 65_495));
+    }
+
+    #[test]
+    fn segment_payload_seqs_chain_correctly() {
+        // Per-segment seq must be base + offset. Parse the
+        // 4-byte big-endian seq field out of each frame's TCP
+        // header (offset 14 + 20 + 4 = 38 bytes into the frame).
+        let payload = vec![0u8; 200_000];
+        let base_seq: u32 = 0x1000_0000;
+        let frames = segment_payload(
+            CLIENT_IP,
+            10003,
+            SERVER_IP,
+            SERVER_PORT,
+            base_seq,
+            0,
+            &payload,
+        );
+        assert_eq!(frames.len(), 4, "200KB payload should split into 4 frames");
+        let extract_seq = |frame: &[u8]| -> u32 {
+            // Ethernet 14, IPv4 20, then TCP header. Seq is at
+            // bytes 4..8 of the TCP header, big-endian.
+            let off = 14 + 20 + 4;
+            u32::from_be_bytes([frame[off], frame[off + 1], frame[off + 2], frame[off + 3]])
+        };
+        assert_eq!(extract_seq(&frames[0]), base_seq);
+        assert_eq!(extract_seq(&frames[1]), base_seq.wrapping_add(65_495));
+        assert_eq!(extract_seq(&frames[2]), base_seq.wrapping_add(130_990));
+        assert_eq!(extract_seq(&frames[3]), base_seq.wrapping_add(196_485));
     }
 }

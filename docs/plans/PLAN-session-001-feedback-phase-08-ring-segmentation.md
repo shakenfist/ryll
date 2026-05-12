@@ -358,50 +358,48 @@ Bundles with the running Phase 02–07 manual checklist:
 
 ## Tasks
 
-- [ ] Extract `segment_payload(src_ip, src_port, dst_ip,
+- [x] Extracted `segment_payload(src_ip, src_port, dst_ip,
       dst_port, seq, ack, data)` as a `pub(crate)` free
-      function in `ryll/src/capture.rs`. Logic mirrors the
-      existing `write_segmented` loop body. Defensive fallback
-      for empty data: produce one empty frame.
-- [ ] Rewrite `PcapChannelWriter::write_segmented` to call
+      function in `ryll/src/capture.rs`. Defensive fallback
+      for empty data produces one empty frame so callers
+      don't have to special-case the return value.
+- [x] `PcapChannelWriter::write_segmented` rewritten to call
       `segment_payload` and write each returned frame via
-      `write_frame`. Preserves the existing seq-advance
-      semantics at the call site (`write_sent` / `write_received`).
-- [ ] Add `pub additional_segments: Vec<Arc<[u8]>>` to
-      `TrafficEntry` (`ryll/src/bugreport.rs`). Doc comment
-      explains the segmentation model and the empty-Vec
-      common case.
-- [ ] Replace `build_frame` with `build_segmented_frames`
+      `write_frame`. Same seq-advance semantics at the
+      `write_sent` / `write_received` call sites.
+- [x] Added `pub additional_segments: Vec<Arc<[u8]>>` to
+      `TrafficEntry`. Doc comment explains the segmentation
+      model and the empty-Vec common case (no allocation).
+- [x] Replaced `build_frame` with `build_segmented_frames`
       returning `Vec<Arc<[u8]>>`. Both producer sites
       (`record_received`, `record_sent`) build the entry by
-      splitting the first frame off as `pcap_frame` and
+      `remove(0)`-ing the first frame as `pcap_frame` and
       using the rest as `additional_segments`.
-- [ ] Update `TrafficRingBuffer::push` to account total bytes
-      across `pcap_frame.len() + additional_segments`. Same
-      for the eviction path (subtract both on `pop_front`).
-- [ ] Update `TrafficRingBuffer::write_pcap_to` to iterate
+- [x] Added free function `entry_bytes(entry)` that sums
+      `pcap_frame.len() + additional_segments`; used in
+      `TrafficRingBuffer::push` for both insertion and
+      eviction byte accounting.
+- [x] `TrafficRingBuffer::write_pcap_to` updated to iterate
       `pcap_frame` then `additional_segments` per entry,
       writing one pcap packet per segment at the entry's
-      timestamp. Increment `count` per entry (= per message),
-      not per segment, to preserve the existing return-value
+      timestamp. `count` increments per entry (= per
+      message), preserving pre-Phase-08 return-value
       semantics.
-- [ ] Update both test stub literals (`bugreport.rs:1589, 1605`)
-      to include `additional_segments: Vec::new()` for the
-      now-five-field literal.
-- [ ] Extend the existing
-      `traffic_entry_clone_shares_pcap_frame_via_arc` test
+- [x] Both test stub literals now include
+      `additional_segments: Vec::new()`.
+- [x] Extended `traffic_entry_clone_shares_pcap_frame_via_arc`
       to also assert `Arc::ptr_eq` across cloned
-      `additional_segments` entries when present.
-- [ ] Add the five new tests under "Tests" above:
+      `additional_segments` entries.
+- [x] Added the five new tests:
   - `bugreport::tests::traffic_entry_segments_large_message`
-  - `bugreport::tests::traffic_entry_segment_seqs_chain_correctly`
   - `bugreport::tests::traffic_ring_byte_cap_evicts_segmented_entries`
   - `capture::tests::segment_payload_split_at_max`
   - `capture::tests::segment_payload_single_segment_under_max`
-- [ ] Update `PLAN-session-001-feedback.md` K2 row in the
+  - `capture::tests::segment_payload_seqs_chain_correctly`
+- [x] Updated `PLAN-session-001-feedback.md` K2 row in the
       "Confirmed bugs" table with the resolution pointer.
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
-      row for Phase 08 → Done.
+- [x] Updated `PLAN-session-001-feedback.md` Execution
+      table row for Phase 08 → Done.
 - [ ] Manual integration check (deferred operator action,
       bundles with the running Phase 02–07 manual checklist):
       busy-display F8 report → Wireshark verification of

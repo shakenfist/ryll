@@ -52,9 +52,12 @@ pub struct TrafficEntry {
     pub wire_size: u32,
     /// Payload size (wire_size minus 6-byte header).
     pub payload_size: u32,
-    /// Full pcap frame bytes (Ethernet + IP + TCP + SPICE
-    /// payload). Used by `drain_to_pcap()` for bug-report
-    /// export.
+    /// First pcap frame bytes (Ethernet + IP + TCP + SPICE
+    /// payload). For SPICE messages that fit in a single
+    /// IPv4 frame (< 65495 payload bytes), this is the
+    /// whole message; for larger messages it's the first
+    /// segment and the rest live in `additional_segments`.
+    /// Used by `drain_to_pcap()` for bug-report export.
     ///
     /// `Arc<[u8]>` so Phase 09's snapshot-on-notification
     /// path can clone the ring buffer's entries in
@@ -62,6 +65,15 @@ pub struct TrafficEntry {
     /// See `traffic_entry_clone_shares_pcap_frame_via_arc`
     /// in this file's tests for the cheap-clone invariant.
     pub pcap_frame: Arc<[u8]>,
+    /// Additional TCP segments produced when a SPICE message
+    /// exceeds the IPv4 frame limit (Phase 08 / K2 fix).
+    /// Empty in the common case where the message fits in a
+    /// single segment; a few entries for larger display-
+    /// channel messages. Each segment is an independent
+    /// `Arc<[u8]>` so clones (Phase 09) remain O(N atomic
+    /// refcount bumps). An empty `Vec` does not allocate, so
+    /// the common case has zero per-entry overhead.
+    pub additional_segments: Vec<Arc<[u8]>>,
 }
 
 /// Lightweight traffic entry for the viewer (no pcap frame).
@@ -82,6 +94,18 @@ pub struct TrafficViewEntry {
     pub wire_size: u32,
     /// Payload size (wire_size minus 6-byte header).
     pub payload_size: u32,
+}
+
+/// Total byte cost of a `TrafficEntry` in the ring buffer:
+/// the first segment plus any additional segments. Used by
+/// the byte-cap accounting in `TrafficRingBuffer::push`.
+fn entry_bytes(entry: &TrafficEntry) -> usize {
+    entry.pcap_frame.len()
+        + entry
+            .additional_segments
+            .iter()
+            .map(|s| s.len())
+            .sum::<usize>()
 }
 
 /// Per-channel ring buffer of recent protocol traffic.
@@ -111,13 +135,15 @@ impl TrafficRingBuffer {
     }
 
     /// Push a new entry, evicting oldest entries if the byte
-    /// cap would be exceeded.
+    /// cap would be exceeded. Accounts for the full segmented
+    /// payload (Phase 08): an entry's byte cost is its
+    /// `pcap_frame` plus any `additional_segments`.
     pub fn push(&mut self, entry: TrafficEntry) {
-        self.total_bytes += entry.pcap_frame.len();
+        self.total_bytes += entry_bytes(&entry);
         self.entries.push_back(entry);
         while self.total_bytes > self.max_bytes {
             if let Some(old) = self.entries.pop_front() {
-                self.total_bytes -= old.pcap_frame.len();
+                self.total_bytes -= entry_bytes(&old);
             } else {
                 break;
             }
@@ -153,6 +179,7 @@ impl TrafficRingBuffer {
 
         let mut count = 0;
         for entry in &self.entries {
+            // First segment (always present).
             let packet = PcapPacket::new(
                 entry.timestamp,
                 entry.pcap_frame.len() as u32,
@@ -162,6 +189,17 @@ impl TrafficRingBuffer {
                 &entry.pcap_frame[..],
             );
             pcap.write_packet(&packet).ok();
+            // Additional segments (Phase 08) for SPICE messages
+            // that exceeded the IPv4 frame limit. Written at
+            // the same timestamp — matches what the live
+            // capture writer produces for the same payload.
+            for seg in &entry.additional_segments {
+                let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
+                pcap.write_packet(&seg_packet).ok();
+            }
+            // `count` reflects the number of SPICE messages,
+            // not segments — preserve the pre-Phase-08 return-
+            // value semantics.
             count += 1;
         }
 
@@ -312,9 +350,11 @@ impl TrafficBuffers {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        let pcap_frame: Arc<[u8]> = self
-            .build_frame(channel, false, raw_message, &mut guard)
-            .into();
+        let mut frames = self.build_segmented_frames(channel, false, raw_message, &mut guard);
+        // segment_payload guarantees ≥1 frame; the unwrap is
+        // an invariant assertion, not a fallible operation.
+        let pcap_frame = frames.remove(0);
+        let additional_segments = frames;
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -324,6 +364,7 @@ impl TrafficBuffers {
             wire_size,
             payload_size,
             pcap_frame,
+            additional_segments,
         };
         guard.push(entry);
     }
@@ -346,9 +387,10 @@ impl TrafficBuffers {
         let payload_size = wire_size.saturating_sub(6);
 
         let mut guard = buf.lock().unwrap();
-        let pcap_frame: Arc<[u8]> = self
-            .build_frame(channel, true, raw_message, &mut guard)
-            .into();
+        let mut frames = self.build_segmented_frames(channel, true, raw_message, &mut guard);
+        // segment_payload guarantees ≥1 frame.
+        let pcap_frame = frames.remove(0);
+        let additional_segments = frames;
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -358,20 +400,24 @@ impl TrafficBuffers {
             wire_size,
             payload_size,
             pcap_frame,
+            additional_segments,
         };
         guard.push(entry);
     }
 
-    /// Build a pcap frame for the given message, updating TCP
-    /// sequence numbers on the ring buffer.
+    /// Build one or more pcap frames for the given message,
+    /// updating TCP sequence numbers on the ring buffer.
+    /// Messages above the IPv4 frame limit are split via the
+    /// shared `capture::segment_payload` helper — the Phase 08
+    /// (K2) fix. Always returns at least one frame.
     #[cfg(feature = "capture")]
-    fn build_frame(
+    fn build_segmented_frames(
         &self,
         channel: &str,
         is_sent: bool,
         data: &[u8],
         ring: &mut TrafficRingBuffer,
-    ) -> Vec<u8> {
+    ) -> Vec<Arc<[u8]>> {
         let port = capture::channel_port(channel);
         let (src_ip, src_port, dst_ip, dst_port, seq, ack) = if is_sent {
             let s = ring.client_seq;
@@ -384,20 +430,26 @@ impl TrafficBuffers {
             ring.server_seq = ring.server_seq.wrapping_add(data.len() as u32);
             ([10, 0, 0, 2], 5900u16, [10, 0, 0, 1], port, s, a)
         };
-        capture::build_tcp_frame(src_ip, src_port, dst_ip, dst_port, seq, ack, data)
+        capture::segment_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, data)
+            .into_iter()
+            .map(Arc::<[u8]>::from)
+            .collect()
     }
 
-    /// Stub when capture feature is disabled — produce an empty
-    /// frame since pcap construction is unavailable.
+    /// Stub when capture feature is disabled — produce a
+    /// single empty frame since pcap construction is
+    /// unavailable. Callers will treat this as "one entry,
+    /// zero useful pcap data" which matches the pre-Phase-08
+    /// behaviour.
     #[cfg(not(feature = "capture"))]
-    fn build_frame(
+    fn build_segmented_frames(
         &self,
         _channel: &str,
         _is_sent: bool,
         _data: &[u8],
         _ring: &mut TrafficRingBuffer,
-    ) -> Vec<u8> {
-        Vec::new()
+    ) -> Vec<Arc<[u8]>> {
+        vec![Arc::from(Vec::<u8>::new())]
     }
 
     /// Log a summary of ring buffer state (for verbose mode).
@@ -1587,6 +1639,7 @@ mod tests {
                 wire_size: 20,
                 payload_size: 14,
                 pcap_frame: Arc::from(vec![0u8; 20]),
+                additional_segments: Vec::new(),
             });
         }
         assert_eq!(rb.len(), 3);
@@ -1603,6 +1656,7 @@ mod tests {
                 wire_size: 20,
                 payload_size: 14,
                 pcap_frame: Arc::from(vec![0u8; 20]),
+                additional_segments: Vec::new(),
             });
         }
 
@@ -3157,6 +3211,7 @@ mod tests {
             wire_size: 20,
             payload_size: 14,
             pcap_frame: Arc::from(vec![0u8; 20]),
+            additional_segments: vec![Arc::from(vec![0u8; 10]), Arc::from(vec![0u8; 5])],
         };
         let cloned = entry.clone();
         assert!(
@@ -3166,5 +3221,90 @@ mod tests {
              Vec<u8> (or another deep-copy type) and Phase 09's \
              snapshot cost model is broken."
         );
+        // Phase 08: the same invariant for additional_segments.
+        // Cloning a Vec<Arc<[u8]>> deep-copies the Vec spine but
+        // each Arc<[u8]> stays shared — that's the property the
+        // segmented ring needs for cheap Phase 09 snapshots.
+        for (orig, clone) in entry
+            .additional_segments
+            .iter()
+            .zip(cloned.additional_segments.iter())
+        {
+            assert!(
+                Arc::ptr_eq(orig, clone),
+                "Cloned additional_segments must share each \
+                 segment's Arc payload allocation."
+            );
+        }
+    }
+
+    // ── Phase 08 segmentation ───────────────────────────────
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn traffic_entry_segments_large_message() {
+        // Push a >65 KB synthetic message through record_received
+        // and verify it lands in the ring as one entry with
+        // pcap_frame holding the first MAX_PAYLOAD bytes and
+        // additional_segments carrying the tail.
+        let bufs = TrafficBuffers::new();
+        // 100 000 byte payload → two segments (65495 + 34505).
+        let big = vec![0xABu8; 100_000];
+        bufs.record_received("display", 1, "test", &big);
+        let guard = bufs.display.lock().unwrap();
+        assert_eq!(guard.entries().len(), 1, "one entry per SPICE message");
+        let entry = guard.entries().front().unwrap();
+        // pcap_frame is the first segment: TCP wrapping is added,
+        // so the frame is bigger than just MAX_PAYLOAD payload —
+        // assert against the payload-bearing portion via the
+        // segment count and tail size instead of exact byte
+        // counts on the framed output.
+        assert_eq!(
+            entry.additional_segments.len(),
+            1,
+            "100 KB payload should produce exactly one trailing segment"
+        );
+        // The total bytes the ring holds must match the framed
+        // size, not the raw payload size — and crucially must be
+        // > 65 KB, proving the pre-Phase-08 drop-on-overflow
+        // path did not fire.
+        let total = entry.pcap_frame.len()
+            + entry
+                .additional_segments
+                .iter()
+                .map(|s| s.len())
+                .sum::<usize>();
+        assert!(
+            total > 100_000,
+            "framed total should exceed raw payload size (TCP/IP headers): got {}",
+            total
+        );
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn traffic_ring_byte_cap_evicts_segmented_entries() {
+        // A segmented entry's byte cost includes
+        // additional_segments. Push enough oversized entries to
+        // exceed a small ring cap and verify total_bytes accounts
+        // them correctly during eviction.
+        let mut rb = TrafficRingBuffer::new(200);
+        for i in 0..5 {
+            rb.push(TrafficEntry {
+                timestamp: Duration::from_millis(i * 100),
+                channel: "test",
+                direction: TrafficDirection::Received,
+                message_type: i as u16,
+                message_name: "test",
+                wire_size: 100,
+                payload_size: 94,
+                pcap_frame: Arc::from(vec![0u8; 50]),
+                additional_segments: vec![Arc::from(vec![0u8; 50])],
+            });
+        }
+        // Each entry is 100 bytes; the 200-byte cap holds at
+        // most 2 entries.
+        assert!(rb.total_bytes() <= 200);
+        assert!(rb.len() <= 2);
     }
 }
