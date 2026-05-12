@@ -257,25 +257,27 @@ manual test:
 
 ## Tasks
 
-- [ ] Replace `PER_CHANNEL_BYTES` in `ryll/src/bugreport.rs`
+- [x] Replace `PER_CHANNEL_BYTES` in `ryll/src/bugreport.rs`
       with the six per-channel named constants (display,
       usbredir, playback, cursor, main, inputs) plus
       `TOTAL_TRAFFIC_BUFFER_BYTES`. Comment block above the
       constants summarises the weighting and references this
       phase plan.
-- [ ] Add the `const _: () = assert!(...)` compile-time
-      sum-check immediately after the constants.
-- [ ] Update each `Mutex::new(TrafficRingBuffer::new(...))`
+- [x] Add the `const _: () = assert!(...)` compile-time
+      sum-check immediately after the constants
+      (`#[allow(clippy::assertions_on_constants)]` to suppress
+      the dead-assert lint — the const-time check *is* the
+      point).
+- [x] Update each `Mutex::new(TrafficRingBuffer::new(...))`
       slot in `TrafficBuffers::new()` to use the
       channel-specific constant.
-- [ ] Add a `pub fn max_bytes(&self) -> usize` accessor on
-      `TrafficRingBuffer` (one-liner; the private field is
-      already there).
-- [ ] Add three unit tests in `bugreport::tests`:
+- [x] Add a `pub fn max_bytes(&self) -> usize` accessor on
+      `TrafficRingBuffer`.
+- [x] Add three unit tests in `bugreport::tests`:
   - `traffic_buffer_per_channel_caps_match_plan`
   - `traffic_buffer_total_budget_is_50mb`
   - `traffic_buffer_display_holds_more_than_other_channels`
-- [ ] Update `PLAN-session-001-feedback.md` Execution table
+- [x] Update `PLAN-session-001-feedback.md` Execution table
       row for Phase 06 → Done. There is no master-plan
       "bug" entry for Phase 06 (it's an improvement, not a
       bug fix), so the Confirmed-Bugs table needs no edit.

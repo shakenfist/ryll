@@ -170,10 +170,67 @@ impl TrafficRingBuffer {
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
+
+    /// Configured byte cap. The buffer evicts entries from the
+    /// front whenever a push would push `total_bytes` past
+    /// this value. Exposed so unit tests can assert the
+    /// rebalanced per-channel caps land in the right buckets.
+    #[allow(dead_code)]
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
 }
 
-/// Default per-channel ring buffer cap: 10 MB (50 MB / 5 channels).
-const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 6;
+// Per-channel ring-buffer caps. Total = 50 MB, weighted by
+// observed session-001 traffic rates (Phase 06 plan). Weights
+// are documented per-line so a retune is a one-line edit. The
+// `const _: () = assert!(...)` immediately below pins the sum.
+//
+// Why these weights:
+//   display:16 dominates because display is the channel the
+//     rebalance exists to help. 32 MB covers ~5 s at 6 MB/s
+//     peak and ~16 s at 2 MB/s typical from session-001.
+//   usbredir:2 — active USB transfers hit ~50 MB/s, which no
+//     realistic cap captures. 4 MB suffices for the idle /
+//     control case and the protocol-state-change tail at the
+//     start of a transfer.
+//   playback / cursor / main : 2 each — all an order of
+//     magnitude below display but with non-trivial sustained
+//     rates. 4 MB is many minutes of retention.
+//   inputs:1 is the lowest sustained-rate channel by a wide
+//     margin; 2 MB holds hours of keystrokes / mouse events.
+const DISPLAY_BUFFER_BYTES: usize = 32 * 1024 * 1024; // weight 16
+const USBREDIR_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const PLAYBACK_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const CURSOR_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const MAIN_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
+
+/// Budget shared across all per-channel ring buffers. Pinned
+/// at 50 MB; dynamic sizing keyed on system memory is the
+/// master plan's "Future work" item and explicitly out of
+/// scope for this phase.
+const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
+
+// Compile-time arithmetic guard: the per-channel caps must
+// sum to TOTAL_TRAFFIC_BUFFER_BYTES. A typo in any of the
+// constants above fails the build rather than silently
+// changing the budget. Belt-and-suspenders with the runtime
+// test in bugreport::tests.
+//
+// clippy::assertions_on_constants warns on `assert!(<const>)`
+// as dead code; here the const-time assert *is* the point.
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(
+    DISPLAY_BUFFER_BYTES
+        + USBREDIR_BUFFER_BYTES
+        + PLAYBACK_BUFFER_BYTES
+        + CURSOR_BUFFER_BYTES
+        + MAIN_BUFFER_BYTES
+        + INPUTS_BUFFER_BYTES
+        == TOTAL_TRAFFIC_BUFFER_BYTES,
+    "per-channel caps must sum to TOTAL_TRAFFIC_BUFFER_BYTES",
+);
 
 /// Known channel names.
 const CHANNELS: [&str; 6] = [
@@ -197,12 +254,12 @@ impl TrafficBuffers {
     /// Create a new set of traffic buffers.
     pub fn new() -> Self {
         TrafficBuffers {
-            main: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            display: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            inputs: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            cursor: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            usbredir: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            playback: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
+            main: Mutex::new(TrafficRingBuffer::new(MAIN_BUFFER_BYTES)),
+            display: Mutex::new(TrafficRingBuffer::new(DISPLAY_BUFFER_BYTES)),
+            inputs: Mutex::new(TrafficRingBuffer::new(INPUTS_BUFFER_BYTES)),
+            cursor: Mutex::new(TrafficRingBuffer::new(CURSOR_BUFFER_BYTES)),
+            usbredir: Mutex::new(TrafficRingBuffer::new(USBREDIR_BUFFER_BYTES)),
+            playback: Mutex::new(TrafficRingBuffer::new(PLAYBACK_BUFFER_BYTES)),
             start: Instant::now(),
         }
     }
@@ -2992,5 +3049,79 @@ mod tests {
         assert!(filename.starts_with("ryll-disconnect-weird-name-with-colons-"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Phase 06 rebalance ─────────────────────────────────
+
+    #[test]
+    fn traffic_buffer_per_channel_caps_match_plan() {
+        // Pin each channel's ring buffer to its Phase 06 cap.
+        // Catches a silent regression to the old even-split
+        // (~8.33 MB everywhere) or a typo in any of the named
+        // constants.
+        let bufs = TrafficBuffers::new();
+        assert_eq!(
+            bufs.main.lock().unwrap().max_bytes(),
+            MAIN_BUFFER_BYTES,
+            "main ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.display.lock().unwrap().max_bytes(),
+            DISPLAY_BUFFER_BYTES,
+            "display ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.inputs.lock().unwrap().max_bytes(),
+            INPUTS_BUFFER_BYTES,
+            "inputs ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.cursor.lock().unwrap().max_bytes(),
+            CURSOR_BUFFER_BYTES,
+            "cursor ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.usbredir.lock().unwrap().max_bytes(),
+            USBREDIR_BUFFER_BYTES,
+            "usbredir ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.playback.lock().unwrap().max_bytes(),
+            PLAYBACK_BUFFER_BYTES,
+            "playback ring cap mismatch"
+        );
+    }
+
+    #[test]
+    fn traffic_buffer_total_budget_is_50mb() {
+        // Belt-and-suspenders with the compile-time
+        // const _: () = assert!(...) check next to the
+        // constants. Visible in CI test output if it ever
+        // trips.
+        let total = DISPLAY_BUFFER_BYTES
+            + USBREDIR_BUFFER_BYTES
+            + PLAYBACK_BUFFER_BYTES
+            + CURSOR_BUFFER_BYTES
+            + MAIN_BUFFER_BYTES
+            + INPUTS_BUFFER_BYTES;
+        assert_eq!(total, TOTAL_TRAFFIC_BUFFER_BYTES);
+        assert_eq!(TOTAL_TRAFFIC_BUFFER_BYTES, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn traffic_buffer_display_holds_more_than_other_channels() {
+        // Shape invariant — display is the channel the
+        // rebalance exists to help. Catches a weight typo
+        // (e.g. swapping display and inputs by mistake)
+        // without overfitting to specific numbers, which the
+        // per-channel-caps test already does. Clippy notes
+        // these are compile-time-true, which is the point —
+        // the test surfaces the failure in CI output too.
+        assert!(DISPLAY_BUFFER_BYTES > MAIN_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > INPUTS_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > CURSOR_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > PLAYBACK_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > USBREDIR_BUFFER_BYTES);
     }
 }
