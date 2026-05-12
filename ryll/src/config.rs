@@ -351,20 +351,57 @@ impl Config {
 /// file. Absent → `None`; malformed → log a warn and yield
 /// `None` (do not propagate the error — connect should still
 /// succeed even if the optional expiry hint cannot be parsed).
+///
+/// Hardening (pre-push audit, wave 2d / F1 + F2):
+///
+/// - **Overflow-safe arithmetic.** A near-`u64::MAX` value
+///   would overflow the i64-backed `SystemTime` and panic on
+///   the `+` operator. `checked_add` returns `None`, which we
+///   treat as a parse failure.
+///
+/// - **Reject past timestamps at parse time.** A hostile or
+///   buggy `.vv` with `ticket-valid-until=0` (or any value
+///   already in the past) would short-circuit every disconnect
+///   into the `Modal(TicketExpired)` variant on first
+///   disconnect, even though the actual server-side ticket may
+///   be perfectly valid. Treat already-past expiries the same
+///   as malformed: log a warn and yield `None` so the session
+///   proceeds normally.
 fn parse_ticket_valid_until(ini: &Ini, section: &str) -> Option<SystemTime> {
     let raw = ini
         .get(section, "ticket-valid-until")
         .and_then(filter_none)?;
-    match raw.trim().parse::<u64>() {
-        Ok(secs) => Some(UNIX_EPOCH + Duration::from_secs(secs)),
+    let secs = match raw.trim().parse::<u64>() {
+        Ok(s) => s,
         Err(e) => {
             warn!(
                 ".vv: ticket-valid-until='{}' is not a valid unix timestamp: {}; ignoring",
                 raw, e
             );
-            None
+            return None;
         }
+    };
+    let expiry = match UNIX_EPOCH.checked_add(Duration::from_secs(secs)) {
+        Some(t) => t,
+        None => {
+            warn!(
+                ".vv: ticket-valid-until='{}' overflows SystemTime; ignoring",
+                raw
+            );
+            return None;
+        }
+    };
+    let now = SystemTime::now();
+    if expiry <= now {
+        warn!(
+            ".vv: ticket-valid-until='{}' is already in the past at parse time; \
+             ignoring (would otherwise short-circuit every disconnect to a \
+             ticket-expired modal)",
+            raw
+        );
+        return None;
     }
+    Some(expiry)
 }
 
 /// Collect virtual disk configs from CLI args and validate paths.
@@ -493,11 +530,24 @@ mod tests {
 
     #[test]
     fn vv_ticket_valid_until_parses_unix_ts() {
-        // 2024-11-01T22:13:20Z = unix 1730500000
-        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=1730500000\n");
+        // Use a far-future timestamp so the past-rejection
+        // hardening doesn't trip the happy-path test. 33 years
+        // from the unix epoch puts us comfortably past 2026 and
+        // well within SystemTime's range. The exact number
+        // doesn't matter beyond "not in the past at test time".
+        let future = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs())
+            + 86_400;
+        let vv = format!(
+            "[virt-viewer]\nhost=h\nport=5900\nticket-valid-until={}\n",
+            future
+        );
+        let cfg = parse(&vv);
         let t = cfg.ticket_valid_until.expect("ticket_valid_until set");
         let secs = t.duration_since(UNIX_EPOCH).unwrap().as_secs();
-        assert_eq!(secs, 1_730_500_000);
+        assert_eq!(secs, future);
     }
 
     #[test]
@@ -511,6 +561,40 @@ mod tests {
     #[test]
     fn vv_ticket_valid_until_absent_yields_none() {
         let cfg = parse("[virt-viewer]\nhost=h\nport=5900\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_past_value_yields_none() {
+        // Pre-push audit wave 2d / F2 hardening: a hostile or
+        // buggy .vv with a past timestamp would otherwise lock
+        // the user into Modal(TicketExpired) on first
+        // disconnect. Reject at parse time so the session
+        // proceeds with the full auto-reconnect budget.
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=1\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_zero_yields_none() {
+        // Boundary case for the past-rejection: 0 (the unix
+        // epoch) is unambiguously in the past.
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=0\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_overflow_yields_none() {
+        // Pre-push audit wave 2d / F1 hardening:
+        // u64::MAX seconds overflows the i64-backed SystemTime
+        // and would panic on `UNIX_EPOCH + Duration::from_secs`.
+        // checked_add returns None; we treat it like a parse
+        // failure.
+        let vv = format!(
+            "[virt-viewer]\nhost=h\nport=5900\nticket-valid-until={}\n",
+            u64::MAX
+        );
+        let cfg = parse(&vv);
         assert!(cfg.ticket_valid_until.is_none());
     }
 }
