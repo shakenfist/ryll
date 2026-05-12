@@ -258,6 +258,18 @@ Ryll uses:
     connection-state transition, pushed via the
     `RyllApp::push_connection_event` helper).
 
+    Prefer `RyllApp::push_notification` over a bare
+    `notifications.lock().push(entry)` from inside `RyllApp`:
+    the wrapper *also* captures a `TrafficBuffers` snapshot
+    keyed by the new entry's id (Phase 10 / F2). That
+    snapshot is what the "File…" button on each
+    notification row consumes to produce an at-fire bug
+    report. Producers outside `RyllApp` (channel handlers,
+    pedantic observer) still go through the raw store —
+    they don't have access to the snapshot store, and the
+    button falls back gracefully to post-event-only when
+    no snapshot exists.
+
 22. **Auto-reconnect: pure state-machine transition, side effects
     at the call site** - The `ReconnectState` enum on `RyllApp`
     (`ryll/src/app.rs`) replaces the old `show_disconnect_dialog`

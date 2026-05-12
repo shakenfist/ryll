@@ -1741,16 +1741,44 @@ performance.
 
 Every SPICE message (sent and received) is recorded in a per-channel
 ring buffer regardless of whether `--capture` is active. The ring
-buffer retains the most recent traffic up to a 50 MB total cap
-(12.5 MB per channel). Each entry stores structured metadata (channel
-name, direction, message type ID and human-readable name, wire and
-payload sizes, timestamp) alongside a full pcap frame for export.
+buffer retains the most recent traffic up to a 50 MB total cap,
+allocated by weight per channel (Phase 06 of the session-001-feedback
+master plan rebalanced the previous even split):
 
-The `TrafficBuffers` struct in `ryll/src/bugreport.rs` holds all four
+| Channel | Cap | Weight | Coverage at session-001 rates |
+|---------|-----|--------|-------------------------------|
+| display | 32 MB | 16 | ~16 s @ 2 MB/s typical, ~5 s @ 6 MB/s peak |
+| usbredir | 4 MB | 2 | session-long when idle (active transfers exceed any cap) |
+| playback | 4 MB | 2 | many minutes of audio |
+| cursor | 4 MB | 2 | many minutes |
+| main | 4 MB | 2 | hours |
+| inputs | 2 MB | 1 | hours |
+
+The display rebalance was load-bearing for the Phase 10 notification-
+snapshot feature: a snapshot captured at notification-fire time covers
+the run-up to the event for users to file in a bug report.
+
+Each entry stores structured metadata (channel name, direction,
+message type ID and human-readable name, wire and payload sizes,
+timestamp) alongside the pcap frame bytes for export. SPICE messages
+that exceed the IPv4 single-frame limit (~64 KB) are split into
+multiple TCP segments via the shared `capture::segment_payload`
+helper; each `TrafficEntry` carries its first segment in `pcap_frame`
+and any trailing segments in `additional_segments: Vec<Arc<[u8]>>`
+(Phase 08). The `Arc<[u8]>` choice for both fields (Phase 07) makes
+ring-buffer entry clones O(N atomic refcount bumps) rather than
+O(total bytes), which is what enables the notification-snapshot
+store's cheap deep-copy at fire time.
+
+The `TrafficBuffers` struct in `ryll/src/bugreport.rs` holds all six
 per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
 shared via `Arc<TrafficBuffers>` between all channel handler tasks
-and the UI thread. This supports both bug report export
-and the live traffic viewer.
+and the UI thread. This supports both bug-report export, the live
+traffic viewer, and the snapshot-on-notification path. (The webdav
+channel is intentionally absent — its handler does not call
+`traffic.record_*` today; tracked as a follow-up in
+`PLAN-session-001-feedback-phase-06-channel-rebalance.md`'s Out-of-
+scope section.)
 
 ## Channel State Snapshots
 
