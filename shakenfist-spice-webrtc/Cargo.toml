@@ -28,7 +28,7 @@ tracing = "0.1"
 bytes = "1"
 
 # Random values (SSRC, initial sequence numbers)
-rand = "0.8"
+rand = "0.9"
 
 # Opus encoder for the Phase 3 step 3d synthetic-audio pump. The
 # `opus` crate wraps libopus through `audiopus_sys`, which probes
