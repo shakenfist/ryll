@@ -1868,6 +1868,8 @@ mod tests {
             socket_max_chunk_bytes: 262_144,
             ack_send_count: 3,
             last_ack_send_ts_secs: Some(4.25),
+            // Phase-02 pcap writer-queue drop counter.
+            writer_dropped_count: 11,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -1899,12 +1901,15 @@ mod tests {
         assert!(json.contains("\"ack_send_count\": 3"));
         assert!(json.contains("\"last_ack_send_ts_secs\": 4.25"));
         assert!(json.contains("\"recent_ack_intervals_secs\""));
+        // Phase-02 field.
+        assert!(json.contains("\"writer_dropped_count\": 11"));
     }
 
     #[test]
     fn test_inputs_snapshot_serialises() {
         let mut snap = InputsSnapshot {
             button_state: 1,
+            writer_dropped_count: 4,
             ..Default::default()
         };
         snap.recent_events.push_back(InputEventRecord {
@@ -1918,12 +1923,14 @@ mod tests {
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"button_state\": 1"));
         assert!(json.contains("\"event_type\": \"KeyDown\""));
+        assert!(json.contains("\"writer_dropped_count\": 4"));
     }
 
     #[test]
     fn test_cursor_snapshot_serialises() {
         let mut snap = CursorSnapshot {
             cache_entries: 1,
+            writer_dropped_count: 9,
             ..Default::default()
         };
         snap.cache_contents.push(CursorCacheEntry {
@@ -1935,6 +1942,7 @@ mod tests {
         });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"cursor_id\": 99"));
+        assert!(json.contains("\"writer_dropped_count\": 9"));
     }
 
     #[test]
@@ -1943,10 +1951,12 @@ mod tests {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
+            writer_dropped_count: 2,
             ..Default::default()
         };
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
+        assert!(json.contains("\"writer_dropped_count\": 2"));
     }
 
     #[test]

@@ -448,6 +448,13 @@ phase 1.
   `last_ack_send_ts_secs` and `triggered_uptime_secs`) means we
   stopped consuming server messages for that long, which
   applies SPICE-level backpressure on the server.
+- `writer_dropped_count` — number of pcap-capture packets the
+  dedicated writer task's bounded queue rejected because it
+  was full. Zero unless `--capture` is active. A non-zero
+  value implicates disk speed (or anything else slowing the
+  writer task) rather than decode CPU or socket-read pacing;
+  the rest of the SPICE pipeline keeps running because the
+  enqueue is non-blocking. Added in phase 2.
 
 To read the report:
 

@@ -1790,10 +1790,10 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), ACK state, bytes in/out |
-| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), bytes in/out |
-| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, bytes in/out |
-| `MainSnapshot` | Main | Session ID, bytes in/out |
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter (phase 2), ACK state, bytes in/out |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), pcap writer-queue drop counter, bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, pcap writer-queue drop counter, bytes in/out |
+| `MainSnapshot` | Main | Session ID, pcap writer-queue drop counter, bytes in/out |
 | `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four

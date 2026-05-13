@@ -92,6 +92,14 @@ pub struct WebdavChannel {
 
     // WebDAV server (None until sharing is started)
     server: Option<WebdavServer>,
+
+    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    /// WebDAV is not in `CHANNELS` so the CaptureSink accepts
+    /// items unconditionally; this counter therefore stays at
+    /// zero in normal operation and only rises if the writer
+    /// task's queue itself is full. Surfaced for uniformity
+    /// with the other channels.
+    capture_dropped_count: u64,
 }
 
 impl WebdavChannel {
@@ -137,6 +145,7 @@ impl WebdavChannel {
             response_tx,
             response_rx,
             server: None,
+            capture_dropped_count: 0,
         }
     }
 
@@ -228,7 +237,10 @@ impl WebdavChannel {
 
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
-                        c.packet_received("webdav", &chunk[..n]);
+                        if !c.packet_received("webdav", &chunk[..n]) {
+                            self.capture_dropped_count =
+                                self.capture_dropped_count.saturating_add(1);
+                        }
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
@@ -700,7 +712,9 @@ impl WebdavChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("webdav", data);
+            if !c.packet_sent("webdav", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
@@ -720,6 +734,7 @@ impl WebdavChannel {
             snap.ping_recv_count = self.ping_recv_count;
             snap.pong_send_count = self.pong_send_count;
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+            snap.writer_dropped_count = self.capture_dropped_count;
         }
     }
 }

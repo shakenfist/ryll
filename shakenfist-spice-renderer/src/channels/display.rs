@@ -596,6 +596,10 @@ pub struct DisplayChannel {
     ack_send_count: u32,
     last_ack_send_ts_secs: Option<f64>,
     recent_ack_intervals_secs: VecDeque<f64>,
+    /// Phase-02: count of pcap-capture packets rejected by the
+    /// writer task's queue. Mirrored into
+    /// `DisplaySnapshot::writer_dropped_count`.
+    capture_dropped_count: u64,
 }
 
 impl DisplayChannel {
@@ -651,6 +655,7 @@ impl DisplayChannel {
             ack_send_count: 0,
             last_ack_send_ts_secs: None,
             recent_ack_intervals_secs: VecDeque::new(),
+            capture_dropped_count: 0,
         }
     }
 
@@ -713,7 +718,9 @@ impl DisplayChannel {
 
             self.byte_counter.add(n as u64);
             if let Some(ref c) = self.capture {
-                c.packet_received("display", &chunk[..n]);
+                if !c.packet_received("display", &chunk[..n]) {
+                    self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+                }
             }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
@@ -2265,6 +2272,9 @@ impl DisplayChannel {
         snap.ack_send_count = self.ack_send_count;
         snap.last_ack_send_ts_secs = self.last_ack_send_ts_secs;
         snap.recent_ack_intervals_secs = self.recent_ack_intervals_secs.clone();
+
+        // Phase-02: pcap writer-queue drop counter.
+        snap.writer_dropped_count = self.capture_dropped_count;
     }
 
     async fn send_ack(&mut self) -> Result<()> {
@@ -2299,7 +2309,9 @@ impl DisplayChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("display", data);
+            if !c.packet_sent("display", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;

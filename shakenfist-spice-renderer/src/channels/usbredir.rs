@@ -81,6 +81,9 @@ pub struct UsbredirChannel {
     interrupt_tx: mpsc::Sender<InterruptData>,
     interrupt_rx: mpsc::Receiver<InterruptData>,
     interrupt_handles: HashMap<u8, tokio::task::JoinHandle<()>>,
+
+    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    capture_dropped_count: u64,
 }
 
 impl UsbredirChannel {
@@ -127,6 +130,7 @@ impl UsbredirChannel {
             interrupt_tx,
             interrupt_rx,
             interrupt_handles: HashMap::new(),
+            capture_dropped_count: 0,
         }
     }
 
@@ -185,7 +189,10 @@ impl UsbredirChannel {
 
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
-                        c.packet_received("usbredir", &chunk[..n]);
+                        if !c.packet_received("usbredir", &chunk[..n]) {
+                            self.capture_dropped_count =
+                                self.capture_dropped_count.saturating_add(1);
+                        }
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
@@ -985,7 +992,9 @@ impl UsbredirChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("usbredir", data);
+            if !c.packet_sent("usbredir", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
@@ -1005,6 +1014,7 @@ impl UsbredirChannel {
             snap.ping_recv_count = self.ping_recv_count;
             snap.pong_send_count = self.pong_send_count;
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+            snap.writer_dropped_count = self.capture_dropped_count;
         }
     }
 }

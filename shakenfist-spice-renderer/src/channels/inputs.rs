@@ -100,6 +100,8 @@ pub struct InputsChannel {
     shift_held: bool,
     alt_held: bool,
     paste_state: Option<PasteState>,
+    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    capture_dropped_count: u64,
 }
 
 /// Idle window before the inputs-channel keepalive fires.
@@ -154,6 +156,7 @@ impl InputsChannel {
             shift_held: false,
             alt_held: false,
             paste_state: None,
+            capture_dropped_count: 0,
         }
     }
 
@@ -186,6 +189,7 @@ impl InputsChannel {
             let stream = &mut self.stream;
             let buffer = &mut self.buffer;
             let bytes_in = &mut self.bytes_in;
+            let capture_dropped_count = &mut self.capture_dropped_count;
             let input_rx = &mut self.input_rx;
             let capture = &self.capture;
             let byte_counter = &self.byte_counter;
@@ -208,7 +212,9 @@ impl InputsChannel {
                 if n > 0 {
                     byte_counter.add(n as u64);
                     if let Some(ref c) = capture {
-                        c.packet_received("inputs", &chunk[..n]);
+                        if !c.packet_received("inputs", &chunk[..n]) {
+                            *capture_dropped_count = capture_dropped_count.saturating_add(1);
+                        }
                     }
                     buffer.extend_from_slice(&chunk[..n]);
                     *bytes_in += n as u64;
@@ -826,6 +832,7 @@ impl InputsChannel {
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.client_keepalive_send_count = self.client_keepalive_send_count;
         snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
+        snap.writer_dropped_count = self.capture_dropped_count;
     }
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
@@ -870,7 +877,9 @@ impl InputsChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("inputs", data);
+            if !c.packet_sent("inputs", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;

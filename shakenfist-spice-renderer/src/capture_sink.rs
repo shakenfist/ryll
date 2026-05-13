@@ -17,11 +17,16 @@
 /// when capture is disabled.
 pub trait CaptureSink: Send + Sync {
     /// Record a packet sent by the client on the given channel.
-    fn packet_sent(&self, channel: &str, data: &[u8]);
+    /// Returns `true` if the packet was queued, `false` if the
+    /// sink's writer queue was full and the packet was dropped.
+    /// Channels use the `false` return to count drops in their
+    /// snapshot's `writer_dropped_count` field (see
+    /// PLAN-video-keeping-up-phase-02-pcap-thread.md).
+    fn packet_sent(&self, channel: &str, data: &[u8]) -> bool;
 
     /// Record a packet received from the server on the given
-    /// channel.
-    fn packet_received(&self, channel: &str, data: &[u8]);
+    /// channel. Same `bool` semantics as `packet_sent`.
+    fn packet_received(&self, channel: &str, data: &[u8]) -> bool;
 
     /// Record a display frame after a MARK boundary. `surface_id`
     /// is the SPICE surface id; only surface 0 is currently
