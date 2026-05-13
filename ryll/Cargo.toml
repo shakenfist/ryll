@@ -20,7 +20,7 @@ tokio-console = ["dep:console-subscriber"]
 
 [dependencies]
 # GUI framework
-eframe = { version = "0.29", features = ["persistence"] }
+eframe = { version = "0.34", features = ["persistence"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
