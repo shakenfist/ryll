@@ -1595,7 +1595,6 @@ impl BugReport {
     /// metadata / session / channel-state / notifications /
     /// runtime-metrics are all the standard shape.
     #[allow(clippy::too_many_arguments)]
-    #[cfg(feature = "capture")]
     pub fn write_notification(
         dir: &std::path::Path,
         notification: &shakenfist_spice_renderer::NotificationEntry,
