@@ -415,6 +415,53 @@ changed while you were typing the description.
 - If `--capture <DIR>` is active: `<DIR>/bug-reports/`
 - Otherwise: the current working directory
 
+### Reading display `channel-state.json` for "video not keeping up"
+
+When a Display bug report is submitted because video appears to
+stutter or fall behind, these fields in `channel-state.json` tell
+you which part of the pipeline was slow without re-running the
+session. They were added by the master plan
+[`PLAN-video-keeping-up.md`](../docs/plans/PLAN-video-keeping-up.md)
+phase 1.
+
+- `decode_total_count`, `decode_failed_count`,
+  `decode_from_cache_count` — cumulative decode counters since
+  the channel started.
+- `decode_recent_min_us`, `decode_recent_max_us`,
+  `decode_recent_mean_us` — min / max / mean decompression
+  wall-time in microseconds over the most recent decodes that
+  actually invoked the decoder (cache hits and failures are
+  excluded). Read alongside `recent_decodes[].decode_duration_us`
+  and `.image_type` to see whether GLZ or JPEG is the slow
+  format. A mean above a few milliseconds on a busy session
+  points at decode CPU as the bottleneck.
+- `socket_read_count`, `socket_reads_at_chunk_cap`,
+  `socket_max_chunk_bytes` — how often the channel's 256 KB
+  socket read returned full (a proxy for "the OS recv buffer
+  had bytes waiting when we read"). A high ratio of
+  `socket_reads_at_chunk_cap` to `socket_read_count` indicates
+  the read loop is not keeping up with the arrival rate; a low
+  ratio means the wire / server is the bottleneck, not us.
+- `ack_send_count`, `last_ack_send_ts_secs`,
+  `recent_ack_intervals_secs` — ACK cadence. A long tail in
+  `recent_ack_intervals_secs` (or a gap between
+  `last_ack_send_ts_secs` and `triggered_uptime_secs`) means we
+  stopped consuming server messages for that long, which
+  applies SPICE-level backpressure on the server.
+
+To read the report:
+
+1. `unzip ryll-bugreport-*.zip` and open `channel-state.json`.
+2. Check `decode_recent_*` first — if decode dominates, the
+   server is sending fine; look at decoder CPU or compression
+   format.
+3. If decode is fast, check `socket_reads_at_chunk_cap` vs
+   `socket_read_count` — a high ratio means the read loop is
+   behind; a low ratio means arrival is the bottleneck.
+4. Cross-check `recent_ack_intervals_secs` — flat intervals at
+   the expected cadence mean SPICE flow control is healthy;
+   long gaps mean we paused.
+
 ### Live traffic viewer
 
 Press **F11** or click **Traffic** in the status bar to open a side

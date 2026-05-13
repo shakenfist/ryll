@@ -1790,7 +1790,7 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20), ACK state, bytes in/out |
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), ACK state, bytes in/out |
 | `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), bytes in/out |
 | `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, bytes in/out |
 | `MainSnapshot` | Main | Session ID, bytes in/out |

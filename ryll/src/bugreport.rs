@@ -1856,6 +1856,18 @@ mod tests {
             image_cache_ids: vec![1, 2, 3],
             image_cache_bytes: 12345,
             bytes_in: 100_000,
+            // Phase-01 "video not keeping up" diagnostic fields.
+            decode_total_count: 7,
+            decode_failed_count: 1,
+            decode_from_cache_count: 2,
+            decode_recent_min_us: 250,
+            decode_recent_max_us: 9000,
+            decode_recent_mean_us: 1500,
+            socket_read_count: 42,
+            socket_reads_at_chunk_cap: 5,
+            socket_max_chunk_bytes: 262_144,
+            ack_send_count: 3,
+            last_ack_send_ts_secs: Some(4.25),
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -1866,11 +1878,27 @@ mod tests {
             from_cache: false,
             success: true,
             timestamp_secs: 1.5,
+            decode_duration_us: 1234,
         });
+        snap.recent_ack_intervals_secs.push_back(0.42);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
         assert!(json.contains("\"bytes_in\": 100000"));
+        // Phase-01 fields visible in channel-state.json.
+        assert!(json.contains("\"decode_duration_us\": 1234"));
+        assert!(json.contains("\"decode_total_count\": 7"));
+        assert!(json.contains("\"decode_failed_count\": 1"));
+        assert!(json.contains("\"decode_from_cache_count\": 2"));
+        assert!(json.contains("\"decode_recent_min_us\": 250"));
+        assert!(json.contains("\"decode_recent_max_us\": 9000"));
+        assert!(json.contains("\"decode_recent_mean_us\": 1500"));
+        assert!(json.contains("\"socket_read_count\": 42"));
+        assert!(json.contains("\"socket_reads_at_chunk_cap\": 5"));
+        assert!(json.contains("\"socket_max_chunk_bytes\": 262144"));
+        assert!(json.contains("\"ack_send_count\": 3"));
+        assert!(json.contains("\"last_ack_send_ts_secs\": 4.25"));
+        assert!(json.contains("\"recent_ack_intervals_secs\""));
     }
 
     #[test]

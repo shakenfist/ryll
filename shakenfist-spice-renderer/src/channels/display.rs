@@ -4,6 +4,7 @@ use flate2::read::ZlibDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
@@ -144,6 +145,56 @@ struct StreamState {
 
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
+
+/// Maximum number of consecutive ACK-send intervals retained in
+/// the snapshot for "video not keeping up" diagnostics. With a
+/// typical ACK window of a few hundred messages on a busy
+/// display session, 32 intervals covers tens of seconds of
+/// recent activity — enough to see whether ACK cadence paused
+/// without bloating channel-state.json.
+const RECENT_ACK_INTERVALS_CAP: usize = 32;
+
+/// Push an ACK-send interval into the bounded ring, evicting
+/// the oldest entry when the cap is exceeded. Factored out of
+/// `send_ack` so the cap behaviour is unit-testable without
+/// standing up a live channel.
+fn push_ack_interval(ring: &mut VecDeque<f64>, interval_secs: f64) {
+    ring.push_back(interval_secs);
+    if ring.len() > RECENT_ACK_INTERVALS_CAP {
+        ring.pop_front();
+    }
+}
+
+/// Min / max / mean of `decode_duration_us` over the recent
+/// decode ring, excluding cache hits and failures so the result
+/// characterises actual decoder cost. Returns `(0, 0, 0)` when
+/// no qualifying entries are present.
+fn recent_decode_duration_stats(decodes: &VecDeque<DecodeResult>) -> (u32, u32, u32) {
+    let mut count: u64 = 0;
+    let mut sum: u64 = 0;
+    let mut min: u32 = u32::MAX;
+    let mut max: u32 = 0;
+    for d in decodes.iter() {
+        if d.from_cache || !d.success {
+            continue;
+        }
+        count += 1;
+        sum += u64::from(d.decode_duration_us);
+        if d.decode_duration_us < min {
+            min = d.decode_duration_us;
+        }
+        if d.decode_duration_us > max {
+            max = d.decode_duration_us;
+        }
+    }
+    match sum.checked_div(count) {
+        None => (0, 0, 0),
+        Some(mean_u64) => {
+            let mean = u32::try_from(mean_u64).unwrap_or(u32::MAX);
+            (min, max, mean)
+        }
+    }
+}
 
 /// What we decided to do with a DRAW_FILL after classifying its
 /// rop/brush/mask. Extracted from `handle_draw_fill` so the
@@ -534,6 +585,17 @@ pub struct DisplayChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
+    /// Phase-01 "video not keeping up" instrumentation. See
+    /// PLAN-video-keeping-up-phase-01-instrumentation.md.
+    decode_total_count: u64,
+    decode_failed_count: u64,
+    decode_from_cache_count: u64,
+    socket_read_count: u64,
+    socket_reads_at_chunk_cap: u64,
+    socket_max_chunk_bytes: u32,
+    ack_send_count: u32,
+    last_ack_send_ts_secs: Option<f64>,
+    recent_ack_intervals_secs: VecDeque<f64>,
 }
 
 impl DisplayChannel {
@@ -580,6 +642,15 @@ impl DisplayChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
+            decode_total_count: 0,
+            decode_failed_count: 0,
+            decode_from_cache_count: 0,
+            socket_read_count: 0,
+            socket_reads_at_chunk_cap: 0,
+            socket_max_chunk_bytes: 0,
+            ack_send_count: 0,
+            last_ack_send_ts_secs: None,
+            recent_ack_intervals_secs: VecDeque::new(),
         }
     }
 
@@ -624,6 +695,20 @@ impl DisplayChannel {
                     .ok();
                 self.repaint_notify.notify_one();
                 break;
+            }
+
+            // Phase-01: socket-read fill stats. A read that comes
+            // back at the full chunk size means the OS recv buffer
+            // had at least that much waiting when we read, which
+            // is a cheap proxy for "the read loop is behind the
+            // arrival rate". See PLAN-video-keeping-up-phase-01.
+            self.socket_read_count = self.socket_read_count.saturating_add(1);
+            if n == chunk.len() {
+                self.socket_reads_at_chunk_cap = self.socket_reads_at_chunk_cap.saturating_add(1);
+            }
+            let n_u32 = u32::try_from(n).unwrap_or(u32::MAX);
+            if n_u32 > self.socket_max_chunk_bytes {
+                self.socket_max_chunk_bytes = n_u32;
             }
 
             self.byte_counter.add(n as u64);
@@ -1319,7 +1404,11 @@ impl DisplayChannel {
             image_data.len()
         );
 
-        // Decode/decompress based on type
+        // Decode/decompress based on type. The bracket here measures
+        // only the decompression dispatch, not header parsing or the
+        // downstream emit; that scope matches the diagnostic question
+        // "how long does decode itself take per image".
+        let decode_start = Instant::now();
         let decompressed: Option<DecompressedImage> = match image_type {
             Some(ImageType::Pixmap) => {
                 // BitmapData: format(u8) + flags(u8) + x(u32) +
@@ -1669,6 +1758,11 @@ impl DisplayChannel {
 
         // Record this decode attempt in the snapshot history.
         let is_from_cache = matches!(image_type, Some(ImageType::FromCache));
+        let decode_duration_us = if is_from_cache {
+            0
+        } else {
+            u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX)
+        };
         self.record_decode(DecodeResult {
             image_type: format!("{:?}", image_type),
             image_id: img_desc.image_id,
@@ -1677,6 +1771,7 @@ impl DisplayChannel {
             from_cache: is_from_cache,
             success: decompressed.is_some(),
             timestamp_secs: self.traffic.elapsed().as_secs_f64(),
+            decode_duration_us,
         });
 
         if decompressed.is_none() {
@@ -2111,6 +2206,13 @@ impl DisplayChannel {
 
     /// Record a decode result and update the snapshot.
     fn record_decode(&mut self, decode: DecodeResult) {
+        self.decode_total_count = self.decode_total_count.saturating_add(1);
+        if !decode.success {
+            self.decode_failed_count = self.decode_failed_count.saturating_add(1);
+        }
+        if decode.from_cache {
+            self.decode_from_cache_count = self.decode_from_cache_count.saturating_add(1);
+        }
         self.recent_decodes.push_back(decode);
         if self.recent_decodes.len() > MAX_RECENT_DECODES {
             self.recent_decodes.pop_front();
@@ -2143,12 +2245,42 @@ impl DisplayChannel {
             ids
         };
         snap.recent_decodes = self.recent_decodes.clone();
+
+        // Phase-01: cumulative decode counters and recent-window
+        // decode duration stats. The recent-window aggregate
+        // excludes cache hits and failures so it characterises
+        // actual decoder cost.
+        snap.decode_total_count = self.decode_total_count;
+        snap.decode_failed_count = self.decode_failed_count;
+        snap.decode_from_cache_count = self.decode_from_cache_count;
+        let (min_us, max_us, mean_us) = recent_decode_duration_stats(&self.recent_decodes);
+        snap.decode_recent_min_us = min_us;
+        snap.decode_recent_max_us = max_us;
+        snap.decode_recent_mean_us = mean_us;
+
+        // Phase-01: socket-read fill stats and ACK-send stats.
+        snap.socket_read_count = self.socket_read_count;
+        snap.socket_reads_at_chunk_cap = self.socket_reads_at_chunk_cap;
+        snap.socket_max_chunk_bytes = self.socket_max_chunk_bytes;
+        snap.ack_send_count = self.ack_send_count;
+        snap.last_ack_send_ts_secs = self.last_ack_send_ts_secs;
+        snap.recent_ack_intervals_secs = self.recent_ack_intervals_secs.clone();
     }
 
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(display_client::ACK, &[]);
         self.send_with_log(display_client::ACK, &msg).await?;
         self.last_ack = self.message_count;
+
+        // Phase-01: record ACK cadence so a bug report can show
+        // whether ACK sends stalled. See
+        // PLAN-video-keeping-up-phase-01.
+        let now = self.traffic.elapsed().as_secs_f64();
+        if let Some(prev) = self.last_ack_send_ts_secs {
+            push_ack_interval(&mut self.recent_ack_intervals_secs, now - prev);
+        }
+        self.last_ack_send_ts_secs = Some(now);
+        self.ack_send_count = self.ack_send_count.saturating_add(1);
         Ok(())
     }
 
@@ -2875,5 +3007,80 @@ mod tests {
             }
             other => panic!("expected Paint, got {:?}", other),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase-01 "video not keeping up" instrumentation
+    // -------------------------------------------------------------------------
+
+    fn decode(success: bool, from_cache: bool, decode_duration_us: u32) -> DecodeResult {
+        DecodeResult {
+            image_type: "GlzRgb".to_string(),
+            image_id: 0,
+            width: 0,
+            height: 0,
+            from_cache,
+            success,
+            timestamp_secs: 0.0,
+            decode_duration_us,
+        }
+    }
+
+    #[test]
+    fn recent_decode_duration_stats_empty_ring_returns_zeros() {
+        let ring = VecDeque::new();
+        assert_eq!(recent_decode_duration_stats(&ring), (0, 0, 0));
+    }
+
+    #[test]
+    fn recent_decode_duration_stats_ignores_cache_hits_and_failures() {
+        let mut ring = VecDeque::new();
+        // Success, non-cache: counted.
+        ring.push_back(decode(true, false, 100));
+        ring.push_back(decode(true, false, 300));
+        ring.push_back(decode(true, false, 200));
+        // Cache hit: ignored.
+        ring.push_back(decode(true, true, 9999));
+        // Failure: ignored.
+        ring.push_back(decode(false, false, 9999));
+        let (min, max, mean) = recent_decode_duration_stats(&ring);
+        assert_eq!(min, 100);
+        assert_eq!(max, 300);
+        assert_eq!(mean, 200);
+    }
+
+    #[test]
+    fn recent_decode_duration_stats_all_excluded_returns_zeros() {
+        let mut ring = VecDeque::new();
+        ring.push_back(decode(true, true, 500));
+        ring.push_back(decode(false, false, 1000));
+        assert_eq!(recent_decode_duration_stats(&ring), (0, 0, 0));
+    }
+
+    #[test]
+    fn push_ack_interval_caps_ring_keeping_most_recent() {
+        let mut ring: VecDeque<f64> = VecDeque::new();
+        // Push 40 distinct intervals.
+        for i in 0..40 {
+            push_ack_interval(&mut ring, i as f64);
+        }
+        // Cap is 32; we should have intervals 8..40 in order.
+        assert_eq!(ring.len(), RECENT_ACK_INTERVALS_CAP);
+        assert_eq!(ring.front().copied(), Some(8.0));
+        assert_eq!(ring.back().copied(), Some(39.0));
+        let observed: Vec<f64> = ring.iter().copied().collect();
+        let expected: Vec<f64> = (8..40).map(|i| i as f64).collect();
+        assert_eq!(observed, expected);
+    }
+
+    #[test]
+    fn push_ack_interval_under_cap_retains_all() {
+        let mut ring: VecDeque<f64> = VecDeque::new();
+        for i in 0..5 {
+            push_ack_interval(&mut ring, i as f64);
+        }
+        assert_eq!(ring.len(), 5);
+        assert_eq!(ring.front().copied(), Some(0.0));
+        assert_eq!(ring.back().copied(), Some(4.0));
     }
 }
