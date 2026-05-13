@@ -456,6 +456,25 @@ phase 1.
   the rest of the SPICE pipeline keeps running because the
   enqueue is non-blocking. Added in phase 2.
 
+In `session.json` (a sibling artefact in the same zip):
+
+- `video_drop_count` — number of display frames dropped
+  because the H.264 encoder task's queue was full when the
+  egui frame loop tried to enqueue. Zero unless `--capture`
+  is active. A non-zero value implicates encoder CPU (or MP4
+  write speed) rather than the SPICE pipeline; the egui frame
+  loop stays responsive because the enqueue is non-blocking.
+  Added in phase 3.
+
+**MP4 finalisation note (phase 3 trade-off).** With phase 3
+the MP4 moov atom is written by the encoder task after the
+sender drops, not synchronously by `CaptureSession::close()`.
+In practice the encoder task finalises within milliseconds of
+close, but a bug report assembled in a very short window
+after a disconnect — or in the SIGINT abrupt-shutdown path —
+may see an unfinalised (unplayable) `display.mp4`. The pcap
+files and the rest of the report are unaffected.
+
 To read the report:
 
 1. `unzip ryll-bugreport-*.zip` and open `channel-state.json`.

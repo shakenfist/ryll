@@ -31,6 +31,10 @@ pub trait CaptureSink: Send + Sync {
     /// Record a display frame after a MARK boundary. `surface_id`
     /// is the SPICE surface id; only surface 0 is currently
     /// recorded by ryll's `CaptureSession`, but the sink decides
-    /// the policy.
-    fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32);
+    /// the policy. Returns `true` if the frame was queued,
+    /// `false` if the encoder's queue was full and the frame
+    /// was dropped. The caller (the egui frame loop) bumps a
+    /// drop counter on `false`. See
+    /// PLAN-video-keeping-up-phase-03.
+    fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool;
 }

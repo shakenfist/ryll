@@ -1794,7 +1794,7 @@ written to JSON for bug reports.
 | `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), pcap writer-queue drop counter, bytes in/out |
 | `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, pcap writer-queue drop counter, bytes in/out |
 | `MainSnapshot` | Main | Session ID, pcap writer-queue drop counter, bytes in/out |
-| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
+| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime, video encoder-queue drop counter (phase 3) |
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside

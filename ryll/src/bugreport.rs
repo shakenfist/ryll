@@ -631,6 +631,16 @@ pub struct AppSnapshot {
     /// session has accumulated. 0 for a session that never lost
     /// its connection; rising values indicate a rocky session.
     pub auto_reconnect_count: u32,
+    /// Phase-03 "video not keeping up" diagnostic: number of
+    /// display frames dropped because the H.264 encoder task's
+    /// bounded queue was full when `CaptureSession::frame()`
+    /// tried to enqueue. Cumulative since session start; zero
+    /// when `--capture` is not in use. A non-zero value
+    /// implicates encoder CPU (or downstream MP4 write speed)
+    /// rather than decode or socket-read when triaging a
+    /// "video not keeping up" report. See
+    /// PLAN-video-keeping-up-phase-03.
+    pub video_drop_count: u64,
 }
 
 impl Default for AppSnapshot {
@@ -648,6 +658,7 @@ impl Default for AppSnapshot {
             connected: false,
             uptime_secs: 0.0,
             auto_reconnect_count: 0,
+            video_drop_count: 0,
         }
     }
 }
@@ -1964,6 +1975,7 @@ mod tests {
         let mut snap = AppSnapshot {
             fps: 59.9,
             connected: true,
+            video_drop_count: 13,
             ..Default::default()
         };
         snap.surfaces.push(SurfaceInfo {
@@ -1975,6 +1987,8 @@ mod tests {
         assert!(json.contains("\"fps\": 59.9"));
         assert!(json.contains("\"connected\": true"));
         assert!(json.contains("\"surface_id\": 0"));
+        // Phase-03 field.
+        assert!(json.contains("\"video_drop_count\": 13"));
     }
 
     #[test]

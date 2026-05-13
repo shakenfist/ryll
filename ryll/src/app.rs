@@ -660,6 +660,13 @@ pub struct RyllApp {
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
 
+    // Phase-03: count of display frames dropped because the
+    // encoder task's queue was full at CaptureSession::frame
+    // call time. Mirrored into AppSnapshot::video_drop_count
+    // by update_app_snapshot(). Stays zero unless --capture
+    // is active. See PLAN-video-keeping-up-phase-03.
+    video_drop_count: u64,
+
     // Connection target for bug report metadata
     target_host: String,
     target_port: u16,
@@ -1052,6 +1059,7 @@ impl RyllApp {
             notification_snapshots: std::sync::Mutex::new(NotificationSnapshotStore::new()),
             channel_snapshots,
             app_snapshot,
+            video_drop_count: 0,
             target_host,
             target_port,
             show_bug_dialog: false,
@@ -1604,7 +1612,10 @@ impl RyllApp {
                         self.stats.frame_times.remove(0);
                     }
 
-                    // Capture a video frame if enabled
+                    // Capture a video frame if enabled. Phase-03:
+                    // frame() is a non-blocking enqueue returning
+                    // bool; false means the encoder task's queue
+                    // was full and the frame was dropped.
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self
                             .surfaces
@@ -1612,7 +1623,9 @@ impl RyllApp {
                             .map(|gs| gs.surface())
                             .max_by_key(|s| (s.width as u64) * (s.height as u64))
                         {
-                            capture.frame(0, surface.pixels(), surface.width, surface.height);
+                            if !capture.frame(0, surface.pixels(), surface.width, surface.height) {
+                                self.video_drop_count = self.video_drop_count.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -1953,6 +1966,7 @@ impl RyllApp {
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
         snap.auto_reconnect_count = self.auto_reconnect_count;
+        snap.video_drop_count = self.video_drop_count;
     }
 
     /// Clone the largest surface's RGBA pixels, capture trigger

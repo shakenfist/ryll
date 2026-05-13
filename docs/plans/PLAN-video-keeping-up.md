@@ -146,7 +146,7 @@ session:
 |-------|------|--------|
 | 1. Decode duration + socket fill + ACK-window signals | PLAN-video-keeping-up-phase-01-instrumentation.md | Done |
 | 2. Move pcap writes to a dedicated writer task | PLAN-video-keeping-up-phase-02-pcap-thread.md | Done |
-| 3. Move MP4 video encoding off the GUI event loop | PLAN-video-keeping-up-phase-03-video-encode-thread.md | Not started |
+| 3. Move MP4 video encoding off the GUI event loop | PLAN-video-keeping-up-phase-03-video-encode-thread.md | Done |
 | 4. Render-side arrival-to-display latency | PLAN-video-keeping-up-phase-04-render-latency.md | Not started |
 
 **Phase 1** is the gate. It produces the data needed to triage

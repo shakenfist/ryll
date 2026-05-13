@@ -562,6 +562,75 @@ fn chrono_now() -> String {
     crate::bugreport::chrono_now()
 }
 
+// ── Video writer task ───────────────────────────────────
+
+/// Bound on the queue feeding the dedicated video encoder
+/// task. Smaller than `PCAP_QUEUE_CAPACITY` because per-item
+/// payload is dominated by full RGBA surface bytes (~8 MB at
+/// 1080p, ~33 MB at 4K). Eight slots absorb ~100-250 ms of
+/// encoder backlog at typical SPICE presentation rates before
+/// drops begin. See PLAN-video-keeping-up-phase-03.
+const VIDEO_QUEUE_CAPACITY: usize = 8;
+
+/// One queued frame for the encoder task. `pixels` is
+/// `Arc<[u8]>` so the egui hot-path enqueue copies the
+/// surface once and the encoder task consumes it by
+/// reference. `timestamp_ms` is captured at enqueue time so
+/// MP4 presentation timestamps reflect when the frame was
+/// produced, not when the encoder caught up.
+#[derive(Debug)]
+struct VideoQueueItem {
+    surface_id: u32,
+    pixels: Arc<[u8]>,
+    width: u32,
+    height: u32,
+    timestamp_ms: u64,
+}
+
+/// Long-lived task that owns the `VideoWriter`. Lazily
+/// initialises it from the first received frame's dimensions
+/// (matching pre-phase-3 behaviour where the writer was
+/// created inside `CaptureSession::frame` on first call).
+/// When the sender drops, drains any in-flight items, then
+/// finalises the MP4 by calling `VideoWriter::close()` —
+/// which writes the moov atom and makes the file playable.
+async fn video_writer_task(mut rx: mpsc::Receiver<VideoQueueItem>, dir: PathBuf) {
+    let mut writer: Option<VideoWriter> = None;
+    let mut init_attempted = false;
+
+    while let Some(item) = rx.recv().await {
+        // Only surface 0 is recorded today; non-primary
+        // surfaces are dropped silently. The filter lives in
+        // the task so the hot-path enqueue stays uniformly
+        // cheap.
+        if item.surface_id != 0 {
+            debug!("capture: skipping non-primary surface {}", item.surface_id);
+            continue;
+        }
+        if writer.is_none() && !init_attempted {
+            init_attempted = true;
+            writer = VideoWriter::new(
+                &dir,
+                &item.pixels,
+                item.width,
+                item.height,
+                item.timestamp_ms,
+            );
+            // VideoWriter::new() writes the first frame as
+            // part of init, so no separate write_frame call.
+            continue;
+        }
+        if let Some(vw) = writer.as_mut() {
+            vw.write_frame(&item.pixels, item.width, item.height, item.timestamp_ms);
+        }
+    }
+    // Sender dropped → write the MP4 moov atom and exit.
+    if let Some(mut vw) = writer.take() {
+        vw.close();
+    }
+    debug!("capture: video writer task drained and exiting");
+}
+
 // ── Capture session ─────────────────────────────────────
 
 /// Holds state for an active capture session.
@@ -579,10 +648,16 @@ pub struct CaptureSession {
     /// after the sender is dropped to guarantee the queue has
     /// drained before this `CaptureSession` is destroyed.
     writer_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Video writer (lazily initialised on first frame).
-    video_writer: Mutex<Option<VideoWriter>>,
-    /// Set to true after video init has been attempted (even if it failed).
-    video_init_attempted: Mutex<bool>,
+    /// Phase-03: sender side of the queue feeding the
+    /// dedicated H.264/MP4 encoder task. Held inside
+    /// `Option<Mutex<>>` so `close()` can `take()` it and
+    /// drop it, signalling the encoder task to drain,
+    /// finalise the MP4 (moov atom), and exit.
+    video_tx: Mutex<Option<mpsc::Sender<VideoQueueItem>>>,
+    /// Phase-03: join handle for the encoder task. Detached
+    /// at `close()` time; the task continues on the runtime
+    /// until it has drained the queue and finalised the MP4.
+    video_handle: Mutex<Option<JoinHandle<()>>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
 }
@@ -611,13 +686,16 @@ impl CaptureSession {
         let (queue_tx, queue_rx) = mpsc::channel(PCAP_QUEUE_CAPACITY);
         let writer_handle = tokio::spawn(pcap_writer_task(queue_rx, writers));
 
+        let (video_tx, video_rx) = mpsc::channel(VIDEO_QUEUE_CAPACITY);
+        let video_handle = tokio::spawn(video_writer_task(video_rx, dir.clone()));
+
         Ok(CaptureSession {
             dir,
             start: Instant::now(),
             queue_tx: Mutex::new(Some(queue_tx)),
             writer_handle: Mutex::new(Some(writer_handle)),
-            video_writer: Mutex::new(None),
-            video_init_attempted: Mutex::new(false),
+            video_tx: Mutex::new(Some(video_tx)),
+            video_handle: Mutex::new(Some(video_handle)),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -707,60 +785,64 @@ impl CaptureSession {
         tx.try_send(item).is_ok()
     }
 
-    /// Record a display frame after a MARK boundary.
-    pub fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) {
-        if surface_id != 0 {
-            debug!("capture: skipping non-primary surface {}", surface_id);
-            return;
-        }
-
-        let timestamp_ms = self.start.elapsed().as_millis() as u64;
-
-        let mut writer = self.video_writer.lock().unwrap();
-        let mut attempted = self.video_init_attempted.lock().unwrap();
-
-        if writer.is_none() && !*attempted {
-            *attempted = true;
-            *writer = VideoWriter::new(&self.dir, pixels, width, height, timestamp_ms);
-            return; // first frame already written by VideoWriter::new()
-        }
-
-        if let Some(ref mut vw) = *writer {
-            vw.write_frame(pixels, width, height, timestamp_ms);
-        }
+    /// Record a display frame after a MARK boundary. Returns
+    /// `true` if the frame was enqueued to the encoder task,
+    /// `false` if the encoder's queue was full and the frame
+    /// was dropped, or if the session has been closed. The
+    /// surface-0 filter and lazy `VideoWriter::new()` both
+    /// run on the encoder task; this method only allocates
+    /// the `Arc<[u8]>` for the pixel buffer and `try_send`s.
+    pub fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool {
+        let tx_guard = self.video_tx.lock().unwrap();
+        let Some(tx) = tx_guard.as_ref() else {
+            return false; // close() has run
+        };
+        let item = VideoQueueItem {
+            surface_id,
+            pixels: Arc::from(pixels),
+            width,
+            height,
+            timestamp_ms: self.start.elapsed().as_millis() as u64,
+        };
+        tx.try_send(item).is_ok()
     }
 
     /// Finalise and close the capture session.
     ///
-    /// Takes `&self` so it can be called through an `Arc` (including
-    /// from the sync egui frame-update path). Drops the queue
-    /// sender; the dedicated pcap writer task observes the sender
-    /// drop, drains any in-flight queue items, and exits on its
-    /// own. We do *not* await the writer task's join handle here —
-    /// two of the four close call sites are inside the sync egui
-    /// `App::update` method, where awaiting is not feasible.
-    /// Dropping a `JoinHandle` does not abort the task, so the
-    /// writer keeps running on the tokio runtime until it drains
-    /// naturally; in practice it finishes well before the runtime
-    /// shuts down at process exit. Finally finalises the MP4
-    /// video writer (writes the moov atom).
+    /// Takes `&self` so it can be called through an `Arc`
+    /// (including from the sync egui frame-update path).
+    /// Drops both queue senders; the dedicated writer tasks
+    /// observe the sender drop, drain any in-flight items,
+    /// and exit on their own. The encoder task additionally
+    /// runs `VideoWriter::close()` (writes the MP4 moov atom)
+    /// after its loop exits.
+    ///
+    /// We do *not* await the writer tasks' join handles here:
+    /// two of the four close call sites are inside the sync
+    /// egui `App::update` method, where awaiting is not
+    /// feasible. Dropping a `JoinHandle` does not abort the
+    /// task, so both writers keep running on the tokio
+    /// runtime until they drain naturally; in practice they
+    /// finish well before the runtime shuts down at process
+    /// exit.
+    ///
+    /// **Phase-3 regression**: MP4 finalisation is no longer
+    /// synchronous with `close()`. A bug report assembled
+    /// within milliseconds of `close()` may see a not-yet-
+    /// finalised (unplayable) MP4. See
+    /// PLAN-video-keeping-up-phase-03 for the trade-off and
+    /// mitigation options.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return; // already closed
         }
-        // Drop the sender so the writer task's recv() returns None
-        // once the queue drains.
+        // Drop the pcap sender so its writer task drains and exits.
         drop(self.queue_tx.lock().unwrap().take());
-        // Detach the writer handle. The task continues on the
-        // runtime; dropping the handle does not abort it.
         let _ = self.writer_handle.lock().unwrap().take();
-        // Finalise video.
-        if let Ok(mut writer) = self.video_writer.lock() {
-            if let Some(ref mut vw) = *writer {
-                vw.close();
-            }
-            *writer = None;
-        }
+        // Drop the video sender so its encoder task drains,
+        // finalises the MP4 (writes the moov atom), and exits.
+        drop(self.video_tx.lock().unwrap().take());
+        let _ = self.video_handle.lock().unwrap().take();
         info!("capture: session closed ({})", self.dir.display());
     }
 }
@@ -787,8 +869,8 @@ impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
         CaptureSession::packet_received(self, channel, data)
     }
 
-    fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) {
-        CaptureSession::frame(self, surface_id, pixels, width, height);
+    fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool {
+        CaptureSession::frame(self, surface_id, pixels, width, height)
     }
 }
 
@@ -1100,5 +1182,173 @@ mod tests {
         // After close() the queue sender is gone, so further
         // enqueues return false.
         assert!(!session.packet_received("display", &[0u8; 10]));
+    }
+
+    // ── Phase-03 video writer-task tests ─────────────────
+
+    /// Build an RGBA pixel buffer of the requested size with
+    /// a simple gradient. Content doesn't matter for H.264
+    /// (the encoder will compress whatever bytes it gets);
+    /// we just need at least `w*h*4` bytes.
+    fn rgba_test_frame(w: u32, h: u32) -> Vec<u8> {
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                pixels[i] = (x % 256) as u8;
+                pixels[i + 1] = (y % 256) as u8;
+                pixels[i + 2] = ((x + y) % 256) as u8;
+                pixels[i + 3] = 255;
+            }
+        }
+        pixels
+    }
+
+    /// Open an MP4 and return (track_count, sample_count_in_track_1).
+    /// Used to verify the encoder task finalised the moov atom and
+    /// wrote samples. If the file was never finalised (no moov),
+    /// `Mp4Reader::read_header` returns an error.
+    fn read_mp4_track1(path: &std::path::Path) -> anyhow::Result<(usize, u32)> {
+        let f = File::open(path)?;
+        let size = f.metadata()?.len();
+        let reader = std::io::BufReader::new(f);
+        let mp4 = mp4::Mp4Reader::read_header(reader, size)?;
+        let tracks = mp4.tracks().len();
+        let samples = mp4.tracks().get(&1).map(|t| t.sample_count()).unwrap_or(0);
+        Ok((tracks, samples))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn video_writer_task_encodes_and_finalises_mp4() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, rx) = mpsc::channel::<VideoQueueItem>(8);
+        let handle = tokio::spawn(video_writer_task(rx, dir.path().to_path_buf()));
+
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let pixels = Arc::from(rgba_test_frame(w, h).as_slice());
+        // Send 3 frames at 33 ms spacing.
+        for i in 0..3u64 {
+            tx.send(VideoQueueItem {
+                surface_id: 0,
+                pixels: Arc::clone(&pixels),
+                width: w,
+                height: h,
+                timestamp_ms: i * 33,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        handle.await.expect("video task join");
+
+        // The encoder task should have finalised the MP4. Read it
+        // back and assert the moov atom is present (Mp4Reader
+        // would otherwise fail) and that exactly one video track
+        // exists with 3 samples.
+        let mp4_path = dir.path().join("display.mp4");
+        let (tracks, samples) = read_mp4_track1(&mp4_path).expect("read mp4 header");
+        assert_eq!(tracks, 1, "expected one video track");
+        assert_eq!(samples, 3, "expected three samples (frames)");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn video_writer_task_skips_non_primary_surfaces() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (tx, rx) = mpsc::channel::<VideoQueueItem>(8);
+        let handle = tokio::spawn(video_writer_task(rx, dir.path().to_path_buf()));
+
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let pixels = Arc::from(rgba_test_frame(w, h).as_slice());
+        // First item: non-primary surface — task should skip it
+        // without consuming the lazy-init slot.
+        tx.send(VideoQueueItem {
+            surface_id: 7,
+            pixels: Arc::clone(&pixels),
+            width: w,
+            height: h,
+            timestamp_ms: 0,
+        })
+        .await
+        .unwrap();
+        // Then a primary-surface frame that should init the writer.
+        tx.send(VideoQueueItem {
+            surface_id: 0,
+            pixels: Arc::clone(&pixels),
+            width: w,
+            height: h,
+            timestamp_ms: 33,
+        })
+        .await
+        .unwrap();
+        // Then another non-primary that should be dropped post-init.
+        tx.send(VideoQueueItem {
+            surface_id: 2,
+            pixels: Arc::clone(&pixels),
+            width: w,
+            height: h,
+            timestamp_ms: 66,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.expect("video task join");
+
+        // Only one surface-0 frame; expect exactly one sample.
+        let mp4_path = dir.path().join("display.mp4");
+        let (_, samples) = read_mp4_track1(&mp4_path).expect("read mp4 header");
+        assert_eq!(samples, 1, "expected one sample from surface 0 only");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_session_frame_returns_false_when_video_queue_full() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session =
+            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let pixels = rgba_test_frame(w, h);
+
+        let mut accepted = 0u64;
+        let mut dropped = 0u64;
+        // Saturate the video queue without yielding. With a
+        // current_thread runtime the encoder task gets no cycles
+        // until we await, so try_send eventually returns
+        // Err(Full). Send more than VIDEO_QUEUE_CAPACITY items.
+        for _ in 0..(VIDEO_QUEUE_CAPACITY as u64 * 4) {
+            if session.frame(0, &pixels, w, h) {
+                accepted += 1;
+            } else {
+                dropped += 1;
+            }
+        }
+        assert!(
+            accepted > 0,
+            "at least some frames should be accepted (got {})",
+            accepted
+        );
+        assert!(
+            dropped > 0,
+            "queue should overflow with the encoder task starved (got {})",
+            dropped
+        );
+        session.close();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capture_session_frame_returns_false_after_close() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session =
+            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+        let w: u32 = 64;
+        let h: u32 = 64;
+        let pixels = rgba_test_frame(w, h);
+        assert!(session.frame(0, &pixels, w, h));
+        session.close();
+        // Second close() is a no-op.
+        session.close();
+        assert!(!session.frame(0, &pixels, w, h));
     }
 }

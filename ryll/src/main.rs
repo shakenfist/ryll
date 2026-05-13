@@ -22,7 +22,9 @@ mod capture {
         pub fn packet_received(&self, _channel: &str, _data: &[u8]) -> bool {
             true
         }
-        pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) {}
+        pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) -> bool {
+            true
+        }
         pub fn close(&self) {}
     }
     impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
@@ -32,8 +34,8 @@ mod capture {
         fn packet_received(&self, channel: &str, data: &[u8]) -> bool {
             CaptureSession::packet_received(self, channel, data)
         }
-        fn frame(&self, id: u32, px: &[u8], w: u32, h: u32) {
-            CaptureSession::frame(self, id, px, w, h);
+        fn frame(&self, id: u32, px: &[u8], w: u32, h: u32) -> bool {
+            CaptureSession::frame(self, id, px, w, h)
         }
     }
 }
