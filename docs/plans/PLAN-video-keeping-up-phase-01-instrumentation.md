@@ -328,8 +328,9 @@ needs to be extended to assert the new fields are present.
 - **ACK-ring memory.** 32 × `f64` = 256 bytes per session.
   Negligible.
 - **Snapshot clone cost.** `update_snapshot` already clones
-  the 145-entry `recent_decodes` ring on every call; adding a
-  32-entry `recent_ack_intervals_secs` clone is negligible.
+  the `recent_decodes` ring (cap `MAX_RECENT_DECODES = 20`)
+  on every call; adding a 32-entry
+  `recent_ack_intervals_secs` clone is negligible.
 - **Backward compatibility of `channel-state.json`.** The file
   is internal to bug reports and parsed by maintainers, not by
   external tooling, so adding fields is safe.

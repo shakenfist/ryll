@@ -60,9 +60,10 @@ plan's creation:
   - `fps`: derived from `DisplayMark` timestamps — measures
     presentation rate.
   - `frames_received`: cumulative `ImageReady` count.
-  - `DisplaySnapshot.recent_decodes`: VecDeque (cap 145) with
-    per-decode success flag, image type, dimensions, and
-    session-relative timestamp — **no wall-clock duration**.
+  - `DisplaySnapshot.recent_decodes`: VecDeque (cap
+    `MAX_RECENT_DECODES = 20`) with per-decode success flag,
+    image type, dimensions, and session-relative timestamp —
+    **no wall-clock duration**.
 
 - **Gaps that block diagnosis today:**
   - No decode wall-time per image; can't tell GLZ is choking.
@@ -100,8 +101,9 @@ actually hot.
    report makes the drop visible. Blocking would reintroduce
    the backpressure the threading split is meant to remove.
 
-2. **Last-N (cap 145) plus min/max/mean** for decode duration,
-   matching the existing `recent_decodes` ring. Cheap, matches
+2. **Last-N plus min/max/mean** for decode duration, sharing
+   the existing `recent_decodes` ring (cap
+   `MAX_RECENT_DECODES = 20` in `display.rs`). Cheap, matches
    the surrounding code, and the aggregate stats give a
    long-run summary without the state cost of a full histogram.
    Computed at snapshot-emit time over the ring contents.
