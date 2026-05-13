@@ -517,6 +517,7 @@ fn build_image_event(
     height: u32,
     pixels: Vec<u8>,
     image_id: u64,
+    produced_at_secs: f64,
 ) -> ChannelEvent {
     match composite {
         CompositeMode::Overwrite => ChannelEvent::ImageReady {
@@ -528,6 +529,7 @@ fn build_image_event(
             height,
             pixels,
             image_id,
+            produced_at_secs,
         },
         CompositeMode::ChromaKey { chroma_rgba } => ChannelEvent::ImageReadyChroma {
             display_channel_id,
@@ -539,6 +541,7 @@ fn build_image_event(
             pixels,
             chroma_rgba,
             image_id,
+            produced_at_secs,
         },
         CompositeMode::AlphaBlend { alpha } => ChannelEvent::ImageReadyAlpha {
             display_channel_id,
@@ -550,6 +553,7 @@ fn build_image_event(
             pixels,
             alpha,
             image_id,
+            produced_at_secs,
         },
     }
 }
@@ -959,7 +963,12 @@ impl DisplayChannel {
 
             display_server::MARK => {
                 debug!("display: mark");
-                self.event_tx.send(ChannelEvent::DisplayMark).await.ok();
+                self.event_tx
+                    .send(ChannelEvent::DisplayMark {
+                        produced_at_secs: self.traffic.elapsed().as_secs_f64(),
+                    })
+                    .await
+                    .ok();
                 self.repaint_notify.notify_one();
             }
 
@@ -1200,6 +1209,7 @@ impl DisplayChannel {
                                         height: fh.min(h),
                                         pixels: rgba,
                                         image_id: 0,
+                                        produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                                     })
                                     .await
                                     .ok();
@@ -1895,6 +1905,7 @@ impl DisplayChannel {
                             sub_h as u32,
                             sub_pixels,
                             img.image_id,
+                            self.traffic.elapsed().as_secs_f64(),
                         ))
                         .await
                         .ok();
@@ -1912,6 +1923,7 @@ impl DisplayChannel {
                         out_height,
                         out_pixels,
                         img.image_id,
+                        self.traffic.elapsed().as_secs_f64(),
                     ))
                     .await
                     .ok();

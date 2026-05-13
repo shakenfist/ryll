@@ -641,6 +641,25 @@ pub struct AppSnapshot {
     /// "video not keeping up" report. See
     /// PLAN-video-keeping-up-phase-03.
     pub video_drop_count: u64,
+    /// Phase-04 "video not keeping up" diagnostic: min / max /
+    /// mean microseconds of mpsc-queue lag between the display
+    /// channel emitting `ImageReady*` events and the egui
+    /// frame loop processing them. Computed over a bounded
+    /// recent window (cap `RECENT_LAG_RING_CAP` in `app.rs`).
+    /// A high mean here when phase-1 decode and socket-fill
+    /// metrics look healthy implicates the egui loop / GUI
+    /// thread as the bottleneck. Within-batch samples are
+    /// correlated; `max` is the most informative single
+    /// number. See PLAN-video-keeping-up-phase-04.
+    pub image_ready_lag_recent_min_us: u32,
+    pub image_ready_lag_recent_max_us: u32,
+    pub image_ready_lag_recent_mean_us: u32,
+    /// Same shape but for `DisplayMark` events (per-frame
+    /// boundary). Lower cadence than `image_ready_*` so the
+    /// recent window covers a longer real-time interval.
+    pub display_mark_lag_recent_min_us: u32,
+    pub display_mark_lag_recent_max_us: u32,
+    pub display_mark_lag_recent_mean_us: u32,
 }
 
 impl Default for AppSnapshot {
@@ -659,6 +678,12 @@ impl Default for AppSnapshot {
             uptime_secs: 0.0,
             auto_reconnect_count: 0,
             video_drop_count: 0,
+            image_ready_lag_recent_min_us: 0,
+            image_ready_lag_recent_max_us: 0,
+            image_ready_lag_recent_mean_us: 0,
+            display_mark_lag_recent_min_us: 0,
+            display_mark_lag_recent_max_us: 0,
+            display_mark_lag_recent_mean_us: 0,
         }
     }
 }
@@ -1976,6 +2001,13 @@ mod tests {
             fps: 59.9,
             connected: true,
             video_drop_count: 13,
+            // Phase-04 render-latency aggregates.
+            image_ready_lag_recent_min_us: 50,
+            image_ready_lag_recent_max_us: 9000,
+            image_ready_lag_recent_mean_us: 750,
+            display_mark_lag_recent_min_us: 80,
+            display_mark_lag_recent_max_us: 12000,
+            display_mark_lag_recent_mean_us: 1100,
             ..Default::default()
         };
         snap.surfaces.push(SurfaceInfo {
@@ -1989,6 +2021,13 @@ mod tests {
         assert!(json.contains("\"surface_id\": 0"));
         // Phase-03 field.
         assert!(json.contains("\"video_drop_count\": 13"));
+        // Phase-04 fields.
+        assert!(json.contains("\"image_ready_lag_recent_min_us\": 50"));
+        assert!(json.contains("\"image_ready_lag_recent_max_us\": 9000"));
+        assert!(json.contains("\"image_ready_lag_recent_mean_us\": 750"));
+        assert!(json.contains("\"display_mark_lag_recent_min_us\": 80"));
+        assert!(json.contains("\"display_mark_lag_recent_max_us\": 12000"));
+        assert!(json.contains("\"display_mark_lag_recent_mean_us\": 1100"));
     }
 
     #[test]

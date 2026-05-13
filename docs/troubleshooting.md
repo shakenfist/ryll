@@ -465,6 +465,19 @@ In `session.json` (a sibling artefact in the same zip):
   write speed) rather than the SPICE pipeline; the egui frame
   loop stays responsive because the enqueue is non-blocking.
   Added in phase 3.
+- `image_ready_lag_recent_{min,max,mean}_us` and
+  `display_mark_lag_recent_{min,max,mean}_us` — microseconds
+  spent waiting in the renderer→app mpsc queue, computed
+  over a bounded recent window of samples. `image_ready_*`
+  covers per-image emissions (high cadence); `display_mark_*`
+  covers per-frame-boundary emissions. A high mean here when
+  `channel-state.json`'s `decode_recent_max_us` and
+  `socket_reads_at_chunk_cap` look healthy implicates the
+  egui loop / GUI thread as the bottleneck — typically a
+  long-running synchronous operation inside `App::update`
+  starving the event drain. `max` is the most informative
+  single number; within-batch samples are correlated so
+  `mean` is biased by batch size. Added in phase 4.
 
 **MP4 finalisation note (phase 3 trade-off).** With phase 3
 the MP4 moov atom is written by the encoder task after the

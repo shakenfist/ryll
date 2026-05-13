@@ -108,13 +108,17 @@ actually hot.
    long-run summary without the state cost of a full histogram.
    Computed at snapshot-emit time over the ring contents.
 
-## Open questions
-
-1. **Definition of "render-side latency"** for phase 4. Is it
-   `ImageReady` → next presented `DisplayMark`, or something
-   finer-grained inside the renderer? Resolve when phase 4
-   starts; depends on whether the renderer can expose a
-   timestamp at present-time.
+3. **Render-side latency = mpsc-queue lag** between event
+   emission in the display channel and event drain in the
+   egui frame loop. Captured as `produced_at_secs: f64` on
+   `ChannelEvent::ImageReady*` and `ChannelEvent::DisplayMark`
+   at emit; consumed in `process_events` to compute
+   `consumed_at - produced_at` and feed two bounded rings
+   surfaced as min/max/mean aggregates on `AppSnapshot`.
+   Finer-grained "inside the egui paint" timing was rejected
+   as disproportionate; end-to-end "pixels visible to user"
+   is unmeasurable without external instrumentation. See
+   `PLAN-video-keeping-up-phase-04-render-latency.md`.
 
 ## Acceptance criteria
 
@@ -147,7 +151,7 @@ session:
 | 1. Decode duration + socket fill + ACK-window signals | PLAN-video-keeping-up-phase-01-instrumentation.md | Done |
 | 2. Move pcap writes to a dedicated writer task | PLAN-video-keeping-up-phase-02-pcap-thread.md | Done |
 | 3. Move MP4 video encoding off the GUI event loop | PLAN-video-keeping-up-phase-03-video-encode-thread.md | Done |
-| 4. Render-side arrival-to-display latency | PLAN-video-keeping-up-phase-04-render-latency.md | Not started |
+| 4. Render-side arrival-to-display latency | PLAN-video-keeping-up-phase-04-render-latency.md | Done |
 
 **Phase 1** is the gate. It produces the data needed to triage
 U1 and tells us whether phases 2–4 are warranted. Done when the
