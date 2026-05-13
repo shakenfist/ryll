@@ -1577,16 +1577,36 @@ pcap file never triggers a length-overflow panic.
 surface (surface 0). Frames are emitted on MARK boundaries
 with real timestamps for variable-rate playback.
 
-Implementation: `capture::VideoWriter` lazily initialised on
-the first `DisplayMark` event. Uses `openh264` for RGBA →
-YUV420 → H.264 encoding, and the `mp4` crate for MP4 muxing.
+Implementation: `capture::VideoWriter` is owned exclusively by
+a dedicated tokio `video_writer_task` spawned in
+`CaptureSession::new` (phase 3, see
+`PLAN-video-keeping-up-phase-03-video-encode-thread.md`). The
+egui call site (`CaptureSession::frame`) is a non-blocking
+`try_send` into a bounded mpsc (cap `VIDEO_QUEUE_CAPACITY = 8`)
+that returns `bool`; `false` signals the encoder queue was
+full and the frame was dropped. The drop counter lands in
+`AppSnapshot::video_drop_count`. The encoder task lazy-inits
+`VideoWriter` from the first surface-0 frame, encodes RGBA →
+YUV420 → H.264 via `openh264`, and muxes into MP4 via the
+`mp4` crate. On sender drop the task drains, calls
+`VideoWriter::close()` to write the MP4 moov atom, then
+exits. Pcap follows the same pattern via `pcap_writer_task`
+(phase 2) with cap `PCAP_QUEUE_CAPACITY = 1024`.
 
 The capture session is `Arc<CaptureSession>` shared across all
 channels and the app. When `--capture` is not specified, the
 field is `None` and all capture code paths are skipped. The
 `CaptureSession` uses an `AtomicBool` guard to ensure `close()`
 is idempotent -- it may be called both explicitly during
-shutdown and again from the `Drop` implementation.
+shutdown and again from the `Drop` implementation. `close()`
+is **synchronous** and drops both writer senders without
+awaiting drain; the tokio tasks finalise (pcap flush is a
+no-op since pcap I/O is unbuffered; MP4 writes the moov atom)
+on the runtime. This means MP4 finalisation is no longer
+synchronous with `close()` — a bug report assembled within
+milliseconds of close may see an unfinalised MP4. See the
+phase-3 plan's "MP4 finalisation regression" note for the
+trade-off rationale.
 
 ## Graceful Shutdown
 
@@ -1606,8 +1626,20 @@ a clean shutdown instead of killing the process immediately.
 The pcap channel writers (`PcapChannelWriter` in `capture.rs`) write directly
 to `File` without `BufWriter`. This means every packet is persisted to disk
 immediately, so pcap data is never lost if the process is interrupted by
-SIGINT or any other signal. The MP4 video writer also uses unbuffered `File`
-I/O for the same reason.
+SIGINT or any other signal.
+
+After phase 2 these writes happen on the dedicated `pcap_writer_task`, fed
+by a bounded mpsc from the channel handlers. The hot path on each channel
+is a non-blocking `try_send`; queue-full means the packet is dropped and
+the per-channel `writer_dropped_count` counter is bumped. Slow disk no
+longer back-pressures the SPICE socket.
+
+The MP4 video writer also uses unbuffered `File` I/O. After phase 3 the
+encoder runs on a dedicated `video_writer_task` and the egui frame loop
+enqueues frames via `try_send`. MP4 finalisation (`write_end` for the
+moov atom) runs on the task after the sender drops; under SIGINT or abrupt
+shutdown the MP4 may be left unfinalised. See the phase-3 plan for the
+trade-off.
 
 ## Reconnection
 

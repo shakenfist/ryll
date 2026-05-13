@@ -77,9 +77,18 @@ Ryll uses:
    headless tokio select loop both poll this flag and shut down cleanly,
    ensuring capture sessions are finalized.
 
-6. **Unbuffered capture I/O** - Pcap and MP4 writers in `capture.rs` write
-   directly to `File` (no `BufWriter`), so packet data is always on disk and
-   survives SIGINT without explicit flush.
+6. **Unbuffered capture I/O on dedicated tasks** - Pcap and MP4 writers in
+   `capture.rs` write directly to `File` (no `BufWriter`), so written bytes are
+   always on disk and survive SIGINT without explicit flush. Both writers run
+   on **dedicated tokio tasks** (`pcap_writer_task`, `video_writer_task`); the
+   channel handlers and the egui frame loop enqueue via non-blocking `try_send`
+   so slow disk cannot back-pressure the SPICE socket or stall the GUI. Queue
+   caps `PCAP_QUEUE_CAPACITY = 1024` and `VIDEO_QUEUE_CAPACITY = 8`; drops are
+   counted in per-channel `writer_dropped_count` (channels) and
+   `AppSnapshot::video_drop_count` (video). MP4 finalisation runs on the
+   encoder task after the sender drops, so a bug report assembled within
+   milliseconds of `CaptureSession::close()` may see an unfinalised MP4 — see
+   the phase-3 plan for the trade-off.
 
 7. **Display channel capabilities** - Ryll advertises COMPOSITE, MONITORS_CONFIG,
    SIZED_STREAM, and A8_SURFACE capabilities during the display channel
@@ -441,7 +450,7 @@ important when adding new channels or extending existing ones.
 | Trait | What it abstracts | `ryll` impl |
 |-------|-------------------|-------------|
 | `TrafficSink` | Per-channel raw-byte ring buffer for bug reports and the live traffic viewer | `bugreport::TrafficBuffers` |
-| `CaptureSink` | pcap + MP4 frame recording; also has a no-op stub when the `capture` feature is disabled | `capture::CaptureSession` |
+| `CaptureSink` | pcap + MP4 frame recording. After phases 2–3, `packet_sent`, `packet_received`, and `frame` all return `bool` (`true` = enqueued, `false` = dropped because the writer task's bounded queue was full). Callers are expected to count drops in their snapshot (per-channel `writer_dropped_count`; `AppSnapshot::video_drop_count` for frames). The no-op stub returns `true` unconditionally when the `capture` feature is disabled. | `capture::CaptureSession` |
 | `NotificationSink` | Pushes `NotificationEntry` into the in-app notification store | `notifications::NotificationStoreSink` |
 | `ClipboardBackend` | Host clipboard read/write | `clipboard_arboard` (via `arboard`) |
 | `UsbBackend` | USB host-side device attachment | Implemented by `usb::RealDevice` (Linux only) and `usb::VirtualMsc` |
