@@ -20,4 +20,4 @@ tokio-rustls = "0.26"
 tracing = "0.1"
 rustls-pemfile = "2"
 socket2 = { version = "0.6", features = ["all"] }
-webpki-roots = "0.26"
+webpki-roots = "1.0"

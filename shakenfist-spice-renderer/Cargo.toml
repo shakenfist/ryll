@@ -13,7 +13,7 @@ readme = "README.md"
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 
 # Binary protocol handling
 bytes = "1"
@@ -36,7 +36,7 @@ tracing = "0.1"
 
 # LZ4 compression/decompression for general data (webdav, usbredir).
 # SPICE image LZ4 lives in shakenfist-spice-compression below.
-lz4_flex = "0.11"
+lz4_flex = "0.13"
 
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving
@@ -51,7 +51,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Error handling
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 
 # Async channels
@@ -75,7 +75,7 @@ jpeg-decoder = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # H.264 encoding for the web frontend encoder pipeline (Phase 2+)
-openh264 = "0.6"
+openh264 = "0.9"
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
 dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
