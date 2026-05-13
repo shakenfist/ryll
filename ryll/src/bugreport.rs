@@ -7,7 +7,7 @@
 /// `shakenfist_spice_renderer::snapshots`; this module re-exports
 /// them so callers in `ryll/` can keep importing them from
 /// `crate::bugreport::*`.
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,10 +52,30 @@ pub struct TrafficEntry {
     pub wire_size: u32,
     /// Payload size (wire_size minus 6-byte header).
     pub payload_size: u32,
-    /// Full pcap frame bytes (Ethernet + IP + TCP + SPICE
-    /// payload).  Used by `drain_to_pcap()` for bug report
-    /// export.
-    pub pcap_frame: Vec<u8>,
+    /// First pcap frame bytes (Ethernet + IP + TCP + SPICE
+    /// payload). For SPICE messages that fit in a single
+    /// IPv4 frame (< 65495 payload bytes), this is the
+    /// whole message; for larger messages it's the first
+    /// segment and the rest live in `additional_segments`.
+    /// Used by `drain_to_pcap()` for bug-report export.
+    ///
+    /// `Arc<[u8]>` so Phase 10's snapshot-on-notification
+    /// path (F2 — "file this notification as a bug report")
+    /// can clone the ring buffer's entries in O(N atomic
+    /// refcount bumps) rather than O(total bytes). See
+    /// `traffic_entry_clone_shares_pcap_frame_via_arc` in
+    /// this file's tests for the cheap-clone invariant.
+    pub pcap_frame: Arc<[u8]>,
+    /// Additional TCP segments produced when a SPICE message
+    /// exceeds the IPv4 frame limit (Phase 08 / K2 fix).
+    /// Empty in the common case where the message fits in a
+    /// single segment; a few entries for larger display-
+    /// channel messages. Each segment is an independent
+    /// `Arc<[u8]>` so clones (Phase 10 snapshot path) remain
+    /// O(N atomic refcount bumps). An empty `Vec` does not
+    /// allocate, so the common case has zero per-entry
+    /// overhead.
+    pub additional_segments: Vec<Arc<[u8]>>,
 }
 
 /// Lightweight traffic entry for the viewer (no pcap frame).
@@ -78,7 +98,25 @@ pub struct TrafficViewEntry {
     pub payload_size: u32,
 }
 
+/// Total byte cost of a `TrafficEntry` in the ring buffer:
+/// the first segment plus any additional segments. Used by
+/// the byte-cap accounting in `TrafficRingBuffer::push`.
+fn entry_bytes(entry: &TrafficEntry) -> usize {
+    entry.pcap_frame.len()
+        + entry
+            .additional_segments
+            .iter()
+            .map(|s| s.len())
+            .sum::<usize>()
+}
+
 /// Per-channel ring buffer of recent protocol traffic.
+///
+/// `Clone` is derived (cheap thanks to Phase 07 / Phase 08:
+/// each `TrafficEntry` clones in O(N atomic refcount bumps)
+/// for its `pcap_frame` and `additional_segments` Arc<[u8]>
+/// payloads). Used by Phase 10's notification-snapshot store.
+#[derive(Clone)]
 pub struct TrafficRingBuffer {
     /// Ring of entries, newest at the back.
     entries: VecDeque<TrafficEntry>,
@@ -105,13 +143,15 @@ impl TrafficRingBuffer {
     }
 
     /// Push a new entry, evicting oldest entries if the byte
-    /// cap would be exceeded.
+    /// cap would be exceeded. Accounts for the full segmented
+    /// payload (Phase 08): an entry's byte cost is its
+    /// `pcap_frame` plus any `additional_segments`.
     pub fn push(&mut self, entry: TrafficEntry) {
-        self.total_bytes += entry.pcap_frame.len();
+        self.total_bytes += entry_bytes(&entry);
         self.entries.push_back(entry);
         while self.total_bytes > self.max_bytes {
             if let Some(old) = self.entries.pop_front() {
-                self.total_bytes -= old.pcap_frame.len();
+                self.total_bytes -= entry_bytes(&old);
             } else {
                 break;
             }
@@ -147,12 +187,27 @@ impl TrafficRingBuffer {
 
         let mut count = 0;
         for entry in &self.entries {
+            // First segment (always present).
             let packet = PcapPacket::new(
                 entry.timestamp,
                 entry.pcap_frame.len() as u32,
-                &entry.pcap_frame,
+                // Explicit slice borrow: &entry.pcap_frame
+                // would be &Arc<[u8]> after the Phase 07
+                // refactor and PcapPacket wants &[u8].
+                &entry.pcap_frame[..],
             );
             pcap.write_packet(&packet).ok();
+            // Additional segments (Phase 08) for SPICE messages
+            // that exceeded the IPv4 frame limit. Written at
+            // the same timestamp — matches what the live
+            // capture writer produces for the same payload.
+            for seg in &entry.additional_segments {
+                let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
+                pcap.write_packet(&seg_packet).ok();
+            }
+            // `count` reflects the number of SPICE messages,
+            // not segments — preserve the pre-Phase-08 return-
+            // value semantics.
             count += 1;
         }
 
@@ -170,10 +225,67 @@ impl TrafficRingBuffer {
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
+
+    /// Configured byte cap. The buffer evicts entries from the
+    /// front whenever a push would push `total_bytes` past
+    /// this value. Exposed so unit tests can assert the
+    /// rebalanced per-channel caps land in the right buckets.
+    #[allow(dead_code)]
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
 }
 
-/// Default per-channel ring buffer cap: 10 MB (50 MB / 5 channels).
-const PER_CHANNEL_BYTES: usize = 50 * 1024 * 1024 / 6;
+// Per-channel ring-buffer caps. Total = 50 MB, weighted by
+// observed session-001 traffic rates (Phase 06 plan). Weights
+// are documented per-line so a retune is a one-line edit. The
+// `const _: () = assert!(...)` immediately below pins the sum.
+//
+// Why these weights:
+//   display:16 dominates because display is the channel the
+//     rebalance exists to help. 32 MB covers ~5 s at 6 MB/s
+//     peak and ~16 s at 2 MB/s typical from session-001.
+//   usbredir:2 — active USB transfers hit ~50 MB/s, which no
+//     realistic cap captures. 4 MB suffices for the idle /
+//     control case and the protocol-state-change tail at the
+//     start of a transfer.
+//   playback / cursor / main : 2 each — all an order of
+//     magnitude below display but with non-trivial sustained
+//     rates. 4 MB is many minutes of retention.
+//   inputs:1 is the lowest sustained-rate channel by a wide
+//     margin; 2 MB holds hours of keystrokes / mouse events.
+const DISPLAY_BUFFER_BYTES: usize = 32 * 1024 * 1024; // weight 16
+const USBREDIR_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const PLAYBACK_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const CURSOR_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const MAIN_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
+const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
+
+/// Budget shared across all per-channel ring buffers. Pinned
+/// at 50 MB; dynamic sizing keyed on system memory is the
+/// master plan's "Future work" item and explicitly out of
+/// scope for this phase.
+const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
+
+// Compile-time arithmetic guard: the per-channel caps must
+// sum to TOTAL_TRAFFIC_BUFFER_BYTES. A typo in any of the
+// constants above fails the build rather than silently
+// changing the budget. Belt-and-suspenders with the runtime
+// test in bugreport::tests.
+//
+// clippy::assertions_on_constants warns on `assert!(<const>)`
+// as dead code; here the const-time assert *is* the point.
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(
+    DISPLAY_BUFFER_BYTES
+        + USBREDIR_BUFFER_BYTES
+        + PLAYBACK_BUFFER_BYTES
+        + CURSOR_BUFFER_BYTES
+        + MAIN_BUFFER_BYTES
+        + INPUTS_BUFFER_BYTES
+        == TOTAL_TRAFFIC_BUFFER_BYTES,
+    "per-channel caps must sum to TOTAL_TRAFFIC_BUFFER_BYTES",
+);
 
 /// Known channel names.
 const CHANNELS: [&str; 6] = [
@@ -197,12 +309,12 @@ impl TrafficBuffers {
     /// Create a new set of traffic buffers.
     pub fn new() -> Self {
         TrafficBuffers {
-            main: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            display: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            inputs: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            cursor: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            usbredir: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
-            playback: Mutex::new(TrafficRingBuffer::new(PER_CHANNEL_BYTES)),
+            main: Mutex::new(TrafficRingBuffer::new(MAIN_BUFFER_BYTES)),
+            display: Mutex::new(TrafficRingBuffer::new(DISPLAY_BUFFER_BYTES)),
+            inputs: Mutex::new(TrafficRingBuffer::new(INPUTS_BUFFER_BYTES)),
+            cursor: Mutex::new(TrafficRingBuffer::new(CURSOR_BUFFER_BYTES)),
+            usbredir: Mutex::new(TrafficRingBuffer::new(USBREDIR_BUFFER_BYTES)),
+            playback: Mutex::new(TrafficRingBuffer::new(PLAYBACK_BUFFER_BYTES)),
             start: Instant::now(),
         }
     }
@@ -212,7 +324,47 @@ impl TrafficBuffers {
         self.start.elapsed()
     }
 
+    /// Cheap deep-copy of the live ring state (Phase 10 / F2).
+    ///
+    /// Per-channel locks are held briefly to clone each ring;
+    /// the underlying `TrafficEntry` clones are O(N atomic
+    /// refcount bumps) thanks to Phase 07's `Arc<[u8]>` for
+    /// `pcap_frame` and Phase 08's `Vec<Arc<[u8]>>` for
+    /// `additional_segments`.
+    ///
+    /// The returned `TrafficBuffers` is a standalone value
+    /// suitable for handing to `BugReport::assemble` /
+    /// `write_notification` — its rings are immutable from
+    /// the perspective of the notification-snapshot store
+    /// (nothing pushes to them after capture), but the type
+    /// shape is identical so the bug-report writer needs no
+    /// changes to accept it.
+    pub fn snapshot(&self) -> TrafficBuffers {
+        TrafficBuffers {
+            main: Mutex::new(self.main.lock().unwrap().clone()),
+            display: Mutex::new(self.display.lock().unwrap().clone()),
+            inputs: Mutex::new(self.inputs.lock().unwrap().clone()),
+            cursor: Mutex::new(self.cursor.lock().unwrap().clone()),
+            usbredir: Mutex::new(self.usbredir.lock().unwrap().clone()),
+            playback: Mutex::new(self.playback.lock().unwrap().clone()),
+            start: self.start,
+        }
+    }
+
     /// Get the ring buffer for a channel by name.
+    ///
+    /// **Webdav is deliberately absent**: the webdav channel
+    /// (`shakenfist-spice-renderer/src/channels/webdav.rs`)
+    /// does not call `traffic.record_*` today, so plumbing a
+    /// `Mutex<TrafficRingBuffer>` for it would yield an
+    /// always-empty ring. Phase 06's per-channel cap
+    /// rebalance noted this gap as out-of-scope (would
+    /// require channel-side recording plumbing plus a budget
+    /// slice from display); it's tracked in
+    /// `PLAN-session-001-feedback-phase-06-channel-rebalance.md`
+    /// "Out of scope". `ChannelSnapshots` does carry a
+    /// `webdav` field for protocol-level state — that
+    /// asymmetry is intentional, not an oversight.
     fn buffer_for(&self, channel: &str) -> Option<&Mutex<TrafficRingBuffer>> {
         match channel {
             "main" => Some(&self.main),
@@ -246,7 +398,11 @@ impl TrafficBuffers {
             Ok(g) => g,
             Err(e) => e.into_inner(),
         };
-        let pcap_frame = self.build_frame(channel, false, raw_message, &mut guard);
+        let mut frames = self.build_segmented_frames(channel, false, raw_message, &mut guard);
+        // segment_payload guarantees ≥1 frame; the unwrap is
+        // an invariant assertion, not a fallible operation.
+        let pcap_frame = frames.remove(0);
+        let additional_segments = frames;
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -256,6 +412,7 @@ impl TrafficBuffers {
             wire_size,
             payload_size,
             pcap_frame,
+            additional_segments,
         };
         guard.push(entry);
     }
@@ -278,7 +435,10 @@ impl TrafficBuffers {
         let payload_size = wire_size.saturating_sub(6);
 
         let mut guard = buf.lock().unwrap();
-        let pcap_frame = self.build_frame(channel, true, raw_message, &mut guard);
+        let mut frames = self.build_segmented_frames(channel, true, raw_message, &mut guard);
+        // segment_payload guarantees ≥1 frame.
+        let pcap_frame = frames.remove(0);
+        let additional_segments = frames;
         let entry = TrafficEntry {
             timestamp: elapsed,
             channel,
@@ -288,20 +448,24 @@ impl TrafficBuffers {
             wire_size,
             payload_size,
             pcap_frame,
+            additional_segments,
         };
         guard.push(entry);
     }
 
-    /// Build a pcap frame for the given message, updating TCP
-    /// sequence numbers on the ring buffer.
+    /// Build one or more pcap frames for the given message,
+    /// updating TCP sequence numbers on the ring buffer.
+    /// Messages above the IPv4 frame limit are split via the
+    /// shared `capture::segment_payload` helper — the Phase 08
+    /// (K2) fix. Always returns at least one frame.
     #[cfg(feature = "capture")]
-    fn build_frame(
+    fn build_segmented_frames(
         &self,
         channel: &str,
         is_sent: bool,
         data: &[u8],
         ring: &mut TrafficRingBuffer,
-    ) -> Vec<u8> {
+    ) -> Vec<Arc<[u8]>> {
         let port = capture::channel_port(channel);
         let (src_ip, src_port, dst_ip, dst_port, seq, ack) = if is_sent {
             let s = ring.client_seq;
@@ -314,20 +478,26 @@ impl TrafficBuffers {
             ring.server_seq = ring.server_seq.wrapping_add(data.len() as u32);
             ([10, 0, 0, 2], 5900u16, [10, 0, 0, 1], port, s, a)
         };
-        capture::build_tcp_frame(src_ip, src_port, dst_ip, dst_port, seq, ack, data)
+        capture::segment_payload(src_ip, src_port, dst_ip, dst_port, seq, ack, data)
+            .into_iter()
+            .map(Arc::<[u8]>::from)
+            .collect()
     }
 
-    /// Stub when capture feature is disabled — produce an empty
-    /// frame since pcap construction is unavailable.
+    /// Stub when capture feature is disabled — produce a
+    /// single empty frame since pcap construction is
+    /// unavailable. Callers will treat this as "one entry,
+    /// zero useful pcap data" which matches the pre-Phase-08
+    /// behaviour.
     #[cfg(not(feature = "capture"))]
-    fn build_frame(
+    fn build_segmented_frames(
         &self,
         _channel: &str,
         _is_sent: bool,
         _data: &[u8],
         _ring: &mut TrafficRingBuffer,
-    ) -> Vec<u8> {
-        Vec::new()
+    ) -> Vec<Arc<[u8]>> {
+        vec![Arc::from(Vec::<u8>::new())]
     }
 
     /// Log a summary of ring buffer state (for verbose mode).
@@ -457,6 +627,10 @@ pub struct AppSnapshot {
     pub mouse_mode: u32,
     pub connected: bool,
     pub uptime_secs: f64,
+    /// Number of auto-reconnect attempts (Pending entries) the
+    /// session has accumulated. 0 for a session that never lost
+    /// its connection; rising values indicate a rocky session.
+    pub auto_reconnect_count: u32,
 }
 
 impl Default for AppSnapshot {
@@ -473,6 +647,7 @@ impl Default for AppSnapshot {
             mouse_mode: 0,
             connected: false,
             uptime_secs: 0.0,
+            auto_reconnect_count: 0,
         }
     }
 }
@@ -618,6 +793,25 @@ pub(crate) struct PedanticConfig {
 /// some reason.
 pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
+/// Whether a notification-derived bug report (Phase 10 / F2)
+/// captured its ring-buffer payload from a live snapshot at
+/// the moment the notification fired, or only from the
+/// post-event ring state. Serialised into the report's
+/// metadata.json via `BugReportType::Notification`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum NotificationSnapshotState {
+    /// The snapshot store had a live capture for this
+    /// notification when the user clicked the button. The
+    /// pcap and channel-state JSON reflect ring contents
+    /// from the moment the notification fired.
+    AtFire,
+    /// The snapshot expired (>60 s old) or fell off the
+    /// 5-entry stack. The pcap and channel-state JSON
+    /// reflect post-event ring contents — useful, but
+    /// without the run-up to the event itself.
+    PostEventOnly,
+}
+
 /// Which channel the bug report is about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum BugReportType {
@@ -631,6 +825,25 @@ pub enum BugReportType {
     /// the registry (e.g. "display:unimpl:draw_rop3").
     Pedantic {
         gap_key: String,
+    },
+    /// Auto-generated when ryll observes a channel disconnect
+    /// (transport error, EOF, or its own keepalive timeout).
+    /// `channel` is the channel name that fired the disconnect
+    /// signal — every `ChannelEvent::Disconnected` and
+    /// `ChannelEvent::Error` carries a structured `ChannelType`,
+    /// so the attribution is always known.
+    Disconnect {
+        channel: String,
+    },
+    /// User clicked the "File bug report" button on a
+    /// notification entry (Phase 10 / F2).
+    /// `notification_id` is the entry's stable id within the
+    /// session's `NotificationStore`; `snapshot_state` records
+    /// whether the report's traffic payload came from a live
+    /// snapshot at fire time or only post-event ring contents.
+    Notification {
+        notification_id: u64,
+        snapshot_state: NotificationSnapshotState,
     },
 }
 
@@ -652,6 +865,21 @@ impl BugReportType {
                 Some("usbredir") => "usbredir",
                 _ => "display",
             },
+            BugReportType::Disconnect { channel } => match channel.as_str() {
+                "main" => "main",
+                "display" => "display",
+                "inputs" => "inputs",
+                "cursor" => "cursor",
+                "playback" => "playback",
+                "usbredir" => "usbredir",
+                "webdav" => "webdav",
+                _ => "main",
+            },
+            // Phase 10: notification reports are session-level
+            // — the pcap covers all channels, and the
+            // channel-state.json defaults to main as a
+            // sensible session anchor.
+            BugReportType::Notification { .. } => "main",
         }
     }
 }
@@ -663,6 +891,183 @@ pub struct ReportRegion {
     pub top: u32,
     pub right: u32,
     pub bottom: u32,
+}
+
+/// Per-channel diagnostic snapshot embedded in
+/// `disconnect-cause.json`. Lets a maintainer reading the zip
+/// compare the channel that fired the disconnect against the
+/// other channels' last-known state — were they all silent at
+/// the same time, or just the one that dropped?
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PerChannelDiagnostics {
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub last_recv_ts_secs: Option<f64>,
+    pub last_send_ts_secs: Option<f64>,
+    pub ping_recv_count: u32,
+    pub pong_send_count: u32,
+    pub last_ping_recv_ts_secs: Option<f64>,
+    /// Idle keepalives this client sent on this channel
+    /// (Phase 02 K1 fix). Today only the inputs channel sends
+    /// these; the field is present on every entry for
+    /// uniform JSON shape, with 0 / None where unimplemented.
+    pub client_keepalive_send_count: u32,
+    pub last_client_keepalive_send_ts_secs: Option<f64>,
+}
+
+/// Structured cause record for an auto-disconnect bug report.
+/// Goal: a maintainer reading the resulting zip should be able
+/// to tell which side dropped the connection and what each
+/// channel was doing at the moment of failure, without having
+/// to re-run the session.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisconnectCause {
+    /// Channel name that fired the disconnect signal. Both
+    /// `ChannelEvent::Disconnected` and `ChannelEvent::Error`
+    /// carry a structured `ChannelType`, so attribution is
+    /// always known.
+    pub channel: String,
+    /// Free-form cause / reason captured at the disconnect
+    /// site (the `info!`/`error!` log line text).
+    pub error_message: String,
+    /// `std::io::ErrorKind` debug string when known. None for
+    /// EOF / clean close / our own keepalive timeout.
+    pub error_kind: Option<String>,
+    /// True if the main-channel client-side keepalive timeout
+    /// (`main_channel.rs`, 30 s) fired. Distinguishes "we
+    /// timed ourselves out" from a real EOF/RST.
+    pub keepalive_timeout_fired: bool,
+    /// Session uptime at the moment of failure.
+    pub session_uptime_secs: f64,
+    /// Per-channel last-known state. Keys are channel names
+    /// ("main", "display", "inputs", "cursor", "playback",
+    /// "usbredir", "webdav").
+    pub per_channel: BTreeMap<String, PerChannelDiagnostics>,
+}
+
+impl DisconnectCause {
+    /// Snapshot every channel's last-known diagnostic state into
+    /// a `BTreeMap` keyed by channel name. Used by the
+    /// disconnect-snapshot hook to populate
+    /// `DisconnectCause::per_channel`.
+    pub fn collect_per_channel(
+        snapshots: &ChannelSnapshots,
+    ) -> BTreeMap<String, PerChannelDiagnostics> {
+        let mut out = BTreeMap::new();
+        if let Ok(s) = snapshots.main.lock() {
+            out.insert(
+                "main".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: s.client_keepalive_send_count,
+                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.display.lock() {
+            out.insert(
+                "display".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.inputs.lock() {
+            out.insert(
+                "inputs".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: s.client_keepalive_send_count,
+                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.cursor.lock() {
+            out.insert(
+                "cursor".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.playback.lock() {
+            out.insert(
+                "playback".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.usbredir.lock() {
+            out.insert(
+                "usbredir".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
+                },
+            );
+        }
+        if let Ok(s) = snapshots.webdav.lock() {
+            out.insert(
+                "webdav".to_string(),
+                PerChannelDiagnostics {
+                    bytes_in: s.bytes_in,
+                    bytes_out: s.bytes_out,
+                    last_recv_ts_secs: s.last_recv_ts_secs,
+                    last_send_ts_secs: s.last_send_ts_secs,
+                    ping_recv_count: s.ping_recv_count,
+                    pong_send_count: s.pong_send_count,
+                    last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
+                },
+            );
+        }
+        out
+    }
 }
 
 /// Captured at the moment a bug-report dialog opened, or at
@@ -688,6 +1093,13 @@ pub struct TriggerTimestamps {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReportMetadata {
     pub ryll_version: String,
+    /// Short git SHA of the build (with `-dirty` suffix when the
+    /// working tree had uncommitted changes at build time).
+    /// Populated from `env!("RYLL_GIT_SHA")` at compile time;
+    /// falls back to "unknown" when the build environment can't
+    /// reach git. Lets a maintainer reading a bug-report zip
+    /// confirm exactly which commit produced the binary.
+    pub ryll_git_sha: String,
     pub platform_os: String,
     pub platform_arch: String,
     pub report_type: BugReportType,
@@ -808,54 +1220,31 @@ impl BugReport {
         session.uptime_secs = traffic.elapsed().as_secs_f64();
         let session_json = serde_json::to_string_pretty(&session)?;
 
-        // 2. Channel state snapshot
+        // 2. Channel state snapshot — pick the channel from
+        // report_type.channel_name() and delegate the
+        // lock/clone/serialise to ChannelSnapshots'
+        // snapshot_json_for helper. The Usb variant is the
+        // only special case: it has no dedicated snapshot
+        // (its pcap traffic is captured via channel_name()
+        // → "usbredir" further below), so emit an empty
+        // object.
         let channel_state_json = match &report_type {
-            BugReportType::Display => {
-                let snap = channel_snapshots.display.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Input => {
-                let snap = channel_snapshots.inputs.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Cursor => {
-                let snap = channel_snapshots.cursor.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Connection => {
-                let snap = channel_snapshots.main.lock().unwrap().clone();
-                serde_json::to_string_pretty(&snap)?
-            }
-            BugReportType::Usb => {
-                // No dedicated usbredir snapshot yet; pcap traffic is captured via channel_name()
-                "{}".to_string()
-            }
-            BugReportType::Pedantic { .. } => {
-                // Pick the snapshot based on the channel the gap came from.
-                // For unknown channels we picked "display" as the fallback
-                // in channel_name(), so this match mirrors that.
-                match report_type.channel_name() {
-                    "cursor" => {
-                        let snap = channel_snapshots.cursor.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "inputs" => {
-                        let snap = channel_snapshots.inputs.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "main" => {
-                        let snap = channel_snapshots.main.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                    "usbredir" => {
-                        // No dedicated usbredir snapshot yet.
-                        "{}".to_string()
-                    }
-                    _ => {
-                        let snap = channel_snapshots.display.lock().unwrap().clone();
-                        serde_json::to_string_pretty(&snap)?
-                    }
-                }
+            BugReportType::Usb => "{}".to_string(),
+            _ => {
+                let name = report_type.channel_name();
+                channel_snapshots
+                    .snapshot_json_for(name)
+                    .unwrap_or_else(|| {
+                        // Defensive: channel_name() can return
+                        // "display" / "main" / etc. as
+                        // fallbacks; snapshot_json_for covers
+                        // all of those. This arm fires only
+                        // if a future channel_name() variant
+                        // returns an unknown name.
+                        channel_snapshots
+                            .snapshot_json_for("display")
+                            .expect("display snapshot must exist")
+                    })?
             }
         };
 
@@ -921,6 +1310,7 @@ impl BugReport {
         };
         let metadata = ReportMetadata {
             ryll_version: env!("CARGO_PKG_VERSION").to_string(),
+            ryll_git_sha: env!("RYLL_GIT_SHA").to_string(),
             platform_os: std::env::consts::OS.to_string(),
             platform_arch: std::env::consts::ARCH.to_string(),
             channel: channel_name.to_string(),
@@ -1090,6 +1480,206 @@ impl BugReport {
         Ok(path)
     }
 
+    /// Auto-generate a bug report for a channel disconnect,
+    /// write it to `dir`, and return the path. Used by the
+    /// app's disconnect-snapshot hook so the next disconnect
+    /// captures the run-up to the failure rather than
+    /// post-reconnect noise.
+    ///
+    /// Mirrors `write_pedantic` for the assemble-and-write
+    /// plumbing, plus a new `disconnect-cause.json` carrying the
+    /// structured `DisconnectCause` record. The pcap section is
+    /// the channel that fired the disconnect (per
+    /// `BugReportType::Disconnect::channel_name`); if the channel
+    /// is "error" or otherwise unknown, the main-channel pcap
+    /// is included as a fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_disconnect(
+        dir: &std::path::Path,
+        cause: DisconnectCause,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
+        runtime_metrics: RuntimeMetrics,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let description = format!(
+            "auto: connection lost on {} ({})",
+            cause.channel, cause.error_message
+        );
+        let report = Self::assemble(
+            BugReportType::Disconnect {
+                channel: cause.channel.clone(),
+            },
+            description,
+            None,
+            target_host,
+            target_port,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            notifications,
+            None,
+            runtime_metrics,
+            None,
+            None,
+        )?;
+
+        std::fs::create_dir_all(dir)?;
+
+        let safe_channel = cause
+            .channel
+            .chars()
+            .map(|c| match c {
+                ':' | '/' | '\\' | ' ' => '-',
+                c if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' => c,
+                _ => '_',
+            })
+            .collect::<String>();
+        let filename = format!(
+            "ryll-disconnect-{}-{}.zip",
+            safe_channel,
+            filename_timestamp()
+        );
+        let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(report.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(report.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(report.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = report.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(report.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&report.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
+
+        let cause_json = serde_json::to_string_pretty(&cause)?;
+        zip.start_file("disconnect-cause.json", opts)?;
+        zip.write_all(cause_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
+    /// Phase 10 (F2): write a bug-report zip triggered by the
+    /// user clicking "File bug report" on a notification entry.
+    /// The `traffic` argument is either a live snapshot
+    /// captured at notification-fire time (`AtFire`) or the
+    /// current `TrafficBuffers` (`PostEventOnly`); the
+    /// `snapshot_state` argument records which case applies
+    /// so the maintainer reading the zip knows whether the
+    /// pcap contains the run-up to the event.
+    ///
+    /// Mirrors `write_disconnect`'s zip-writing shape and
+    /// uses `BugReport::assemble` under the hood so
+    /// metadata / session / channel-state / notifications /
+    /// runtime-metrics are all the standard shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_notification(
+        dir: &std::path::Path,
+        notification: &shakenfist_spice_renderer::NotificationEntry,
+        snapshot_state: NotificationSnapshotState,
+        target_host: &str,
+        target_port: u16,
+        traffic: &TrafficBuffers,
+        channel_snapshots: &ChannelSnapshots,
+        app_snapshot: &Mutex<AppSnapshot>,
+        notifications: &Mutex<NotificationStore>,
+        runtime_metrics: RuntimeMetrics,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use shakenfist_spice_protocol::NotifySeverity;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let sev_label = match notification.severity {
+            NotifySeverity::Info => "info",
+            NotifySeverity::Warn => "warn",
+            NotifySeverity::Error => "error",
+        };
+        let description = format!("notification: [{}] {}", sev_label, notification.message);
+
+        let report = Self::assemble(
+            BugReportType::Notification {
+                notification_id: notification.id,
+                snapshot_state,
+            },
+            description,
+            None,
+            target_host,
+            target_port,
+            traffic,
+            channel_snapshots,
+            app_snapshot,
+            notifications,
+            None,
+            runtime_metrics,
+            None,
+            None,
+        )?;
+
+        std::fs::create_dir_all(dir)?;
+
+        let snapshot_tag = match snapshot_state {
+            NotificationSnapshotState::AtFire => "atfire",
+            NotificationSnapshotState::PostEventOnly => "postevent",
+        };
+        let filename = format!(
+            "ryll-notification-{}-{}-{}.zip",
+            notification.id,
+            snapshot_tag,
+            filename_timestamp(),
+        );
+        let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(report.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(report.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(report.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = report.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(report.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&report.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
     /// Build the --pedantic observer closure and register it
     /// with the warn_once registry. Called from
     /// `app::RyllApp::new` (GUI) and `app::run_headless`
@@ -1197,7 +1787,8 @@ mod tests {
                 message_name: "test",
                 wire_size: 20,
                 payload_size: 14,
-                pcap_frame: vec![0u8; 20],
+                pcap_frame: Arc::from(vec![0u8; 20]),
+                additional_segments: Vec::new(),
             });
         }
         assert_eq!(rb.len(), 3);
@@ -1213,7 +1804,8 @@ mod tests {
                 message_name: "test",
                 wire_size: 20,
                 payload_size: 14,
-                pcap_frame: vec![0u8; 20],
+                pcap_frame: Arc::from(vec![0u8; 20]),
+                additional_segments: Vec::new(),
             });
         }
 
@@ -1323,6 +1915,7 @@ mod tests {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
+            ..Default::default()
         };
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
@@ -1390,6 +1983,7 @@ mod tests {
     fn test_report_metadata_serialises() {
         let meta = ReportMetadata {
             ryll_version: "0.1.0".to_string(),
+            ryll_git_sha: "deadbeef".to_string(),
             platform_os: "linux".to_string(),
             platform_arch: "x86_64".to_string(),
             report_type: BugReportType::Display,
@@ -2432,5 +3026,434 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message, "first-gap-key");
         assert_eq!(entries[1].message, "second-spice-message");
+    }
+
+    #[test]
+    fn test_disconnect_channel_name_routing() {
+        for ch in [
+            "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
+        ] {
+            assert_eq!(
+                BugReportType::Disconnect {
+                    channel: ch.to_string()
+                }
+                .channel_name(),
+                ch,
+                "channel {} should round-trip",
+                ch
+            );
+        }
+        // Unknown / "error" channels fall back to main, since the
+        // main pcap is the most useful default for an auto-disconnect
+        // bug report when the originating channel is not known.
+        assert_eq!(
+            BugReportType::Disconnect {
+                channel: "error".to_string()
+            }
+            .channel_name(),
+            "main"
+        );
+        assert_eq!(
+            BugReportType::Disconnect {
+                channel: "bogus".to_string()
+            }
+            .channel_name(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn test_collect_per_channel_round_trips_keepalive_and_traffic() {
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.main.lock().unwrap();
+            s.bytes_in = 1234;
+            s.bytes_out = 5678;
+            s.last_recv_ts_secs = Some(12.5);
+            s.last_send_ts_secs = Some(11.5);
+            s.ping_recv_count = 3;
+            s.pong_send_count = 3;
+            s.last_ping_recv_ts_secs = Some(12.5);
+            s.keepalive_timeout_fired = true;
+        }
+        {
+            let mut s = snapshots.display.lock().unwrap();
+            s.bytes_in = 99;
+        }
+
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
+        let main = per_channel.get("main").expect("main entry missing");
+        assert_eq!(main.bytes_in, 1234);
+        assert_eq!(main.bytes_out, 5678);
+        assert_eq!(main.last_recv_ts_secs, Some(12.5));
+        assert_eq!(main.ping_recv_count, 3);
+        assert_eq!(main.pong_send_count, 3);
+
+        // keepalive_timeout_fired isn't in PerChannelDiagnostics; it
+        // is read separately at the disconnect site, but we verify
+        // here that the snapshot retains the flag the caller set.
+        assert!(snapshots.main.lock().unwrap().keepalive_timeout_fired);
+
+        // Every channel name should appear, even ones we didn't touch.
+        for ch in [
+            "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
+        ] {
+            assert!(per_channel.contains_key(ch), "per_channel missing {}", ch);
+        }
+    }
+
+    #[test]
+    fn test_collect_per_channel_surfaces_keepalive_fields() {
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.inputs.lock().unwrap();
+            s.client_keepalive_send_count = 7;
+            s.last_client_keepalive_send_ts_secs = Some(305.5);
+        }
+        {
+            let mut s = snapshots.main.lock().unwrap();
+            s.client_keepalive_send_count = 11;
+            s.last_client_keepalive_send_ts_secs = Some(110.0);
+        }
+
+        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
+
+        let inputs = per_channel.get("inputs").expect("inputs entry missing");
+        assert_eq!(inputs.client_keepalive_send_count, 7);
+        assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
+
+        let main = per_channel.get("main").expect("main entry missing");
+        assert_eq!(main.client_keepalive_send_count, 11);
+        assert_eq!(main.last_client_keepalive_send_ts_secs, Some(110.0));
+
+        // The other channels do not yet implement keepalive, so the
+        // fields default to 0 / None.
+        for ch in ["display", "cursor", "playback", "usbredir", "webdav"] {
+            let entry = per_channel
+                .get(ch)
+                .unwrap_or_else(|| panic!("missing {}", ch));
+            assert_eq!(
+                entry.client_keepalive_send_count, 0,
+                "{} should report zero keepalives sent",
+                ch
+            );
+            assert_eq!(
+                entry.last_client_keepalive_send_ts_secs, None,
+                "{} should report no last-keepalive-send timestamp",
+                ch
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_disconnect_produces_zip_with_cause_json() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        {
+            let mut s = snapshots.main.lock().unwrap();
+            s.bytes_in = 4096;
+        }
+        let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
+        let metrics = stub_metrics();
+
+        let cause = DisconnectCause {
+            channel: "main".to_string(),
+            error_message: "test disconnect".to_string(),
+            error_kind: None,
+            keepalive_timeout_fired: true,
+            session_uptime_secs: 10.0,
+            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+        };
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let path = BugReport::write_disconnect(
+            &tmp,
+            cause,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            metrics,
+        )
+        .unwrap();
+
+        assert!(path.exists(), "disconnect zip does not exist: {:?}", path);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            filename.starts_with("ryll-disconnect-main-"),
+            "filename does not encode channel: {}",
+            filename
+        );
+
+        let file = std::fs::File::open(&path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.contains(&"metadata.json".to_string()));
+        assert!(names.contains(&"session.json".to_string()));
+        assert!(names.contains(&"channel-state.json".to_string()));
+        assert!(names.contains(&"runtime-metrics.json".to_string()));
+        assert!(names.contains(&"disconnect-cause.json".to_string()));
+
+        // disconnect-cause.json should round-trip the fields we set,
+        // including keepalive_timeout_fired and the per-channel map.
+        let mut cf = archive.by_name("disconnect-cause.json").unwrap();
+        let mut json = String::new();
+        std::io::Read::read_to_string(&mut cf, &mut json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["channel"], "main");
+        assert_eq!(parsed["error_message"], "test disconnect");
+        assert_eq!(parsed["keepalive_timeout_fired"], true);
+        assert_eq!(parsed["session_uptime_secs"], 10.0);
+        assert_eq!(parsed["per_channel"]["main"]["bytes_in"], 4096);
+        assert!(parsed["per_channel"]
+            .as_object()
+            .unwrap()
+            .contains_key("playback"));
+        assert!(parsed["per_channel"]
+            .as_object()
+            .unwrap()
+            .contains_key("webdav"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_write_disconnect_sanitises_channel_in_filename() {
+        let traffic = TrafficBuffers::new();
+        let snapshots = ChannelSnapshots::new();
+        let app_snap = Mutex::new(AppSnapshot::default());
+        let notifications = Mutex::new(NotificationStore::new());
+
+        let cause = DisconnectCause {
+            channel: "weird/name with:colons".to_string(),
+            error_message: "x".to_string(),
+            error_kind: Some("ConnectionReset".to_string()),
+            keepalive_timeout_fired: false,
+            session_uptime_secs: 0.0,
+            per_channel: DisconnectCause::collect_per_channel(&snapshots),
+        };
+
+        let tmp = std::env::temp_dir().join("ryll-test-bugreport-disconnect-sanitise");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let path = BugReport::write_disconnect(
+            &tmp,
+            cause,
+            "10.0.0.1",
+            5900,
+            &traffic,
+            &snapshots,
+            &app_snap,
+            &notifications,
+            stub_metrics(),
+        )
+        .unwrap();
+
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            !filename.contains('/') && !filename.contains(':') && !filename.contains(' '),
+            "filename was not sanitised: {}",
+            filename
+        );
+        assert!(filename.starts_with("ryll-disconnect-weird-name-with-colons-"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Phase 06 rebalance ─────────────────────────────────
+
+    #[test]
+    fn traffic_buffer_per_channel_caps_match_plan() {
+        // Pin each channel's ring buffer to its Phase 06 cap.
+        // Catches a silent regression to the old even-split
+        // (~8.33 MB everywhere) or a typo in any of the named
+        // constants.
+        let bufs = TrafficBuffers::new();
+        assert_eq!(
+            bufs.main.lock().unwrap().max_bytes(),
+            MAIN_BUFFER_BYTES,
+            "main ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.display.lock().unwrap().max_bytes(),
+            DISPLAY_BUFFER_BYTES,
+            "display ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.inputs.lock().unwrap().max_bytes(),
+            INPUTS_BUFFER_BYTES,
+            "inputs ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.cursor.lock().unwrap().max_bytes(),
+            CURSOR_BUFFER_BYTES,
+            "cursor ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.usbredir.lock().unwrap().max_bytes(),
+            USBREDIR_BUFFER_BYTES,
+            "usbredir ring cap mismatch"
+        );
+        assert_eq!(
+            bufs.playback.lock().unwrap().max_bytes(),
+            PLAYBACK_BUFFER_BYTES,
+            "playback ring cap mismatch"
+        );
+    }
+
+    #[test]
+    fn traffic_buffer_total_budget_is_50mb() {
+        // Belt-and-suspenders with the compile-time
+        // const _: () = assert!(...) check next to the
+        // constants. Visible in CI test output if it ever
+        // trips.
+        let total = DISPLAY_BUFFER_BYTES
+            + USBREDIR_BUFFER_BYTES
+            + PLAYBACK_BUFFER_BYTES
+            + CURSOR_BUFFER_BYTES
+            + MAIN_BUFFER_BYTES
+            + INPUTS_BUFFER_BYTES;
+        assert_eq!(total, TOTAL_TRAFFIC_BUFFER_BYTES);
+        assert_eq!(TOTAL_TRAFFIC_BUFFER_BYTES, 50 * 1024 * 1024);
+    }
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn traffic_buffer_display_holds_more_than_other_channels() {
+        // Shape invariant — display is the channel the
+        // rebalance exists to help. Catches a weight typo
+        // (e.g. swapping display and inputs by mistake)
+        // without overfitting to specific numbers, which the
+        // per-channel-caps test already does. Clippy notes
+        // these are compile-time-true, which is the point —
+        // the test surfaces the failure in CI output too.
+        assert!(DISPLAY_BUFFER_BYTES > MAIN_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > INPUTS_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > CURSOR_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > PLAYBACK_BUFFER_BYTES);
+        assert!(DISPLAY_BUFFER_BYTES > USBREDIR_BUFFER_BYTES);
+    }
+
+    // ── Phase 07: cheap-clone invariant ─────────────────────
+
+    #[test]
+    fn traffic_entry_clone_shares_pcap_frame_via_arc() {
+        // Phase 07 (no user-visible behaviour change) guard.
+        // The cheap-clone property is the whole point of the
+        // refactor — without this test a future change that
+        // turns pcap_frame back into Vec<u8> would compile and
+        // silently regress the Phase 10 snapshot path's cost
+        // model from O(N atomic increments) to O(total bytes).
+        let entry = TrafficEntry {
+            timestamp: Duration::from_millis(0),
+            channel: "main",
+            direction: TrafficDirection::Received,
+            message_type: 1,
+            message_name: "test",
+            wire_size: 20,
+            payload_size: 14,
+            pcap_frame: Arc::from(vec![0u8; 20]),
+            additional_segments: vec![Arc::from(vec![0u8; 10]), Arc::from(vec![0u8; 5])],
+        };
+        let cloned = entry.clone();
+        assert!(
+            Arc::ptr_eq(&entry.pcap_frame, &cloned.pcap_frame),
+            "Clone must share the payload allocation; if this \
+             fires, pcap_frame's type was changed back to \
+             Vec<u8> (or another deep-copy type) and Phase 10's \
+             snapshot cost model is broken."
+        );
+        // Phase 08: the same invariant for additional_segments.
+        // Cloning a Vec<Arc<[u8]>> deep-copies the Vec spine but
+        // each Arc<[u8]> stays shared — that's the property the
+        // segmented ring needs for cheap Phase 10 snapshots.
+        for (orig, clone) in entry
+            .additional_segments
+            .iter()
+            .zip(cloned.additional_segments.iter())
+        {
+            assert!(
+                Arc::ptr_eq(orig, clone),
+                "Cloned additional_segments must share each \
+                 segment's Arc payload allocation."
+            );
+        }
+    }
+
+    // ── Phase 08 segmentation ───────────────────────────────
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn traffic_entry_segments_large_message() {
+        // Push a >65 KB synthetic message through record_received
+        // and verify it lands in the ring as one entry with
+        // pcap_frame holding the first MAX_PAYLOAD bytes and
+        // additional_segments carrying the tail.
+        let bufs = TrafficBuffers::new();
+        // 100 000 byte payload → two segments (65495 + 34505).
+        let big = vec![0xABu8; 100_000];
+        bufs.record_received("display", 1, "test", &big);
+        let guard = bufs.display.lock().unwrap();
+        assert_eq!(guard.entries().len(), 1, "one entry per SPICE message");
+        let entry = guard.entries().front().unwrap();
+        // pcap_frame is the first segment: TCP wrapping is added,
+        // so the frame is bigger than just MAX_PAYLOAD payload —
+        // assert against the payload-bearing portion via the
+        // segment count and tail size instead of exact byte
+        // counts on the framed output.
+        assert_eq!(
+            entry.additional_segments.len(),
+            1,
+            "100 KB payload should produce exactly one trailing segment"
+        );
+        // The total bytes the ring holds must match the framed
+        // size, not the raw payload size — and crucially must be
+        // > 65 KB, proving the pre-Phase-08 drop-on-overflow
+        // path did not fire.
+        let total = entry.pcap_frame.len()
+            + entry
+                .additional_segments
+                .iter()
+                .map(|s| s.len())
+                .sum::<usize>();
+        assert!(
+            total > 100_000,
+            "framed total should exceed raw payload size (TCP/IP headers): got {}",
+            total
+        );
+    }
+
+    #[cfg(feature = "capture")]
+    #[test]
+    fn traffic_ring_byte_cap_evicts_segmented_entries() {
+        // A segmented entry's byte cost includes
+        // additional_segments. Push enough oversized entries to
+        // exceed a small ring cap and verify total_bytes accounts
+        // them correctly during eviction.
+        let mut rb = TrafficRingBuffer::new(200);
+        for i in 0..5 {
+            rb.push(TrafficEntry {
+                timestamp: Duration::from_millis(i * 100),
+                channel: "test",
+                direction: TrafficDirection::Received,
+                message_type: i as u16,
+                message_name: "test",
+                wire_size: 100,
+                payload_size: 94,
+                pcap_frame: Arc::from(vec![0u8; 50]),
+                additional_segments: vec![Arc::from(vec![0u8; 50])],
+            });
+        }
+        // Each entry is 100 bytes; the 200-byte cap holds at
+        // most 2 entries.
+        assert!(rb.total_bytes() <= 200);
+        assert!(rb.len() <= 2);
     }
 }

@@ -3,9 +3,9 @@ use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::mpsc;
 use tokio::sync::Notify as RepaintNotify;
-use tracing::{debug, info, warn};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, error, info, warn};
 
 use crate::snapshots::MainSnapshot;
 use crate::{
@@ -139,13 +139,52 @@ pub struct MainChannel {
     bytes_in: u64,
     bytes_out: u64,
     last_ping_at: Option<Instant>,
+    /// Local cache of disconnect-cause diagnostic fields,
+    /// flushed to `snapshot` by `update_snapshot()`. Mirrors the
+    /// matching fields on `MainSnapshot`.
+    last_recv_ts_secs: Option<f64>,
+    last_send_ts_secs: Option<f64>,
+    ping_recv_count: u32,
+    pong_send_count: u32,
+    last_ping_recv_ts_secs: Option<f64>,
+    /// Wall-clock time (tokio runtime) of the most recent
+    /// inbound *or* outbound activity on main. Drives the idle
+    /// keepalive (Phase 02 K1 fix): when this is older than
+    /// `KEEPALIVE_IDLE`, we send a spurious PONG to keep the
+    /// server's per-channel rcc connectivity timer alive.
+    /// Updated on every recv (in the select loop) and every
+    /// send (in `send()`).
+    last_activity: tokio::time::Instant,
+    /// Counter of idle keepalives we've fired on main. Surfaced
+    /// via `MainSnapshot` for disconnect-cause diagnostics.
+    client_keepalive_send_count: u32,
+    /// Session-relative seconds at the most recent keepalive
+    /// send.
+    last_client_keepalive_send_ts_secs: Option<f64>,
     /// True after `maybe_request_client_mouse_mode` sends a
     /// `MOUSE_MODE_REQUEST(CLIENT)` and until a MOUSE_MODE
     /// message confirms we're in CLIENT mode. Stops a flappy
     /// or hostile server from amplifying outbound requests
     /// 1:1 on inbound MOUSE_MODE messages.
     mouse_mode_request_pending: bool,
+    /// Fired once when the INIT message arrives. The session
+    /// orchestrator awaits this to learn the session id before
+    /// connecting secondary channels. Wrapped in Option so the
+    /// signal can be consumed exactly once via `take()`.
+    session_init_signal: Option<oneshot::Sender<u32>>,
+    /// Fired once when CHANNELS_LIST arrives. Carries the list of
+    /// (ChannelType, channel_id) tuples the server advertised,
+    /// which the orchestrator uses to spawn secondary channels.
+    channels_avail_signal: Option<oneshot::Sender<Vec<(ChannelType, u8)>>>,
 }
+
+/// Idle window before the main-channel keepalive fires. The
+/// SPICE server's per-RCC connectivity check is 30 s
+/// (CLIENT_CONNECTIVITY_TIMEOUT, main-channel-client.cpp:38);
+/// 10 s leaves wide headroom against jitter and clock skew.
+/// Matches the inputs-channel keepalive cadence so the two
+/// channels' keepalive traffic interleaves predictably.
+const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl MainChannel {
     #[allow(clippy::too_many_arguments)]
@@ -161,6 +200,8 @@ impl MainChannel {
         monitors: u8,
         log_config: LogConfig,
         clipboard: Option<Arc<dyn ClipboardBackend>>,
+        session_init_signal: oneshot::Sender<u32>,
+        channels_avail_signal: oneshot::Sender<Vec<(ChannelType, u8)>>,
     ) -> Self {
         MainChannel {
             stream,
@@ -187,7 +228,17 @@ impl MainChannel {
             bytes_in: 0,
             bytes_out: 0,
             last_ping_at: None,
+            last_recv_ts_secs: None,
+            last_send_ts_secs: None,
+            ping_recv_count: 0,
+            pong_send_count: 0,
+            last_ping_recv_ts_secs: None,
+            last_activity: tokio::time::Instant::now(),
+            client_keepalive_send_count: 0,
+            last_client_keepalive_send_ts_secs: None,
             mouse_mode_request_pending: false,
+            session_init_signal: Some(session_init_signal),
+            channels_avail_signal: Some(channels_avail_signal),
         }
     }
 
@@ -196,16 +247,209 @@ impl MainChannel {
         self.session_id
     }
 
+    /// Public entry point. Wraps `run_loop` so any error
+    /// propagating out of the inner select! arms is logged
+    /// before the task ends. Without this, `?` propagations
+    /// inside the loop end the task silently, which in
+    /// session-001d hid the cause of main going dark mid-run
+    /// (`client_keepalive_send_count` plateaued at 31 well
+    /// before the session disconnect, with no log line
+    /// explaining why).
+    ///
+    /// `Box::pin` heap-allocates the inner state machine so
+    /// the wrapper does not inline `run_loop`'s entire async
+    /// state into its own frame. Without this, debug builds
+    /// overflowed the tokio worker stack at channel startup
+    /// (verified on macOS with session-001e: stack overflow
+    /// in `tokio-rt-worker` before the first PING was even
+    /// processed).
     pub async fn run(&mut self) -> Result<()> {
+        let result = Box::pin(self.run_loop()).await;
+        match &result {
+            Ok(()) => info!("main: run loop exited cleanly"),
+            Err(e) => error!("main: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    // `last_arm` is observable only when the heartbeat arm fires
+    // before the next iteration overwrites it; all other reads of
+    // it look "dead" to clippy. The lint is correct in the strict
+    // sense but uninformative for diagnostic state, so suppress
+    // it for this function only. Will go away when the heartbeat
+    // is removed.
+    #[allow(unused_assignments)]
+    async fn run_loop(&mut self) -> Result<()> {
         info!("main: channel started");
 
         let mut resize_debounce: Option<tokio::time::Instant> = None;
-        let mut clipboard_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        clipboard_interval.tick().await;
+        // Diagnostic env var for the K1 hang investigation. When
+        // RYLL_DISABLE_CLIPBOARD_POLL=1 is set in the environment,
+        // the clipboard_interval is replaced by `None` and the
+        // corresponding select! arm becomes a never-resolving
+        // future (`std::future::pending`), effectively removing
+        // it from main's loop. If K1 stops reproducing under this
+        // flag, the clipboard arm is the trigger; if it still
+        // reproduces, the bug is elsewhere. Will be removed when
+        // K1 is closed.
+        let disable_clipboard_poll = std::env::var("RYLL_DISABLE_CLIPBOARD_POLL")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if disable_clipboard_poll {
+            info!("main: clipboard polling disabled via RYLL_DISABLE_CLIPBOARD_POLL");
+        }
+        let mut clipboard_interval = if disable_clipboard_poll {
+            None
+        } else {
+            let mut i = tokio::time::interval(std::time::Duration::from_millis(500));
+            i.tick().await;
+            Some(i)
+        };
+
+        // K1 watchdog. Spawns a plain std::thread (NOT a tokio
+        // task — by design: if tokio's runtime is somehow
+        // wedged, this thread is unaffected) that monitors the
+        // heartbeat timestamp. If main's heartbeat goes silent
+        // for >5 s, the watchdog shells out to `gdb --batch -p
+        // $$ -ex 'thread apply all bt'` to capture all-thread
+        // backtraces at the moment of the freeze, *before* the
+        // server-side rcc disconnect tears everything down.
+        // Output lands in /tmp with a timestamped filename. The
+        // watchdog fires once per silence period to avoid
+        // multiple dumps for the same hang.
+        //
+        // Opt-in via RYLL_WATCHDOG_GDB=1. Requires `gdb` on
+        // PATH and either a permissive `kernel.yama.ptrace_scope`
+        // (=0) or `cap_sys_ptrace`.
+        let last_heartbeat_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        if std::env::var("RYLL_WATCHDOG_GDB")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            let hb = last_heartbeat_ms.clone();
+            let pid = std::process::id();
+            info!(
+                "main: K1 watchdog enabled (pid {}); will dump backtraces if heartbeat silent >5 s",
+                pid
+            );
+            std::thread::Builder::new()
+                .name("ryll-watchdog".into())
+                .spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let mut fired = false;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        let last = hb.load(Ordering::Relaxed);
+                        if last == 0 {
+                            continue;
+                        }
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let gap_ms = now.saturating_sub(last);
+                        if gap_ms > 5_000 {
+                            if !fired {
+                                fired = true;
+                                let bt_path = format!("/tmp/ryll-watchdog-bt-{}-{}.txt", pid, now);
+                                eprintln!(
+                                    "ryll-watchdog: main heartbeat silent for {} ms, \
+                                     capturing all-thread backtrace via gdb -> {}",
+                                    gap_ms, bt_path
+                                );
+                                let bt_file = match std::fs::File::create(&bt_path) {
+                                    Ok(f) => f,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "ryll-watchdog: could not create {}: {}",
+                                            bt_path, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                                let status = std::process::Command::new("gdb")
+                                    .args([
+                                        "--batch",
+                                        "-p",
+                                        &pid.to_string(),
+                                        "-ex",
+                                        "set pagination off",
+                                        "-ex",
+                                        "thread apply all bt",
+                                        "-ex",
+                                        "detach",
+                                        "-ex",
+                                        "quit",
+                                    ])
+                                    .stdout(bt_file)
+                                    .stderr(std::process::Stdio::null())
+                                    .status();
+                                match status {
+                                    Ok(s) if s.success() => {
+                                        eprintln!(
+                                            "ryll-watchdog: backtrace captured to {}",
+                                            bt_path
+                                        );
+                                    }
+                                    Ok(s) => {
+                                        eprintln!(
+                                            "ryll-watchdog: gdb exited with status {:?}; \
+                                             check {} for partial output",
+                                            s.code(),
+                                            bt_path
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("ryll-watchdog: failed to spawn gdb: {}", e);
+                                    }
+                                }
+                            }
+                        } else {
+                            fired = false;
+                        }
+                    }
+                })
+                .expect("failed to spawn ryll-watchdog thread");
+        }
+        // Diagnostic heartbeat for the K1 hang investigation
+        // (sessions 001b/c/d/f/g). main's task has been observed
+        // to silently stop polling some time after T+465 across
+        // every K1 reproduction — neither the read branch nor the
+        // keepalive branch fires after that, but the task also
+        // doesn't exit. The wrapper-level "exited cleanly" /
+        // "exited with error" log lines never appear for main,
+        // confirming run_loop doesn't return — it's blocked on
+        // an `.await` somewhere we can't see from snapshots.
+        //
+        // This heartbeat fires every 1 s. Each tick logs which
+        // select arm fired most recently, so when main goes
+        // dark we can read backwards to "the last arm that
+        // ran was X" and narrow the hang to a specific code
+        // path. Removing this when K1 is closed.
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+        heartbeat.tick().await;
+        let mut last_arm: &'static str = "startup";
+        // Iteration counter for K1 hang investigation. Incremented at
+        // the top of every loop body. Logged from the heartbeat arm
+        // alongside last_arm. If iter_count keeps climbing while
+        // last_arm stays the same, the loop is iterating but no
+        // non-heartbeat arm is firing (timer wakers/IO wakers are
+        // silent). If iter_count stops climbing entirely, the loop
+        // body itself is stuck somewhere.
+        let mut iter_count: u64 = 0;
         let mut last_data_received = tokio::time::Instant::now();
-        let keepalive_timeout = std::time::Duration::from_secs(30);
+        // Backstop for an unreachable / dead server, not a primary
+        // mechanism. The SPICE server's own connectivity check is at
+        // 30 s (CLIENT_CONNECTIVITY_TIMEOUT, main-channel-client.cpp:38)
+        // and produces a more informative log line than our local
+        // timer. Setting this above 30 s ensures the server-side
+        // check fires unambiguously first when the server is still
+        // alive, leaving our timer to catch the case where the
+        // server disappears without any FIN/RST.
+        let keepalive_timeout = std::time::Duration::from_secs(90);
 
         loop {
+            iter_count = iter_count.wrapping_add(1);
             let mut chunk = [0u8; 65536];
             let stream = &mut self.stream;
             let monitors_config_rx = &mut self.monitors_config_rx;
@@ -230,28 +474,32 @@ impl MainChannel {
                         }
                     }
                 } => {
+                    last_arm = "read";
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.event_tx
-                            .send(ChannelEvent::Disconnected(ChannelType::Main))
-                            .await
-                            .ok();
+                        self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                            .await;
                         self.repaint_notify.notify_one();
                         break;
                     }
 
                     last_data_received = tokio::time::Instant::now();
+                    self.last_activity = tokio::time::Instant::now();
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
                         c.packet_received("main", &chunk[..n]);
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
+                    self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
+                    last_arm = "read+process_messages";
                     self.process_messages().await?;
+                    last_arm = "read+process_messages_done";
                 }
                 resize = monitors_config_rx.recv() => {
+                    last_arm = "monitors_config_rx";
                     let Some((width, height)) = resize else {
                         continue;
                     };
@@ -264,30 +512,72 @@ impl MainChannel {
                     resize_debounce = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
                 }
                 _ = debounce_sleep => {
+                    last_arm = "debounce_sleep";
                     resize_debounce = None;
                     if let Some((width, height)) = self.pending_monitors_config {
                         info!("main: resize debounced: {}x{}", width, height);
-                        self.event_tx
-                            .send(ChannelEvent::MonitorsConfig { width, height })
-                            .await
-                            .ok();
+                        self.send_event(ChannelEvent::MonitorsConfig { width, height })
+                            .await;
                         self.repaint_notify.notify_one();
                         self.maybe_send_agent_monitors_config().await?;
                     }
                 }
-                _ = clipboard_interval.tick() => {
+                _ = async {
+                    match &mut clipboard_interval {
+                        Some(i) => { i.tick().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    last_arm = "clipboard_interval";
                     if self.agent_connected && self.agent_caps_announced {
+                        last_arm = "clipboard_interval+poll";
                         self.poll_host_clipboard().await?;
+                        last_arm = "clipboard_interval+poll_done";
                     }
                 }
                 _ = tokio::time::sleep_until(last_data_received + keepalive_timeout) => {
+                    last_arm = "keepalive_timeout";
                     info!("main: no data received for {}s, assuming disconnected", keepalive_timeout.as_secs());
-                    self.event_tx
-                        .send(ChannelEvent::Disconnected(ChannelType::Main))
-                        .await
-                        .ok();
+                    // Mark the snapshot before emitting Disconnected so
+                    // the disconnect-cause record can distinguish "we
+                    // timed ourselves out" from a real EOF / RST.
+                    if let Ok(mut snap) = self.snapshot.lock() {
+                        snap.keepalive_timeout_fired = true;
+                    }
+                    self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                        .await;
                     self.repaint_notify.notify_one();
                     break;
+                }
+                // Idle keepalive (Phase 02 K1 fix). When main has been
+                // silent in both directions for KEEPALIVE_IDLE, send a
+                // spurious PONG so the server's per-channel rcc 30 s
+                // connectivity timer never fires. Session-001c data
+                // showed the inputs-only keepalive was insufficient
+                // because main itself goes silent at T+465 in every
+                // reproduction; this branch closes that gap.
+                _ = tokio::time::sleep_until(self.last_activity + KEEPALIVE_IDLE) => {
+                    last_arm = "keepalive_idle";
+                    self.send_idle_keepalive().await?;
+                    last_arm = "keepalive_idle_done";
+                }
+                _ = heartbeat.tick() => {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    last_heartbeat_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    info!(
+                        "main: heartbeat T+{:.1}s iter={} last_arm={} last_recv={:?} \
+                         last_send={:?} keepalives={} pongs={}",
+                        self.traffic.elapsed().as_secs_f64(),
+                        iter_count,
+                        last_arm,
+                        self.last_recv_ts_secs,
+                        self.last_send_ts_secs,
+                        self.client_keepalive_send_count,
+                        self.pong_send_count,
+                    );
                 }
             }
         }
@@ -365,18 +655,20 @@ impl MainChannel {
                 self.agent_tokens = init.agent_tokens;
                 self.agent_caps_announced = false;
 
+                // Signal the session orchestrator before any awaits so it
+                // can proceed with secondary channel setup immediately.
+                if let Some(sig) = self.session_init_signal.take() {
+                    let _ = sig.send(init.session_id);
+                }
+
                 if self.agent_connected {
                     self.connect_agent().await?;
                 }
 
-                self.event_tx
-                    .send(ChannelEvent::SessionInitialized(init.session_id))
-                    .await
-                    .ok();
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(self.agent_connected))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::SessionInitialized(init.session_id))
+                    .await;
+                self.send_event(ChannelEvent::AgentConnected(self.agent_connected))
+                    .await;
                 self.repaint_notify.notify_one();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
@@ -390,10 +682,8 @@ impl MainChannel {
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
                 );
-                self.event_tx
-                    .send(ChannelEvent::MouseMode(init.current_mouse_mode))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::MouseMode(init.current_mouse_mode))
+                    .await;
                 self.repaint_notify.notify_one();
 
                 // Request client mouse mode (absolute positioning) if
@@ -434,10 +724,8 @@ impl MainChannel {
                     if current as u32 == MOUSE_MODE_CLIENT {
                         self.mouse_mode_request_pending = false;
                     }
-                    self.event_tx
-                        .send(ChannelEvent::MouseMode(current as u32))
-                        .await
-                        .ok();
+                    self.send_event(ChannelEvent::MouseMode(current as u32))
+                        .await;
                     self.repaint_notify.notify_one();
 
                     // The server often reverts to SERVER mode after a
@@ -492,10 +780,14 @@ impl MainChannel {
                     }
                 }
 
-                self.event_tx
-                    .send(ChannelEvent::ChannelsAvailable(channels))
-                    .await
-                    .ok();
+                // Signal the session orchestrator before any awaits so it
+                // can proceed with secondary channel setup immediately.
+                if let Some(sig) = self.channels_avail_signal.take() {
+                    let _ = sig.send(channels.clone());
+                }
+
+                self.send_event(ChannelEvent::ChannelsAvailable(channels))
+                    .await;
                 self.repaint_notify.notify_one();
             }
 
@@ -506,15 +798,15 @@ impl MainChannel {
                     // Vec<f32>; loss of precision is irrelevant for a
                     // sub-millisecond sparkline.
                     let sample_ms = (now - last).as_secs_f64() * 1000.0;
-                    self.event_tx
-                        .send(ChannelEvent::Latency {
-                            sample_ms: sample_ms as f32,
-                        })
-                        .await
-                        .ok();
+                    self.send_event(ChannelEvent::Latency {
+                        sample_ms: sample_ms as f32,
+                    })
+                    .await;
                     self.repaint_notify.notify_one();
                 }
                 self.last_ping_at = Some(now);
+                self.ping_recv_count = self.ping_recv_count.saturating_add(1);
+                self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
                 let ping = Ping::read(payload)?;
 
@@ -531,6 +823,7 @@ impl MainChannel {
                 let response = make_message(main_client::PONG, &pong_payload);
 
                 self.send_with_log(main_client::PONG, &response).await?;
+                self.pong_send_count = self.pong_send_count.saturating_add(1);
 
                 // Request channel list on first large ping
                 if ping.id > 0 && self.session_id.is_some() && !self.channels_requested {
@@ -585,39 +878,28 @@ impl MainChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::Notification(entry)).await;
                 self.repaint_notify.notify_one();
             }
 
             main_server::DISCONNECTING => {
                 info!("main: server sent disconnect notification");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Main))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                    .await;
                 self.repaint_notify.notify_one();
             }
 
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(true))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::AgentConnected(true)).await;
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
-                self.event_tx
-                    .send(ChannelEvent::AgentConnected(false))
-                    .await
-                    .ok();
+                self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
             }
@@ -666,17 +948,50 @@ impl MainChannel {
         Ok(())
     }
 
-    /// Sync local state to the shared snapshot.
+    /// Sync local state to the shared snapshot. Note that
+    /// `keepalive_timeout_fired` is poked into the snapshot
+    /// directly at the timeout site, not flushed here, since it
+    /// is set once on a terminal path and then read by the
+    /// disconnect-cause assembly.
     fn update_snapshot(&self) {
         let mut snap = self.snapshot.lock().unwrap();
         snap.session_id = self.session_id;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
+        snap.last_recv_ts_secs = self.last_recv_ts_secs;
+        snap.last_send_ts_secs = self.last_send_ts_secs;
+        snap.ping_recv_count = self.ping_recv_count;
+        snap.pong_send_count = self.pong_send_count;
+        snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+        snap.client_keepalive_send_count = self.client_keepalive_send_count;
+        snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    /// Send a `ChannelEvent` to the renderer with a 5 s timeout
+    /// and silent-drop on closed-receiver. K1 (session-001) was an
+    /// abandoned-receiver deadlock where main blocked forever on
+    /// `event_tx.send().await`; the root cause was fixed by
+    /// removing the intermediate temp channel, but this helper is
+    /// defense-in-depth so the next time something similar
+    /// regresses we see a `warn!` line within 5 seconds instead of
+    /// a silent multi-minute hang.
+    async fn send_event(&self, ev: ChannelEvent) {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), self.event_tx.send(ev)).await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_closed)) => {}
+            Err(_elapsed) => {
+                warn!(
+                    "main: event_tx.send() timed out after 5 s; \
+                     renderer event consumer is wedged or starved"
+                );
+            }
+        }
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports
@@ -901,7 +1216,35 @@ impl MainChannel {
                         u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
                     if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
                         debug!("main: clipboard request from guest");
-                        let text = self.clipboard.as_ref().and_then(|cb| cb.get_text());
+                        // Same spawn_blocking + timeout shape as
+                        // poll_host_clipboard: cb.get_text() can
+                        // hang macOS NSPasteboard when ryll is
+                        // backgrounded.
+                        let text = match self.clipboard.as_ref() {
+                            Some(c) => {
+                                let cb = c.clone();
+                                match tokio::time::timeout(
+                                    std::time::Duration::from_secs(1),
+                                    tokio::task::spawn_blocking(move || cb.get_text()),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(opt)) => opt,
+                                    Ok(Err(e)) => {
+                                        warn!("main: clipboard request task panicked: {}", e);
+                                        None
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "main: clipboard request timed out (1 s), \
+                                             ignoring guest request"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
+                            None => None,
+                        };
                         if let Some(text) = text {
                             // Log byte count only — clipboard content may contain
                             // passwords or sensitive data.
@@ -934,9 +1277,47 @@ impl MainChannel {
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
-        let text = match self.clipboard.as_ref().and_then(|cb| cb.get_text()) {
-            Some(t) => t,
+        // arboard::Clipboard::get_text() is synchronous and on
+        // macOS reaches into NSPasteboard. When the ryll process
+        // is backgrounded / on a different virtual desktop /
+        // App Nap'd, that call has been observed to block the
+        // calling thread for many seconds at a time. Until
+        // session-001f, this lived directly on main's tokio
+        // worker — a single hung clipboard poll would wedge
+        // main's `select!` loop, which on backgrounded macOS
+        // sessions reproducibly silenced main at the same
+        // ~7-minute mark across every K1 reproduction. Other
+        // channels (on different workers) kept running, so the
+        // server eventually tore the session down for client
+        // unresponsiveness.
+        //
+        // Push the call to `spawn_blocking` so it runs on
+        // tokio's blocking thread pool, then wrap in a
+        // `tokio::time::timeout` so a genuinely-stuck
+        // pasteboard query gives up rather than starving the
+        // pool indefinitely. A timed-out poll is logged at
+        // warn level and treated like an empty clipboard;
+        // the next 500 ms tick retries.
+        let cb = match self.clipboard.as_ref() {
+            Some(c) => c.clone(),
             None => return Ok(()),
+        };
+        let text = match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || cb.get_text()),
+        )
+        .await
+        {
+            Ok(Ok(Some(t))) => t,
+            Ok(Ok(None)) => return Ok(()),
+            Ok(Err(e)) => {
+                warn!("main: clipboard poll task panicked: {}", e);
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("main: clipboard poll timed out (1 s), skipping");
+                return Ok(());
+            }
         };
 
         if text.is_empty() {
@@ -1005,6 +1386,53 @@ impl MainChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.last_activity = tokio::time::Instant::now();
+        Ok(())
+    }
+
+    /// Send a spurious PONG with a synthesised id/timestamp to
+    /// keep the server's per-channel rcc connectivity timer
+    /// alive. Triggered by the idle-keepalive select branch in
+    /// `run()` after `KEEPALIVE_IDLE` of channel silence.
+    ///
+    /// The SPICE protocol does not define a client→server PING
+    /// (PING is server→client only, with no SPICE_MSGC_PING in
+    /// `spice-protocol/spice/enums.h`). PONG is the simplest
+    /// available client→server message: the server's PONG
+    /// handler looks up the id in its outstanding-PING table
+    /// and on a miss either silently discards or warning-logs.
+    /// Either way the server's `received_bytes` flag flips,
+    /// resetting the 30 s rcc timer
+    /// (`main-channel-client.cpp:38`,
+    /// `red-channel-client.cpp:656`).
+    ///
+    /// Hypothesis under test: the session-001c data shows the
+    /// inputs-channel keepalive correctly keeps inputs alive
+    /// (`client_keepalive_send_count` rises into the 40s) but
+    /// K1 still fires because main goes silent at T+465 across
+    /// runs. Adding a main-channel keepalive should close out
+    /// the K1 reproduction class — and if it doesn't,
+    /// session-002b's disconnect-cause.json will tell us via
+    /// the new `MainSnapshot::client_keepalive_send_count`
+    /// field whether the sends were happening.
+    async fn send_idle_keepalive(&mut self) -> Result<()> {
+        // id and timestamp deliberately zeroed. They have no
+        // semantic meaning to us (we never get the round-trip
+        // back as a latency sample because the server's
+        // outstanding-PING ledger has no entry for id 0). The
+        // server tolerates the unmatched PONG either way.
+        let mut payload = Vec::new();
+        Ping {
+            id: 0,
+            timestamp: 0,
+        }
+        .write_pong(&mut payload)?;
+        let response = make_message(main_client::PONG, &payload);
+        self.send_with_log(main_client::PONG, &response).await?;
+        self.client_keepalive_send_count = self.client_keepalive_send_count.saturating_add(1);
+        self.last_client_keepalive_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.update_snapshot();
         Ok(())
     }
 }

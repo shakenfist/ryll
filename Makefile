@@ -18,9 +18,21 @@ QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 UID := $(shell id -u)
 GID := $(shell id -g)
 
+# Embed the current git SHA into the binary so a running ryll can
+# identify which build it is. Computed once on the host (the
+# devcontainer can't see the worktree's gitdir) and passed as an
+# env var to ryll/build.rs. Falls back to "unknown" if git is
+# unavailable. "-dirty" is appended when the working tree has
+# uncommitted changes, so dogfooding a quick edit doesn't quietly
+# masquerade as the last committed SHA.
+RYLL_GIT_SHA := $(shell git rev-parse --short=8 HEAD 2>/dev/null)$(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
+RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
+
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer ensure-cache lint lint-fix test help \
-	test-qemu test-qemu-usb test-qemu-stop
+	test-qemu test-qemu-usb test-qemu-stop test-k1-idle \
+	macos-prereqs macos-build macos-release \
+	build-tokio-console
 
 all: build
 
@@ -35,6 +47,10 @@ help:
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
 	@echo "  make devcontainer           - Build the development container"
 	@echo "  make clean                  - Remove build artifacts"
+	@echo ""
+	@echo "macOS native (run on a Mac, not in the devcontainer):"
+	@echo "  make macos-build            - Native debug build for the host Mac"
+	@echo "  make macos-release          - Native release build for the host Mac"
 	@echo ""
 	@echo "Test SPICE server:"
 	@echo "  make test-qemu              - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
@@ -69,8 +85,29 @@ build: ensure-cache
 		-w /workspace \
 		-u $(UID):$(GID) \
 		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build -p ryll
+
+# Diagnostic-only build: compile ryll with the tokio-console
+# feature on, plus RUSTFLAGS=--cfg tokio_unstable so tokio's
+# instrumentation hooks are active. The resulting binary, when
+# run with RYLL_TOKIO_CONSOLE=1, exposes a unix socket on
+# 127.0.0.1:6669 that the `tokio-console` TUI viewer connects
+# to. Used during the K1 hang investigation; will go away when
+# the feature is removed.
+build-tokio-console: ensure-cache
+	docker run --rm \
+		-v "$(CURDIR)":/workspace \
+		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
+		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
+		-w /workspace \
+		-u $(UID):$(GID) \
+		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
+		-e RUSTFLAGS="--cfg tokio_unstable" \
+		$(RYLL_IMAGE) \
+		cargo build -p ryll --features tokio-console
 
 # Build release version
 release: ensure-cache
@@ -81,6 +118,7 @@ release: ensure-cache
 		-w /workspace \
 		-u $(UID):$(GID) \
 		-e HOME=/build \
+		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
 
@@ -156,6 +194,52 @@ lint-fix: ensure-cache
 		$(RYLL_IMAGE) \
 		sh -c "cargo fmt --all && cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings"
 
+# Native macOS build. Run this on a Mac — the devcontainer can't
+# produce a binary that talks to the host window server, and ryll
+# is a GUI app. Mirrors the CI matrix in
+# .github/workflows/{ci,release}.yml: same
+# MACOSX_DEPLOYMENT_TARGET, same CMAKE_POLICY_VERSION_MINIMUM
+# (audiopus_sys source-builds libopus and the bundled CMakeLists
+# uses a pre-3.5 cmake_minimum_required which CMake 4.x rejects
+# without this override).
+macos-prereqs:
+	@if [ "$$(uname -s)" != "Darwin" ]; then \
+		echo "error: macOS targets must run on macOS (uname -s says $$(uname -s))."; \
+		echo "       use 'make build' / 'make release' for the Linux devcontainer."; \
+		exit 1; \
+	fi
+	@missing=""; \
+	for tool in cargo cmake pkg-config; do \
+		if ! command -v $$tool >/dev/null 2>&1; then \
+			missing="$$missing $$tool"; \
+		fi; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "error: missing required tool(s):$$missing"; \
+		echo ""; \
+		echo "  install with:"; \
+		echo "    brew install cmake pkg-config"; \
+		echo "    brew install rustup-init && rustup-init -y    # if cargo missing"; \
+		echo ""; \
+		echo "  cmake is needed because audiopus_sys source-builds libopus."; \
+		echo "  pkg-config lets the build find system libraries cleanly."; \
+		exit 1; \
+	fi
+
+macos-build: macos-prereqs
+	MACOSX_DEPLOYMENT_TARGET=14.0 \
+	CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		cargo build -p ryll
+	@echo ""
+	@echo "Built debug binary: target/debug/ryll"
+
+macos-release: macos-prereqs
+	MACOSX_DEPLOYMENT_TARGET=14.0 \
+	CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+		cargo build --release -p ryll
+	@echo ""
+	@echo "Built release binary: target/release/ryll"
+
 # Clean build artifacts
 clean:
 	rm -rf target/
@@ -201,6 +285,14 @@ test-qemu-stop:
 		echo "Stopped test QEMU instance"; \
 	fi
 	@rm -f $(QEMU_VARS_COPY)
+
+# Long-idle regression test for K1 (main-channel-wedge). Requires a
+# SPICE server reachable at $(HOST_PORT) — typically start one with
+# `make test-qemu` first. Default idle window is 540s (~9 min, well
+# past the historical T+466s wedge threshold). See
+# tools/test-k1-idle.sh for the full assertion set.
+test-k1-idle:
+	./tools/test-k1-idle.sh
 
 # Create a test RAW image for USB disk passthrough
 testdata/usb-test.raw:

@@ -171,7 +171,10 @@ pub enum ChannelEvent {
     AgentConnected(bool),
 
     /// Connection error
-    Error(String),
+    Error {
+        channel: ChannelType,
+        message: String,
+    },
 
     /// A channel-side notification destined for the host's
     /// notification store. Replaces the old direct

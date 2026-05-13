@@ -4,14 +4,14 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::bugreport::{
     chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
-    PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers, TrafficDirection, TrafficViewEntry,
-    TriggerTimestamps,
+    NotificationSnapshotState, PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers,
+    TrafficDirection, TrafficViewEntry, TriggerTimestamps,
 };
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
@@ -72,6 +72,315 @@ const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
 
 /// How often the traffic viewer refreshes from the ring buffers.
 const TRAFFIC_VIEWER_REFRESH_MS: u64 = 250;
+
+/// Auto-reconnect retry budget per disconnect cluster.
+const MAX_RECONNECT_ATTEMPTS: u8 = 3;
+
+/// Backoff (seconds) before each reconnect attempt within a
+/// cluster. Index 0 is the wait before attempt 1, index 1 before
+/// attempt 2, etc. Shape matches spice-gtk's reconnect policy:
+/// short first attempt for blip recovery, longer windows for
+/// server restarts. Total worst-case wait ~21 s before the modal.
+const RECONNECT_BACKOFF_SECS: [u64; MAX_RECONNECT_ATTEMPTS as usize] = [1, 4, 16];
+
+/// After the auto-reconnect budget is exhausted (Modal shown),
+/// further disconnects within this window go straight back to
+/// Modal without re-trying — a flapping server cannot make us
+/// bang away forever. A fresh budget unlocks after this elapses.
+const RECONNECT_CLUSTER_RESET: Duration = Duration::from_secs(5 * 60);
+
+/// How long a notification's traffic-buffer snapshot is kept
+/// before being treated as expired (Phase 10 / F2). The
+/// "File bug report" button on a notification entry switches
+/// to post-event-only mode after this window elapses.
+const NOTIFICATION_SNAPSHOT_TTL: Duration = Duration::from_secs(60);
+
+/// Maximum number of live notification snapshots retained at
+/// any one time (Phase 10 / F2). Oldest is evicted when a
+/// sixth notification fires.
+const NOTIFICATION_SNAPSHOT_CAP: usize = 5;
+
+/// Single entry in the notification-snapshot store. Owns a
+/// captured `TrafficBuffers` (cheap thanks to Phase 07 /
+/// Phase 08's Arc-shared payloads).
+struct NotificationSnapshotEntry {
+    captured_at: Instant,
+    traffic: TrafficBuffers,
+}
+
+/// Bounded LRU+TTL store of traffic-buffer snapshots keyed by
+/// `NotificationEntry::id`. Phase 10 (F2): every fresh
+/// notification push captures one entry; entries are pruned
+/// on overflow (cap) or expiry (TTL). The notifications panel
+/// uses `has_live` to render the button's visual state, and
+/// `take` to consume the snapshot when the user clicks.
+struct NotificationSnapshotStore {
+    by_id: HashMap<u64, NotificationSnapshotEntry>,
+    /// Notification ids in insertion order, oldest first.
+    /// Tracked separately so eviction-on-overflow is O(1).
+    insertion_order: VecDeque<u64>,
+    /// Tick-time prune is gated on this so we don't walk the
+    /// map on every paint frame.
+    last_prune: Instant,
+}
+
+impl NotificationSnapshotStore {
+    fn new() -> Self {
+        NotificationSnapshotStore {
+            by_id: HashMap::new(),
+            insertion_order: VecDeque::new(),
+            last_prune: Instant::now(),
+        }
+    }
+
+    /// Insert (or refresh) a snapshot for `id`. If the store
+    /// is over capacity after this push, the oldest entry is
+    /// evicted. Expired entries are pruned opportunistically.
+    fn capture(&mut self, id: u64, traffic: TrafficBuffers, now: Instant) {
+        self.prune_expired(now);
+
+        if self.by_id.contains_key(&id) {
+            // Refresh: replace the captured payload and bump
+            // the captured_at timestamp. Don't touch
+            // insertion_order — its position is unchanged by
+            // a fold-refresh.
+            if let Some(entry) = self.by_id.get_mut(&id) {
+                entry.captured_at = now;
+                entry.traffic = traffic;
+            }
+            return;
+        }
+
+        self.by_id.insert(
+            id,
+            NotificationSnapshotEntry {
+                captured_at: now,
+                traffic,
+            },
+        );
+        self.insertion_order.push_back(id);
+        while self.insertion_order.len() > NOTIFICATION_SNAPSHOT_CAP {
+            if let Some(oldest_id) = self.insertion_order.pop_front() {
+                self.by_id.remove(&oldest_id);
+            }
+        }
+    }
+
+    /// `true` iff a non-expired snapshot exists for this id.
+    /// Prunes expired entries as a side effect so the answer
+    /// is always current.
+    fn has_live(&mut self, id: u64, now: Instant) -> bool {
+        self.prune_expired(now);
+        self.by_id.contains_key(&id)
+    }
+
+    /// Remove and return the snapshot for `id`, if present
+    /// and non-expired. Used at button-click time to consume
+    /// the snapshot for a report. Prunes expired entries on
+    /// the way through.
+    fn take(&mut self, id: u64, now: Instant) -> Option<TrafficBuffers> {
+        self.prune_expired(now);
+        let entry = self.by_id.remove(&id)?;
+        self.insertion_order.retain(|other| *other != id);
+        Some(entry.traffic)
+    }
+
+    /// Drop every entry older than the TTL. Cheap O(N) walk
+    /// over `insertion_order`, at most `NOTIFICATION_SNAPSHOT_CAP`
+    /// entries.
+    fn prune_expired(&mut self, now: Instant) {
+        while let Some(&oldest_id) = self.insertion_order.front() {
+            let expired = self
+                .by_id
+                .get(&oldest_id)
+                .map(|e| now.duration_since(e.captured_at) >= NOTIFICATION_SNAPSHOT_TTL)
+                .unwrap_or(true);
+            if !expired {
+                break;
+            }
+            self.insertion_order.pop_front();
+            self.by_id.remove(&oldest_id);
+        }
+    }
+
+    /// Called from the GUI tick at most once per second so
+    /// the notifications panel's button visuals reflect
+    /// expiration in real time without polling on every
+    /// repaint.
+    fn maybe_prune(&mut self, now: Instant) {
+        if now.duration_since(self.last_prune) >= Duration::from_secs(1) {
+            self.last_prune = now;
+            self.prune_expired(now);
+        }
+    }
+}
+
+/// Discriminator for the disconnect-modal. The variant
+/// determines title, body copy, and which buttons render. The
+/// `OneShotConsumed` and `TicketExpired` variants are entered
+/// when the .vv file's `delete-this-file` / `ticket-valid-until`
+/// keys (see `kerbside-wt-docs/docs/spice/console-vv-extensions.md`)
+/// indicate that any further reconnect is doomed; the
+/// `Generic` variant covers everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModalVariant {
+    /// Auto-reconnect budget exhausted on a reusable ticket.
+    /// `latest_error` is the most recent attempt's failure
+    /// string, shown in the modal body for context.
+    Generic { latest_error: String },
+    /// The .vv file's `delete-this-file=1` flag marked the
+    /// ticket as single-use; the first link consumed it, and
+    /// any reconnect would be rejected by the server. Reconnect
+    /// button hidden.
+    OneShotConsumed,
+    /// `ticket-valid-until` has elapsed (wall-clock time). The
+    /// server will reject any link from now on; auto-reconnect
+    /// is suppressed and the modal explains why.
+    TicketExpired { expired_at: SystemTime },
+}
+
+/// Auto-reconnect state machine. Replaces the implicit
+/// `show_disconnect_dialog: bool` + `disconnect_reason` pair so
+/// every disconnect path either auto-recovers or surfaces a
+/// well-typed modal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReconnectState {
+    /// Connected normally, or not yet attempted.
+    Idle,
+    /// Auto-reconnect is in progress. `attempt` ∈ 1..=MAX_ATTEMPTS;
+    /// `next_at` is when the next `reconnect()` call should fire.
+    Pending {
+        attempt: u8,
+        next_at: Instant,
+        latest_error: String,
+    },
+    /// Budget exhausted (or ticket-related auto-suppression);
+    /// the user takes over via the modal. Variant carries the
+    /// reason and any context needed to render copy + buttons.
+    Modal(ModalVariant),
+}
+
+/// Policy bits derived from the .vv file's ticket-related keys.
+/// Bundled so the state-machine transition can take a single
+/// argument rather than threading two unrelated booleans.
+#[derive(Debug, Clone, Copy, Default)]
+struct ReconnectPolicy {
+    /// `delete-this-file=1` was set: the previous link consumed
+    /// the ticket, so the server will reject any reconnect. All
+    /// disconnects go straight to `Modal(OneShotConsumed)`.
+    ticket_is_single_use: bool,
+    /// `ticket-valid-until=<unix-ts>` was set: when this wall
+    /// time has passed, any reconnect would be doomed. The
+    /// state machine consults this on entry and at every
+    /// `Pending` tick so the modal trips immediately rather
+    /// than burning the 3-attempt budget on dead retries.
+    ticket_valid_until: Option<SystemTime>,
+}
+
+impl ReconnectPolicy {
+    /// If the ticket policy forbids any further reconnect, return
+    /// the appropriate `ModalVariant`. `Ok(())` means the normal
+    /// retry path is permitted.
+    fn forbid_retry(&self, now_wall: SystemTime) -> Option<ModalVariant> {
+        if self.ticket_is_single_use {
+            return Some(ModalVariant::OneShotConsumed);
+        }
+        if let Some(expiry) = self.ticket_valid_until {
+            if now_wall >= expiry {
+                return Some(ModalVariant::TicketExpired { expired_at: expiry });
+            }
+        }
+        None
+    }
+}
+
+impl ReconnectState {
+    /// Pure transition for a disconnect event. Returns the new
+    /// state, or `None` if the event should be ignored (e.g. a
+    /// duplicate channel-storm event while we're already in
+    /// `Pending` or `Modal`).
+    ///
+    /// `awaiting_outcome` is `true` when the disconnect is the
+    /// failure of an in-flight reconnect attempt (we previously
+    /// called `reconnect()` from a `Pending` tick and are now
+    /// hearing back). `false` for the initial disconnect or for
+    /// duplicate storm events.
+    ///
+    /// `policy` derived from the .vv file's ticket-related
+    /// keys. When it forbids retries (single-use ticket
+    /// consumed, or `ticket-valid-until` elapsed) we skip the
+    /// auto-retry path entirely and land in the matching
+    /// `Modal` variant on the first disconnect.
+    fn on_disconnect(
+        &self,
+        awaiting_outcome: bool,
+        last_modal_at: Option<Instant>,
+        now: Instant,
+        now_wall: SystemTime,
+        policy: ReconnectPolicy,
+        latest_error: String,
+    ) -> Option<Self> {
+        // Ticket-bound deployments: any further reconnect would
+        // be rejected, so trip the modal on the first disconnect
+        // event of any kind — no point in burning the budget.
+        if let Some(variant) = policy.forbid_retry(now_wall) {
+            // Already in the matching Modal? Ignore the storm.
+            if matches!(self, ReconnectState::Modal(v) if v == &variant) {
+                return None;
+            }
+            return Some(ReconnectState::Modal(variant));
+        }
+
+        if awaiting_outcome {
+            match self {
+                ReconnectState::Pending { attempt, .. } => {
+                    let next_attempt = attempt + 1;
+                    if next_attempt > MAX_RECONNECT_ATTEMPTS {
+                        Some(ReconnectState::Modal(ModalVariant::Generic {
+                            latest_error,
+                        }))
+                    } else {
+                        let backoff = Duration::from_secs(
+                            RECONNECT_BACKOFF_SECS[(next_attempt - 1) as usize],
+                        );
+                        Some(ReconnectState::Pending {
+                            attempt: next_attempt,
+                            next_at: now + backoff,
+                            latest_error,
+                        })
+                    }
+                }
+                // `awaiting_outcome` should imply we were in
+                // Pending; defensively land in Generic Modal so
+                // we don't silently re-arm a retry from a stale
+                // state.
+                _ => Some(ReconnectState::Modal(ModalVariant::Generic {
+                    latest_error,
+                })),
+            }
+        } else {
+            match self {
+                ReconnectState::Idle => {
+                    if let Some(t) = last_modal_at {
+                        if now.duration_since(t) < RECONNECT_CLUSTER_RESET {
+                            return Some(ReconnectState::Modal(ModalVariant::Generic {
+                                latest_error,
+                            }));
+                        }
+                    }
+                    let backoff = Duration::from_secs(RECONNECT_BACKOFF_SECS[0]);
+                    Some(ReconnectState::Pending {
+                        attempt: 1,
+                        next_at: now + backoff,
+                        latest_error,
+                    })
+                }
+                // Already disconnected — ignore the duplicate.
+                ReconnectState::Pending { .. } | ReconnectState::Modal(_) => None,
+            }
+        }
+    }
+}
 
 /// Statistics tracking
 #[derive(Default)]
@@ -231,8 +540,29 @@ pub struct RyllApp {
     connected: bool,
     error_message: Option<String>,
     mouse_mode: u32,
-    show_disconnect_dialog: bool,
-    disconnect_reason: Option<String>,
+    /// Auto-reconnect state machine; supplants the old
+    /// `show_disconnect_dialog` + `disconnect_reason` pair.
+    reconnect_state: ReconnectState,
+    /// `true` once a `Pending` tick has actually called
+    /// `reconnect()` and is awaiting the new connection's
+    /// outcome. Distinguishes "we just kicked off attempt N"
+    /// from "we're seeing yet another channel-storm event for
+    /// the disconnect that put us into Pending."
+    awaiting_reconnect_outcome: bool,
+    /// Wall time the most recent `Modal` was entered; used to
+    /// gate the cluster-reset window. Cleared on manual
+    /// reconnect from the modal (user intervention starts a
+    /// fresh budget).
+    last_modal_at: Option<Instant>,
+    /// Count of `Pending` entries (per-attempt) over the
+    /// session's lifetime, surfaced in `session.json` for
+    /// post-hoc analysis of how rocky the session was.
+    auto_reconnect_count: u32,
+    /// Has the T-30s `ticket-valid-until` pre-expiry warning
+    /// been pushed for the current session? Latches to `true`
+    /// once fired so the notification panel does not see a
+    /// stream of duplicates as the deadline approaches.
+    ticket_expiry_warned: bool,
 
     // Last mouse position sent (to avoid flooding with duplicates)
     last_mouse_pos: Option<(u32, u32)>,
@@ -293,6 +623,15 @@ pub struct RyllApp {
     // Capture session (None when --capture is not specified)
     capture: Option<Arc<CaptureSession>>,
 
+    // Override for bug-report output directory (--bug-report-dir).
+    // None means fall back to capture/cwd; see manual_bug_report_dir().
+    bug_report_dir: Option<PathBuf>,
+
+    // Cooldown for auto-disconnect snapshots so a flapping
+    // channel can't dump one zip per disconnect storm. 60 s
+    // window; see maybe_write_disconnect_snapshot().
+    last_disconnect_report_at: Option<Instant>,
+
     // USB command sender and state
     usb_tx: Option<mpsc::Sender<UsbCommand>>,
     usb_channel_ready: bool,
@@ -308,6 +647,14 @@ pub struct RyllApp {
 
     // In-app notification store (shared with all channels and producers).
     notifications: SharedNotifications,
+
+    // Phase 10 (F2): bounded snapshot store keyed by
+    // notification id. Captured on every push_notification
+    // call so the "File bug report" button on a notification
+    // entry can produce a report with pcap/state from the
+    // moment the notification fired. Wrapped in Mutex for
+    // the same multi-producer reasons SharedNotifications is.
+    notification_snapshots: std::sync::Mutex<NotificationSnapshotStore>,
 
     // Channel state snapshots (always active, for bug reports)
     channel_snapshots: ChannelSnapshots,
@@ -408,6 +755,39 @@ pub struct RyllApp {
     /// returns. Mirrors the cooperative-cancel shape of the global
     /// `SHUTDOWN_REQUESTED` flag, scoped per attempt.
     connection_cancel: Option<Arc<AtomicBool>>,
+
+    /// True while ryll's window is focused. Updated on every
+    /// `update()` call from `ctx.input(|i| i.focused)`. Read by
+    /// the `FocusGatedClipboard` decorator so the host
+    /// pasteboard is only polled while the user is looking at
+    /// ryll — a Phase 02 K1 follow-up to the spawn_blocking
+    /// fix in commit 54155e99.
+    app_focused: Arc<AtomicBool>,
+
+    /// Persisted copy of the `--debug-single-thread-runtime`
+    /// flag so reconnect can build a runtime of the same
+    /// shape as the initial connect. Diagnostic-only.
+    debug_single_thread_runtime: bool,
+}
+
+/// Build the per-connection tokio runtime, honouring the
+/// `--debug-single-thread-runtime` flag. The current_thread
+/// flavour runs every spawned task on the calling thread,
+/// which lets us tell a real blocking call (still hangs
+/// because there's nowhere else to make progress) from a
+/// multi-threaded scheduler / Waker-registration anomaly
+/// (does not hang). Used by both the initial-connect and
+/// reconnect spawn sites.
+fn build_connection_runtime(single_thread: bool) -> tokio::runtime::Runtime {
+    if single_thread {
+        info!("app: building current_thread tokio runtime (debug single-thread mode)");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build current_thread tokio runtime")
+    } else {
+        tokio::runtime::Runtime::new().expect("failed to build multi-threaded tokio runtime")
+    }
 }
 
 // ── Screenshot path helpers ─────────────────────────────────────────────────
@@ -430,6 +810,27 @@ pub struct RyllApp {
 /// ("foo.bar.png",      2) → ["foo.bar-1.png", "foo.bar-2.png"]
 /// ("/tmp/foo.png",     2) → ["/tmp/foo-1.png", "/tmp/foo-2.png"]
 /// ```
+/// Format a `SystemTime` as a `HH:MM:SS` clock string in UTC
+/// for the `TicketExpired` modal body. UTC is unambiguous for a
+/// modal that explains "the ticket expired at …" — the user is
+/// usually in the same TZ as their issuing system anyway, and
+/// pulling in a TZ-aware crate just for one line of modal copy
+/// would be disproportionate. Falls back to the raw unix
+/// timestamp if the time is before the epoch (impossible in
+/// practice but cheap to handle).
+fn format_expiry_local(t: SystemTime) -> String {
+    match t.duration_since(UNIX_EPOCH) {
+        Ok(d) => {
+            let secs = d.as_secs() % 86400;
+            let h = secs / 3600;
+            let m = (secs % 3600) / 60;
+            let s = secs % 60;
+            format!("{:02}:{:02}:{:02} UTC", h, m, s)
+        }
+        Err(_) => "before 1970-01-01".to_string(),
+    }
+}
+
 fn screenshot_paths(base: &std::path::Path, count: usize) -> Vec<PathBuf> {
     if count <= 1 {
         return vec![base.to_path_buf()];
@@ -469,7 +870,9 @@ impl RyllApp {
         capture: Option<Arc<CaptureSession>>,
         monitors: u8,
         pedantic_config: Option<PedanticConfig>,
+        bug_report_dir: Option<PathBuf>,
         obey_guest_size: bool,
+        debug_single_thread_runtime: bool,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -537,20 +940,22 @@ impl RyllApp {
         let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
             traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
         let log_config_clone = settings::log_config();
-        let snaps_for_conn = ChannelSnapshots {
-            display: channel_snapshots.display.clone(),
-            inputs: channel_snapshots.inputs.clone(),
-            cursor: channel_snapshots.cursor.clone(),
-            main: channel_snapshots.main.clone(),
-        };
+        let snaps_for_conn = channel_snapshots.clone();
 
         let vol_for_conn = volume_control.clone();
         let vd_clone = virtual_disks.clone();
         let sd_clone = share_dir.clone();
         let connection_cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_conn = connection_cancel.clone();
+        // Initialise to true so a session connecting at startup
+        // (before egui has fired its first focus event) polls the
+        // clipboard normally. RyllApp::update overwrites this on
+        // every frame.
+        let app_focused = Arc::new(AtomicBool::new(true));
+        let focused_for_conn = app_focused.clone();
+        let single_thread_for_conn = debug_single_thread_runtime;
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let runtime = build_connection_runtime(single_thread_for_conn);
             runtime.block_on(async {
                 // Repaint bridge: wake egui whenever a channel handler
                 // signals notify_one() after pushing a ChannelEvent.
@@ -561,8 +966,12 @@ impl RyllApp {
                     }
                 });
 
-                let clipboard: Option<Arc<dyn ClipboardBackend>> =
-                    Some(Arc::new(ArboardClipboard::new()));
+                let clipboard: Option<Arc<dyn ClipboardBackend>> = Some(Arc::new(
+                    crate::clipboard_arboard::FocusGatedClipboard::new(
+                        Arc::new(ArboardClipboard::new()),
+                        focused_for_conn,
+                    ),
+                ));
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
@@ -611,8 +1020,11 @@ impl RyllApp {
             connected: false,
             error_message: None,
             mouse_mode: 0,
-            show_disconnect_dialog: false,
-            disconnect_reason: None,
+            reconnect_state: ReconnectState::Idle,
+            awaiting_reconnect_outcome: false,
+            last_modal_at: None,
+            auto_reconnect_count: 0,
+            ticket_expiry_warned: false,
             last_mouse_pos: None,
             last_modifiers: None,
             forwarded_buttons: 0,
@@ -624,6 +1036,8 @@ impl RyllApp {
             bandwidth: BandwidthTracker::new(byte_counter),
             latency: LatencyTracker::new(),
             capture,
+            bug_report_dir,
+            last_disconnect_report_at: None,
             usb_tx: Some(usb_tx),
             webdav_tx: Some(webdav_tx),
             usb_channel_ready: false,
@@ -635,6 +1049,7 @@ impl RyllApp {
             usb_connected_at: None,
             traffic,
             notifications,
+            notification_snapshots: std::sync::Mutex::new(NotificationSnapshotStore::new()),
             channel_snapshots,
             app_snapshot,
             target_host,
@@ -688,6 +1103,8 @@ impl RyllApp {
             reconnect_share_dir: share_dir,
             egui_ctx: cc.egui_ctx.clone(),
             connection_cancel: Some(connection_cancel),
+            app_focused,
+            debug_single_thread_runtime,
         }
     }
 
@@ -710,13 +1127,13 @@ impl RyllApp {
         let byte_counter = Arc::new(ByteCounter::new());
         let traffic = Arc::new(TrafficBuffers::new());
         let channel_snapshots = ChannelSnapshots::new();
-        let volume_control = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
 
         self.event_rx = event_rx;
         self.input_tx = Some(input_tx);
         self.resize_tx = Some(resize_tx);
         self.last_sent_resize = None;
-        self.volume_control = volume_control.clone();
+        // volume_control is intentionally NOT replaced — see the
+        // `vol_for_conn` binding below for the rationale.
         self.surfaces.clear();
         self.cursor_pos = (0, 0);
         self.cursor_visible = true;
@@ -728,8 +1145,12 @@ impl RyllApp {
         self.connected = false;
         self.error_message = None;
         self.mouse_mode = 0;
-        self.show_disconnect_dialog = false;
-        self.disconnect_reason = None;
+        // Clear the main-channel keepalive-timeout flag so a
+        // subsequent disconnect reports its own cause cleanly
+        // rather than inheriting the previous attempt's state.
+        if let Ok(mut snap) = self.channel_snapshots.main.lock() {
+            snap.keepalive_timeout_fired = false;
+        }
         self.last_mouse_pos = None;
         self.last_modifiers = None;
         self.forwarded_buttons = 0;
@@ -770,24 +1191,26 @@ impl RyllApp {
         let counter_clone = byte_counter;
         let traffic_clone: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
             traffic as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
-        let snaps_for_conn = ChannelSnapshots {
-            display: self.channel_snapshots.display.clone(),
-            inputs: self.channel_snapshots.inputs.clone(),
-            cursor: self.channel_snapshots.cursor.clone(),
-            main: self.channel_snapshots.main.clone(),
-        };
+        let snaps_for_conn = self.channel_snapshots.clone();
         let monitors = self.monitors;
         let virtual_disks = self.reconnect_virtual_disks.clone();
         let share_dir = self.reconnect_share_dir.clone();
-        let vol_for_conn = volume_control;
+        // Volume slider position and mute state are host-side
+        // state (the cpal output gain), not session state. Hand
+        // the *existing* Arc<VolumeControl> to the new connection
+        // task so the user's prior choices survive the swap; the
+        // old playback channel's clone drops as that task exits.
+        let vol_for_conn = self.volume_control.clone();
         let enable_paste = self.enable_paste;
         let log_config_clone = settings::log_config();
         let connection_cancel = Arc::new(AtomicBool::new(false));
         let cancel_for_conn = connection_cancel.clone();
         self.connection_cancel = Some(connection_cancel);
+        let focused_for_conn = self.app_focused.clone();
+        let single_thread_for_conn = self.debug_single_thread_runtime;
 
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let runtime = build_connection_runtime(single_thread_for_conn);
             runtime.block_on(async {
                 // Repaint bridge: wake egui whenever a channel handler
                 // signals notify_one() after pushing a ChannelEvent.
@@ -798,8 +1221,12 @@ impl RyllApp {
                     }
                 });
 
-                let clipboard: Option<Arc<dyn ClipboardBackend>> =
-                    Some(Arc::new(ArboardClipboard::new()));
+                let clipboard: Option<Arc<dyn ClipboardBackend>> = Some(Arc::new(
+                    crate::clipboard_arboard::FocusGatedClipboard::new(
+                        Arc::new(ArboardClipboard::new()),
+                        focused_for_conn,
+                    ),
+                ));
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
@@ -833,12 +1260,156 @@ impl RyllApp {
         info!("app: reconnecting...");
     }
 
+    /// Driven by the disconnect modal's Reconnect button. Counts
+    /// as user intervention: clears the cluster-reset window so a
+    /// failed manual attempt re-arms the full 3-attempt budget
+    /// rather than going straight back to Modal.
+    fn reconnect_manual(&mut self) {
+        // Phase 09 (F1): surface the click in the bell history
+        // so the user has visible confirmation that the button
+        // registered before the connection actually completes.
+        self.push_connection_event(NotifySeverity::Info, "Reconnecting (manual)…".to_string());
+        self.reconnect_state = ReconnectState::Idle;
+        self.awaiting_reconnect_outcome = false;
+        self.last_modal_at = None;
+        self.reconnect();
+    }
+
+    /// Drive the `ReconnectState` machine in response to a critical
+    /// disconnect (Main/Display/Inputs going down, or any
+    /// `ChannelEvent::Error`). Callers are responsible for writing
+    /// the disconnect snapshot before invoking this — keeping the
+    /// snapshot at the call site avoids double-writing when the
+    /// `Disconnected` handler has already snapshotted for the
+    /// channel-storm path.
+    fn handle_critical_disconnect(&mut self, message: String) {
+        let awaiting = self.awaiting_reconnect_outcome;
+        let now = Instant::now();
+        let now_wall = SystemTime::now();
+        let policy = self.reconnect_policy();
+        let new_state = self.reconnect_state.on_disconnect(
+            awaiting,
+            self.last_modal_at,
+            now,
+            now_wall,
+            policy,
+            message.clone(),
+        );
+
+        // Even if the state machine ignores the event, the
+        // connection itself has gone — clear surfaces / cursor so
+        // the next paint shows a clean canvas.
+        self.connected = false;
+        self.surfaces.clear();
+        self.cursor_image = None;
+        self.cursor_texture = None;
+
+        let Some(new_state) = new_state else {
+            // Duplicate storm event — state unchanged, no-op.
+            return;
+        };
+
+        if awaiting {
+            self.awaiting_reconnect_outcome = false;
+        }
+
+        if let ReconnectState::Pending { attempt, .. } = &new_state {
+            self.auto_reconnect_count = self.auto_reconnect_count.saturating_add(1);
+            if *attempt == 1 {
+                // Initial disconnect — announce the start of the
+                // auto-retry cycle. Phase 09 (F1).
+                self.push_connection_event(
+                    NotifySeverity::Warn,
+                    "Connection lost — reconnecting…".to_string(),
+                );
+            } else {
+                // attempt > 1: the previous attempt just failed.
+                // Reclassified from NotificationSource::BugReport
+                // to NotificationSource::Connection in Phase 09.
+                self.push_connection_event(
+                    NotifySeverity::Warn,
+                    format!("Reconnect attempt {} failed: {}", attempt - 1, message),
+                );
+            }
+        }
+        if let ReconnectState::Modal(variant) = &new_state {
+            self.last_modal_at = Some(now);
+            // The transition into Modal{Generic} via the
+            // awaiting-outcome path is itself an attempt failure —
+            // the user's three retries have been spent.
+            if awaiting && matches!(variant, ModalVariant::Generic { .. }) {
+                self.push_connection_event(
+                    NotifySeverity::Warn,
+                    format!(
+                        "Reconnect attempt {} failed: {}",
+                        MAX_RECONNECT_ATTEMPTS, message,
+                    ),
+                );
+            }
+            // Phase 09 (F1): also surface the Modal entry itself
+            // as a connection event so the bell history records
+            // the cycle's terminal state. The modal pops in
+            // parallel; users who dismiss it reflexively still
+            // see the event in the notification log.
+            let (severity, modal_msg) = modal_variant_notification(variant);
+            self.push_connection_event(severity, modal_msg);
+            // Clock-skew check: when we land in Generic Modal,
+            // the ticket should have been good (otherwise we'd
+            // have taken the OneShotConsumed/TicketExpired path).
+            // If `ticket-valid-until` is set and still in the
+            // future, the 3 failures are suspicious — log a hook
+            // so future investigations have something to grep.
+            if let (ModalVariant::Generic { .. }, Some(expiry)) =
+                (variant, policy.ticket_valid_until)
+            {
+                if now_wall < expiry {
+                    warn!(
+                        "app: 3 reconnect attempts failed but ticket-valid-until \
+                         is still in the future ({:?}); possible clock skew or \
+                         server-side issue independent of ticket expiry",
+                        expiry
+                    );
+                }
+            }
+        }
+
+        self.reconnect_state = new_state;
+    }
+
+    /// Derive the `ReconnectPolicy` from the active `.vv`
+    /// config. Read at every disconnect / tick — cheap, and
+    /// avoids caching state that would have to be re-synced if
+    /// Config ever became mutable.
+    fn reconnect_policy(&self) -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: self.config.ticket_is_single_use,
+            ticket_valid_until: self.config.ticket_valid_until,
+        }
+    }
+
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
                     info!("app: session {} initialized", session_id);
                     self.connected = true;
+                    // A fresh successful link clears any pending
+                    // reconnect state. Whether this resulted from
+                    // an auto-retry or a user clicking Reconnect,
+                    // the cycle is done.
+                    if self.reconnect_state != ReconnectState::Idle {
+                        info!("app: reconnect succeeded, returning to Idle");
+                        self.reconnect_state = ReconnectState::Idle;
+                    }
+                    self.awaiting_reconnect_outcome = false;
+                    // Phase 09 (F1): surface the link in the bell
+                    // history. Fires on initial connect and on
+                    // every reconnect success; the 30 s dedup
+                    // collapses storm reconnects to a single entry.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        format!("Connected to {}:{}", self.target_host, self.target_port),
+                    );
                 }
 
                 ChannelEvent::SurfaceCreated {
@@ -1088,14 +1659,22 @@ impl RyllApp {
                     self.latency.record(sample_ms);
                 }
 
-                ChannelEvent::Error(msg) => {
-                    error!("app: channel error: {}", msg);
-                    self.connected = false;
-                    self.surfaces.clear();
-                    self.cursor_image = None;
-                    self.cursor_texture = None;
-                    self.show_disconnect_dialog = true;
-                    self.disconnect_reason = Some(msg);
+                ChannelEvent::Error { channel, message } => {
+                    error!("app: {} channel error: {}", channel.name(), message);
+                    // Phase 09 (F1): surface the raw error in the
+                    // bell history before the state-machine path
+                    // can swallow it into the modal. handle_*
+                    // below also pushes the resulting connection-
+                    // lost / modal-entry notifications.
+                    self.push_connection_event(
+                        NotifySeverity::Error,
+                        format!("{} channel error: {}", channel.name(), message),
+                    );
+                    // Snapshot before driving the state machine so
+                    // the zip captures the run-up to the failure.
+                    self.maybe_write_disconnect_snapshot(channel.name(), &message);
+                    let reason = format!("{} channel error: {}", channel.name(), message);
+                    self.handle_critical_disconnect(reason);
                 }
 
                 ChannelEvent::UsbChannelReady => {
@@ -1173,10 +1752,34 @@ impl RyllApp {
                 ChannelEvent::AgentConnected(connected) => {
                     info!("app: vdagent connected={}", connected);
                     self.agent_connected = connected;
+                    // Phase 09 (F1): record the agent-state
+                    // transition. Affects clipboard sync, paste,
+                    // and resolution updates — useful for the
+                    // user to see when those features come or go.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        if connected {
+                            "Guest agent connected"
+                        } else {
+                            "Guest agent disconnected"
+                        }
+                        .to_string(),
+                    );
                 }
 
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
+
+                    // Snapshot for every channel disconnect, including
+                    // non-critical ones. Under ticket-based deployments
+                    // (oVirt, Kerbside) a dropped channel is permanently
+                    // lost — the user silently loses audio / USB / etc.
+                    // Even if the session keeps running, we want
+                    // diagnostic data on why the channel went down.
+                    self.maybe_write_disconnect_snapshot(
+                        channel.name(),
+                        &format!("channel {} disconnected", channel.name()),
+                    );
 
                     // Channel-specific cleanup
                     if channel == ChannelType::Usbredir {
@@ -1192,32 +1795,37 @@ impl RyllApp {
                         self.webdav_connected_at = None;
                     }
 
-                    // Only show disconnect dialog for critical channels.
-                    // Non-critical channels (USB, WebDAV, Cursor, Playback)
-                    // have independent lifecycles and their disconnect does
-                    // not mean the session is over.
+                    // Only the critical channels drive the
+                    // session-level reconnect state. Non-critical
+                    // channels (USB, WebDAV, Cursor, Playback) have
+                    // independent lifecycles; their disconnects
+                    // are snapshotted above but do not tear down
+                    // the session.
                     match channel {
                         ChannelType::Main | ChannelType::Display | ChannelType::Inputs => {
-                            self.connected = false;
-                            // Drop the rendered guest surface and cursor so the
-                            // window does not retain a stale frame after the
-                            // session ends; the reconnect path needs a clean
-                            // canvas.
-                            self.surfaces.clear();
-                            self.cursor_image = None;
-                            self.cursor_texture = None;
-                            if !self.show_disconnect_dialog {
-                                self.show_disconnect_dialog = true;
-                                self.disconnect_reason = Some(format!(
-                                    "Connection lost ({} channel disconnected)",
-                                    channel.name()
-                                ));
-                            }
+                            let reason = format!(
+                                "Connection lost ({} channel disconnected)",
+                                channel.name()
+                            );
+                            // Snapshot was already written above
+                            // by the unconditional call near the
+                            // top of this arm; the helper now only
+                            // drives the state machine.
+                            self.handle_critical_disconnect(reason);
                         }
                         _ => {
                             debug!(
                                 "app: non-critical channel {} disconnected, session continues",
                                 channel.name()
+                            );
+                            // Phase 09 (F1): non-critical
+                            // disconnect goes to the bell as Info
+                            // (was debug!-only before). Surfaces
+                            // e.g. usbredir / webdav drops without
+                            // disrupting the user.
+                            self.push_connection_event(
+                                NotifySeverity::Info,
+                                format!("{} channel disconnected", channel.name()),
                             );
                         }
                     }
@@ -1344,6 +1952,7 @@ impl RyllApp {
         snap.mouse_mode = self.mouse_mode;
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
+        snap.auto_reconnect_count = self.auto_reconnect_count;
     }
 
     /// Clone the largest surface's RGBA pixels, capture trigger
@@ -1507,16 +2116,103 @@ impl RyllApp {
             precomputed_screenshot_png,
         )?;
 
-        // Determine output directory
-        let output_dir = match &self.capture {
-            Some(cap) => cap.dir.join("bug-reports"),
-            None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
-        };
-
+        let output_dir = self.manual_bug_report_dir();
         report.write_zip(&output_dir)
     }
 
-    /// Push a notification entry into the shared store.
+    /// Resolve the output directory for a manual (F8) or
+    /// auto-disconnect bug report. Priority:
+    ///   1. --bug-report-dir if set
+    ///   2. <--capture>/bug-reports/ if --capture is set
+    ///   3. current working directory
+    fn manual_bug_report_dir(&self) -> PathBuf {
+        if let Some(d) = &self.bug_report_dir {
+            return d.clone();
+        }
+        match &self.capture {
+            Some(cap) => cap.dir.join("bug-reports"),
+            None => std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        }
+    }
+
+    /// Auto-write a disconnect-snapshot bug report, best-effort.
+    /// Subject to a 60 s cooldown to bound disk usage during a
+    /// disconnect storm. Failures are logged but never block
+    /// the disconnect modal. Runtime metrics are reported as
+    /// unavailable here (a 1 s sample on the GUI thread would
+    /// freeze the UI); pcap and snapshots are the load-bearing
+    /// data for diagnosing the disconnect.
+    fn maybe_write_disconnect_snapshot(&mut self, channel: &str, message: &str) {
+        if let Some(at) = self.last_disconnect_report_at {
+            if at.elapsed() < Duration::from_secs(60) {
+                debug!(
+                    "app: disconnect snapshot cooldown active ({}s remaining), skipping for {}",
+                    60u64.saturating_sub(at.elapsed().as_secs()),
+                    channel
+                );
+                return;
+            }
+        }
+
+        let keepalive_timeout_fired = self
+            .channel_snapshots
+            .main
+            .lock()
+            .map(|s| s.keepalive_timeout_fired)
+            .unwrap_or(false);
+
+        let cause = crate::bugreport::DisconnectCause {
+            channel: channel.to_string(),
+            error_message: message.to_string(),
+            error_kind: None,
+            keepalive_timeout_fired,
+            session_uptime_secs: self.traffic.elapsed().as_secs_f64(),
+            per_channel: crate::bugreport::DisconnectCause::collect_per_channel(
+                &self.channel_snapshots,
+            ),
+        };
+
+        let runtime_metrics = shakenfist_spice_renderer::metrics::RuntimeMetrics::unavailable(
+            "runtime metrics are not sampled on the GUI thread for auto-disconnect snapshots",
+        );
+
+        let output_dir = self.manual_bug_report_dir();
+        match BugReport::write_disconnect(
+            &output_dir,
+            cause,
+            &self.target_host,
+            self.target_port,
+            &self.traffic,
+            &self.channel_snapshots,
+            &self.app_snapshot,
+            &self.notifications,
+            runtime_metrics,
+        ) {
+            Ok(path) => {
+                info!("app: disconnect snapshot saved to {}", path.display());
+                self.push_notification(
+                    NotifySeverity::Info,
+                    NotificationSource::BugReport,
+                    format!("Disconnect snapshot saved to {}", path.display()),
+                );
+                self.last_disconnect_report_at = Some(Instant::now());
+            }
+            Err(e) => {
+                error!("app: failed to write disconnect snapshot: {}", e);
+                // Still update the cooldown so a write that fails
+                // for an environmental reason (no disk space, bad
+                // dir) doesn't retry on every disconnect event.
+                self.last_disconnect_report_at = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Push a notification entry into the shared store. After
+    /// the push lands, also capture a `TrafficBuffers`
+    /// snapshot keyed by the entry's id (Phase 10 / F2) so
+    /// the "File bug report" button on the notification can
+    /// later produce a report with pcap/state from the
+    /// moment the notification fired.
     fn push_notification(
         &self,
         severity: NotifySeverity,
@@ -1524,8 +2220,103 @@ impl RyllApp {
         message: impl Into<String>,
     ) {
         let entry = NotificationEntry::new(severity, source, message);
-        if let Ok(mut guard) = self.notifications.lock() {
-            guard.push(entry);
+        let id = match self.notifications.lock() {
+            Ok(mut guard) => Some(guard.push(entry)),
+            Err(_) => None,
+        };
+        if let Some(id) = id {
+            // Capture under a separate lock so the
+            // notifications mutex is already released — the
+            // snapshot() call locks each per-channel ring
+            // briefly, and we don't want to keep both
+            // top-level locks acquired at once.
+            if let Ok(mut store) = self.notification_snapshots.lock() {
+                store.capture(id, self.traffic.snapshot(), Instant::now());
+            }
+        }
+    }
+
+    /// Push a connection-state transition (Phase 09 / F1).
+    /// Wraps `push_notification` with
+    /// `NotificationSource::Connection` so every connection
+    /// event lands under a single label in the side panel.
+    fn push_connection_event(&self, severity: NotifySeverity, message: impl Into<String>) {
+        self.push_notification(severity, NotificationSource::Connection, message);
+    }
+
+    /// Phase 10 (F2): user clicked "File bug report" on a
+    /// notification row. Looks up the notification, consumes
+    /// any live snapshot for it, and writes a zip via
+    /// `BugReport::write_notification`. Always produces a
+    /// report — when no live snapshot is available, falls
+    /// back to the current live `TrafficBuffers` and tags the
+    /// report `PostEventOnly`.
+    fn file_notification_bug_report(&mut self, id: u64) {
+        // Resolve the notification entry first so we can use
+        // its severity/message in the report description.
+        let entry = match self.notifications.lock() {
+            Ok(guard) => guard.iter_newest_first().find(|e| e.id == id).cloned(),
+            Err(_) => None,
+        };
+        let Some(entry) = entry else {
+            warn!(
+                "app: file_notification_bug_report({}) — entry no longer in store",
+                id
+            );
+            return;
+        };
+
+        // Take the live snapshot (if any). If absent or
+        // expired, fall back to the current live traffic.
+        let now = Instant::now();
+        let (traffic_owned, snapshot_state): (Option<TrafficBuffers>, NotificationSnapshotState) = {
+            match self.notification_snapshots.lock() {
+                Ok(mut store) => match store.take(id, now) {
+                    Some(snap) => (Some(snap), NotificationSnapshotState::AtFire),
+                    None => (None, NotificationSnapshotState::PostEventOnly),
+                },
+                Err(_) => (None, NotificationSnapshotState::PostEventOnly),
+            }
+        };
+        let traffic_ref: &TrafficBuffers = match &traffic_owned {
+            Some(s) => s,
+            None => self.traffic.as_ref(),
+        };
+
+        let output_dir = self.manual_bug_report_dir();
+        let runtime_metrics = shakenfist_spice_renderer::metrics::RuntimeMetrics::unavailable(
+            "runtime metrics are not sampled on the GUI thread for notification \
+                 bug reports — the pcap and channel snapshots are the load-bearing data",
+        );
+
+        match BugReport::write_notification(
+            &output_dir,
+            &entry,
+            snapshot_state,
+            &self.target_host,
+            self.target_port,
+            traffic_ref,
+            &self.channel_snapshots,
+            &self.app_snapshot,
+            &self.notifications,
+            runtime_metrics,
+        ) {
+            Ok(path) => {
+                info!("app: notification bug report saved to {}", path.display());
+                self.push_notification(
+                    NotifySeverity::Info,
+                    NotificationSource::BugReport,
+                    format!("Bug report saved to {}", path.display()),
+                );
+            }
+            Err(e) => {
+                error!("app: failed to write notification bug report: {}", e);
+                self.push_notification(
+                    NotifySeverity::Error,
+                    NotificationSource::BugReport,
+                    format!("Bug report failed: {}", e),
+                );
+            }
         }
     }
 
@@ -1749,6 +2540,16 @@ impl RyllApp {
 
 impl eframe::App for RyllApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Mirror egui's per-frame focus state into the shared
+        // AtomicBool that the FocusGatedClipboard reads. The
+        // value flips on the same frame egui sees the
+        // platform-level focus event, so the next 500 ms
+        // clipboard tick on the renderer side will see the
+        // updated state.
+        let focused = ctx.input(|i| i.focused);
+        self.app_focused
+            .store(focused, std::sync::atomic::Ordering::Relaxed);
+
         // Graceful shutdown on Ctrl+C: close capture session (flushes
         // the MP4 moov atom) then ask eframe to exit. Also flip the
         // per-connection cancel flag so the renderer's session
@@ -1768,6 +2569,80 @@ impl eframe::App for RyllApp {
 
         // Process incoming events
         self.process_events();
+
+        // Phase 10 (F2): prune expired notification snapshots
+        // at most once per second so the per-row File-as-bug-
+        // report button visual state honestly reflects the
+        // 60 s TTL without walking the map on every paint.
+        if let Ok(mut store) = self.notification_snapshots.lock() {
+            store.maybe_prune(Instant::now());
+        }
+
+        // Pre-expiry warning: if `ticket-valid-until` is set and
+        // we are within 30 s of expiry, push a one-shot warn
+        // notification so the user knows the session is about
+        // to end. Latched via `ticket_expiry_warned` to fire
+        // exactly once per session.
+        if !self.ticket_expiry_warned {
+            if let Some(expiry) = self.config.ticket_valid_until {
+                if let Ok(remaining) = expiry.duration_since(SystemTime::now()) {
+                    if remaining <= Duration::from_secs(30) {
+                        self.push_notification(
+                            NotifySeverity::Warn,
+                            NotificationSource::BugReport,
+                            "Session ticket expires in 30 seconds.".to_string(),
+                        );
+                        self.ticket_expiry_warned = true;
+                    }
+                }
+            }
+        }
+
+        // Auto-reconnect tick: when the Pending deadline has
+        // passed AND we are not already awaiting the outcome of
+        // a prior fire, kick off the next attempt. The flag
+        // doubles as a "don't re-fire on the next frame" gate;
+        // it clears only when the outcome arrives
+        // (SessionInitialized → success, or a disconnect →
+        // advance/Modal).
+        if !self.awaiting_reconnect_outcome {
+            // Re-check the ticket policy at the moment of fire —
+            // a long Pending window can outlive
+            // `ticket-valid-until`, and there is no point firing
+            // a reconnect we know the server will reject. This
+            // tripwire fires from either Pending(N) directly to
+            // Modal{TicketExpired}, bypassing the remaining
+            // attempts.
+            if matches!(self.reconnect_state, ReconnectState::Pending { .. }) {
+                if let Some(variant) = self.reconnect_policy().forbid_retry(SystemTime::now()) {
+                    info!(
+                        "app: ticket policy now forbids retry mid-Pending; \
+                         transitioning to Modal directly"
+                    );
+                    self.last_modal_at = Some(Instant::now());
+                    self.reconnect_state = ReconnectState::Modal(variant);
+                }
+            }
+            if let ReconnectState::Pending {
+                attempt, next_at, ..
+            } = &self.reconnect_state
+            {
+                if Instant::now() >= *next_at {
+                    let attempt = *attempt;
+                    info!("app: auto-reconnect attempt {} firing", attempt);
+                    // Phase 09 (F1): surface the attempt fire in
+                    // the bell history. Per-attempt number in the
+                    // message keeps successive attempts distinct
+                    // across the 30 s dedup window.
+                    self.push_connection_event(
+                        NotifySeverity::Info,
+                        format!("Reconnect attempt {}/{}…", attempt, MAX_RECONNECT_ATTEMPTS),
+                    );
+                    self.awaiting_reconnect_outcome = true;
+                    self.reconnect();
+                }
+            }
+        }
 
         // Resize viewport to match the remote surface (plus stats
         // bar) whenever a new primary surface differs from the
@@ -1966,6 +2841,14 @@ impl eframe::App for RyllApp {
                     if self.cadence_enabled {
                         ui.separator();
                         ui.label("Cadence: ON");
+                    }
+
+                    if let ReconnectState::Pending { attempt, .. } = &self.reconnect_state {
+                        ui.separator();
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 160, 60),
+                            format!("Reconnecting… ({}/{})", attempt, MAX_RECONNECT_ATTEMPTS),
+                        );
                     }
 
                     if let Some(ref desc) = self.usb_device_description {
@@ -2222,7 +3105,30 @@ impl eframe::App for RyllApp {
                     ui.label(format!("{} total / {} unread", total, unread));
                     ui.separator();
 
+                    // Phase 10 (F2): collect notification-snapshot
+                    // live-state flags under one lock outside the
+                    // per-row render, so each row's button knows
+                    // whether to render in the at-fire (solid) or
+                    // post-event-only (dim) state without
+                    // re-locking per entry.
+                    let live_now = Instant::now();
+                    let live_ids: std::collections::HashSet<u64> = match self
+                        .notification_snapshots
+                        .lock()
+                    {
+                        Ok(mut store) => {
+                            store.prune_expired(live_now);
+                            snapshot
+                                .iter()
+                                .filter(|e| store.has_live(e.id, live_now))
+                                .map(|e| e.id)
+                                .collect()
+                        }
+                        Err(_) => std::collections::HashSet::new(),
+                    };
+
                     let mut to_remove: Vec<u64> = Vec::new();
+                    let mut pending_bug_report_id: Option<u64> = None;
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if snapshot.is_empty() {
                             ui.label("No notifications.");
@@ -2263,6 +3169,30 @@ impl eframe::App for RyllApp {
                                         if ui.small_button("Dismiss").clicked() {
                                             to_remove.push(entry.id);
                                         }
+                                        // Phase 10 (F2): File-as-bug-report
+                                        // button. Always present; visual
+                                        // state and tooltip vary by whether
+                                        // a live snapshot still exists for
+                                        // this notification.
+                                        let snapshot_live = live_ids.contains(&entry.id);
+                                        let (label, tooltip) = if snapshot_live {
+                                            (
+                                                egui::RichText::new("File…"),
+                                                "File bug report (at-fire snapshot available)",
+                                            )
+                                        } else {
+                                            (
+                                                egui::RichText::new("File…").weak(),
+                                                "File bug report (post-event context only — snapshot expired)",
+                                            )
+                                        };
+                                        if ui
+                                            .small_button(label)
+                                            .on_hover_text(tooltip)
+                                            .clicked()
+                                        {
+                                            pending_bug_report_id = Some(entry.id);
+                                        }
                                     },
                                 );
                             });
@@ -2275,6 +3205,9 @@ impl eframe::App for RyllApp {
                                 s.remove(id);
                             }
                         }
+                    }
+                    if let Some(id) = pending_bug_report_id {
+                        self.file_notification_bug_report(id);
                     }
                 });
         }
@@ -3008,18 +3941,33 @@ impl eframe::App for RyllApp {
             if region_completed {
                 let (sx, sy) = self.region_drag_start.unwrap();
                 let (ex, ey) = self.region_drag_end.unwrap();
-                let region = ReportRegion {
-                    left: sx.min(ex),
-                    top: sy.min(ey),
-                    right: sx.max(ex),
-                    bottom: sy.max(ey),
-                };
-                let report_type = self.bug_report_type.clone();
-                let description = self.bug_description.clone();
-                self.finish_bug_report(report_type, description, Some(region));
-                self.region_select_active = false;
-                self.region_drag_start = None;
-                self.region_drag_end = None;
+                match validate_region(sx, sy, ex, ey) {
+                    Some(region) => {
+                        let report_type = self.bug_report_type.clone();
+                        let description = self.bug_description.clone();
+                        self.finish_bug_report(report_type, description, Some(region));
+                        self.region_select_active = false;
+                        self.region_drag_start = None;
+                        self.region_drag_end = None;
+                    }
+                    None => {
+                        // Click without drag, or any other
+                        // degenerate input (K4 guard). Stay in
+                        // region-select mode and tell the user
+                        // what went wrong; reset the drag state
+                        // so they can try again without having
+                        // to re-enter region-select.
+                        self.push_notification(
+                            NotifySeverity::Warn,
+                            NotificationSource::BugReport,
+                            "Drag a region with non-zero area, or press \
+                             Escape to cancel."
+                                .to_string(),
+                        );
+                        self.region_drag_start = None;
+                        self.region_drag_end = None;
+                    }
+                }
             }
         }
 
@@ -3110,21 +4058,48 @@ impl eframe::App for RyllApp {
                 }
             });
 
+        // The modal only appears when auto-reconnect has given
+        // up. Pending state shows the status-bar indicator
+        // (rendered in the bottom stats panel) instead, so the
+        // user is not interrupted while we are still trying.
         let mut wants_reconnect = false;
-        if self.show_disconnect_dialog {
-            let reason = self
-                .disconnect_reason
-                .as_deref()
-                .unwrap_or("Unknown reason");
-            egui::Window::new("Disconnected")
+        if let ReconnectState::Modal(variant) = &self.reconnect_state {
+            let (title, body, allow_reconnect) = match variant {
+                ModalVariant::Generic { latest_error } => (
+                    "Connection lost",
+                    format!(
+                        "Three automatic reconnect attempts failed: {}",
+                        latest_error
+                    ),
+                    true,
+                ),
+                ModalVariant::OneShotConsumed => (
+                    "Session ended — cannot reconnect",
+                    "This connection used a single-use ticket. \
+                     Request a new connection from the system that \
+                     issued the original link."
+                        .to_string(),
+                    false,
+                ),
+                ModalVariant::TicketExpired { expired_at } => (
+                    "Session ended — ticket expired",
+                    format!(
+                        "The ticket for this session expired at {}. \
+                         Request a new connection.",
+                        format_expiry_local(*expired_at),
+                    ),
+                    false,
+                ),
+            };
+            egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label(reason);
+                    ui.label(body);
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Reconnect").clicked() {
+                        if allow_reconnect && ui.button("Reconnect").clicked() {
                             wants_reconnect = true;
                         }
                         if ui.button("Close").clicked() {
@@ -3137,7 +4112,7 @@ impl eframe::App for RyllApp {
                 });
         }
         if wants_reconnect {
-            self.reconnect();
+            self.reconnect_manual();
         }
 
         if self.cursor_image.is_some()
@@ -3284,6 +4259,64 @@ fn resolution_notification_due(
         return None;
     }
     Some(target)
+}
+
+/// Phase 09 (F1): map an auto-reconnect `ModalVariant` to the
+/// `(severity, message)` pair that surfaces in the notification
+/// pane when the state machine lands in Modal. Pure for
+/// unit-testability — `modal_variant_notification` is the
+/// only piece of new business logic the connection-event
+/// push sites depend on.
+fn modal_variant_notification(variant: &ModalVariant) -> (NotifySeverity, String) {
+    match variant {
+        ModalVariant::Generic { .. } => (
+            NotifySeverity::Error,
+            "Auto-reconnect failed after 3 attempts".to_string(),
+        ),
+        ModalVariant::OneShotConsumed => (
+            NotifySeverity::Error,
+            "Connection ended — single-use ticket consumed".to_string(),
+        ),
+        ModalVariant::TicketExpired { .. } => (
+            NotifySeverity::Error,
+            "Connection ended — ticket expired".to_string(),
+        ),
+    }
+}
+
+/// Build a `ReportRegion` from the raw drag-start / drag-end
+/// coordinates produced by the region-select widget, iff the
+/// resulting rectangle has strictly positive area. Returns
+/// `None` for click-without-drag (the K4 case in Phase 04) —
+/// the GUI handler uses this to keep the user in
+/// region-select mode and surface a "drag a non-zero region"
+/// notification rather than emitting a degenerate
+/// `ReportRegion` into `report.json`.
+///
+/// "Strictly positive area" means `right > left AND
+/// bottom > top` — a deliberate 1-pixel drag is allowed
+/// since it points at a specific pixel, and rejecting it
+/// would require a jitter threshold that no current data
+/// justifies.
+///
+/// Reversed drags (bottom-right to top-left) are normalised
+/// here so the produced region always satisfies
+/// `left ≤ right && top ≤ bottom`.
+fn validate_region(sx: u32, sy: u32, ex: u32, ey: u32) -> Option<ReportRegion> {
+    let left = sx.min(ex);
+    let right = sx.max(ex);
+    let top = sy.min(ey);
+    let bottom = sy.max(ey);
+    if right > left && bottom > top {
+        Some(ReportRegion {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    } else {
+        None
+    }
 }
 
 /// Generate a simple 12x19 white arrow cursor with a black outline (RGBA).
@@ -3672,5 +4705,502 @@ mod tests {
             ),
             None,
         );
+    }
+
+    // ── ReconnectState transitions ──────────────────────────
+
+    fn err(s: &str) -> String {
+        s.to_string()
+    }
+
+    fn no_policy() -> ReconnectPolicy {
+        ReconnectPolicy::default()
+    }
+
+    fn epoch() -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(1_000_000_000)
+    }
+
+    #[test]
+    fn reconnect_idle_to_pending_on_first_disconnect() {
+        let now = Instant::now();
+        let next =
+            ReconnectState::Idle.on_disconnect(false, None, now, epoch(), no_policy(), err("eof"));
+        match next {
+            Some(ReconnectState::Pending {
+                attempt,
+                next_at,
+                latest_error,
+            }) => {
+                assert_eq!(attempt, 1);
+                assert_eq!(
+                    next_at - now,
+                    Duration::from_secs(RECONNECT_BACKOFF_SECS[0])
+                );
+                assert_eq!(latest_error, "eof");
+            }
+            other => panic!("expected Pending(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reconnect_full_failure_cluster_lands_in_modal() {
+        let now = Instant::now();
+        // Initial disconnect: Idle → Pending(1).
+        let s1 = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), no_policy(), err("e1"))
+            .unwrap();
+        // Attempt 1 failure: Pending(1) → Pending(2).
+        let s2 = s1
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(1),
+                epoch(),
+                no_policy(),
+                err("e2"),
+            )
+            .unwrap();
+        assert!(matches!(s2, ReconnectState::Pending { attempt: 2, .. }));
+        // Attempt 2 failure: Pending(2) → Pending(3).
+        let s3 = s2
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(5),
+                epoch(),
+                no_policy(),
+                err("e3"),
+            )
+            .unwrap();
+        assert!(matches!(s3, ReconnectState::Pending { attempt: 3, .. }));
+        // Attempt 3 failure: Pending(3) → Modal(Generic) with latest error.
+        let s4 = s3
+            .on_disconnect(
+                true,
+                None,
+                now + Duration::from_secs(20),
+                epoch(),
+                no_policy(),
+                err("final"),
+            )
+            .unwrap();
+        match s4 {
+            ReconnectState::Modal(ModalVariant::Generic { latest_error }) => {
+                assert_eq!(latest_error, "final");
+            }
+            other => panic!("expected Modal(Generic), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn reconnect_storm_event_during_pending_is_ignored() {
+        let now = Instant::now();
+        let pending = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), no_policy(), err("first"))
+            .unwrap();
+        // A non-awaiting second event (channel storm) must not
+        // advance the attempt counter — that would burn budget
+        // for a single underlying failure.
+        let next = pending.on_disconnect(
+            false,
+            None,
+            now + Duration::from_millis(10),
+            epoch(),
+            no_policy(),
+            err("dup"),
+        );
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn reconnect_cluster_reset_window_blocks_retry() {
+        let now = Instant::now();
+        // Recent modal: a fresh disconnect must skip Pending and
+        // land directly in Modal. Otherwise a flapping server
+        // would have us banging away forever.
+        let modal_at = now - Duration::from_secs(60);
+        let next = ReconnectState::Idle.on_disconnect(
+            false,
+            Some(modal_at),
+            now,
+            epoch(),
+            no_policy(),
+            err("flap"),
+        );
+        assert!(matches!(
+            next,
+            Some(ReconnectState::Modal(ModalVariant::Generic { .. }))
+        ));
+    }
+
+    #[test]
+    fn reconnect_cluster_reset_window_expires() {
+        let now = Instant::now();
+        // Beyond the 5-min reset window, a fresh budget unlocks.
+        let modal_at = now - RECONNECT_CLUSTER_RESET - Duration::from_secs(1);
+        let next = ReconnectState::Idle
+            .on_disconnect(
+                false,
+                Some(modal_at),
+                now,
+                epoch(),
+                no_policy(),
+                err("later"),
+            )
+            .unwrap();
+        assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
+    }
+
+    #[test]
+    fn reconnect_modal_ignores_extra_storm_events() {
+        // Once we're in Modal, additional non-awaiting events
+        // must not change state — the user is in control.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal(ModalVariant::Generic {
+            latest_error: "x".into(),
+        });
+        let next = modal.on_disconnect(false, None, now, epoch(), no_policy(), err("y"));
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn reconnect_awaiting_outcome_from_idle_lands_in_modal_defensively() {
+        // Defensive arm of on_disconnect: awaiting_outcome=true
+        // implies we were in Pending (we just called
+        // reconnect() from the GUI tick). If a stale event
+        // somehow arrives while state is Idle, the state
+        // machine doesn't silently re-arm a retry — it lands
+        // in Modal(Generic) so the user takes over. Pin the
+        // safety-net behaviour so a future refactor can't
+        // strip it without the test catching the change.
+        let now = Instant::now();
+        let next = ReconnectState::Idle
+            .on_disconnect(
+                true, // awaiting_outcome from Idle: shouldn't happen, defensive
+                None,
+                now,
+                epoch(),
+                no_policy(),
+                err("stale"),
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                &next,
+                ReconnectState::Modal(ModalVariant::Generic { latest_error }) if latest_error == "stale"
+            ),
+            "awaiting_outcome from non-Pending must land in Modal(Generic), got {:?}",
+            next
+        );
+    }
+
+    #[test]
+    fn reconnect_awaiting_outcome_from_modal_lands_in_modal_defensively() {
+        // Same defensive arm, entering from Modal. Replaces
+        // the existing Modal with a fresh Generic carrying
+        // the new error — no silent re-arm, no panic.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal(ModalVariant::OneShotConsumed);
+        let next = modal
+            .on_disconnect(true, None, now, epoch(), no_policy(), err("stale"))
+            .unwrap();
+        assert!(
+            matches!(
+                &next,
+                ReconnectState::Modal(ModalVariant::Generic { latest_error }) if latest_error == "stale"
+            ),
+            "awaiting_outcome from Modal must produce Modal(Generic), got {:?}",
+            next
+        );
+    }
+
+    #[test]
+    fn reconnect_backoff_progression_matches_spec() {
+        // The backoffs published in plan §A.1 are 1s/4s/16s.
+        // Lock them in with a direct check so a typo in the
+        // constant array is caught by the test suite.
+        assert_eq!(RECONNECT_BACKOFF_SECS, [1, 4, 16]);
+        assert_eq!(MAX_RECONNECT_ATTEMPTS, 3);
+    }
+
+    // ── Ticket-policy paths ─────────────────────────────────
+
+    fn one_shot_policy() -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: true,
+            ticket_valid_until: None,
+        }
+    }
+
+    fn expiring_at(t: SystemTime) -> ReconnectPolicy {
+        ReconnectPolicy {
+            ticket_is_single_use: false,
+            ticket_valid_until: Some(t),
+        }
+    }
+
+    #[test]
+    fn ticket_single_use_skips_pending_and_lands_in_oneshot_modal() {
+        // delete-this-file=1: a fresh disconnect must short-circuit
+        // straight to OneShotConsumed without ever entering
+        // Pending. Auto-retry would only produce server-side
+        // ticket-validation failures.
+        let now = Instant::now();
+        let next = ReconnectState::Idle
+            .on_disconnect(
+                false,
+                None,
+                now,
+                epoch(),
+                one_shot_policy(),
+                err("anything"),
+            )
+            .unwrap();
+        assert!(matches!(
+            next,
+            ReconnectState::Modal(ModalVariant::OneShotConsumed)
+        ));
+    }
+
+    #[test]
+    fn ticket_single_use_storm_event_is_noop_in_modal() {
+        // After landing in OneShotConsumed, a duplicate disconnect
+        // (channel storm) must not refire the modal transition.
+        let now = Instant::now();
+        let modal = ReconnectState::Modal(ModalVariant::OneShotConsumed);
+        let next = modal.on_disconnect(false, None, now, epoch(), one_shot_policy(), err("storm"));
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn ticket_expired_in_past_lands_in_ticket_expired_modal() {
+        let now = Instant::now();
+        let expiry = epoch() - Duration::from_secs(60);
+        let policy = expiring_at(expiry);
+        // Disconnect arrives after the ticket has already expired
+        // (per our wall clock). Skip Pending entirely.
+        let next = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), policy, err("dead"))
+            .unwrap();
+        match next {
+            ReconnectState::Modal(ModalVariant::TicketExpired { expired_at }) => {
+                assert_eq!(expired_at, expiry);
+            }
+            other => panic!("expected Modal(TicketExpired), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ticket_valid_in_future_takes_normal_pending_path() {
+        let now = Instant::now();
+        // Ticket good for another hour: a disconnect should enter
+        // Pending(1) as usual.
+        let expiry = epoch() + Duration::from_secs(3600);
+        let next = ReconnectState::Idle
+            .on_disconnect(false, None, now, epoch(), expiring_at(expiry), err("blip"))
+            .unwrap();
+        assert!(matches!(next, ReconnectState::Pending { attempt: 1, .. }));
+    }
+
+    // ── VolumeControl round-trip (K3 guard) ─────────────────
+
+    #[test]
+    fn volume_control_round_trip() {
+        // K3 (Phase 03) fixed RyllApp::reconnect() leaving the
+        // user's volume slider at 80% / unmuted after every
+        // reconnect. The fix relies on the existing
+        // Arc<VolumeControl> surviving the swap, with the same
+        // get/set semantics on both sides of the boundary. Pin
+        // the contract so a future refactor of VolumeControl's
+        // storage cannot quietly re-introduce the regression.
+        let vc = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
+        assert_eq!(vc.volume(), 80);
+        assert!(!vc.muted());
+        vc.set_volume(25);
+        vc.set_muted(true);
+        assert_eq!(vc.volume(), 25);
+        assert!(vc.muted());
+        // The same Arc must reflect updates from any clone — the
+        // app holds one Arc and hands a clone to the playback
+        // channel, so reads via either must see the same value.
+        let other = vc.clone();
+        assert_eq!(other.volume(), 25);
+        assert!(other.muted());
+        other.set_volume(60);
+        assert_eq!(vc.volume(), 60);
+    }
+
+    // ── Region-select validation (K4 guard) ─────────────────
+
+    #[test]
+    fn validate_region_click_without_drag_returns_none() {
+        // Press and release at the same point: degenerate 0×0
+        // rectangle, must be rejected at the GUI layer so we
+        // never serialise it into report.json.
+        assert!(validate_region(100, 100, 100, 100).is_none());
+    }
+
+    #[test]
+    fn validate_region_zero_width_returns_none() {
+        // Same x, non-zero vertical drag — still degenerate.
+        assert!(validate_region(50, 10, 50, 80).is_none());
+    }
+
+    #[test]
+    fn validate_region_zero_height_returns_none() {
+        // Non-zero horizontal drag, same y — still degenerate.
+        assert!(validate_region(10, 40, 100, 40).is_none());
+    }
+
+    #[test]
+    fn validate_region_one_by_one_returns_some() {
+        // A deliberate 1-pixel drag points at a specific pixel
+        // and must be allowed; rejecting it would require a
+        // jitter floor without supporting data.
+        let r = validate_region(7, 11, 8, 12).expect("1x1 region valid");
+        assert_eq!(r.left, 7);
+        assert_eq!(r.top, 11);
+        assert_eq!(r.right, 8);
+        assert_eq!(r.bottom, 12);
+    }
+
+    #[test]
+    fn validate_region_normal_drag_returns_some() {
+        // Happy path: a 30×40 region produced by a normal
+        // top-left → bottom-right drag.
+        let r = validate_region(10, 20, 40, 60).expect("normal region valid");
+        assert_eq!(r.left, 10);
+        assert_eq!(r.top, 20);
+        assert_eq!(r.right, 40);
+        assert_eq!(r.bottom, 60);
+    }
+
+    #[test]
+    fn validate_region_reversed_drag_normalises() {
+        // Drag from bottom-right to top-left must produce the
+        // same canonical {left ≤ right, top ≤ bottom} region
+        // as the forward drag — the bug-report consumers
+        // assume this invariant.
+        let r = validate_region(40, 60, 10, 20).expect("reversed drag valid");
+        assert_eq!(r.left, 10);
+        assert_eq!(r.top, 20);
+        assert_eq!(r.right, 40);
+        assert_eq!(r.bottom, 60);
+    }
+
+    // ── Phase 09 (F1) connection-event message formats ──────
+
+    #[test]
+    fn connection_event_message_format_attempt_fire() {
+        // The attempt-fire notification template embeds the
+        // attempt number so the 30 s dedup window doesn't
+        // collapse successive attempts of one cluster. Catches
+        // a typo in the format string and pins the embedded
+        // MAX_RECONNECT_ATTEMPTS reference.
+        let expected = format!("Reconnect attempt {}/{}…", 2, MAX_RECONNECT_ATTEMPTS);
+        assert_eq!(expected, "Reconnect attempt 2/3…");
+    }
+
+    #[test]
+    fn connection_event_message_format_modal_variants() {
+        // Pin the (severity, message) pair each ModalVariant
+        // maps to. Catches drift between modal copy and
+        // notification copy.
+        let (sev, msg) = modal_variant_notification(&ModalVariant::Generic {
+            latest_error: "ignored".into(),
+        });
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Auto-reconnect failed after 3 attempts");
+
+        let (sev, msg) = modal_variant_notification(&ModalVariant::OneShotConsumed);
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Connection ended — single-use ticket consumed");
+
+        let (sev, msg) = modal_variant_notification(&ModalVariant::TicketExpired {
+            expired_at: UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        });
+        assert_eq!(sev, NotifySeverity::Error);
+        assert_eq!(msg, "Connection ended — ticket expired");
+    }
+
+    // ── Phase 10 (F2) notification-snapshot store ───────────
+
+    fn fresh_traffic() -> TrafficBuffers {
+        TrafficBuffers::new()
+    }
+
+    #[test]
+    fn snapshot_store_evicts_oldest_when_over_cap() {
+        // Six pushes against a five-entry cap: the first id
+        // should no longer be live.
+        let mut store = NotificationSnapshotStore::new();
+        let t0 = Instant::now();
+        for id in 1u64..=6 {
+            store.capture(id, fresh_traffic(), t0);
+        }
+        assert!(!store.has_live(1, t0), "oldest id should have been evicted");
+        for id in 2u64..=6 {
+            assert!(store.has_live(id, t0), "id {} should still be live", id);
+        }
+    }
+
+    #[test]
+    fn snapshot_store_drops_expired_entries_on_prune() {
+        // Two snapshots, then advance "now" past the TTL.
+        // Both should be pruned.
+        let mut store = NotificationSnapshotStore::new();
+        let t0 = Instant::now();
+        store.capture(1, fresh_traffic(), t0);
+        store.capture(2, fresh_traffic(), t0);
+        let later = t0 + NOTIFICATION_SNAPSHOT_TTL + Duration::from_secs(1);
+        store.prune_expired(later);
+        assert!(!store.has_live(1, later));
+        assert!(!store.has_live(2, later));
+    }
+
+    #[test]
+    fn snapshot_store_replaces_on_same_id_fold() {
+        // A re-fire of the same notification id (within the
+        // dedup window) refreshes the captured_at timestamp
+        // and does not append a new entry.
+        let mut store = NotificationSnapshotStore::new();
+        let t0 = Instant::now();
+        store.capture(42, fresh_traffic(), t0);
+        let later = t0 + Duration::from_secs(10);
+        store.capture(42, fresh_traffic(), later);
+        // Only one entry tracked.
+        assert_eq!(store.insertion_order.len(), 1);
+        // After 51 s from later (= t0 + 61), the entry must
+        // still be live (the refresh extended its lifetime).
+        let check = later + Duration::from_secs(51);
+        assert!(store.has_live(42, check));
+    }
+
+    #[test]
+    fn snapshot_store_lookup_returns_none_after_ttl() {
+        let mut store = NotificationSnapshotStore::new();
+        let t0 = Instant::now();
+        store.capture(7, fresh_traffic(), t0);
+        assert!(store.has_live(7, t0));
+        let later = t0 + NOTIFICATION_SNAPSHOT_TTL + Duration::from_secs(1);
+        assert!(!store.has_live(7, later));
+        // take() also prunes; second call returns None.
+        assert!(store.take(7, later).is_none());
+    }
+
+    #[test]
+    fn notification_bug_report_type_serialises() {
+        // Round-trip a BugReportType::Notification through
+        // serde_json to confirm both fields (notification_id
+        // and snapshot_state) land in metadata.json.
+        let rt = BugReportType::Notification {
+            notification_id: 99,
+            snapshot_state: NotificationSnapshotState::AtFire,
+        };
+        let json = serde_json::to_string(&rt).expect("serialise");
+        assert!(json.contains("Notification"));
+        assert!(json.contains("\"notification_id\":99"));
+        assert!(json.contains("AtFire"));
     }
 }

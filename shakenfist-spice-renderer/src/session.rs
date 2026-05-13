@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{error, info};
 
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
@@ -93,16 +93,23 @@ pub async fn run_connection(
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
-    // Wait for session initialization
-
-    // Connect main channel and run until we get session ID and channel list
-    let (event_tx_clone, mut temp_rx) = mpsc::channel(64);
+    // Connect main channel and run it. The main channel sends
+    // ChannelEvents directly into the caller-provided `event_tx`
+    // (no intermediate bounded buffer); session id and channels
+    // list arrive out-of-band via oneshot channels. The earlier
+    // intermediate `mpsc::channel(64)` was the root cause of K1:
+    // it was drained only until session+channels were known, then
+    // abandoned while main kept sending Latency events into it.
+    // After ~65 pings (~7m45s of idle time) the buffer filled and
+    // main blocked forever on send().await.
+    let (session_init_tx, session_init_rx) = oneshot::channel();
+    let (channels_avail_tx, channels_avail_rx) = oneshot::channel();
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
     let mut main_channel = MainChannel::new(
         main_stream,
-        event_tx_clone,
+        event_tx.clone(),
         repaint_notify.clone(),
         capture.clone(),
         byte_counter.clone(),
@@ -112,51 +119,19 @@ pub async fn run_connection(
         monitors,
         log_config,
         clipboard,
+        session_init_tx,
+        channels_avail_tx,
     );
 
     // Spawn main channel task
     let main_handle = tokio::spawn(async move { main_channel.run().await });
 
-    // Wait for session init and channel list
-    let mut got_session = false;
-    let mut got_channels = false;
-    let mut temp_session_id = 0u32;
-    let mut temp_channels = Vec::new();
-
-    loop {
-        match temp_rx.recv().await {
-            Some(ChannelEvent::SessionInitialized(id)) => {
-                temp_session_id = id;
-                got_session = true;
-                event_tx
-                    .send(ChannelEvent::SessionInitialized(id))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(ChannelEvent::ChannelsAvailable(chs)) => {
-                temp_channels = chs;
-                got_channels = true;
-                event_tx
-                    .send(ChannelEvent::ChannelsAvailable(temp_channels.clone()))
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
-            }
-            Some(other) => {
-                event_tx.send(other).await.ok();
-                repaint_notify.notify_one();
-            }
-            None => break,
-        }
-
-        if got_session && got_channels {
-            break;
-        }
-    }
-
-    let session_id = temp_session_id;
-    let channels = temp_channels;
+    let session_id = session_init_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("main channel dropped before SessionInitialized"))?;
+    let channels = channels_avail_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("main channel dropped before ChannelsAvailable"))?;
 
     info!(
         "Session {} ready with {} channels",
@@ -165,12 +140,23 @@ pub async fn run_connection(
     );
 
     // Connect other channels
-    let mut handles = vec![main_handle];
+    let mut handles: Vec<(
+        ChannelType,
+        tokio::task::JoinHandle<Result<(), anyhow::Error>>,
+    )> = vec![(ChannelType::Main, main_handle)];
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
     let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
 
+    let main_only = std::env::var("RYLL_K1_MAIN_ONLY").is_ok();
+    if main_only {
+        info!("RYLL_K1_MAIN_ONLY set — skipping all secondary channels (main only)");
+    }
+
     for (channel_type, channel_id) in channels {
+        if main_only {
+            continue;
+        }
         match channel_type {
             ChannelType::Display => {
                 let stream = client
@@ -188,7 +174,10 @@ pub async fn run_connection(
                     shared_glz_dictionary.clone(),
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Display,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             ChannelType::Cursor => {
@@ -205,7 +194,10 @@ pub async fn run_connection(
                     snapshots.cursor.clone(),
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Cursor,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             ChannelType::Inputs => {
@@ -224,7 +216,10 @@ pub async fn run_connection(
                     enable_paste,
                     log_config,
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Inputs,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
                 // input_rx is moved, can't connect more inputs channels
                 break;
             }
@@ -242,9 +237,14 @@ pub async fn run_connection(
                         virtual_disks.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        traffic.clone(),
+                        snapshots.usbredir.clone(),
                         log_config,
                     );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
+                    handles.push((
+                        ChannelType::Usbredir,
+                        tokio::spawn(async move { channel.run().await }),
+                    ));
                 } else {
                     info!(
                         "Skipping additional usbredir channel (id={}): only one supported",
@@ -266,9 +266,14 @@ pub async fn run_connection(
                         share_dir.clone(),
                         capture.clone(),
                         byte_counter.clone(),
+                        traffic.clone(),
+                        snapshots.webdav.clone(),
                         log_config,
                     );
-                    handles.push(tokio::spawn(async move { channel.run().await }));
+                    handles.push((
+                        ChannelType::Webdav,
+                        tokio::spawn(async move { channel.run().await }),
+                    ));
                 } else {
                     info!(
                         "Skipping additional webdav channel (id={}): only one supported",
@@ -287,12 +292,16 @@ pub async fn run_connection(
                     repaint_notify.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
+                    snapshots.playback.clone(),
                     volume_control.clone(),
                     log_config,
                     cancel.clone(),
                     opus_sink.clone(),
                 );
-                handles.push(tokio::spawn(async move { channel.run().await }));
+                handles.push((
+                    ChannelType::Playback,
+                    tokio::spawn(async move { channel.run().await }),
+                ));
             }
 
             _ => {
@@ -312,7 +321,7 @@ pub async fn run_connection(
     // polls at 100 ms; that latency is well inside human reaction
     // time and avoids adding any awaitable signalling primitive.
     let cancel_watcher = {
-        let abort_handles: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+        let abort_handles: Vec<_> = handles.iter().map(|(_, h)| h.abort_handle()).collect();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -331,18 +340,24 @@ pub async fn run_connection(
     };
 
     // Wait for all channel tasks
-    for handle in handles {
+    for (channel_type, handle) in handles {
         match handle.await {
             Err(e) if e.is_cancelled() => {
                 // Aborted by the cancel watcher; not an error.
             }
             Err(e) => {
-                error!("Channel task panic: {}", e);
+                error!("Channel task panic on {}: {}", channel_type.name(), e);
             }
             Ok(Err(e)) => {
-                let msg = format!("channel error: {}", e);
-                error!("session: {}", msg);
-                event_tx.send(ChannelEvent::Error(msg)).await.ok();
+                let message = format!("channel error: {}", e);
+                error!("session: {}: {}", channel_type.name(), message);
+                event_tx
+                    .send(ChannelEvent::Error {
+                        channel: channel_type,
+                        message,
+                    })
+                    .await
+                    .ok();
                 repaint_notify.notify_one();
             }
             Ok(Ok(())) => {}
@@ -526,8 +541,8 @@ pub async fn run_headless(
                     ChannelEvent::AgentConnected(connected) => {
                         info!("headless: vdagent connected={}", connected);
                     }
-                    ChannelEvent::Error(msg) => {
-                        error!("Error: {}", msg);
+                    ChannelEvent::Error { channel, message } => {
+                        error!("Error on {}: {}", channel.name(), message);
                     }
                     ChannelEvent::Notification(entry) => {
                         notifications.push(entry);

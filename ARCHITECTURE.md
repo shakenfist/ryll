@@ -494,6 +494,7 @@ ryll/src/
 │                        #   runner, reconnect, egui trait impls
 ├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,
 │                        #   implements TrafficSink), bug-report ZIP
+│                        #   assembly, write_disconnect / DisconnectCause
 ├── capture.rs           # Pcap + MP4 capture (CaptureSession,
 │                        #   implements CaptureSink)
 ├── clipboard_arboard.rs # Host clipboard (implements ClipboardBackend)
@@ -931,6 +932,157 @@ panel polls `warn_once_count()` each frame; clicking opens
 a floating window listing every fired key. The counter
 works without `--pedantic` — `--pedantic` only adds the
 bug-report-per-gap automation on top.
+
+### Auto-snapshot on channel disconnect
+
+Because oVirt and Kerbside hand out one-time-use SPICE
+tickets, any channel that disconnects mid-session is
+permanently lost — the client cannot reconnect that
+channel without a fresh ticket. To make those events
+diagnosable after the fact, every `ChannelEvent::Error`
+or `ChannelEvent::Disconnected` triggers a best-effort
+auto-snapshot via `BugReport::write_disconnect`. The
+zip carries a `disconnect-cause.json` record alongside
+the usual pcap / channel-state / metadata files. The
+record names the channel that fired, captures whether
+the main-channel client-side keepalive timeout fired
+(distinguishing "we timed ourselves out" from a server
+RST), and embeds a per-channel diagnostics map so a
+maintainer can compare the dropped channel against the
+others' last-known traffic state.
+
+A 60 s cooldown bounds disk usage during a disconnect
+storm; the cooldown is updated even on write failure so
+a misconfigured output directory does not retry on every
+disconnect event. Snapshots land in (in order of
+preference) `--bug-report-dir`, `<--capture>/bug-reports/`,
+or the current working directory. The same resolution
+chain is used for the manual F8 button. Runtime metrics
+are recorded as unavailable in this path — sampling
+them on the GUI thread would freeze the UI for ~1 s,
+and the pcap and channel snapshots are the load-bearing
+diagnostic data anyway.
+
+### Notification snapshots and the "file from notification" button
+
+Phase 10 (F2) adds a per-row "File…" button on every
+notification entry in the side panel. Clicking always
+produces a bug-report zip; the variant depends on whether
+a live snapshot of the traffic-buffer state exists for
+that notification.
+
+On every `RyllApp::push_notification` call, after the
+`NotificationStore::push` returns the entry id, the app
+captures a cheap deep-copy of `TrafficBuffers` keyed by id.
+The clone is O(N atomic refcount bumps) thanks to Phase 07's
+`Arc<[u8]>` for `pcap_frame` and Phase 08's
+`Vec<Arc<[u8]>>` for `additional_segments`. The store is
+bounded: at most 5 active snapshots, 60 s TTL. Oldest is
+evicted on overflow; expired entries are pruned both at
+capture time and once per second from the GUI tick.
+
+When the user clicks the button:
+
+- If `notification_snapshots.take(id)` returns a snapshot,
+  the report uses it and metadata.json records
+  `report_type.snapshot_state: "AtFire"`. The zip filename
+  includes `atfire`. The pcap reflects the ring contents
+  from the moment the notification fired.
+- If the snapshot is missing (expired or evicted), the
+  report uses the current `TrafficBuffers` and tags
+  `PostEventOnly` / `postevent`. Useful, but without the
+  run-up to the event.
+
+The button's visual state reflects which path a click would
+take: weak/dimmed text + a "snapshot expired" hover tooltip
+when no live snapshot exists. `BugReport::write_notification`
+mirrors `write_disconnect`'s zip shape — same set of files,
+different filename prefix and metadata.
+
+### Auto-reconnect with backoff
+
+When a critical channel (Main, Display, Inputs) goes down
+mid-session, ryll attempts to recover transparently rather
+than presenting a modal immediately. The `ReconnectState`
+enum on `RyllApp` (`ryll/src/app.rs`) drives the flow:
+
+- `Idle` — connected normally, or never disconnected.
+- `Pending { attempt, next_at, latest_error }` — retry
+  scheduled. `attempt` ∈ 1..=3; `next_at` is the wall time
+  the next `reconnect()` call should fire.
+- `Modal(ModalVariant)` — auto-retry has given up and the
+  user has to intervene. The variant determines copy and
+  available buttons.
+
+Backoff is `[1s, 4s, 16s]` — short first attempt for blip
+recovery, longer windows for server restarts; worst-case
+~21 s before the modal pops. After three failures the state
+machine lands in `Modal(Generic { latest_error })`. The
+`latest_error` field carries the most recent attempt's
+failure string into the modal body.
+
+A `last_modal_at: Option<Instant>` field tracks when the
+modal last opened; further disconnects within 5 minutes
+skip the retry budget and go straight back to Modal — a
+flapping server cannot make ryll bang away forever. The
+manual Reconnect button clears `last_modal_at` so a
+user-initiated retry re-arms the full 3-attempt budget.
+
+The transition function `ReconnectState::on_disconnect()`
+is pure — it takes the current state, an `awaiting_outcome`
+bool, the cluster-reset timestamp, the wall clock, a
+`ReconnectPolicy`, and the latest error string, and returns
+the next state (or `None` if the event should be ignored as
+a channel-storm duplicate). Side effects — pushing
+notifications, bumping `auto_reconnect_count`, writing the
+disconnect snapshot — live at the call site in
+`RyllApp::handle_critical_disconnect`. This keeps the state
+machine unit-testable without spinning up the full app.
+
+The `awaiting_outcome` flag distinguishes "the in-flight
+reconnect attempt just failed" (advance the attempt
+counter) from "another channel in the storm just
+disconnected" (no-op). It is set to `true` when the
+GUI-tick poll calls `reconnect()` from a `Pending` state
+and cleared on the next event (success or failure).
+
+### Modal variants and console.vv ticket keys
+
+The `Modal` variant carries one of three discriminants:
+
+- `Generic { latest_error }` — auto-reconnect budget
+  exhausted on a reusable ticket. Buttons: Reconnect, Close.
+- `OneShotConsumed` — the .vv file set `delete-this-file=1`,
+  which ryll interprets as a single-use ticket signal. The
+  first link consumed the ticket; auto-reconnect skips
+  `Pending` entirely. Buttons: Close only.
+- `TicketExpired { expired_at }` — the .vv file set
+  `ticket-valid-until=<unix-ts>` and that wall time has
+  passed. Auto-reconnect is suppressed and the modal shows
+  the expiry time. Buttons: Close only.
+
+`ReconnectPolicy::forbid_retry(now_wall)` consults the two
+ticket-related `Config` fields and returns the appropriate
+`ModalVariant` when retry would be doomed. The state-machine
+transition consults it first, so a single-use ticket
+disconnects directly to Modal without burning the budget.
+
+The GUI tick also re-checks the policy at every `Pending`
+fire — a long Pending window can outlive
+`ticket-valid-until`, and there is no point firing a
+reconnect we know the server will reject. A pre-expiry
+notification ("Session ticket expires in 30 seconds.")
+fires once at T-30s, latched via `ticket_expiry_warned`.
+
+The non-spec `delete-this-file=1` interpretation and the new
+`ticket-valid-until` extension key are documented for
+producers (Kerbside, oVirt, custom gateways) in
+[`console-vv-extensions.md`](https://github.com/shakenfist/kerbside-wt-docs/blob/main/docs/spice/console-vv-extensions.md)
+in the kerbside-wt-docs repository.
+
+`auto_reconnect_count: u32` on `AppSnapshot` (serialized into
+the bug-report `session.json`) increments on every entry into
+`Pending`, so a future zip shows how rocky the session was.
 
 ## Multi-Monitor Support
 
@@ -1589,16 +1741,44 @@ performance.
 
 Every SPICE message (sent and received) is recorded in a per-channel
 ring buffer regardless of whether `--capture` is active. The ring
-buffer retains the most recent traffic up to a 50 MB total cap
-(12.5 MB per channel). Each entry stores structured metadata (channel
-name, direction, message type ID and human-readable name, wire and
-payload sizes, timestamp) alongside a full pcap frame for export.
+buffer retains the most recent traffic up to a 50 MB total cap,
+allocated by weight per channel (Phase 06 of the session-001-feedback
+master plan rebalanced the previous even split):
 
-The `TrafficBuffers` struct in `ryll/src/bugreport.rs` holds all four
+| Channel | Cap | Weight | Coverage at session-001 rates |
+|---------|-----|--------|-------------------------------|
+| display | 32 MB | 16 | ~16 s @ 2 MB/s typical, ~5 s @ 6 MB/s peak |
+| usbredir | 4 MB | 2 | session-long when idle (active transfers exceed any cap) |
+| playback | 4 MB | 2 | many minutes of audio |
+| cursor | 4 MB | 2 | many minutes |
+| main | 4 MB | 2 | hours |
+| inputs | 2 MB | 1 | hours |
+
+The display rebalance was load-bearing for the Phase 10 notification-
+snapshot feature: a snapshot captured at notification-fire time covers
+the run-up to the event for users to file in a bug report.
+
+Each entry stores structured metadata (channel name, direction,
+message type ID and human-readable name, wire and payload sizes,
+timestamp) alongside the pcap frame bytes for export. SPICE messages
+that exceed the IPv4 single-frame limit (~64 KB) are split into
+multiple TCP segments via the shared `capture::segment_payload`
+helper; each `TrafficEntry` carries its first segment in `pcap_frame`
+and any trailing segments in `additional_segments: Vec<Arc<[u8]>>`
+(Phase 08). The `Arc<[u8]>` choice for both fields (Phase 07) makes
+ring-buffer entry clones O(N atomic refcount bumps) rather than
+O(total bytes), which is what enables the notification-snapshot
+store's cheap deep-copy at fire time.
+
+The `TrafficBuffers` struct in `ryll/src/bugreport.rs` holds all six
 per-channel `TrafficRingBuffer` instances behind `Mutex<>` and is
 shared via `Arc<TrafficBuffers>` between all channel handler tasks
-and the UI thread. This supports both bug report export
-and the live traffic viewer.
+and the UI thread. This supports both bug-report export, the live
+traffic viewer, and the snapshot-on-notification path. (The webdav
+channel is intentionally absent — its handler does not call
+`traffic.record_*` today; tracked as a follow-up in
+`PLAN-session-001-feedback-phase-06-channel-rebalance.md`'s Out-of-
+scope section.)
 
 ## Channel State Snapshots
 

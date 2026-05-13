@@ -1,11 +1,11 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ByteCounter, LogConfig, NotificationEntry, NotificationSource, OpusPacketSink, TrafficSink,
@@ -377,12 +377,19 @@ pub struct PlaybackChannel {
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
     log_config: LogConfig,
+    snapshot: Arc<Mutex<crate::snapshots::PlaybackSnapshot>>,
     ack_generation: u32,
     ack_window: u32,
     message_count: u32,
     last_ack: u32,
     bytes_in: u64,
     bytes_out: u64,
+    /// Local cache of disconnect-cause diagnostic fields.
+    last_recv_ts_secs: Option<f64>,
+    last_send_ts_secs: Option<f64>,
+    ping_recv_count: u32,
+    pong_send_count: u32,
+    last_ping_recv_ts_secs: Option<f64>,
     audio_mode: u16,
     sample_rate: u32,
     channels: u32,
@@ -412,6 +419,7 @@ impl PlaybackChannel {
         repaint_notify: Arc<Notify>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
+        snapshot: Arc<Mutex<crate::snapshots::PlaybackSnapshot>>,
         volume_control: Arc<VolumeControl>,
         log_config: LogConfig,
         cancel: Arc<AtomicBool>,
@@ -425,12 +433,18 @@ impl PlaybackChannel {
             byte_counter,
             traffic,
             log_config,
+            snapshot,
             ack_generation: 0,
             ack_window: 0,
             message_count: 0,
             last_ack: 0,
             bytes_in: 0,
             bytes_out: 0,
+            last_recv_ts_secs: None,
+            last_send_ts_secs: None,
+            ping_recv_count: 0,
+            pong_send_count: 0,
+            last_ping_recv_ts_secs: None,
             audio_mode: 0,
             sample_rate: 0,
             channels: 0,
@@ -443,7 +457,20 @@ impl PlaybackChannel {
         }
     }
 
+    /// Public entry point. Wraps `run_loop` so errors
+    /// propagating out of the inner select! arms are logged
+    /// before the task ends — see `MainChannel::run` for the
+    /// rationale (including the `Box::pin` reason).
     pub async fn run(&mut self) -> Result<()> {
+        let result = Box::pin(self.run_loop()).await;
+        match &result {
+            Ok(()) => info!("playback: run loop exited cleanly"),
+            Err(e) => error!("playback: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("playback: channel started");
         loop {
             let mut chunk = [0u8; 65536];
@@ -488,7 +515,9 @@ impl PlaybackChannel {
             self.byte_counter.add(n as u64);
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
+            self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
             self.process_messages().await?;
+            self.update_snapshot();
         }
 
         // Clean shutdown: stop the audio thread.
@@ -547,11 +576,15 @@ impl PlaybackChannel {
                     self.send_with_log(main_client::ACK_SYNC, &response).await?;
                 }
                 playback_server::PING => {
+                    self.ping_recv_count = self.ping_recv_count.saturating_add(1);
+                    self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+
                     let ping = Ping::read(&payload)?;
                     let mut pong_payload = Vec::new();
                     ping.write_pong(&mut pong_payload)?;
                     let response = make_message(main_client::PONG, &pong_payload);
                     self.send_with_log(main_client::PONG, &response).await?;
+                    self.pong_send_count = self.pong_send_count.saturating_add(1);
                 }
                 playback_server::NOTIFY => {
                     let notify = NotifyMessage::read(&payload)?;
@@ -761,7 +794,22 @@ impl PlaybackChannel {
             }
         }
         self.bytes_out += data.len() as u64;
+        self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.update_snapshot();
         Ok(())
+    }
+
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            snap.bytes_in = self.bytes_in;
+            snap.bytes_out = self.bytes_out;
+            snap.last_recv_ts_secs = self.last_recv_ts_secs;
+            snap.last_send_ts_secs = self.last_send_ts_secs;
+            snap.ping_recv_count = self.ping_recv_count;
+            snap.pong_send_count = self.pong_send_count;
+            snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+        }
     }
 }
 

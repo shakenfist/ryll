@@ -43,7 +43,7 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 - **Live traffic viewer** - Press F11 or use Menu → Traffic for a real-time colour-coded feed of SPICE protocol messages with per-channel filters and pause/resume
 - **USB device management** - Use Menu → USB for a side panel to browse available devices, connect/disconnect physical or virtual USB devices, add RAW disk images via native file picker, and monitor connection status with elapsed time; USB errors integrate with bug reporting
 - **Folder sharing** - Use Menu → Folders for a side panel to select a local directory to share with the guest, toggle read-only mode, and monitor sharing status with elapsed time
-- **In-app notifications panel** - Surfaces protocol gaps, bug-report status, and SPICE_MSG_NOTIFY messages (e.g. QEMU's "channel is insecure" warnings) on a single bell + side-panel surface
+- **In-app notifications panel** - Surfaces protocol gaps, bug-report status, SPICE_MSG_NOTIFY messages (e.g. QEMU's "channel is insecure" warnings), and connection-state transitions (connect / reconnect cycle / channel drop / agent state) on a single bell + side-panel surface. Each entry carries a per-row "File…" button that produces a bug-report zip — when a live ring-buffer snapshot exists for the notification (≤ 60 s old, within the last 5 notifications), the report contains the pcap and channel state from the moment the notification fired; otherwise it falls back to post-event ring contents
 
 ## Installation
 
@@ -154,6 +154,33 @@ ryll --url http://example.com/vm.vv
 # From local file
 ryll --file /path/to/connection.vv
 ```
+
+#### console.vv keys ryll honours
+
+ryll parses the standard `host`, `port`, `tls-port`, `password`,
+`ca`, and `host-subject` keys. It also reads two ticket-related
+keys with ryll-specific behaviour:
+
+- **`delete-this-file=1`** — the standard "remove this file
+  after reading" hint. ryll additionally treats this as a
+  signal that the SPICE ticket is **single-use**: any
+  reconnect attempt would be rejected by the server, so
+  auto-reconnect is suppressed and a "single-use ticket"
+  modal is shown instead of the normal retry sequence.
+- **`ticket-valid-until=<unix-ts>`** — a ryll extension key
+  (no equivalent in remote-viewer). When set, ryll surfaces a
+  T-30s warning notification, suppresses auto-reconnect once
+  the deadline has passed, and shows a "ticket expired" modal
+  with the expiry time.
+
+Both keys degrade gracefully — absent values mean the previous
+ryll behaviour. Producer-side documentation lives in the
+companion doc
+[`console-vv-extensions.md`](https://github.com/shakenfist/kerbside-wt-docs/blob/main/docs/spice/console-vv-extensions.md)
+in the kerbside-wt-docs repository, which is the canonical
+reference for SPICE deployment authors (Kerbside, oVirt,
+custom gateways) who want their .vv output to drive ryll's
+reconnect UX correctly.
 
 ### Direct connection
 
@@ -268,6 +295,24 @@ A bell icon in the status bar shows unread notifications. Click it to
 open the side panel; closing the panel marks everything read. The bell
 tints amber or red when there are unread Warn or Error-severity entries
 (such as SPICE "channel is insecure" warnings from QEMU).
+
+Entries are tagged with a source label — `Connection` for connect /
+disconnect / reconnect cycle / channel error / guest-agent state
+transitions, `Gap` for protocol gaps, `BugReport` for save status,
+`SPICE/<channel>` for server NOTIFY messages, `Internal` for everything
+else.
+
+Every entry carries a per-row **File…** button that produces a bug-report
+zip. ryll captures a snapshot of the traffic ring buffer at the moment a
+notification fires (Phase 10 of the session-001-feedback master plan). If
+a live snapshot exists when the button is clicked (≤ 60 s old, within
+the last 5 notifications), the zip's pcap and channel state come from
+the moment the notification fired and the metadata records
+`notification_snapshot: "AtFire"`. After the snapshot has expired the
+button still produces a report, using the current ring contents, with
+`notification_snapshot: "PostEventOnly"` — the button's visual state
+(solid vs. dimmed + hover tooltip) tells you which path a click would
+take.
 
 ## Architecture
 

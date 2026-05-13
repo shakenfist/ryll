@@ -220,6 +220,26 @@ Ryll uses:
     matters because the traffic pcap is what makes a pedantic report
     actionable for debugging.
 
+20b. **Auto-disconnect snapshots and the bug-report directory chain** -
+    Every `ChannelEvent::Error` / `ChannelEvent::Disconnected` calls
+    `RyllApp::maybe_write_disconnect_snapshot`, which builds a
+    `bugreport::DisconnectCause` (channel name, error message,
+    keepalive-timeout flag from `MainSnapshot`, session uptime,
+    per-channel diagnostics map) and invokes
+    `BugReport::write_disconnect`. The fire-on-every-channel scope
+    is deliberate: under ticket-based deployments (oVirt, Kerbside)
+    every channel disconnect is permanent, so the data must be
+    captured at the moment of failure. A 60 s cooldown is enforced
+    via `RyllApp::last_disconnect_report_at` and is updated even on
+    write failure to avoid retry storms. Output directory resolution
+    (shared with the manual F8 button via `manual_bug_report_dir`):
+    `--bug-report-dir` → `<--capture>/bug-reports/` → CWD. The
+    `--pedantic-dir` flag falls back through the same chain when
+    unspecified: `--pedantic-dir` → `--bug-report-dir` →
+    `./ryll-pedantic-reports/`. Runtime metrics are deliberately
+    `RuntimeMetrics::unavailable(...)` here — sampling on the GUI
+    thread blocks the render loop for ~1 s.
+
 21. **Notifications go through the unified store, not direct UI
     calls** - The notification store at `ryll/src/notifications.rs`
     is the single producer boundary. Channel handlers, the bug-report
@@ -233,6 +253,50 @@ Ryll uses:
     `notifications.rs`; the side panel's `NotificationSource::label()`
     impl dictates how the new variant renders. Bug-report zips
     automatically include any new entries via `notifications.json`.
+    Current source inventory: `Gap`, `BugReport`, `Spice {channel,
+    what}`, `Internal`, `Connection` (Phase 09 / F1 — every
+    connection-state transition, pushed via the
+    `RyllApp::push_connection_event` helper).
+
+    Prefer `RyllApp::push_notification` over a bare
+    `notifications.lock().push(entry)` from inside `RyllApp`:
+    the wrapper *also* captures a `TrafficBuffers` snapshot
+    keyed by the new entry's id (Phase 10 / F2). That
+    snapshot is what the "File…" button on each
+    notification row consumes to produce an at-fire bug
+    report. Producers outside `RyllApp` (channel handlers,
+    pedantic observer) still go through the raw store —
+    they don't have access to the snapshot store, and the
+    button falls back gracefully to post-event-only when
+    no snapshot exists.
+
+22. **Auto-reconnect: pure state-machine transition, side effects
+    at the call site** - The `ReconnectState` enum on `RyllApp`
+    (`ryll/src/app.rs`) replaces the old `show_disconnect_dialog`
+    boolean. `Idle` / `Pending { attempt, next_at, latest_error }` /
+    `Modal(ModalVariant)`. The transition function
+    `ReconnectState::on_disconnect()` is pure — it takes the current
+    state, an `awaiting_outcome` bool, the cluster-reset timestamp,
+    the wall clock, a `ReconnectPolicy`, and the latest error
+    string, and returns the next state (or `None` for a duplicate
+    storm event to ignore). Side effects — pushing notifications,
+    bumping `auto_reconnect_count`, writing the disconnect snapshot,
+    logging clock-skew warnings — live at the call site in
+    `RyllApp::handle_critical_disconnect`, never inside the
+    transition function. This keeps the state machine unit-testable
+    (see `app.rs::tests::reconnect_*` and `ticket_*` tests) without
+    building a full `RyllApp`. When extending: pure transitions add
+    branches to `on_disconnect`; side effects go in the handler. The
+    `awaiting_reconnect_outcome` flag on `RyllApp` is the gate that
+    distinguishes "the in-flight retry just failed" from "another
+    channel in the same storm just dropped" — set when the
+    GUI-tick poll calls `reconnect()`, cleared on the next event.
+    Three modal variants exist (`Generic { latest_error }`,
+    `OneShotConsumed`, `TicketExpired { expired_at }`) driven by
+    `ReconnectPolicy` derived from the `.vv` file's
+    `delete-this-file` and `ticket-valid-until` keys; the policy
+    short-circuits the state machine straight to the matching
+    Modal when retry would be doomed.
 
 ## Code Organisation
 

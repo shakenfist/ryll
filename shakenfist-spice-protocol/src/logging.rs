@@ -381,6 +381,7 @@ pub mod message_names {
             display_server::STREAM_DATA => "stream_data",
             display_server::STREAM_CLIP => "stream_clip",
             display_server::STREAM_DESTROY => "stream_destroy",
+            display_server::STREAM_DESTROY_ALL => "stream_destroy_all",
             display_server::STREAM_DATA_SIZED => "stream_data_sized",
             display_server::DRAW_FILL => "draw_fill",
             display_server::DRAW_OPAQUE => "draw_opaque",

@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
 use configparser::ini::Ini;
 use shakenfist_spice_protocol::ConnectionConfig;
+use tracing::warn;
 
 // Device-shaped configuration (the value types passed into the
 // channel constructors) lives in the renderer crate. The
@@ -79,10 +81,32 @@ pub struct Args {
     #[arg(long)]
     pub pedantic: bool,
 
-    /// Directory for --pedantic-mode bug reports. Created
-    /// if missing.
-    #[arg(long, default_value = "./ryll-pedantic-reports")]
-    pub pedantic_dir: std::path::PathBuf,
+    /// Directory for --pedantic-mode bug reports. Created if
+    /// missing. If unset, falls back to --bug-report-dir, then
+    /// to the historical default of ./ryll-pedantic-reports.
+    #[arg(long)]
+    pub pedantic_dir: Option<std::path::PathBuf>,
+
+    /// Default directory for bug-report zip files (F8 reports,
+    /// pedantic reports, and auto-disconnect snapshots).
+    /// Created if missing. Each flavour can be overridden
+    /// individually (e.g. by --pedantic-dir). If neither this
+    /// nor a flavour-specific flag is set, the per-flavour
+    /// fallback applies (cwd for F8 / auto-disconnect,
+    /// ./ryll-pedantic-reports for pedantic).
+    #[arg(long)]
+    pub bug_report_dir: Option<std::path::PathBuf>,
+
+    /// Diagnostic flag for the K1 hang investigation
+    /// (PLAN-session-001-feedback Phase 02). When set, ryll's
+    /// per-connection tokio runtime is built with
+    /// `Builder::new_current_thread()` instead of the default
+    /// multi-threaded `Runtime::new()`. Disambiguates a real
+    /// blocking call (would still hang) from a multi-threaded
+    /// scheduler / Waker registration bug (would not hang).
+    /// Will be removed after K1 is closed.
+    #[arg(long)]
+    pub debug_single_thread_runtime: bool,
 
     /// Enable paste-as-keystrokes fallback for guests without vdagent
     #[arg(long)]
@@ -141,6 +165,21 @@ pub struct Config {
     pub ca_cert: Option<String>,
     #[allow(dead_code)]
     pub host_subject: Option<String>,
+    /// True when the .vv file set `delete-this-file=1`. ryll
+    /// treats this as "the ticket is single-use" — auto-reconnect
+    /// skips Pending entirely and shows the `OneShotConsumed`
+    /// modal, since the previous link consumed the ticket. The
+    /// non-spec interpretation is documented in
+    /// `kerbside-wt-docs/docs/spice/console-vv-extensions.md`.
+    pub ticket_is_single_use: bool,
+    /// Optional ticket expiry timestamp (`ticket-valid-until` —
+    /// ryll-specific extension key, unix seconds). When the
+    /// current time has passed this point, auto-reconnect is
+    /// disabled regardless of the 3-attempt budget — the ticket
+    /// is dead from the server's point of view, so retrying
+    /// only produces failed attempts. `None` if absent or
+    /// malformed in the .vv file.
+    pub ticket_valid_until: Option<SystemTime>,
 }
 
 impl From<&Config> for ConnectionConfig {
@@ -230,6 +269,8 @@ impl Config {
                     password: None,
                     ca_cert: None,
                     host_subject: None,
+                    ticket_is_single_use: false,
+                    ticket_valid_until: None,
                 })
             }
             3 => {
@@ -243,6 +284,8 @@ impl Config {
                     password: None,
                     ca_cert: None,
                     host_subject: None,
+                    ticket_is_single_use: false,
+                    ticket_valid_until: None,
                 })
             }
             _ => Err(anyhow!(
@@ -275,6 +318,22 @@ impl Config {
         let ca_cert = ini.get(section, "ca").and_then(filter_none);
         let host_subject = ini.get(section, "host-subject").and_then(filter_none);
 
+        // `delete-this-file=1` → single-use ticket. Standard
+        // virt-viewer key; ryll layers an extra interpretation
+        // documented in console-vv-extensions.md. Any value
+        // other than "1" (including absence) leaves
+        // `ticket_is_single_use = false`.
+        let ticket_is_single_use = ini
+            .get(section, "delete-this-file")
+            .and_then(filter_none)
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false);
+
+        // `ticket-valid-until=<unix-ts>` → ryll-specific
+        // extension key. Malformed values do not fail the parse;
+        // we log a warning and treat the field as absent.
+        let ticket_valid_until = parse_ticket_valid_until(&ini, section);
+
         Ok(Config {
             host,
             port: port.unwrap_or(0),
@@ -282,8 +341,67 @@ impl Config {
             password,
             ca_cert,
             host_subject,
+            ticket_is_single_use,
+            ticket_valid_until,
         })
     }
+}
+
+/// Parse the `ticket-valid-until` extension key from the .vv
+/// file. Absent → `None`; malformed → log a warn and yield
+/// `None` (do not propagate the error — connect should still
+/// succeed even if the optional expiry hint cannot be parsed).
+///
+/// Hardening (pre-push audit, wave 2d / F1 + F2):
+///
+/// - **Overflow-safe arithmetic.** A near-`u64::MAX` value
+///   would overflow the i64-backed `SystemTime` and panic on
+///   the `+` operator. `checked_add` returns `None`, which we
+///   treat as a parse failure.
+///
+/// - **Reject past timestamps at parse time.** A hostile or
+///   buggy `.vv` with `ticket-valid-until=0` (or any value
+///   already in the past) would short-circuit every disconnect
+///   into the `Modal(TicketExpired)` variant on first
+///   disconnect, even though the actual server-side ticket may
+///   be perfectly valid. Treat already-past expiries the same
+///   as malformed: log a warn and yield `None` so the session
+///   proceeds normally.
+fn parse_ticket_valid_until(ini: &Ini, section: &str) -> Option<SystemTime> {
+    let raw = ini
+        .get(section, "ticket-valid-until")
+        .and_then(filter_none)?;
+    let secs = match raw.trim().parse::<u64>() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(
+                ".vv: ticket-valid-until='{}' is not a valid unix timestamp: {}; ignoring",
+                raw, e
+            );
+            return None;
+        }
+    };
+    let expiry = match UNIX_EPOCH.checked_add(Duration::from_secs(secs)) {
+        Some(t) => t,
+        None => {
+            warn!(
+                ".vv: ticket-valid-until='{}' overflows SystemTime; ignoring",
+                raw
+            );
+            return None;
+        }
+    };
+    let now = SystemTime::now();
+    if expiry <= now {
+        warn!(
+            ".vv: ticket-valid-until='{}' is already in the past at parse time; \
+             ignoring (would otherwise short-circuit every disconnect to a \
+             ticket-expired modal)",
+            raw
+        );
+        return None;
+    }
+    Some(expiry)
 }
 
 /// Collect virtual disk configs from CLI args and validate paths.
@@ -383,5 +501,100 @@ mod tests {
     fn no_obey_guest_size_flag_sets_true() {
         let args = Args::parse_from(["ryll", "--direct", "host:5900", "--no-obey-guest-size"]);
         assert!(args.no_obey_guest_size);
+    }
+
+    // ── .vv extension keys ──────────────────────────────────
+
+    fn parse(content: &str) -> Config {
+        Config::parse_vv_content(content).expect("parse")
+    }
+
+    #[test]
+    fn vv_defaults_have_ticket_fields_unset() {
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\n");
+        assert!(!cfg.ticket_is_single_use);
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_delete_this_file_1_sets_single_use() {
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=1\n");
+        assert!(cfg.ticket_is_single_use);
+    }
+
+    #[test]
+    fn vv_delete_this_file_0_leaves_single_use_off() {
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=0\n");
+        assert!(!cfg.ticket_is_single_use);
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_parses_unix_ts() {
+        // Use a far-future timestamp so the past-rejection
+        // hardening doesn't trip the happy-path test. 33 years
+        // from the unix epoch puts us comfortably past 2026 and
+        // well within SystemTime's range. The exact number
+        // doesn't matter beyond "not in the past at test time".
+        let future = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs())
+            + 86_400;
+        let vv = format!(
+            "[virt-viewer]\nhost=h\nport=5900\nticket-valid-until={}\n",
+            future
+        );
+        let cfg = parse(&vv);
+        let t = cfg.ticket_valid_until.expect("ticket_valid_until set");
+        let secs = t.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(secs, future);
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_malformed_logs_warn_and_yields_none() {
+        // Garbage value: do not fail the parse, just drop the
+        // optional hint so connect can still proceed.
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=not-a-number\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_absent_yields_none() {
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_past_value_yields_none() {
+        // Pre-push audit wave 2d / F2 hardening: a hostile or
+        // buggy .vv with a past timestamp would otherwise lock
+        // the user into Modal(TicketExpired) on first
+        // disconnect. Reject at parse time so the session
+        // proceeds with the full auto-reconnect budget.
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=1\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_zero_yields_none() {
+        // Boundary case for the past-rejection: 0 (the unix
+        // epoch) is unambiguously in the past.
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\nticket-valid-until=0\n");
+        assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    #[test]
+    fn vv_ticket_valid_until_overflow_yields_none() {
+        // Pre-push audit wave 2d / F1 hardening:
+        // u64::MAX seconds overflows the i64-backed SystemTime
+        // and would panic on `UNIX_EPOCH + Duration::from_secs`.
+        // checked_add returns None; we treat it like a parse
+        // failure.
+        let vv = format!(
+            "[virt-viewer]\nhost=h\nport=5900\nticket-valid-until={}\n",
+            u64::MAX
+        );
+        let cfg = parse(&vv);
+        assert!(cfg.ticket_valid_until.is_none());
     }
 }

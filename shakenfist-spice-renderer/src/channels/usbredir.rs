@@ -4,20 +4,21 @@
 /// device attachment/detachment lifecycle, and delegates configuration
 /// and transfer messages to the active device backend.
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 #[cfg(target_os = "linux")]
 use nusb::MaybeFuture;
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
 use crate::usb::virtual_msc::VirtualMsc;
 use crate::usb::{is_ep_in, ControlSetup, DeviceBackend, InterruptData, UsbDeviceBackend};
 use crate::{
-    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, VirtualDiskConfig,
+    ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
+    VirtualDiskConfig,
 };
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
@@ -42,6 +43,13 @@ pub struct UsbredirChannel {
     buffer: Vec<u8>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
+    /// Traffic sink reference; used only for `elapsed()` to
+    /// stamp disconnect-cause diagnostic timestamps. usbredir
+    /// does not currently feed messages into the traffic ring
+    /// buffers.
+    traffic: Arc<dyn TrafficSink>,
+    /// Disconnect-cause snapshot for the usbredir channel.
+    snapshot: Arc<Mutex<crate::snapshots::UsbredirSnapshot>>,
     log_config: LogConfig,
 
     // BaseChannel ACK state
@@ -53,6 +61,13 @@ pub struct UsbredirChannel {
     // Statistics
     bytes_in: u64,
     bytes_out: u64,
+    /// Local cache of disconnect-cause diagnostic fields,
+    /// flushed to `snapshot` by `update_snapshot()`.
+    last_recv_ts_secs: Option<f64>,
+    last_send_ts_secs: Option<f64>,
+    ping_recv_count: u32,
+    pong_send_count: u32,
+    last_ping_recv_ts_secs: Option<f64>,
 
     // usbredir protocol state
     parser: UsbredirParser,
@@ -78,6 +93,8 @@ impl UsbredirChannel {
         auto_connect_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
+        traffic: Arc<dyn TrafficSink>,
+        snapshot: Arc<Mutex<crate::snapshots::UsbredirSnapshot>>,
         log_config: LogConfig,
     ) -> Self {
         let (interrupt_tx, interrupt_rx) = mpsc::channel(64);
@@ -89,6 +106,8 @@ impl UsbredirChannel {
             buffer: Vec::with_capacity(65536),
             capture,
             byte_counter,
+            traffic,
+            snapshot,
             log_config,
             ack_generation: 0,
             ack_window: 0,
@@ -96,6 +115,11 @@ impl UsbredirChannel {
             last_ack: 0,
             bytes_in: 0,
             bytes_out: 0,
+            last_recv_ts_secs: None,
+            last_send_ts_secs: None,
+            ping_recv_count: 0,
+            pong_send_count: 0,
+            last_ping_recv_ts_secs: None,
             parser: UsbredirParser::new(),
             server_caps: 0,
             backend: None,
@@ -106,8 +130,20 @@ impl UsbredirChannel {
         }
     }
 
-    /// Run the usbredir channel event loop
+    /// Run the usbredir channel event loop. Wraps `run_loop`
+    /// so errors propagating out of the inner select! arms
+    /// are logged before the task ends — see `MainChannel::run`
+    /// for the rationale (including the `Box::pin` reason).
     pub async fn run(&mut self) -> Result<()> {
+        let result = Box::pin(self.run_loop()).await;
+        match &result {
+            Ok(()) => info!("usbredir: run loop exited cleanly"),
+            Err(e) => error!("usbredir: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("usbredir: channel started");
         self.event_tx.send(ChannelEvent::UsbChannelReady).await.ok();
         self.repaint_notify.notify_one();
@@ -153,6 +189,8 @@ impl UsbredirChannel {
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
+                    self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+                    self.update_snapshot();
 
                     self.process_messages().await?;
                 }
@@ -234,6 +272,9 @@ impl UsbredirChannel {
                     .await?;
             }
             spicevmc_server::PING => {
+                self.ping_recv_count = self.ping_recv_count.saturating_add(1);
+                self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+
                 let ping = Ping::read(payload)?;
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -245,6 +286,7 @@ impl UsbredirChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(spicevmc_client::PONG, &pong_payload);
                 self.send_with_log(spicevmc_client::PONG, &response).await?;
+                self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
             spicevmc_server::NOTIFY => {
                 let notify = NotifyMessage::read(payload)?;
@@ -948,7 +990,22 @@ impl UsbredirChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+        self.update_snapshot();
         Ok(())
+    }
+
+    /// Sync local state to the shared snapshot.
+    fn update_snapshot(&self) {
+        if let Ok(mut snap) = self.snapshot.lock() {
+            snap.bytes_in = self.bytes_in;
+            snap.bytes_out = self.bytes_out;
+            snap.last_recv_ts_secs = self.last_recv_ts_secs;
+            snap.last_send_ts_secs = self.last_send_ts_secs;
+            snap.ping_recv_count = self.ping_recv_count;
+            snap.pong_send_count = self.pong_send_count;
+            snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+        }
     }
 }
 

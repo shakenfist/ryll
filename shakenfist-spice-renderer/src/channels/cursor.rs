@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, Notify};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::snapshots::{CursorCacheEntry, CursorSnapshot};
 use crate::{
@@ -36,6 +36,13 @@ pub struct CursorChannel {
     last_ack: u32,
     bytes_in: u64,
     bytes_out: u64,
+    /// Local cache of disconnect-cause diagnostic fields,
+    /// flushed to `snapshot` by `update_snapshot()`.
+    last_recv_ts_secs: Option<f64>,
+    last_send_ts_secs: Option<f64>,
+    ping_recv_count: u32,
+    pong_send_count: u32,
+    last_ping_recv_ts_secs: Option<f64>,
 }
 
 impl CursorChannel {
@@ -67,11 +74,28 @@ impl CursorChannel {
             last_ack: 0,
             bytes_in: 0,
             bytes_out: 0,
+            last_recv_ts_secs: None,
+            last_send_ts_secs: None,
+            ping_recv_count: 0,
+            pong_send_count: 0,
+            last_ping_recv_ts_secs: None,
         }
     }
 
-    /// Run the cursor channel event loop
+    /// Run the cursor channel event loop. Wraps `run_loop` so
+    /// errors propagating out of the inner select! arms are
+    /// logged before the task ends — see `MainChannel::run`
+    /// for the rationale (including the `Box::pin` reason).
     pub async fn run(&mut self) -> Result<()> {
+        let result = Box::pin(self.run_loop()).await;
+        match &result {
+            Ok(()) => info!("cursor: run loop exited cleanly"),
+            Err(e) => error!("cursor: run loop exited with error: {:#}", e),
+        }
+        result
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
         info!("cursor: channel started");
 
         loop {
@@ -104,6 +128,7 @@ impl CursorChannel {
             }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
+            self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
             // Process complete messages
             self.process_messages().await?;
@@ -295,6 +320,9 @@ impl CursorChannel {
             }
 
             cursor_server::PING => {
+                self.ping_recv_count = self.ping_recv_count.saturating_add(1);
+                self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+
                 let ping = Ping::read(payload)?;
 
                 if self.log_config.verbose {
@@ -308,6 +336,7 @@ impl CursorChannel {
                 ping.write_pong(&mut pong_payload)?;
                 let response = make_message(cursor_client::PONG, &pong_payload);
                 self.send_with_log(cursor_client::PONG, &response).await?;
+                self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 
             cursor_server::NOTIFY => {
@@ -445,6 +474,11 @@ impl CursorChannel {
         snap.last_ack = self.last_ack;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;
+        snap.last_recv_ts_secs = self.last_recv_ts_secs;
+        snap.last_send_ts_secs = self.last_send_ts_secs;
+        snap.ping_recv_count = self.ping_recv_count;
+        snap.pong_send_count = self.pong_send_count;
+        snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
     }
 
     async fn send_ack(&mut self) -> Result<()> {
@@ -473,6 +507,7 @@ impl CursorChannel {
         self.stream.write_all(data).await?;
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
+        self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
         Ok(())
     }
 }

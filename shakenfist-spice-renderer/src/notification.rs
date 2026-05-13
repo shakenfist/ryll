@@ -22,6 +22,13 @@ pub enum NotificationSource {
     Spice { channel: ChannelType, what: u32 },
     /// Internally generated notification.
     Internal,
+    /// Connection-state transition: initial connect, reconnect
+    /// cycle, channel disconnect, channel error, guest agent
+    /// up/down. Groups every event that tells the user
+    /// "something changed about the link to the server".
+    /// Introduced in Phase 09 (F1) of the session-001 feedback
+    /// work.
+    Connection,
 }
 
 impl NotificationSource {
@@ -34,6 +41,7 @@ impl NotificationSource {
             NotificationSource::Spice { channel, .. } => {
                 format!("SPICE/{}", channel.name())
             }
+            NotificationSource::Connection => "Connection".to_string(),
         }
     }
 }

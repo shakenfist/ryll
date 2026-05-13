@@ -71,6 +71,49 @@ fn main() -> Result<()> {
     })
     .expect("failed to set Ctrl+C handler");
 
+    // Idempotent rustls CryptoProvider install. rustls 0.23 panics
+    // at the no-arg `ClientConfig::builder()` call site
+    // (shakenfist-spice-protocol/src/client.rs) when feature
+    // unification across the workspace enables both `ring` and
+    // `aws-lc-rs` and no process-level default has been installed.
+    // The Linux devcontainer's resolver lands on a single provider
+    // and silently auto-detects; macOS resolves with both enabled
+    // and panics. Installing a default explicitly at startup
+    // covers every entry path (--web already did this internally).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Optional tokio-console initialisation for the K1 hang
+    // investigation. Requires `--features tokio-console` AND
+    // `RUSTFLAGS=--cfg tokio_unstable` at compile time, plus
+    // `RYLL_TOKIO_CONSOLE=1` at runtime. Console-subscriber
+    // installs itself as the global tracing subscriber, so we
+    // skip the regular tracing_subscriber init below when it
+    // is active. tokio-console viewers connect over a unix
+    // socket (default 127.0.0.1:6669) and show every running
+    // task's state, registered Wakers, last poll time, etc.
+    #[cfg(feature = "tokio-console")]
+    let console_subscriber_active = std::env::var("RYLL_TOKIO_CONSOLE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    #[cfg(not(feature = "tokio-console"))]
+    let console_subscriber_active = false;
+    #[cfg(feature = "tokio-console")]
+    {
+        if console_subscriber_active {
+            console_subscriber::init();
+            // audit-allow-println — this `eprintln!` fires before
+            // tracing is initialised (`set_global_default` runs a
+            // few lines below), so a `tracing::info!` here would
+            // silently drop. The output is a one-shot operator-
+            // facing startup hint that the tokio-console
+            // subscriber is live and how to connect.
+            eprintln!(
+                "ryll: tokio-console subscriber active. Connect with `tokio-console` \
+                 from another terminal. The default endpoint is 127.0.0.1:6669."
+            );
+        }
+    }
+
     // Parse command line arguments
     let args = Args::parse();
 
@@ -87,7 +130,15 @@ fn main() -> Result<()> {
 
     // When verbose, also log to /tmp/ryll.log
     let _file_guard;
-    if args.verbose {
+    if console_subscriber_active {
+        // console-subscriber installed itself globally; don't
+        // try to install another subscriber here. ryll's normal
+        // logs go nowhere in this mode — the operator should
+        // run with `RUST_LOG=info` and the console-subscriber's
+        // own output, or accept the trade-off for the duration
+        // of the K1 investigation.
+        _file_guard = None;
+    } else if args.verbose {
         let file_appender = tracing_appender::rolling::never("/tmp", "ryll.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
         _file_guard = Some(guard);
@@ -110,6 +161,17 @@ fn main() -> Result<()> {
 
     // Initialize global settings for protocol logging
     settings::init(args.verbose, args.intimate);
+
+    // Log build identity early — answers "am I running the build
+    // I just made?" without needing to inspect the binary or
+    // open a bug-report zip. RYLL_GIT_SHA is populated by
+    // ryll/build.rs (preferred: Makefile-passed env var; fallback:
+    // `git rev-parse` at compile time; last resort: "unknown").
+    info!(
+        "ryll v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("RYLL_GIT_SHA"),
+    );
 
     // Load configuration. Phase 5 step 5a removed the
     // `--web` stub: every mode now requires a real `.vv` /
@@ -143,21 +205,29 @@ fn main() -> Result<()> {
     #[cfg(not(feature = "capture"))]
     let capture: Option<Arc<CaptureSession>> = None;
 
-    // Eager-failure `mkdir -p` for the --pedantic output directory so the
-    // user hears about disk/permission problems before the session starts.
-    // The actual gap-observer registration happens inside the app
-    // constructors (app::RyllApp::new / app::run_headless) once the live
-    // traffic / channel-snapshot handles have been built.
+    // Resolve the pedantic output directory. Priority:
+    //   1. --pedantic-dir if set
+    //   2. --bug-report-dir if set
+    //   3. ./ryll-pedantic-reports (historical default)
+    // Eager-failure `mkdir -p` so the user hears about
+    // disk/permission problems before the session starts. The
+    // actual gap-observer registration happens inside the app
+    // constructors (app::RyllApp::new / app::run_headless) once
+    // the live traffic / channel-snapshot handles have been
+    // built.
     let pedantic_config = if args.pedantic {
-        std::fs::create_dir_all(&args.pedantic_dir).with_context(|| {
+        let pedantic_dir = args
+            .pedantic_dir
+            .clone()
+            .or_else(|| args.bug_report_dir.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("./ryll-pedantic-reports"));
+        std::fs::create_dir_all(&pedantic_dir).with_context(|| {
             format!(
                 "failed to create pedantic directory {}",
-                args.pedantic_dir.display()
+                pedantic_dir.display()
             )
         })?;
-        Some(PedanticConfig {
-            dir: args.pedantic_dir.clone(),
-        })
+        Some(PedanticConfig { dir: pedantic_dir })
     } else {
         None
     };
@@ -681,6 +751,8 @@ fn run_gui(
     let monitors = args.monitors;
     let enable_paste = args.enable_paste_as_keystrokes || args.paste_text.is_some();
     let paste_char_delay_ms = args.paste_char_delay_ms;
+    let bug_report_dir = args.bug_report_dir.clone();
+    let debug_single_thread_runtime = args.debug_single_thread_runtime;
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -696,7 +768,9 @@ fn run_gui(
                 capture,
                 monitors,
                 pedantic_config,
+                bug_report_dir,
                 obey_guest_size,
+                debug_single_thread_runtime,
             )))
         }),
     )
