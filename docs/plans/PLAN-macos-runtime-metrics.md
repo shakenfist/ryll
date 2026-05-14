@@ -99,26 +99,47 @@ and reviewable:
    leak (verify with `Activity Monitor` or `lsof`-equivalent
    port count).
 
-## Open questions
+## Resolved decisions
 
-1. **iOS scope.** This plan targets `target_os = "macos"` only.
-   iOS sandbox restrictions on Mach APIs are out of scope; if we
-   ever ship an iOS client, it gets its own plan. Confirm before
-   phase 1 we're happy with that scoping. Lean yes.
+1. **iOS is out of scope.** Plan targets `target_os = "macos"`
+   only. iOS sandbox restrictions on Mach APIs would warrant
+   their own plan, deferred until an iOS client is on the
+   roadmap.
 
-2. **Total process CPU source.** Either read it once via
-   `task_info(MACH_TASK_BASIC_INFO)` or compute it as the sum of
-   per-thread CPU. The former is one syscall and matches what
-   Linux does (process-level read, not summed); the latter
-   guarantees `process.cpu_percent == sum(threads.cpu_percent)`
-   exactly. Resolve before phase 1. Lean read-once for
-   simplicity and parity with Linux.
+2. **Process CPU is read once via `task_info(MACH_TASK_BASIC_INFO)`**,
+   not summed from per-thread `THREAD_BASIC_INFO` values. One
+   syscall per snapshot, parity with Linux's process-level
+   `/proc/self/stat` read. Trade-off accepted:
+   `process.cpu_percent` will not exactly equal
+   `sum(threads.cpu_percent)` because of sampling skew, which
+   matches Linux behaviour today.
 
-3. **What to do with threads that disappear mid-window.** Linux
-   tolerates this (`metrics.rs:309`) by attributing the
-   second-snapshot value to itself, yielding a 0 delta. macOS
-   should do the same. This question is really just a checklist
-   item: confirm the same policy when phase 2 lands.
+3. **Threads that disappear mid-window get Linux-parity
+   handling.** Linux currently attributes the second-snapshot
+   value to itself (yielding a 0 delta;
+   `metrics.rs:309`). The macOS implementation mirrors that
+   policy in phase 2, where thread enumeration lands.
+
+## Acceptance criteria
+
+A macOS bug report's `runtime-metrics.json` is "complete" when:
+
+- The top-level JSON is the `MacOS { … }` variant of
+  `RuntimeMetrics`, not `Unavailable`. The string `"per-thread
+  metrics not implemented on macos"` no longer appears in any
+  field of any Mac bug report.
+- `process.cpu_percent` reflects real CPU usage over the
+  sample window (within sampling skew of what `Activity
+  Monitor` reports).
+- `process.rss_kb` and `process.vm_size_kb` are plausible
+  (RSS in the tens of MB at idle on a Mac client; VmSize
+  larger but bounded).
+- `process.uptime_secs` advances monotonically across
+  successive bug reports within one session.
+- `threads` is empty in phase 1, populated and sorted by tid
+  in phase 2 (one entry per Mach thread alive across the
+  sample window, with `name` populated from
+  `pthread_getname_np` where the thread has been named).
 
 ## Execution
 
