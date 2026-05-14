@@ -62,10 +62,10 @@ pub struct ProcessMetrics {
 /// { "sample_window_ms": 2000, "process": {...}, "threads": [...],
 ///   "platform": "linux" }
 /// ```
-/// or, on macOS (phase 1 of PLAN-macos-runtime-metrics fills
-/// `process`; `threads` is populated in phase 2):
+/// or, on macOS (process + threads populated identically to
+/// Linux; `platform` distinguishes the two):
 /// ```json
-/// { "sample_window_ms": 2000, "process": {...}, "threads": [],
+/// { "sample_window_ms": 2000, "process": {...}, "threads": [...],
 ///   "platform": "macos" }
 /// ```
 /// or, on platforms without an implementation:
@@ -369,58 +369,25 @@ mod linux {
     }
 }
 
-// ── macOS implementation ───────────────────────────────────
-
-/// macOS metrics implementation per `PLAN-macos-runtime-
-/// metrics`: phase 1 added process-level metrics via
-/// `task_info(MACH_TASK_BASIC_INFO)`; phase 2 added per-
-/// thread enumeration via `task_threads` + per-port
-/// `thread_info` (THREAD_BASIC_INFO + THREAD_IDENTIFIER_INFO)
-/// + `pthread_getname_np`, with the `MachThreadList` RAII
-/// guard handling the Mach port lifecycle.
-///
-/// **Uptime baseline:** `PROCESS_START` is a
-/// `LazyLock<Instant>` forced by the module-level
-/// `init_at_startup()` function, which callers invoke at the
-/// top of `main()`. As long as that ordering holds,
-/// `uptime_secs` measures from process start. If a
-/// `sample()` runs before `init_at_startup()`, the baseline
-/// is the first-sample moment instead — see phase-3's plan
-/// for the ordering-requirement risk note.
-#[cfg(target_os = "macos")]
-mod macos {
+// ── macOS delta-math helpers ───────────────────────────────
+//
+// Snapshot types and the delta-math helpers that produce
+// per-process and per-thread CPU% from two snapshots live here
+// rather than in `mod macos` so they (and their unit tests) are
+// compiled on every platform — including Linux CI, where the
+// FFI surface of `mod macos` is unavailable. The helpers take
+// integer fields rather than `libc::time_value_t` for the same
+// reason. See PLAN-macos-runtime-metrics review feedback #2.
+//
+// `allow(dead_code)` because on non-macOS builds only the
+// `#[cfg(test)]` tests reference these items; the real
+// consumer (`mod macos`) is gated to `target_os = "macos"`.
+#[allow(dead_code)]
+mod macos_math {
     use std::collections::HashMap;
-    use std::ffi::CStr;
-    use std::sync::LazyLock;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use super::{ProcessMetrics, RuntimeMetrics, ThreadMetrics};
-
-    // libc 0.2 does not expose mach_port_deallocate on Apple
-    // targets (verified against 0.2.186). The signature is
-    // documented and stable Mach ABI; a local extern "C" is
-    // simpler than pulling in the `mach2` crate for one call.
-    // See PLAN-macos-runtime-metrics-phase-02-threads.md.
-    extern "C" {
-        fn mach_port_deallocate(
-            task: libc::mach_port_t,
-            name: libc::mach_port_t,
-        ) -> libc::kern_return_t;
-    }
-
-    static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
-
-    /// Force the `PROCESS_START` LazyLock so subsequent
-    /// `uptime_secs` reports measure from this call site
-    /// rather than the first `sample()` call. Called from
-    /// the module-level `init_at_startup`; see its doc-
-    /// comment for the ordering requirement.
-    pub(super) fn force_process_start() {
-        // Dereferencing the LazyLock initialises it; the
-        // result is discarded — the side effect is what we
-        // want.
-        let _ = *PROCESS_START;
-    }
+    use super::ThreadMetrics;
 
     /// Per-thread CPU + identity captured at a single moment.
     /// `compute_thread_metrics` matches `ThreadSnapshot`
@@ -434,90 +401,36 @@ mod macos {
         /// threads across snapshots since the Mach
         /// thread_act_t port numbers themselves are not
         /// stable across `task_threads` calls.
-        pub thread_id: u64,
-        pub user_time_us: u64,
-        pub system_time_us: u64,
+        pub(super) thread_id: u64,
+        pub(super) user_time_us: u64,
+        pub(super) system_time_us: u64,
         /// Name from `pthread_getname_np`; empty string if
         /// the thread is unnamed or the lookup fails.
-        pub name: String,
+        pub(super) name: String,
     }
 
     /// Raw `task_basic_info` + per-thread data captured at a
-    /// single moment. Constructed by `take_snapshot()` and
-    /// consumed by `process_cpu_percent` /
+    /// single moment. Constructed by `mod macos::take_snapshot`
+    /// and consumed by `process_cpu_percent` /
     /// `compute_thread_metrics` so the delta math is
     /// unit-testable without the Mach syscalls.
     #[derive(Debug, Clone)]
     pub(super) struct Snapshot {
         /// Total user CPU time across all threads, microseconds.
-        pub user_time_us: u64,
+        pub(super) user_time_us: u64,
         /// Total system CPU time across all threads, microseconds.
-        pub system_time_us: u64,
+        pub(super) system_time_us: u64,
         /// Resident set size in bytes
         /// (`task_basic_info.resident_size`).
-        pub resident_size: u64,
+        pub(super) resident_size: u64,
         /// Virtual memory size in bytes
         /// (`task_basic_info.virtual_size`).
-        pub virtual_size: u64,
+        pub(super) virtual_size: u64,
         /// Per-thread snapshot collected via `task_threads` +
         /// per-port `thread_info`. Empty when thread
         /// enumeration fails; the process-level fields are
         /// still populated.
-        pub threads: Vec<ThreadSnapshot>,
-    }
-
-    /// RAII wrapper around the Mach-allocated thread-port array
-    /// returned by `task_threads`. Releases every port via
-    /// `mach_port_deallocate` and the array memory via
-    /// `vm_deallocate` on Drop, including the panic path. The
-    /// only constructor is the struct literal below; wrapping
-    /// is enforced by `task_threads` writing directly into the
-    /// fields. See PLAN-macos-runtime-metrics-phase-02.
-    struct MachThreadList {
-        ports: *mut libc::thread_act_t,
-        count: libc::mach_msg_type_number_t,
-    }
-
-    impl MachThreadList {
-        fn as_slice(&self) -> &[libc::thread_act_t] {
-            if self.ports.is_null() || self.count == 0 {
-                return &[];
-            }
-            // SAFETY: `task_threads` returned a valid array of
-            // `count` thread_act_t entries; we never modify it.
-            unsafe { std::slice::from_raw_parts(self.ports, self.count as usize) }
-        }
-    }
-
-    impl Drop for MachThreadList {
-        fn drop(&mut self) {
-            if self.ports.is_null() || self.count == 0 {
-                return;
-            }
-            for &port in self.as_slice() {
-                // SAFETY: each port is a send-right returned
-                // by task_threads; deallocating against
-                // mach_task_self() is the documented inverse.
-                // Return value ignored: nothing meaningful to
-                // do on a cleanup failure from Drop.
-                unsafe {
-                    let _ = mach_port_deallocate(libc::mach_task_self(), port);
-                }
-            }
-            let bytes = (self.count as usize) * std::mem::size_of::<libc::thread_act_t>();
-            // SAFETY: task_threads allocated `bytes` worth of
-            // thread_act_t entries via vm_allocate against
-            // mach_task_self(); vm_deallocate is the
-            // documented inverse. Return value ignored: see
-            // above.
-            unsafe {
-                let _ = libc::vm_deallocate(
-                    libc::mach_task_self(),
-                    self.ports as libc::vm_address_t,
-                    bytes as libc::vm_size_t,
-                );
-            }
-        }
+        pub(super) threads: Vec<ThreadSnapshot>,
     }
 
     /// Convert a Mach `time_value_t` (seconds + microseconds)
@@ -525,10 +438,13 @@ mod macos {
     /// session-uptime-in-microseconds fits in u64 for half a
     /// million years; the saturating form removes any panic
     /// surface from arithmetic on kernel-controlled values.
-    pub(super) fn time_value_to_us(t: libc::time_value_t) -> u64 {
-        (t.seconds as u64)
+    /// Takes the two fields directly so the helper has no
+    /// dependency on `libc::time_value_t` and can be exercised
+    /// on every platform's CI.
+    pub(super) fn time_value_to_us(seconds: i32, microseconds: i32) -> u64 {
+        (seconds.max(0) as u64)
             .saturating_mul(1_000_000)
-            .saturating_add(t.microseconds as u64)
+            .saturating_add(microseconds.max(0) as u64)
     }
 
     /// Compute total process CPU% from two snapshots taken
@@ -577,6 +493,134 @@ mod macos {
         out.sort_by_key(|t| t.tid);
         out
     }
+}
+
+// ── macOS implementation ───────────────────────────────────
+
+/// macOS metrics implementation per `PLAN-macos-runtime-
+/// metrics`: phase 1 added process-level metrics via
+/// `task_info(MACH_TASK_BASIC_INFO)`; phase 2 added per-
+/// thread enumeration via `task_threads` + per-port
+/// `thread_info` (THREAD_BASIC_INFO + THREAD_IDENTIFIER_INFO)
+/// + `pthread_getname_np`, with the `MachThreadList` RAII
+/// guard handling the Mach port lifecycle.
+///
+/// **Uptime baseline:** `PROCESS_START` is a
+/// `LazyLock<Instant>` forced by the module-level
+/// `init_at_startup()` function, which callers invoke at the
+/// top of `main()`. As long as that ordering holds,
+/// `uptime_secs` measures from process start. If a
+/// `sample()` runs before `init_at_startup()`, the baseline
+/// is the first-sample moment instead — see phase-3's plan
+/// for the ordering-requirement risk note.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::CStr;
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
+
+    use super::macos_math::{
+        compute_thread_metrics, process_cpu_percent, time_value_to_us, Snapshot, ThreadSnapshot,
+    };
+    use super::{ProcessMetrics, RuntimeMetrics};
+
+    // libc 0.2 does not expose mach_port_deallocate on Apple
+    // targets (verified against 0.2.186). The signature is
+    // documented and stable Mach ABI; a local extern "C" is
+    // simpler than pulling in the `mach2` crate for one call.
+    // See PLAN-macos-runtime-metrics-phase-02-threads.md.
+    extern "C" {
+        fn mach_port_deallocate(
+            task: libc::mach_port_t,
+            name: libc::mach_port_t,
+        ) -> libc::kern_return_t;
+    }
+
+    /// Return the current task's Mach port. Reads the
+    /// `mach_task_self_` static rather than calling
+    /// `libc::mach_task_self()`, which libc 0.2 deprecates in
+    /// favour of the `mach2` crate. The static is the underlying
+    /// storage that the function returns, and is stable for the
+    /// process lifetime, so this avoids both the deprecation
+    /// warning and an extra dependency.
+    fn task_self() -> libc::mach_port_t {
+        // SAFETY: reading the static is sound; it is initialised
+        // by the dynamic loader before any user code runs.
+        unsafe { libc::mach_task_self_ }
+    }
+
+    static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    /// Force the `PROCESS_START` LazyLock so subsequent
+    /// `uptime_secs` reports measure from this call site
+    /// rather than the first `sample()` call. Called from
+    /// the module-level `init_at_startup`; see its doc-
+    /// comment for the ordering requirement.
+    pub(super) fn force_process_start() {
+        // Dereferencing the LazyLock initialises it; the
+        // result is discarded — the side effect is what we
+        // want.
+        let _ = *PROCESS_START;
+    }
+
+    /// RAII wrapper around the Mach-allocated thread-port array
+    /// returned by `task_threads`. Releases every port via
+    /// `mach_port_deallocate` and the array memory via
+    /// `vm_deallocate` on Drop, including the panic path. The
+    /// only constructor is the struct literal below; wrapping
+    /// is enforced by `task_threads` writing directly into the
+    /// fields. See PLAN-macos-runtime-metrics-phase-02.
+    struct MachThreadList {
+        ports: *mut libc::thread_act_t,
+        count: libc::mach_msg_type_number_t,
+    }
+
+    impl MachThreadList {
+        fn as_slice(&self) -> &[libc::thread_act_t] {
+            if self.ports.is_null() || self.count == 0 {
+                return &[];
+            }
+            // SAFETY: `task_threads` returned a valid array of
+            // `count` thread_act_t entries; we never modify it.
+            unsafe { std::slice::from_raw_parts(self.ports, self.count as usize) }
+        }
+    }
+
+    impl Drop for MachThreadList {
+        fn drop(&mut self) {
+            if self.ports.is_null() || self.count == 0 {
+                return;
+            }
+            // SAFETY: `task_threads` returned a valid array of
+            // `count` thread_act_t entries. The pointer is not
+            // freed until after the loop completes, so the
+            // slice's lifetime is bounded by this scope.
+            let ports = unsafe { std::slice::from_raw_parts(self.ports, self.count as usize) };
+            for &port in ports {
+                // SAFETY: each port is a send-right returned
+                // by task_threads; deallocating against
+                // mach_task_self() is the documented inverse.
+                // Return value ignored: nothing meaningful to
+                // do on a cleanup failure from Drop.
+                unsafe {
+                    let _ = mach_port_deallocate(task_self(), port);
+                }
+            }
+            let bytes = (self.count as usize) * std::mem::size_of::<libc::thread_act_t>();
+            // SAFETY: task_threads allocated `bytes` worth of
+            // thread_act_t entries via vm_allocate against
+            // mach_task_self(); vm_deallocate is the
+            // documented inverse. Return value ignored: see
+            // above.
+            unsafe {
+                let _ = libc::vm_deallocate(
+                    task_self(),
+                    self.ports as libc::vm_address_t,
+                    bytes as libc::vm_size_t,
+                );
+            }
+        }
+    }
 
     fn process_uptime_secs() -> f64 {
         PROCESS_START.elapsed().as_secs_f64()
@@ -594,7 +638,10 @@ mod macos {
         // task_threads(mach_task_self()), which satisfies that
         // requirement. Returns NULL for unknown ports.
         let pthread = unsafe { libc::pthread_from_mach_thread_np(port) };
-        if pthread.is_null() {
+        // `pthread_t` is `usize` in current libc on Apple targets
+        // (was `*mut _opaque_pthread_t` in older versions).
+        // Casting to usize makes the null check work either way.
+        if (pthread as usize) == 0 {
             return String::new();
         }
         let mut buf = [0i8; 64];
@@ -656,8 +703,11 @@ mod macos {
 
         Some(ThreadSnapshot {
             thread_id: ident.thread_id,
-            user_time_us: time_value_to_us(basic.user_time),
-            system_time_us: time_value_to_us(basic.system_time),
+            user_time_us: time_value_to_us(basic.user_time.seconds, basic.user_time.microseconds),
+            system_time_us: time_value_to_us(
+                basic.system_time.seconds,
+                basic.system_time.microseconds,
+            ),
             name: read_thread_name(port),
         })
     }
@@ -672,7 +722,7 @@ mod macos {
         // SAFETY: task_threads writes the port-array pointer
         // and count by pointer. mach_task_self() is
         // process-lifetime and cannot fail.
-        let kr = unsafe { libc::task_threads(libc::mach_task_self(), &mut ports, &mut count) };
+        let kr = unsafe { libc::task_threads(task_self(), &mut ports, &mut count) };
         if kr != libc::KERN_SUCCESS {
             return Err("task_threads failed");
         }
@@ -707,7 +757,7 @@ mod macos {
         // not retain any pointer past return.
         let kr = unsafe {
             libc::task_info(
-                libc::mach_task_self(),
+                task_self(),
                 libc::MACH_TASK_BASIC_INFO,
                 &mut info as *mut _ as *mut libc::integer_t,
                 &mut count,
@@ -718,8 +768,11 @@ mod macos {
         }
         let threads = take_thread_snapshots()?;
         Ok(Snapshot {
-            user_time_us: time_value_to_us(info.user_time),
-            system_time_us: time_value_to_us(info.system_time),
+            user_time_us: time_value_to_us(info.user_time.seconds, info.user_time.microseconds),
+            system_time_us: time_value_to_us(
+                info.system_time.seconds,
+                info.system_time.microseconds,
+            ),
             resident_size: info.resident_size,
             virtual_size: info.virtual_size,
             threads,
@@ -760,10 +813,13 @@ mod macos {
 /// and `/proc/self/task/<tid>/stat`, sleeps for `window`, then
 /// re-reads and computes CPU deltas.
 ///
-/// On macOS (phase 1), this calls
-/// `task_info(MACH_TASK_BASIC_INFO)` twice with a `sleep(window)`
-/// between, computing process-level CPU% from the delta. Threads
-/// are not enumerated until phase 2.
+/// On macOS, this calls `task_info(MACH_TASK_BASIC_INFO)` plus
+/// `task_threads` + per-thread `thread_info` twice with a
+/// `sleep(window)` between, computing process-level and per-
+/// thread CPU% from the deltas. Thread names come from
+/// `pthread_getname_np`; the Mach port array from
+/// `task_threads` is released by a `MachThreadList` RAII guard.
+/// Uptime is measured from the `init_at_startup()` call site.
 ///
 /// On other platforms, returns `RuntimeMetrics::Unavailable`
 /// immediately without sleeping.
@@ -916,9 +972,11 @@ VmData:\t   65536 kB\n\
 
     #[test]
     fn test_macos_variant_serialises() {
-        // Phase-1 contract: same JSON shape as Linux,
-        // distinguished by the `platform` field. `threads` is
-        // empty in phase 1; phase 2 will populate it.
+        // Same JSON shape as Linux, distinguished by the
+        // `platform` field. `threads` may be empty (no threads
+        // running) or populated; this test exercises the empty
+        // case to ensure the serialised array is `[]` rather
+        // than omitted.
         let m = RuntimeMetrics::MacOS {
             sample_window_ms: 2000,
             process: ProcessMetrics {
@@ -953,41 +1011,30 @@ VmData:\t   65536 kB\n\
         init_at_startup();
     }
 
-    // ── macOS phase-1 helper tests ─────────────────────────
+    // ── macOS delta-math helper tests ──────────────────────
     //
-    // These tests exercise the delta-math and conversion
-    // helpers that are platform-independent. They run on every
-    // CI matrix entry (including Linux) so a regression in the
-    // helper logic is caught before reaching a Mac. The
-    // helpers live inside `#[cfg(target_os = "macos")] mod
-    // macos`, so the tests are gated to that platform too —
-    // delta math correctness is checked there.
+    // These exercise `macos_math` — the pure delta/conversion
+    // helpers that the macOS metrics path relies on. The
+    // helpers live in a non-cfg-gated module so these tests
+    // compile and run on every CI matrix entry (including
+    // Linux), catching regressions in the helper logic before
+    // they reach a Mac.
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_time_value_to_us_basic() {
-        use super::macos::time_value_to_us;
-        let tv = libc::time_value_t {
-            seconds: 0,
-            microseconds: 0,
-        };
-        assert_eq!(time_value_to_us(tv), 0);
-        let tv = libc::time_value_t {
-            seconds: 1,
-            microseconds: 500_000,
-        };
-        assert_eq!(time_value_to_us(tv), 1_500_000);
-        let tv = libc::time_value_t {
-            seconds: 47,
-            microseconds: 250,
-        };
-        assert_eq!(time_value_to_us(tv), 47_000_250);
+        use super::macos_math::time_value_to_us;
+        assert_eq!(time_value_to_us(0, 0), 0);
+        assert_eq!(time_value_to_us(1, 500_000), 1_500_000);
+        assert_eq!(time_value_to_us(47, 250), 47_000_250);
+        // Negative kernel-supplied values are clamped to zero
+        // rather than wrapping to a huge u64.
+        assert_eq!(time_value_to_us(-1, 0), 0);
+        assert_eq!(time_value_to_us(0, -1), 0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_process_cpu_percent_delta() {
-        use super::macos::{process_cpu_percent, Snapshot};
+        use super::macos_math::{process_cpu_percent, Snapshot};
         // 100 ms window, 50 ms of user CPU + 10 ms of system =
         // 60 ms CPU consumed during a 100 ms wall window.
         // Expected: 60.0 percent.
@@ -1009,10 +1056,9 @@ VmData:\t   65536 kB\n\
         assert!((pct - 60.0).abs() < 0.01, "expected ~60.0%, got {}", pct);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_process_cpu_percent_zero_window() {
-        use super::macos::{process_cpu_percent, Snapshot};
+        use super::macos_math::{process_cpu_percent, Snapshot};
         // Zero-duration window must not produce NaN/Inf. The
         // helper bumps the divisor to 1 µs, so the resulting
         // percent is finite (zero when deltas are zero).
@@ -1028,10 +1074,9 @@ VmData:\t   65536 kB\n\
         assert_eq!(pct, 0.0);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_process_cpu_percent_clock_reset() {
-        use super::macos::{process_cpu_percent, Snapshot};
+        use super::macos_math::{process_cpu_percent, Snapshot};
         // Pathological: second snapshot's CPU is *less* than
         // first's (clock reset / thread-accounting quirk).
         // Saturating subtract yields 0; percent = 0.
@@ -1103,18 +1148,20 @@ VmData:\t   65536 kB\n\
         }
     }
 
-    // ── macOS phase-2 thread-metric tests ──────────────────
+    // ── macOS thread-metric tests ──────────────────────────
     //
-    // These exercise `compute_thread_metrics`, the
-    // platform-independent helper that produces ThreadMetrics
-    // from two ThreadSnapshot lists + a window. They're gated
-    // to target_os = "macos" because the types live inside
-    // the cfg-gated `mod macos`; the logic itself is pure
-    // Rust and could run anywhere.
+    // These exercise `compute_thread_metrics`, the pure helper
+    // that produces ThreadMetrics from two ThreadSnapshot
+    // lists + a window. They live next to the other
+    // `macos_math` tests and run on every platform.
 
-    #[cfg(target_os = "macos")]
-    fn ts(thread_id: u64, user_us: u64, sys_us: u64, name: &str) -> super::macos::ThreadSnapshot {
-        super::macos::ThreadSnapshot {
+    fn ts(
+        thread_id: u64,
+        user_us: u64,
+        sys_us: u64,
+        name: &str,
+    ) -> super::macos_math::ThreadSnapshot {
+        super::macos_math::ThreadSnapshot {
             thread_id,
             user_time_us: user_us,
             system_time_us: sys_us,
@@ -1122,10 +1169,9 @@ VmData:\t   65536 kB\n\
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_compute_thread_metrics_basic() {
-        use super::macos::compute_thread_metrics;
+        use super::macos_math::compute_thread_metrics;
         // Two threads, both present in A and B. Window = 100 ms.
         // Thread 1: 50 ms user + 10 ms sys delta = 60% CPU.
         // Thread 2: 25 ms user + 5 ms sys delta = 30% CPU.
@@ -1148,13 +1194,12 @@ VmData:\t   65536 kB\n\
         assert!((out[1].cpu_percent - 30.0).abs() < 0.01);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_compute_thread_metrics_new_thread() {
         // Thread in B but not in A is a new arrival mid-window;
         // report 0% CPU (Linux parity), not garbage from
         // attributing B's accumulated CPU to a zero baseline.
-        use super::macos::compute_thread_metrics;
+        use super::macos_math::compute_thread_metrics;
         let a = vec![ts(1, 1_000_000, 0, "worker")];
         let b = vec![
             ts(1, 1_050_000, 0, "worker"),
@@ -1168,12 +1213,11 @@ VmData:\t   65536 kB\n\
         assert_eq!(newcomer.name, "newcomer");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_compute_thread_metrics_dropped_thread() {
         // Thread in A but not in B died mid-window; it must not
         // appear in the output at all.
-        use super::macos::compute_thread_metrics;
+        use super::macos_math::compute_thread_metrics;
         let a = vec![ts(1, 1_000_000, 0, "worker"), ts(7, 500_000, 0, "doomed")];
         let b = vec![ts(1, 1_050_000, 0, "worker")];
         let out = compute_thread_metrics(&a, &b, Duration::from_millis(100));
@@ -1182,12 +1226,11 @@ VmData:\t   65536 kB\n\
         assert!(out.iter().all(|t| t.tid != 7));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_compute_thread_metrics_sorted_by_tid() {
         // Inputs in arbitrary order produce output sorted
         // ascending by tid.
-        use super::macos::compute_thread_metrics;
+        use super::macos_math::compute_thread_metrics;
         let a = vec![ts(42, 0, 0, "a"), ts(7, 0, 0, "b"), ts(101, 0, 0, "c")];
         let b = vec![ts(101, 0, 0, "c"), ts(42, 0, 0, "a"), ts(7, 0, 0, "b")];
         let out = compute_thread_metrics(&a, &b, Duration::from_millis(100));
@@ -1195,13 +1238,12 @@ VmData:\t   65536 kB\n\
         assert_eq!(tids, vec![7, 42, 101]);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_compute_thread_metrics_zero_window() {
         // Zero-window must produce finite percent for every
         // thread (the .max(1) µs guard from phase 1
         // generalises).
-        use super::macos::compute_thread_metrics;
+        use super::macos_math::compute_thread_metrics;
         let a = vec![ts(1, 1_000_000, 0, "w")];
         let b = vec![ts(1, 1_050_000, 0, "w")];
         let out = compute_thread_metrics(&a, &b, Duration::from_millis(0));
