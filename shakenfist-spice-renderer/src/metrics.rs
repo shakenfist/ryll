@@ -996,12 +996,14 @@ VmData:\t   65536 kB\n\
             system_time_us: 0,
             resident_size: 0,
             virtual_size: 0,
+            threads: Vec::new(),
         };
         let b = Snapshot {
             user_time_us: 1_050_000,
             system_time_us: 10_000,
             resident_size: 0,
             virtual_size: 0,
+            threads: Vec::new(),
         };
         let pct = process_cpu_percent(&a, &b, std::time::Duration::from_millis(100));
         assert!((pct - 60.0).abs() < 0.01, "expected ~60.0%, got {}", pct);
@@ -1019,6 +1021,7 @@ VmData:\t   65536 kB\n\
             system_time_us: 0,
             resident_size: 0,
             virtual_size: 0,
+            threads: Vec::new(),
         };
         let pct = process_cpu_percent(&s, &s, std::time::Duration::from_millis(0));
         assert!(pct.is_finite(), "percent must be finite: {}", pct);
@@ -1037,12 +1040,14 @@ VmData:\t   65536 kB\n\
             system_time_us: 500_000,
             resident_size: 0,
             virtual_size: 0,
+            threads: Vec::new(),
         };
         let b = Snapshot {
             user_time_us: 999_000,
             system_time_us: 400_000,
             resident_size: 0,
             virtual_size: 0,
+            threads: Vec::new(),
         };
         let pct = process_cpu_percent(&a, &b, std::time::Duration::from_millis(100));
         assert_eq!(pct, 0.0);

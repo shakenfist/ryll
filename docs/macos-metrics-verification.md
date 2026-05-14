@@ -176,13 +176,23 @@ behaviour over many calls.
 ### Procedure
 
 1. Start ryll under pedantic mode against a real SPICE
-   server:
+   server. `--pedantic` is a boolean flag (auto-write a bug
+   report zip per distinct protocol gap, capped at 50 per
+   session); `--pedantic-dir <DIR>` is the separate flag
+   that controls where those zips land. Both come before
+   the SPICE connection arguments:
    ```sh
-   ryll spice://example/?password=… --pedantic /tmp/ryll-soak
+   ryll --pedantic --pedantic-dir /tmp/ryll-soak \
+       spice://example/?password=…
    ```
-   Pedantic mode triggers periodic bug-report assembly, so
-   `metrics::sample` runs every few seconds, exercising
-   `task_threads` + `MachThreadList::drop`.
+   Pedantic mode triggers bug-report assembly on every new
+   protocol gap (up to the 50-per-session cap), so
+   `metrics::sample` runs each time, exercising
+   `task_threads` + `MachThreadList::drop`. If the cap is
+   hit early in the soak, leak detection still works
+   (constant port count once sampling stops); for a longer
+   stress, F8-trigger bug reports manually every few
+   minutes to keep `sample()` firing.
 2. Record the initial Mach port count for the ryll process:
    ```sh
    RYLL_PID=$(pgrep ryll)
