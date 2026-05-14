@@ -1761,10 +1761,16 @@ Ryll tracks:
   in `app.rs` samples it once per second and renders the sparkline.
 - **Runtime metrics in bug reports**: each bug-report ZIP includes a
   `runtime-metrics.json` file with process and per-thread CPU%, RSS,
-  and VmSize sampled over a 2-second window. Linux-only (reads
-  `/proc/self/stat`, `/proc/self/status`, and `/proc/self/task/*/`);
-  non-Linux platforms emit a graceful "unavailable" payload.
-  Implemented in `ryll/src/metrics.rs`.
+  and VmSize sampled over a 2-second window. On **Linux** the data
+  comes from `/proc/self/stat`, `/proc/self/status`, and
+  `/proc/self/task/*/`. On **macOS** (phase 1 of
+  `PLAN-macos-runtime-metrics`) process-level data comes from a
+  single `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot; the
+  `threads` array is empty until phase 2 wires up Mach-thread
+  enumeration. Other platforms emit a graceful "unavailable"
+  payload. The `MacOS` enum variant has the same JSON shape as
+  `Linux`, distinguished by the `platform` field. Implemented in
+  `shakenfist-spice-renderer/src/metrics.rs`.
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.

@@ -1,11 +1,24 @@
 /// Runtime metrics for bug reports.
 ///
 /// Captures process-level and per-thread CPU usage, memory
-/// footprint, and uptime over a short sample window.  On Linux,
-/// these are read from `/proc/self/stat`, `/proc/self/status`, and
-/// `/proc/self/task/<tid>/stat`.  On other platforms the struct
-/// records that metrics are unavailable so the bug-report ZIP still
-/// contains the file with a clear explanation.
+/// footprint, and uptime over a short sample window.
+///
+/// On **Linux**, these are read from `/proc/self/stat`,
+/// `/proc/self/status`, and `/proc/self/task/<tid>/stat`.
+///
+/// On **macOS** (phase 1 of `PLAN-macos-runtime-metrics`):
+/// process-level metrics via a single
+/// `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot. Per-
+/// thread enumeration is deferred to phase 2, so `threads` is
+/// empty in the current `MacOS` variant. Uptime uses a
+/// `LazyLock<Instant>` initialised on the first call to
+/// `sample()`, so it strictly measures time-since-first-sample
+/// rather than true process start (the few-second gap at
+/// startup is documented in the master plan).
+///
+/// On other platforms the struct records that metrics are
+/// unavailable so the bug-report ZIP still contains the file
+/// with a clear explanation.
 use std::time::Duration;
 
 use serde::Serialize;
@@ -45,15 +58,31 @@ pub struct ProcessMetrics {
 /// { "sample_window_ms": 2000, "process": {...}, "threads": [...],
 ///   "platform": "linux" }
 /// ```
-/// or:
+/// or, on macOS (phase 1 of PLAN-macos-runtime-metrics fills
+/// `process`; `threads` is populated in phase 2):
 /// ```json
-/// { "platform": "macos", "available": false, "reason": "..." }
+/// { "sample_window_ms": 2000, "process": {...}, "threads": [],
+///   "platform": "macos" }
+/// ```
+/// or, on platforms without an implementation:
+/// ```json
+/// { "platform": "freebsd", "available": false, "reason": "..." }
 /// ```
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum RuntimeMetrics {
     /// Full Linux metrics collected from /proc.
     Linux {
+        sample_window_ms: u64,
+        process: ProcessMetrics,
+        threads: Vec<ThreadMetrics>,
+        platform: String,
+    },
+    /// macOS metrics collected via Mach `task_info`. Identical
+    /// JSON shape to `Linux` — `#[serde(untagged)]` means a
+    /// consumer that already handles `Linux` accepts `MacOS`
+    /// unchanged. The `platform` field tells them apart.
+    MacOS {
         sample_window_ms: u64,
         process: ProcessMetrics,
         threads: Vec<ThreadMetrics>,
@@ -336,24 +365,164 @@ mod linux {
     }
 }
 
+// ── macOS implementation ───────────────────────────────────
+
+/// Phase-1 of `PLAN-macos-runtime-metrics`: process-level
+/// metrics via a single `task_info(MACH_TASK_BASIC_INFO)`
+/// syscall per snapshot. No Mach-port lifecycle work, no
+/// thread enumeration; those land in phase 2.
+///
+/// **Uptime caveat:** `PROCESS_START` is a `LazyLock<Instant>`
+/// initialised on the first call to `sample()`. This measures
+/// "time since first sample" rather than true process start;
+/// the gap is "the few seconds between `main()` and the first
+/// bug-report trigger" and is acceptable for diagnostic
+/// purposes. Phase 3 may promote `PROCESS_START` to a
+/// globally-initialised static if reports filed seconds after
+/// startup ever matter.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::sync::LazyLock;
+    use std::time::{Duration, Instant};
+
+    use super::{ProcessMetrics, RuntimeMetrics};
+
+    static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    /// Raw `task_basic_info` data captured at a single moment.
+    /// `Snapshot` is constructed by `take_snapshot()` and
+    /// consumed by `process_cpu_percent` so the delta math is
+    /// unit-testable without the Mach syscall.
+    #[derive(Debug, Clone)]
+    pub(super) struct Snapshot {
+        /// Total user CPU time across all threads, microseconds.
+        pub user_time_us: u64,
+        /// Total system CPU time across all threads, microseconds.
+        pub system_time_us: u64,
+        /// Resident set size in bytes
+        /// (`task_basic_info.resident_size`).
+        pub resident_size: u64,
+        /// Virtual memory size in bytes
+        /// (`task_basic_info.virtual_size`).
+        pub virtual_size: u64,
+    }
+
+    /// Convert a Mach `time_value_t` (seconds + microseconds)
+    /// into a single u64 microsecond count. Saturating because
+    /// session-uptime-in-microseconds fits in u64 for half a
+    /// million years; the saturating form removes any panic
+    /// surface from arithmetic on kernel-controlled values.
+    pub(super) fn time_value_to_us(t: libc::time_value_t) -> u64 {
+        (t.seconds as u64)
+            .saturating_mul(1_000_000)
+            .saturating_add(t.microseconds as u64)
+    }
+
+    /// Compute total process CPU% from two snapshots taken
+    /// `window` apart. Saturating subtraction handles the
+    /// theoretical case where the second snapshot's
+    /// accumulated CPU is less than the first (clock reset /
+    /// thread accounting quirk); `window.as_micros().max(1)`
+    /// guards against the zero-window edge case so the result
+    /// is always finite.
+    pub(super) fn process_cpu_percent(a: &Snapshot, b: &Snapshot, window: Duration) -> f64 {
+        let user_delta = b.user_time_us.saturating_sub(a.user_time_us);
+        let sys_delta = b.system_time_us.saturating_sub(a.system_time_us);
+        let total_us = user_delta.saturating_add(sys_delta);
+        let window_us = window.as_micros().max(1) as u64;
+        (total_us as f64 / window_us as f64) * 100.0
+    }
+
+    fn process_uptime_secs() -> f64 {
+        PROCESS_START.elapsed().as_secs_f64()
+    }
+
+    fn take_snapshot() -> Result<Snapshot, &'static str> {
+        let mut info: libc::mach_task_basic_info_data_t = unsafe { std::mem::zeroed() };
+        let mut count: libc::mach_msg_type_number_t = (std::mem::size_of::<
+            libc::mach_task_basic_info_data_t,
+        >() / std::mem::size_of::<libc::natural_t>())
+            as libc::mach_msg_type_number_t;
+        // SAFETY: task_info has no preconditions beyond a live
+        // task port and a correctly-sized output buffer. We
+        // pass mach_task_self() (the current process's port,
+        // process-lifetime, cannot fail) and a stack-local
+        // `info` of exactly the shape declared by
+        // MACH_TASK_BASIC_INFO. `count` is computed from the
+        // same struct and is in/out by pointer. The call does
+        // not retain any pointer past return.
+        let kr = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO,
+                &mut info as *mut _ as *mut libc::integer_t,
+                &mut count,
+            )
+        };
+        if kr != libc::KERN_SUCCESS {
+            return Err("task_info(MACH_TASK_BASIC_INFO) failed");
+        }
+        Ok(Snapshot {
+            user_time_us: time_value_to_us(info.user_time),
+            system_time_us: time_value_to_us(info.system_time),
+            resident_size: info.resident_size,
+            virtual_size: info.virtual_size,
+        })
+    }
+
+    pub fn sample(window: Duration) -> RuntimeMetrics {
+        let snap_a = match take_snapshot() {
+            Ok(s) => s,
+            Err(reason) => return RuntimeMetrics::unavailable(reason),
+        };
+        std::thread::sleep(window);
+        let snap_b = match take_snapshot() {
+            Ok(s) => s,
+            Err(reason) => return RuntimeMetrics::unavailable(reason),
+        };
+        let cpu_percent = process_cpu_percent(&snap_a, &snap_b, window);
+        RuntimeMetrics::MacOS {
+            sample_window_ms: window.as_millis() as u64,
+            process: ProcessMetrics {
+                cpu_percent,
+                rss_kb: snap_b.resident_size / 1024,
+                vm_size_kb: snap_b.virtual_size / 1024,
+                uptime_secs: process_uptime_secs(),
+            },
+            // Phase 1: empty. Phase 2 enumerates Mach threads.
+            threads: Vec::new(),
+            platform: "macos".to_string(),
+        }
+    }
+}
+
 // ── Public entry point ─────────────────────────────────────
 
 /// Sample runtime metrics over the given window duration.
 ///
-/// On Linux, this reads `/proc/self/stat`, `/proc/self/status`, and
-/// `/proc/self/task/<tid>/stat`, sleeps for `window`, then re-reads
-/// and computes CPU deltas.
+/// On Linux, this reads `/proc/self/stat`, `/proc/self/status`,
+/// and `/proc/self/task/<tid>/stat`, sleeps for `window`, then
+/// re-reads and computes CPU deltas.
 ///
-/// On non-Linux platforms, returns `RuntimeMetrics::Unavailable`
+/// On macOS (phase 1), this calls
+/// `task_info(MACH_TASK_BASIC_INFO)` twice with a `sleep(window)`
+/// between, computing process-level CPU% from the delta. Threads
+/// are not enumerated until phase 2.
+///
+/// On other platforms, returns `RuntimeMetrics::Unavailable`
 /// immediately without sleeping.
 pub fn sample(window: Duration) -> RuntimeMetrics {
     #[cfg(target_os = "linux")]
     {
         linux::sample(window)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = window; // not used on non-Linux
+        macos::sample(window)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = window; // not used on unsupported platforms
         RuntimeMetrics::unavailable(format!(
             "per-thread metrics not implemented on {}",
             std::env::consts::OS
@@ -463,5 +632,158 @@ VmData:\t   65536 kB\n\
         assert!(json.contains("\"platform\":\"linux\""));
         // Untagged: no enum variant name in the JSON.
         assert!(!json.contains("\"Linux\""));
+    }
+
+    #[test]
+    fn test_macos_variant_serialises() {
+        // Phase-1 contract: same JSON shape as Linux,
+        // distinguished by the `platform` field. `threads` is
+        // empty in phase 1; phase 2 will populate it.
+        let m = RuntimeMetrics::MacOS {
+            sample_window_ms: 2000,
+            process: ProcessMetrics {
+                cpu_percent: 18.75,
+                rss_kb: 98_304,
+                vm_size_kb: 524_288,
+                uptime_secs: 31.4,
+            },
+            threads: Vec::new(),
+            platform: "macos".to_string(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"sample_window_ms\":2000"));
+        assert!(json.contains("\"cpu_percent\":18.75"));
+        assert!(json.contains("\"rss_kb\":98304"));
+        assert!(json.contains("\"vm_size_kb\":524288"));
+        assert!(json.contains("\"threads\":[]"));
+        assert!(json.contains("\"platform\":\"macos\""));
+        // Untagged: no enum variant name in the JSON.
+        assert!(!json.contains("\"MacOS\""));
+        assert!(!json.contains("\"Linux\""));
+    }
+
+    // ── macOS phase-1 helper tests ─────────────────────────
+    //
+    // These tests exercise the delta-math and conversion
+    // helpers that are platform-independent. They run on every
+    // CI matrix entry (including Linux) so a regression in the
+    // helper logic is caught before reaching a Mac. The
+    // helpers live inside `#[cfg(target_os = "macos")] mod
+    // macos`, so the tests are gated to that platform too —
+    // delta math correctness is checked there.
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_time_value_to_us_basic() {
+        use super::macos::time_value_to_us;
+        let tv = libc::time_value_t {
+            seconds: 0,
+            microseconds: 0,
+        };
+        assert_eq!(time_value_to_us(tv), 0);
+        let tv = libc::time_value_t {
+            seconds: 1,
+            microseconds: 500_000,
+        };
+        assert_eq!(time_value_to_us(tv), 1_500_000);
+        let tv = libc::time_value_t {
+            seconds: 47,
+            microseconds: 250,
+        };
+        assert_eq!(time_value_to_us(tv), 47_000_250);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_process_cpu_percent_delta() {
+        use super::macos::{process_cpu_percent, Snapshot};
+        // 100 ms window, 50 ms of user CPU + 10 ms of system =
+        // 60 ms CPU consumed during a 100 ms wall window.
+        // Expected: 60.0 percent.
+        let a = Snapshot {
+            user_time_us: 1_000_000,
+            system_time_us: 0,
+            resident_size: 0,
+            virtual_size: 0,
+        };
+        let b = Snapshot {
+            user_time_us: 1_050_000,
+            system_time_us: 10_000,
+            resident_size: 0,
+            virtual_size: 0,
+        };
+        let pct = process_cpu_percent(&a, &b, std::time::Duration::from_millis(100));
+        assert!((pct - 60.0).abs() < 0.01, "expected ~60.0%, got {}", pct);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_process_cpu_percent_zero_window() {
+        use super::macos::{process_cpu_percent, Snapshot};
+        // Zero-duration window must not produce NaN/Inf. The
+        // helper bumps the divisor to 1 µs, so the resulting
+        // percent is finite (zero when deltas are zero).
+        let s = Snapshot {
+            user_time_us: 0,
+            system_time_us: 0,
+            resident_size: 0,
+            virtual_size: 0,
+        };
+        let pct = process_cpu_percent(&s, &s, std::time::Duration::from_millis(0));
+        assert!(pct.is_finite(), "percent must be finite: {}", pct);
+        assert_eq!(pct, 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_process_cpu_percent_clock_reset() {
+        use super::macos::{process_cpu_percent, Snapshot};
+        // Pathological: second snapshot's CPU is *less* than
+        // first's (clock reset / thread-accounting quirk).
+        // Saturating subtract yields 0; percent = 0.
+        let a = Snapshot {
+            user_time_us: 1_000_000,
+            system_time_us: 500_000,
+            resident_size: 0,
+            virtual_size: 0,
+        };
+        let b = Snapshot {
+            user_time_us: 999_000,
+            system_time_us: 400_000,
+            resident_size: 0,
+            virtual_size: 0,
+        };
+        let pct = process_cpu_percent(&a, &b, std::time::Duration::from_millis(100));
+        assert_eq!(pct, 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_sample_returns_populated_variant() {
+        // End-to-end smoke test on a real Mac: call sample()
+        // with a short window and confirm a populated MacOS
+        // variant comes back, not Unavailable.
+        let m = sample(std::time::Duration::from_millis(100));
+        match m {
+            RuntimeMetrics::MacOS {
+                sample_window_ms,
+                process,
+                threads,
+                platform,
+            } => {
+                assert_eq!(platform, "macos");
+                assert_eq!(sample_window_ms, 100);
+                // Threads is empty in phase 1.
+                assert!(threads.is_empty());
+                // RSS must be positive for any running process.
+                assert!(process.rss_kb > 0, "rss_kb={}", process.rss_kb);
+                assert!(process.vm_size_kb > 0, "vm_size_kb={}", process.vm_size_kb);
+                // CPU% is non-negative and finite.
+                assert!(process.cpu_percent >= 0.0 && process.cpu_percent.is_finite());
+                // Uptime is non-negative.
+                assert!(process.uptime_secs >= 0.0);
+            }
+            other => panic!("expected MacOS variant, got {:?}", other),
+        }
     }
 }
