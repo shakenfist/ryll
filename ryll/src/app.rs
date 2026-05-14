@@ -67,6 +67,14 @@ const LATENCY_HISTORY_LEN: usize = 60;
 /// Number of recent frame timestamps kept for the FPS sliding window.
 const FPS_WINDOW_SIZE: usize = 120;
 
+/// Phase-04: number of recent mpsc-queue lag samples (μs)
+/// retained per event kind for render-side latency
+/// diagnostics. Per-event cadence is typically several Hz to
+/// hundreds of Hz; 32 entries cover seconds of recent activity
+/// without bloating session.json. See
+/// PLAN-video-keeping-up-phase-04.
+const RECENT_LAG_RING_CAP: usize = 32;
+
 /// Maximum entries shown in the traffic viewer.
 const TRAFFIC_VIEWER_MAX_ENTRIES: usize = 200;
 
@@ -660,6 +668,20 @@ pub struct RyllApp {
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
 
+    // Phase-03: count of display frames dropped because the
+    // encoder task's queue was full at CaptureSession::frame
+    // call time. Mirrored into AppSnapshot::video_drop_count
+    // by update_app_snapshot(). Stays zero unless --capture
+    // is active. See PLAN-video-keeping-up-phase-03.
+    video_drop_count: u64,
+
+    // Phase-04: bounded rings of mpsc-queue lag samples (μs)
+    // for renderer-to-app events. Mirrored into AppSnapshot
+    // by update_app_snapshot() as min/max/mean aggregates.
+    // See PLAN-video-keeping-up-phase-04.
+    recent_image_ready_lag_us: VecDeque<u32>,
+    recent_display_mark_lag_us: VecDeque<u32>,
+
     // Connection target for bug report metadata
     target_host: String,
     target_port: u16,
@@ -1052,6 +1074,9 @@ impl RyllApp {
             notification_snapshots: std::sync::Mutex::new(NotificationSnapshotStore::new()),
             channel_snapshots,
             app_snapshot,
+            video_drop_count: 0,
+            recent_image_ready_lag_us: VecDeque::new(),
+            recent_display_mark_lag_us: VecDeque::new(),
             target_host,
             target_port,
             show_bug_dialog: false,
@@ -1389,6 +1414,35 @@ impl RyllApp {
 
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
+            // Phase-04: record mpsc-queue lag from event emit
+            // to app pickup for renderer-side latency
+            // diagnostics. See PLAN-video-keeping-up-phase-04.
+            // Within-batch correlation noted: events drained
+            // in one process_events() call share this read,
+            // so several samples from one egui frame will be
+            // close in time.
+            let consumed_at_secs = self.traffic.elapsed().as_secs_f64();
+            match &event {
+                ChannelEvent::ImageReady {
+                    produced_at_secs, ..
+                }
+                | ChannelEvent::ImageReadyChroma {
+                    produced_at_secs, ..
+                }
+                | ChannelEvent::ImageReadyAlpha {
+                    produced_at_secs, ..
+                } => {
+                    let lag_us = ((consumed_at_secs - *produced_at_secs).max(0.0) * 1_000_000.0)
+                        .min(u32::MAX as f64) as u32;
+                    push_with_cap(&mut self.recent_image_ready_lag_us, lag_us);
+                }
+                ChannelEvent::DisplayMark { produced_at_secs } => {
+                    let lag_us = ((consumed_at_secs - *produced_at_secs).max(0.0) * 1_000_000.0)
+                        .min(u32::MAX as f64) as u32;
+                    push_with_cap(&mut self.recent_display_mark_lag_us, lag_us);
+                }
+                _ => {}
+            }
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
                     info!("app: session {} initialized", session_id);
@@ -1596,7 +1650,7 @@ impl RyllApp {
                     }
                 }
 
-                ChannelEvent::DisplayMark => {
+                ChannelEvent::DisplayMark { .. } => {
                     // Frame boundary — record timestamp for FPS calculation
                     let now = Instant::now();
                     self.stats.frame_times.push(now);
@@ -1604,7 +1658,10 @@ impl RyllApp {
                         self.stats.frame_times.remove(0);
                     }
 
-                    // Capture a video frame if enabled
+                    // Capture a video frame if enabled. Phase-03:
+                    // frame() is a non-blocking enqueue returning
+                    // bool; false means the encoder task's queue
+                    // was full and the frame was dropped.
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self
                             .surfaces
@@ -1612,7 +1669,9 @@ impl RyllApp {
                             .map(|gs| gs.surface())
                             .max_by_key(|s| (s.width as u64) * (s.height as u64))
                         {
-                            capture.frame(0, surface.pixels(), surface.width, surface.height);
+                            if !capture.frame(0, surface.pixels(), surface.width, surface.height) {
+                                self.video_drop_count = self.video_drop_count.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -1953,6 +2012,17 @@ impl RyllApp {
         snap.connected = self.connected;
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
         snap.auto_reconnect_count = self.auto_reconnect_count;
+        snap.video_drop_count = self.video_drop_count;
+
+        // Phase-04: render-side latency aggregates.
+        let (img_min, img_max, img_mean) = recent_lag_stats(&self.recent_image_ready_lag_us);
+        snap.image_ready_lag_recent_min_us = img_min;
+        snap.image_ready_lag_recent_max_us = img_max;
+        snap.image_ready_lag_recent_mean_us = img_mean;
+        let (mark_min, mark_max, mark_mean) = recent_lag_stats(&self.recent_display_mark_lag_us);
+        snap.display_mark_lag_recent_min_us = mark_min;
+        snap.display_mark_lag_recent_max_us = mark_max;
+        snap.display_mark_lag_recent_mean_us = mark_mean;
     }
 
     /// Clone the largest surface's RGBA pixels, capture trigger
@@ -4149,6 +4219,40 @@ fn is_primary_surface(display_channel_id: u8, surface_id: u32) -> bool {
     display_channel_id == 0 && surface_id == 0
 }
 
+/// Push a lag sample into a bounded ring, evicting the oldest
+/// entry when the cap is exceeded. Factored out of
+/// `process_events` so the cap behaviour is unit-testable.
+/// See PLAN-video-keeping-up-phase-04.
+fn push_with_cap(ring: &mut VecDeque<u32>, value: u32) {
+    ring.push_back(value);
+    if ring.len() > RECENT_LAG_RING_CAP {
+        ring.pop_front();
+    }
+}
+
+/// Min / max / mean of the values in a lag ring. Returns
+/// `(0, 0, 0)` when the ring is empty so a snapshot field
+/// reads as "no samples yet" rather than carrying stale data.
+fn recent_lag_stats(ring: &VecDeque<u32>) -> (u32, u32, u32) {
+    if ring.is_empty() {
+        return (0, 0, 0);
+    }
+    let mut min = u32::MAX;
+    let mut max = 0u32;
+    let mut sum: u64 = 0;
+    for &v in ring {
+        if v < min {
+            min = v;
+        }
+        if v > max {
+            max = v;
+        }
+        sum += v as u64;
+    }
+    let mean = u32::try_from(sum / ring.len() as u64).unwrap_or(u32::MAX);
+    (min, max, mean)
+}
+
 /// True when an announced surface size is small enough to
 /// safely drive the auto-fit and resolution-notification
 /// pipelines. See `MAX_AUTO_FIT_DIMENSION` for the
@@ -5202,5 +5306,54 @@ mod tests {
         assert!(json.contains("Notification"));
         assert!(json.contains("\"notification_id\":99"));
         assert!(json.contains("AtFire"));
+    }
+
+    // ── Phase-04 render-latency helpers ──────────────────
+
+    #[test]
+    fn recent_lag_stats_empty_ring_returns_zeros() {
+        let ring: VecDeque<u32> = VecDeque::new();
+        assert_eq!(recent_lag_stats(&ring), (0, 0, 0));
+    }
+
+    #[test]
+    fn recent_lag_stats_computes_min_max_mean() {
+        let ring: VecDeque<u32> = [100u32, 300, 200].into_iter().collect();
+        let (min, max, mean) = recent_lag_stats(&ring);
+        assert_eq!(min, 100);
+        assert_eq!(max, 300);
+        assert_eq!(mean, 200);
+    }
+
+    #[test]
+    fn recent_lag_stats_single_sample() {
+        let ring: VecDeque<u32> = std::iter::once(42u32).collect();
+        assert_eq!(recent_lag_stats(&ring), (42, 42, 42));
+    }
+
+    #[test]
+    fn push_with_cap_caps_at_recent_lag_ring_cap() {
+        let mut ring: VecDeque<u32> = VecDeque::new();
+        // Push more than the cap; verify only the most recent
+        // RECENT_LAG_RING_CAP entries survive, in order.
+        for i in 0..(RECENT_LAG_RING_CAP as u32 + 8) {
+            push_with_cap(&mut ring, i);
+        }
+        assert_eq!(ring.len(), RECENT_LAG_RING_CAP);
+        // First retained value should be sample index 8.
+        assert_eq!(ring.front().copied(), Some(8));
+        // Last retained value should be the very last push.
+        assert_eq!(ring.back().copied(), Some(RECENT_LAG_RING_CAP as u32 + 7));
+    }
+
+    #[test]
+    fn push_with_cap_under_cap_retains_all() {
+        let mut ring: VecDeque<u32> = VecDeque::new();
+        for i in 0..5 {
+            push_with_cap(&mut ring, i);
+        }
+        assert_eq!(ring.len(), 5);
+        assert_eq!(ring.front().copied(), Some(0));
+        assert_eq!(ring.back().copied(), Some(4));
     }
 }

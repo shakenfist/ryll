@@ -259,6 +259,7 @@ mod tests {
             height: 2,
             pixels,
             image_id: 0,
+            produced_at_secs: 0.0,
         });
         let s = m.primary_surface().expect("primary present");
         // First pixel should now be opaque red.
@@ -280,6 +281,7 @@ mod tests {
             height: 4,
             pixels,
             image_id: 0,
+            produced_at_secs: 0.0,
         });
         assert_eq!(m.surfaces.len(), 1);
         let s = m.primary_surface().expect("primary auto-created");
@@ -326,7 +328,9 @@ mod tests {
     fn non_display_event_is_noop() {
         let mut m = SurfaceMirror::new();
         m.apply_event(&ChannelEvent::SessionInitialized(42));
-        m.apply_event(&ChannelEvent::DisplayMark);
+        m.apply_event(&ChannelEvent::DisplayMark {
+            produced_at_secs: 0.0,
+        });
         m.apply_event(&ChannelEvent::CursorPosition {
             x: 10,
             y: 20,

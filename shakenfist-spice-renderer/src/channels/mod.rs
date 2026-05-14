@@ -55,6 +55,11 @@ pub enum ChannelEvent {
         pixels: Vec<u8>, // RGBA
         #[allow(dead_code)]
         image_id: u64,
+        /// Session-relative seconds at the moment the emitting
+        /// channel called `event_tx.send`. Used by the app to
+        /// compute mpsc-queue lag for renderer-side latency
+        /// diagnostics. See PLAN-video-keeping-up-phase-04.
+        produced_at_secs: f64,
     },
 
     /// Image-bearing paint with chroma-keying (DRAW_TRANSPARENT).
@@ -72,6 +77,8 @@ pub enum ChannelEvent {
         chroma_rgba: [u8; 4],
         #[allow(dead_code)]
         image_id: u64,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Image-bearing paint with constant-alpha blending
@@ -88,6 +95,8 @@ pub enum ChannelEvent {
         alpha: u8,
         #[allow(dead_code)]
         image_id: u64,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Solid-colour fill of a destination rect.
@@ -123,7 +132,10 @@ pub enum ChannelEvent {
     },
 
     /// Display mark (frame boundary)
-    DisplayMark,
+    DisplayMark {
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
+    },
 
     /// Cursor position updated
     CursorPosition {
