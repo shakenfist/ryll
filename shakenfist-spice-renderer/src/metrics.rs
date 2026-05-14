@@ -6,7 +6,7 @@
 /// On **Linux**, these are read from `/proc/self/stat`,
 /// `/proc/self/status`, and `/proc/self/task/<tid>/stat`.
 ///
-/// On **macOS** (phases 1–2 of `PLAN-macos-runtime-metrics`):
+/// On **macOS** (phases 1–3 of `PLAN-macos-runtime-metrics`):
 /// process-level metrics via a single
 /// `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot
 /// (phase 1) plus per-thread enumeration via `task_threads` +
@@ -15,11 +15,10 @@
 /// name (phase 2). The Mach port array from `task_threads` is
 /// wrapped in a `MachThreadList` RAII guard so each port
 /// reference and the array memory are released on every exit
-/// path, including panic. Uptime uses a `LazyLock<Instant>`
-/// initialised on the first call to `sample()`, so it
-/// strictly measures time-since-first-sample rather than true
-/// process start (the few-second gap at startup is documented
-/// in the master plan).
+/// path, including panic. Uptime is baselined by
+/// `init_at_startup()`, which the caller invokes at the top
+/// of `main()` (phase 3); `uptime_secs` then measures from
+/// process start.
 ///
 /// On other platforms the struct records that metrics are
 /// unavailable so the bug-report ZIP still contains the file
@@ -372,19 +371,22 @@ mod linux {
 
 // ── macOS implementation ───────────────────────────────────
 
-/// Phase-1 of `PLAN-macos-runtime-metrics`: process-level
-/// metrics via a single `task_info(MACH_TASK_BASIC_INFO)`
-/// syscall per snapshot. No Mach-port lifecycle work, no
-/// thread enumeration; those land in phase 2.
+/// macOS metrics implementation per `PLAN-macos-runtime-
+/// metrics`: phase 1 added process-level metrics via
+/// `task_info(MACH_TASK_BASIC_INFO)`; phase 2 added per-
+/// thread enumeration via `task_threads` + per-port
+/// `thread_info` (THREAD_BASIC_INFO + THREAD_IDENTIFIER_INFO)
+/// + `pthread_getname_np`, with the `MachThreadList` RAII
+/// guard handling the Mach port lifecycle.
 ///
-/// **Uptime caveat:** `PROCESS_START` is a `LazyLock<Instant>`
-/// initialised on the first call to `sample()`. This measures
-/// "time since first sample" rather than true process start;
-/// the gap is "the few seconds between `main()` and the first
-/// bug-report trigger" and is acceptable for diagnostic
-/// purposes. Phase 3 may promote `PROCESS_START` to a
-/// globally-initialised static if reports filed seconds after
-/// startup ever matter.
+/// **Uptime baseline:** `PROCESS_START` is a
+/// `LazyLock<Instant>` forced by the module-level
+/// `init_at_startup()` function, which callers invoke at the
+/// top of `main()`. As long as that ordering holds,
+/// `uptime_secs` measures from process start. If a
+/// `sample()` runs before `init_at_startup()`, the baseline
+/// is the first-sample moment instead — see phase-3's plan
+/// for the ordering-requirement risk note.
 #[cfg(target_os = "macos")]
 mod macos {
     use std::collections::HashMap;
@@ -407,6 +409,18 @@ mod macos {
     }
 
     static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+    /// Force the `PROCESS_START` LazyLock so subsequent
+    /// `uptime_secs` reports measure from this call site
+    /// rather than the first `sample()` call. Called from
+    /// the module-level `init_at_startup`; see its doc-
+    /// comment for the ordering requirement.
+    pub(super) fn force_process_start() {
+        // Dereferencing the LazyLock initialises it; the
+        // result is discarded — the side effect is what we
+        // want.
+        let _ = *PROCESS_START;
+    }
 
     /// Per-thread CPU + identity captured at a single moment.
     /// `compute_thread_metrics` matches `ThreadSnapshot`
@@ -772,6 +786,30 @@ pub fn sample(window: Duration) -> RuntimeMetrics {
     }
 }
 
+/// Initialise platform-specific runtime-metrics state at
+/// process start.
+///
+/// On macOS this forces the `PROCESS_START` LazyLock so
+/// subsequent `uptime_secs` values measure from this call
+/// site rather than the first `sample()` call. Call once at
+/// the top of `main()`, before any tokio runtime init or
+/// `sample()` call, so the uptime baseline reflects true
+/// process start.
+///
+/// On other platforms this is a no-op.
+///
+/// Idempotent and cheap; safe to call more than once. If a
+/// `sample()` already ran before `init_at_startup`, the
+/// LazyLock is already set and this call is a no-op — see
+/// `PLAN-macos-runtime-metrics-phase-03-integration.md`
+/// "Risks" for the ordering requirement.
+pub fn init_at_startup() {
+    #[cfg(target_os = "macos")]
+    {
+        macos::force_process_start();
+    }
+}
+
 // ── Unit tests ─────────────────────────────────────────────
 
 #[cfg(test)]
@@ -902,6 +940,17 @@ VmData:\t   65536 kB\n\
         // Untagged: no enum variant name in the JSON.
         assert!(!json.contains("\"MacOS\""));
         assert!(!json.contains("\"Linux\""));
+    }
+
+    #[test]
+    fn test_init_at_startup_runs_without_panic() {
+        // Phase-3 contract: init_at_startup() is unconditionally
+        // callable on every platform and idempotent. On Linux
+        // it is a no-op; on macOS it forces the PROCESS_START
+        // LazyLock. Either way, calling it twice in a row from
+        // a test must not panic, return an error, or block.
+        init_at_startup();
+        init_at_startup();
     }
 
     // ── macOS phase-1 helper tests ─────────────────────────

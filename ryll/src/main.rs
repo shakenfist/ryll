@@ -74,6 +74,15 @@ use crate::notifications::{
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> Result<()> {
+    // Baseline the runtime-metrics uptime clock at process
+    // start, before tokio runtime construction or any
+    // metrics::sample() call. On Linux this is a no-op; on
+    // macOS it forces the LazyLock<Instant> that backs
+    // `process.uptime_secs` so the field measures from
+    // here rather than the first bug-report trigger. See
+    // PLAN-macos-runtime-metrics-phase-03-integration.md.
+    shakenfist_spice_renderer::metrics::init_at_startup();
+
     // Install Ctrl+C handler so graceful shutdown works on all platforms.
     ctrlc::set_handler(|| {
         SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);

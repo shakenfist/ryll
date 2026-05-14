@@ -61,9 +61,12 @@ API mapping for macOS:
   `pthread_getname_np(pthread, buf, len)`. Tokio names its
   worker threads, so this gets us useful labels without
   building our own registry.
-- **Uptime:** record `Instant::now()` once at process start in a
-  `LazyLock` (or `OnceLock`) inside this module and report
-  elapsed seconds.
+- **Uptime:** `LazyLock<Instant>` inside the module, forced
+  at process start by a `metrics::init_at_startup()` call
+  from `main()`. Phase 1 introduced the LazyLock with a
+  documented "time-since-first-sample" caveat; phase 3
+  added `init_at_startup` and the explicit `main()` call so
+  the caveat is closed in practice.
 
 ## Mission and problem statement
 
@@ -147,7 +150,7 @@ A macOS bug report's `runtime-metrics.json` is "complete" when:
 |-------|------|--------|
 | 1. Process-level metrics on macOS | PLAN-macos-runtime-metrics-phase-01-process.md | Done |
 | 2. Per-thread enumeration + naming | PLAN-macos-runtime-metrics-phase-02-threads.md | Done |
-| 3. Integration into bug-report path + soak | PLAN-macos-runtime-metrics-phase-03-integration.md | Not started |
+| 3. Integration into bug-report path + soak | PLAN-macos-runtime-metrics-phase-03-integration.md | Done |
 
 Phases must run in order — phase 2 builds on the module
 structure phase 1 introduces; phase 3 requires both. Each phase
