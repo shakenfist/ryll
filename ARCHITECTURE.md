@@ -1763,13 +1763,17 @@ Ryll tracks:
   `runtime-metrics.json` file with process and per-thread CPU%, RSS,
   and VmSize sampled over a 2-second window. On **Linux** the data
   comes from `/proc/self/stat`, `/proc/self/status`, and
-  `/proc/self/task/*/`. On **macOS** (phase 1 of
-  `PLAN-macos-runtime-metrics`) process-level data comes from a
-  single `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot; the
-  `threads` array is empty until phase 2 wires up Mach-thread
-  enumeration. Other platforms emit a graceful "unavailable"
-  payload. The `MacOS` enum variant has the same JSON shape as
-  `Linux`, distinguished by the `platform` field. Implemented in
+  `/proc/self/task/*/`. On **macOS** (phases 1–2 of
+  `PLAN-macos-runtime-metrics`) process-level data comes from
+  `task_info(MACH_TASK_BASIC_INFO)` and per-thread data from
+  `task_threads` + per-port `thread_info(THREAD_BASIC_INFO)` +
+  `thread_info(THREAD_IDENTIFIER_INFO)` (for the stable
+  64-bit thread id) + `pthread_getname_np` (for the name).
+  The Mach port array is held in a `MachThreadList` RAII guard
+  so port references are released on every exit path. Other
+  platforms emit a graceful "unavailable" payload. The `MacOS`
+  enum variant has the same JSON shape as `Linux`, distinguished
+  by the `platform` field. Implemented in
   `shakenfist-spice-renderer/src/metrics.rs`.
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy

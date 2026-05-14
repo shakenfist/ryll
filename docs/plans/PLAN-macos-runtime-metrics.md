@@ -146,7 +146,7 @@ A macOS bug report's `runtime-metrics.json` is "complete" when:
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Process-level metrics on macOS | PLAN-macos-runtime-metrics-phase-01-process.md | Done |
-| 2. Per-thread enumeration + naming | PLAN-macos-runtime-metrics-phase-02-threads.md | Not started |
+| 2. Per-thread enumeration + naming | PLAN-macos-runtime-metrics-phase-02-threads.md | Done |
 | 3. Integration into bug-report path + soak | PLAN-macos-runtime-metrics-phase-03-integration.md | Not started |
 
 Phases must run in order — phase 2 builds on the module
