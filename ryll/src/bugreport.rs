@@ -1940,10 +1940,32 @@ mod tests {
             last_frame_ts_secs: Some(45.5),
             last_decode_ok_ts_secs: Some(45.4),
             last_decode_duration_us: 18_321,
+            destroyed_at_secs: None,
         });
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
         snap.stream_data_orphan_count = 3;
+        // Previously-active stream now in the recently-destroyed
+        // ring: destroyed_at_secs is Some, counters are frozen.
+        snap.streams_recently_destroyed.push_back(StreamSnapshot {
+            stream_id: 37,
+            surface_id: 0,
+            codec_type: 1,
+            stream_width: 1600,
+            stream_height: 1200,
+            dest_top: 0,
+            dest_left: 0,
+            dest_bottom: 1200,
+            dest_right: 1600,
+            created_at_secs: 4.0,
+            frames_received: 30,
+            frames_decoded_ok: 28,
+            frames_decode_failed: 2,
+            last_frame_ts_secs: Some(6.0),
+            last_decode_ok_ts_secs: Some(6.0),
+            last_decode_duration_us: 17_500,
+            destroyed_at_secs: Some(6.25),
+        });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
@@ -1980,6 +2002,13 @@ mod tests {
         assert!(json.contains("\"streams_created_total\": 2"));
         assert!(json.contains("\"streams_destroyed_total\": 1"));
         assert!(json.contains("\"stream_data_orphan_count\": 3"));
+        // Recently-destroyed ring: counters survive teardown so a
+        // bug report between flap cycles still answers "did MJPEG
+        // decode during stream X's life?". destroyed_at_secs is
+        // always Some for entries in the ring.
+        assert!(json.contains("\"streams_recently_destroyed\""));
+        assert!(json.contains("\"stream_id\": 37"));
+        assert!(json.contains("\"destroyed_at_secs\": 6.25"));
     }
 
     #[test]

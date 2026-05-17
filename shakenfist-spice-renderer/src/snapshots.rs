@@ -60,6 +60,12 @@ pub struct StreamSnapshot {
     /// Wall-clock microseconds for the most recent successful
     /// decode. Zero until the first one succeeds.
     pub last_decode_duration_us: u32,
+    /// Session-relative seconds when the stream was torn down
+    /// via `STREAM_DESTROY` / `STREAM_DESTROY_ALL`. `None`
+    /// while the stream is still active (i.e. in
+    /// `DisplaySnapshot::streams_active`); always `Some` for
+    /// entries in `streams_recently_destroyed`.
+    pub destroyed_at_secs: Option<f64>,
 }
 
 /// Result of a single image decode in the display channel.
@@ -169,6 +175,14 @@ pub struct DisplaySnapshot {
     /// value points at a `STREAM_CREATE` we missed or processed
     /// in the wrong order — symptom level, not root cause.
     pub stream_data_orphan_count: u64,
+    /// Bounded ring of the most recently torn-down streams,
+    /// oldest first. Each entry's counters are frozen at
+    /// `STREAM_DESTROY` time so a bug report filed after a
+    /// teardown can still answer "during stream X's life, did
+    /// MJPEG decode?". `destroyed_at_secs` is always `Some` for
+    /// entries here. The cap is set by
+    /// `MAX_RECENT_DESTROYED_STREAMS` in the display channel.
+    pub streams_recently_destroyed: VecDeque<StreamSnapshot>,
 }
 
 /// A recorded input event for the inputs channel snapshot.

@@ -158,6 +158,13 @@ struct StreamState {
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
 
+/// Maximum number of recently-destroyed streams retained for
+/// post-mortem diagnostics. Streams flap fast enough on a misbehaving
+/// spice-server (observed: stream every ~15 s with ~2 s lifetime)
+/// that 16 entries comfortably covers a few minutes of session
+/// time without bloating channel-state.json.
+const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
+
 /// Maximum number of consecutive ACK-send intervals retained in
 /// the snapshot for "video not keeping up" diagnostics. With a
 /// typical ACK window of a few hundred messages on a busy
@@ -623,6 +630,11 @@ pub struct DisplayChannel {
     streams_created_total: u64,
     streams_destroyed_total: u64,
     stream_data_orphan_count: u64,
+    /// Bounded ring of recently-destroyed `StreamState`s captured
+    /// at teardown so per-stream counters survive `STREAM_DESTROY`.
+    /// Without this, a bug report filed between flap cycles loses
+    /// the diagnostic data we just added.
+    recently_destroyed_streams: VecDeque<StreamSnapshot>,
 }
 
 impl DisplayChannel {
@@ -682,6 +694,67 @@ impl DisplayChannel {
             streams_created_total: 0,
             streams_destroyed_total: 0,
             stream_data_orphan_count: 0,
+            recently_destroyed_streams: VecDeque::new(),
+        }
+    }
+
+    /// Build a `StreamSnapshot` from a live `StreamState`.
+    /// `destroyed_at` is `None` for active streams (entries in
+    /// `streams_active`) and `Some(now)` for entries being
+    /// moved into `recently_destroyed_streams`.
+    fn stream_state_to_snapshot(
+        id: u32,
+        s: &StreamState,
+        destroyed_at: Option<f64>,
+    ) -> StreamSnapshot {
+        StreamSnapshot {
+            stream_id: id,
+            surface_id: s.surface_id,
+            codec_type: s.codec_type,
+            stream_width: s.stream_width,
+            stream_height: s.stream_height,
+            dest_top: s.dest_top,
+            dest_left: s.dest_left,
+            dest_bottom: s.dest_bottom,
+            dest_right: s.dest_right,
+            created_at_secs: s.created_at_secs,
+            frames_received: s.frames_received,
+            frames_decoded_ok: s.frames_decoded_ok,
+            frames_decode_failed: s.frames_decode_failed,
+            last_frame_ts_secs: s.last_frame_ts_secs,
+            last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
+            last_decode_duration_us: s.last_decode_duration_us,
+            destroyed_at_secs: destroyed_at,
+        }
+    }
+
+    /// Snapshot a dying stream into the recently-destroyed ring,
+    /// evicting the oldest entry when the cap is exceeded, and
+    /// log the final per-stream counters at INFO so the console
+    /// is useful even without a bug report.
+    fn retire_stream(&mut self, stream_id: u32, state: &StreamState, destroyed_at: f64) {
+        let lifetime = destroyed_at - state.created_at_secs;
+        info!(
+            "display: stream_destroy id={} (lifetime={:.2}s, received={}, \
+             decoded_ok={}, decode_failed={}, last_frame_age={})",
+            stream_id,
+            lifetime,
+            state.frames_received,
+            state.frames_decoded_ok,
+            state.frames_decode_failed,
+            state
+                .last_frame_ts_secs
+                .map(|t| format!("{:.2}s", destroyed_at - t))
+                .unwrap_or_else(|| "never".to_string()),
+        );
+        self.recently_destroyed_streams
+            .push_back(Self::stream_state_to_snapshot(
+                stream_id,
+                state,
+                Some(destroyed_at),
+            ));
+        if self.recently_destroyed_streams.len() > MAX_RECENT_DESTROYED_STREAMS {
+            self.recently_destroyed_streams.pop_front();
         }
     }
 
@@ -1294,10 +1367,16 @@ impl DisplayChannel {
             display_server::STREAM_DESTROY => {
                 if payload.len() >= 4 {
                     let stream_id = read_u32_le(payload, 0);
-                    info!("display: stream_destroy id={}", stream_id);
-                    if self.streams.remove(&stream_id).is_some() {
+                    let now = self.traffic.elapsed().as_secs_f64();
+                    if let Some(state) = self.streams.remove(&stream_id) {
+                        self.retire_stream(stream_id, &state, now);
                         self.streams_destroyed_total =
                             self.streams_destroyed_total.saturating_add(1);
+                    } else {
+                        // Server destroyed a stream we never saw
+                        // created — log and move on. Not counted as
+                        // a real destruction.
+                        info!("display: stream_destroy id={} (unknown stream)", stream_id);
                     }
                 }
             }
@@ -1310,7 +1389,15 @@ impl DisplayChannel {
                 // channel-display.c:1855.
                 let cleared = self.streams.len() as u64;
                 info!("display: stream_destroy_all (clearing {} streams)", cleared);
-                self.streams.clear();
+                let now = self.traffic.elapsed().as_secs_f64();
+                // Drain the map into the recently-destroyed ring so
+                // each stream's final counters survive teardown.
+                // Sort by id for stable retire order in the log.
+                let mut drained: Vec<(u32, StreamState)> = self.streams.drain().collect();
+                drained.sort_by_key(|(id, _)| *id);
+                for (id, state) in drained {
+                    self.retire_stream(id, &state, now);
+                }
                 self.streams_destroyed_total = self.streams_destroyed_total.saturating_add(cleared);
             }
 
@@ -2348,37 +2435,20 @@ impl DisplayChannel {
 
         // Stream diagnostics: copy per-stream counters and the
         // aggregate totals so a bug report can answer "did MJPEG
-        // frames arrive / decode / paint?" directly. Streams are
-        // listed in stream_id order for stable JSON output.
+        // frames arrive / decode / paint?" directly. Active
+        // streams are listed in stream_id order for stable JSON
+        // output; recently-destroyed entries retain insertion
+        // (chronological) order from the ring.
         let mut stream_ids: Vec<u32> = self.streams.keys().copied().collect();
         stream_ids.sort_unstable();
         snap.streams_active = stream_ids
             .into_iter()
-            .map(|id| {
-                let s = &self.streams[&id];
-                StreamSnapshot {
-                    stream_id: id,
-                    surface_id: s.surface_id,
-                    codec_type: s.codec_type,
-                    stream_width: s.stream_width,
-                    stream_height: s.stream_height,
-                    dest_top: s.dest_top,
-                    dest_left: s.dest_left,
-                    dest_bottom: s.dest_bottom,
-                    dest_right: s.dest_right,
-                    created_at_secs: s.created_at_secs,
-                    frames_received: s.frames_received,
-                    frames_decoded_ok: s.frames_decoded_ok,
-                    frames_decode_failed: s.frames_decode_failed,
-                    last_frame_ts_secs: s.last_frame_ts_secs,
-                    last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
-                    last_decode_duration_us: s.last_decode_duration_us,
-                }
-            })
+            .map(|id| Self::stream_state_to_snapshot(id, &self.streams[&id], None))
             .collect();
         snap.streams_created_total = self.streams_created_total;
         snap.streams_destroyed_total = self.streams_destroyed_total;
         snap.stream_data_orphan_count = self.stream_data_orphan_count;
+        snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
     }
 
     async fn send_ack(&mut self) -> Result<()> {
