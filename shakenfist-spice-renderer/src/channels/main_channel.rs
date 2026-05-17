@@ -7,6 +7,7 @@ use tokio::sync::Notify as RepaintNotify;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
+use crate::mm_clock::MmClock;
 use crate::snapshots::MainSnapshot;
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
@@ -180,6 +181,12 @@ pub struct MainChannel {
     /// writer task's queue. Mirrored into
     /// `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
+    /// Shared mm_time clock — writer side. Updated from
+    /// `MAIN_INIT::multi_media_time` and from
+    /// `MULTI_MEDIA_TIME` messages. The display channel reads
+    /// the same `Arc` to compute "now in mm_time" at
+    /// `STREAM_REPORT` send time.
+    mm_clock: Arc<MmClock>,
 }
 
 /// Idle window before the main-channel keepalive fires. The
@@ -206,6 +213,7 @@ impl MainChannel {
         clipboard: Option<Arc<dyn ClipboardBackend>>,
         session_init_signal: oneshot::Sender<u32>,
         channels_avail_signal: oneshot::Sender<Vec<(ChannelType, u8)>>,
+        mm_clock: Arc<MmClock>,
     ) -> Self {
         MainChannel {
             stream,
@@ -244,6 +252,7 @@ impl MainChannel {
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
             capture_dropped_count: 0,
+            mm_clock,
         }
     }
 
@@ -642,6 +651,13 @@ impl MainChannel {
                 let init = MainInit::read(payload)?;
                 info!("main: session initialized: id={}", init.session_id);
 
+                // Seed the shared mm_time clock from the server's
+                // initial multi_media_time. Display channel readers
+                // (phase 1F STREAM_REPORT) need this base before
+                // they can compute a meaningful "now in mm_time".
+                self.mm_clock
+                    .set(init.multi_media_time, self.traffic.elapsed().as_secs_f64());
+
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "session_id={}, display_channels_hint={}, mouse_modes={}, \
@@ -747,13 +763,19 @@ impl MainChannel {
             }
 
             main_server::MULTI_MEDIA_TIME => {
-                // Periodic multimedia-time tick for audio/video sync.
-                // Not wired into playback yet; accept the payload so
-                // --pedantic doesn't flag it as an unknown opcode.
+                // Periodic multimedia-time tick. The server uses
+                // this to keep our `mm_time` clock in sync with
+                // its own; the display channel reads the clock at
+                // STREAM_REPORT send time to compute
+                // `last_frame_delay`. Updating the shared
+                // `MmClock` here also makes the value visible in
+                // `MainSnapshot::mm_time_*` for bug reports.
                 if payload.len() >= 4 {
                     let mm_time =
                         u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     debug!("main: multi_media_time={}", mm_time);
+                    self.mm_clock
+                        .set(mm_time, self.traffic.elapsed().as_secs_f64());
                 } else {
                     debug!(
                         "main: short MULTI_MEDIA_TIME payload ({} bytes)",
@@ -974,6 +996,12 @@ impl MainChannel {
         snap.client_keepalive_send_count = self.client_keepalive_send_count;
         snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        // mm_time clock state. `now()` is informational —
+        // computed at snapshot time so a bug report shows the
+        // server's current millisecond counter.
+        snap.mm_time_now = self.mm_clock.now();
+        snap.mm_time_set_count = self.mm_clock.set_count();
+        snap.last_mm_time_set_ts_secs = self.mm_clock.last_set_ts_secs();
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {

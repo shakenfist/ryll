@@ -8,6 +8,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::mm_clock::MmClock;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
@@ -635,6 +636,12 @@ pub struct DisplayChannel {
     /// Without this, a bug report filed between flap cycles loses
     /// the diagnostic data we just added.
     recently_destroyed_streams: VecDeque<StreamSnapshot>,
+    /// Shared mm_time clock — reader side. Phase 1F's
+    /// `STREAM_REPORT` send path reads `mm_clock.now()` to
+    /// compute `last_frame_delay`. Stored here in phase 1B as
+    /// plumbing only; no usage site exists yet.
+    #[allow(dead_code)]
+    mm_clock: Arc<MmClock>,
 }
 
 impl DisplayChannel {
@@ -654,6 +661,7 @@ impl DisplayChannel {
         snapshot: Arc<Mutex<DisplaySnapshot>>,
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
+        mm_clock: Arc<MmClock>,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -695,6 +703,7 @@ impl DisplayChannel {
             streams_destroyed_total: 0,
             stream_data_orphan_count: 0,
             recently_destroyed_streams: VecDeque::new(),
+            mm_clock,
         }
     }
 

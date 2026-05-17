@@ -38,6 +38,7 @@ use crate::channels::{
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
 use crate::log_config::LogConfig;
+use crate::mm_clock::MmClock;
 use crate::notification_sink::NotificationSink;
 use crate::snapshots::ChannelSnapshots;
 use crate::traffic::TrafficSink;
@@ -93,6 +94,15 @@ pub async fn run_connection(
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
+    // Shared mm_time clock. The main channel writes to it from
+    // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel
+    // reads from it when building `STREAM_REPORT` payloads
+    // (phase 1F). Constructed here so both channels share the
+    // same `Arc<MmClock>`; not exposed through `run_connection`'s
+    // public signature because it is purely internal plumbing
+    // — host callers never see it.
+    let mm_clock = Arc::new(MmClock::new());
+
     // Connect main channel and run it. The main channel sends
     // ChannelEvents directly into the caller-provided `event_tx`
     // (no intermediate bounded buffer); session id and channels
@@ -121,6 +131,7 @@ pub async fn run_connection(
         clipboard,
         session_init_tx,
         channels_avail_tx,
+        mm_clock.clone(),
     );
 
     // Spawn main channel task
@@ -173,6 +184,7 @@ pub async fn run_connection(
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
                     log_config,
+                    mm_clock.clone(),
                 );
                 handles.push((
                     ChannelType::Display,

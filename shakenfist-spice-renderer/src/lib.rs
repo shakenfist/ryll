@@ -18,6 +18,7 @@ pub mod display;
 pub mod encoder;
 pub mod log_config;
 pub mod metrics;
+pub mod mm_clock;
 pub mod notification;
 pub mod notification_sink;
 pub mod session;
@@ -39,6 +40,7 @@ pub use encoder::{
     SyntheticFrameSource,
 };
 pub use log_config::LogConfig;
+pub use mm_clock::MmClock;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;
 pub use session::{run_connection, run_headless};

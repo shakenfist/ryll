@@ -2058,11 +2058,18 @@ mod tests {
             bytes_in: 500,
             bytes_out: 100,
             writer_dropped_count: 2,
+            // Phase-01 STREAM_REPORT mm_time visibility.
+            mm_time_now: 123_456,
+            mm_time_set_count: 7,
+            last_mm_time_set_ts_secs: Some(12.5),
             ..Default::default()
         };
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
         assert!(json.contains("\"writer_dropped_count\": 2"));
+        assert!(json.contains("\"mm_time_now\": 123456"));
+        assert!(json.contains("\"mm_time_set_count\": 7"));
+        assert!(json.contains("\"last_mm_time_set_ts_secs\": 12.5"));
     }
 
     #[test]

@@ -285,6 +285,21 @@ pub struct MainSnapshot {
     pub pong_send_count: u32,
     /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// Current SPICE `mm_time` (server-side millisecond
+    /// counter) computed from the most recent
+    /// `MAIN_INIT::multi_media_time` or `MULTI_MEDIA_TIME`
+    /// update plus elapsed wall time. Informational; recomputed
+    /// at snapshot time. Wraps at 2^32 ms (~49.7 days).
+    pub mm_time_now: u32,
+    /// Number of `MmClock::set` calls since session start
+    /// (one per `MAIN_INIT` plus one per `MULTI_MEDIA_TIME`).
+    /// A frozen `mm_time_now` with a non-advancing
+    /// `mm_time_set_count` points at the server having stopped
+    /// sending `MULTI_MEDIA_TIME` ticks.
+    pub mm_time_set_count: u64,
+    /// Session-relative seconds at the most recent `MmClock`
+    /// set. `None` until the first `MAIN_INIT` lands.
+    pub last_mm_time_set_ts_secs: Option<f64>,
     /// Set to true by the main channel's read loop when its
     /// 30 s client-side keepalive timeout fires (i.e. ryll
     /// considered itself disconnected because no main-channel
