@@ -1257,32 +1257,53 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED
-                {
-                    if payload.len() < 36 {
-                        return Ok(());
-                    }
-                    let id = read_u32_le(payload, 0);
-                    let dest_top = read_u32_le(payload, 16);
-                    let dest_left = read_u32_le(payload, 20);
-                    let dest_bottom = read_u32_le(payload, 24);
-                    let dest_right = read_u32_le(payload, 28);
-                    let data_size = read_u32_le(payload, 32) as usize;
-                    let data = &payload[36..36 + data_size.min(payload.len() - 36)];
-                    (
-                        id,
-                        Some((dest_top, dest_left, dest_bottom, dest_right)),
-                        data,
-                    )
-                } else {
-                    if payload.len() < 12 {
-                        return Ok(());
-                    }
-                    let id = read_u32_le(payload, 0);
-                    let data_size = read_u32_le(payload, 8) as usize;
-                    let data = &payload[12..12 + data_size.min(payload.len() - 12)];
-                    (id, None, data)
-                };
+                let (stream_id, _frame_mm_time, dest, jpeg_data) =
+                    if msg_type == display_server::STREAM_DATA_SIZED {
+                        // SpiceMsgDisplayStreamDataSized layout (spice.proto):
+                        //   offset  0: stream_id (u32)
+                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  8: width (u32)
+                        //   offset 12: height (u32)
+                        //   offset 16: dest_top (u32)
+                        //   offset 20: dest_left (u32)
+                        //   offset 24: dest_bottom (u32)
+                        //   offset 28: dest_right (u32)
+                        //   offset 32: data_size (u32)
+                        //   offset 36: data
+                        if payload.len() < 36 {
+                            return Ok(());
+                        }
+                        let id = read_u32_le(payload, 0);
+                        // _frame_mm_time: consumed in step 1E
+                        let mm_time = read_u32_le(payload, 4);
+                        let dest_top = read_u32_le(payload, 16);
+                        let dest_left = read_u32_le(payload, 20);
+                        let dest_bottom = read_u32_le(payload, 24);
+                        let dest_right = read_u32_le(payload, 28);
+                        let data_size = read_u32_le(payload, 32) as usize;
+                        let data = &payload[36..36 + data_size.min(payload.len() - 36)];
+                        (
+                            id,
+                            mm_time,
+                            Some((dest_top, dest_left, dest_bottom, dest_right)),
+                            data,
+                        )
+                    } else {
+                        // SpiceMsgDisplayStreamData layout (spice.proto):
+                        //   offset  0: stream_id (u32)
+                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  8: data_size (u32)
+                        //   offset 12: data
+                        if payload.len() < 12 {
+                            return Ok(());
+                        }
+                        let id = read_u32_le(payload, 0);
+                        // _frame_mm_time: consumed in step 1E
+                        let mm_time = read_u32_le(payload, 4);
+                        let data_size = read_u32_le(payload, 8) as usize;
+                        let data = &payload[12..12 + data_size.min(payload.len() - 12)];
+                        (id, mm_time, None, data)
+                    };
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     let now_secs = self.traffic.elapsed().as_secs_f64();
