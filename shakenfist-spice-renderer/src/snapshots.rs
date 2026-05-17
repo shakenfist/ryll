@@ -66,6 +66,39 @@ pub struct StreamSnapshot {
     /// `DisplaySnapshot::streams_active`); always `Some` for
     /// entries in `streams_recently_destroyed`.
     pub destroyed_at_secs: Option<f64>,
+    /// Whether the server activated client reports for this
+    /// stream via STREAM_ACTIVATE_REPORT. False until activation.
+    pub report_is_active: bool,
+    /// Unique id we must echo back in every STREAM_REPORT for
+    /// this stream. The server uses this to correlate reports
+    /// to the stream incarnation (a new id is issued each
+    /// STREAM_CREATE). Zero before activation.
+    pub report_unique_id: u32,
+    /// Server-suggested report trigger: send a report once
+    /// `report_num_frames` reaches this threshold. Zero before
+    /// activation. Server default = 5.
+    pub report_max_window_size: u32,
+    /// Server-suggested report trigger: send a report once
+    /// `now_mm_time - report_start_now_mm_time >= timeout_ms`.
+    /// Zero before activation. Server default = 1000.
+    pub report_timeout_ms: u32,
+    /// Cumulative reports sent since STREAM_CREATE. Zero until
+    /// the first send.
+    pub report_send_count: u32,
+    /// Session-relative seconds of the most recent STREAM_REPORT
+    /// send. None until the first send.
+    pub last_report_sent_ts_secs: Option<f64>,
+    /// Frame count of the most recently sent STREAM_REPORT.
+    /// Zero until the first send.
+    pub last_report_num_frames: u32,
+    /// Drop count of the most recently sent STREAM_REPORT.
+    /// Zero until the first send.
+    pub last_report_num_drops: u32,
+    /// `last_frame_delay` field of the most recently sent
+    /// STREAM_REPORT (signed mm-time difference between the
+    /// frame's mm_time and "now" at send time). Zero until the
+    /// first send.
+    pub last_report_last_frame_delay: i32,
 }
 
 /// Result of a single image decode in the display channel.

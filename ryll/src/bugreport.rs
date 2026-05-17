@@ -1941,6 +1941,15 @@ mod tests {
             last_decode_ok_ts_secs: Some(45.4),
             last_decode_duration_us: 18_321,
             destroyed_at_secs: None,
+            report_is_active: true,
+            report_unique_id: 0xDEAD_BEEF,
+            report_max_window_size: 5,
+            report_timeout_ms: 1000,
+            report_send_count: 3,
+            last_report_sent_ts_secs: Some(12.5),
+            last_report_num_frames: 5,
+            last_report_num_drops: 1,
+            last_report_last_frame_delay: -42,
         });
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
@@ -1965,6 +1974,15 @@ mod tests {
             last_decode_ok_ts_secs: Some(6.0),
             last_decode_duration_us: 17_500,
             destroyed_at_secs: Some(6.25),
+            report_is_active: false,
+            report_unique_id: 0,
+            report_max_window_size: 0,
+            report_timeout_ms: 0,
+            report_send_count: 0,
+            last_report_sent_ts_secs: None,
+            last_report_num_frames: 0,
+            last_report_num_drops: 0,
+            last_report_last_frame_delay: 0,
         });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
@@ -2009,6 +2027,18 @@ mod tests {
         assert!(json.contains("\"streams_recently_destroyed\""));
         assert!(json.contains("\"stream_id\": 37"));
         assert!(json.contains("\"destroyed_at_secs\": 6.25"));
+        // STREAM_ACTIVATE_REPORT fields (step 1D): verify that
+        // activation state and last-sent-report mirrors are
+        // visible in channel-state.json.
+        assert!(json.contains("\"report_is_active\": true"));
+        assert!(json.contains("\"report_unique_id\": 3735928559"));
+        assert!(json.contains("\"report_max_window_size\": 5"));
+        assert!(json.contains("\"report_timeout_ms\": 1000"));
+        assert!(json.contains("\"report_send_count\": 3"));
+        assert!(json.contains("\"last_report_sent_ts_secs\": 12.5"));
+        assert!(json.contains("\"last_report_num_frames\": 5"));
+        assert!(json.contains("\"last_report_num_drops\": 1"));
+        assert!(json.contains("\"last_report_last_frame_delay\": -42"));
     }
 
     #[test]

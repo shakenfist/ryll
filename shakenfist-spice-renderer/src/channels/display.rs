@@ -154,6 +154,29 @@ struct StreamState {
     last_frame_ts_secs: Option<f64>,
     last_decode_ok_ts_secs: Option<f64>,
     last_decode_duration_us: u32,
+    // Report state — populated by STREAM_ACTIVATE_REPORT; reset
+    // to defaults at STREAM_CREATE. See spice.proto's
+    // SpiceMsgDisplayStreamActivateReport and
+    // SpiceMsgcDisplayStreamReport.
+    report_is_active: bool,
+    report_unique_id: u32,
+    report_max_window_size: u32,
+    report_timeout_ms: u32,
+    // Rolling window counters; reset on each send. Phase 1E
+    // updates these per frame; phase 1F resets them.
+    report_num_frames: u32,
+    report_num_drops: u32,
+    report_drops_seq_len: u32,
+    report_start_frame_mm_time: u32,
+    report_end_frame_mm_time: u32,
+    report_start_now_mm_time: u32,
+    // Cumulative — don't reset.
+    report_send_count: u32,
+    last_report_sent_ts_secs: Option<f64>,
+    // Mirrors of the last sent report's values (for snapshots).
+    last_report_num_frames: u32,
+    last_report_num_drops: u32,
+    last_report_last_frame_delay: i32,
 }
 
 /// Maximum number of recent decode results to keep in the snapshot.
@@ -734,6 +757,15 @@ impl DisplayChannel {
             last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
             last_decode_duration_us: s.last_decode_duration_us,
             destroyed_at_secs: destroyed_at,
+            report_is_active: s.report_is_active,
+            report_unique_id: s.report_unique_id,
+            report_max_window_size: s.report_max_window_size,
+            report_timeout_ms: s.report_timeout_ms,
+            report_send_count: s.report_send_count,
+            last_report_sent_ts_secs: s.last_report_sent_ts_secs,
+            last_report_num_frames: s.last_report_num_frames,
+            last_report_num_drops: s.last_report_num_drops,
+            last_report_last_frame_delay: s.last_report_last_frame_delay,
         }
     }
 
@@ -1250,6 +1282,21 @@ impl DisplayChannel {
                             last_frame_ts_secs: None,
                             last_decode_ok_ts_secs: None,
                             last_decode_duration_us: 0,
+                            report_is_active: false,
+                            report_unique_id: 0,
+                            report_max_window_size: 0,
+                            report_timeout_ms: 0,
+                            report_num_frames: 0,
+                            report_num_drops: 0,
+                            report_drops_seq_len: 0,
+                            report_start_frame_mm_time: 0,
+                            report_end_frame_mm_time: 0,
+                            report_start_now_mm_time: 0,
+                            report_send_count: 0,
+                            last_report_sent_ts_secs: None,
+                            last_report_num_frames: 0,
+                            last_report_num_drops: 0,
+                            last_report_last_frame_delay: 0,
                         },
                     );
                     self.streams_created_total = self.streams_created_total.saturating_add(1);
@@ -1432,7 +1479,47 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_ACTIVATE_REPORT => {
-                debug!("display: stream_activate_report");
+                // 16-byte payload per spice.proto's
+                // SpiceMsgDisplayStreamActivateReport:
+                //   offset  0: stream_id (u32)
+                //   offset  4: unique_id (u32)
+                //   offset  8: max_window_size (u32)
+                //   offset 12: timeout_ms (u32)
+                if payload.len() < 16 {
+                    warn!(
+                        "display: short stream_activate_report payload ({} bytes)",
+                        payload.len()
+                    );
+                    return Ok(());
+                }
+                let stream_id = read_u32_le(payload, 0);
+                let unique_id = read_u32_le(payload, 4);
+                let max_window_size = read_u32_le(payload, 8);
+                let timeout_ms = read_u32_le(payload, 12);
+
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    info!(
+                        "display: stream_activate_report: id={} unique_id={} window={} timeout_ms={}",
+                        stream_id, unique_id, max_window_size, timeout_ms
+                    );
+                    stream.report_is_active = true;
+                    stream.report_unique_id = unique_id;
+                    stream.report_max_window_size = max_window_size;
+                    stream.report_timeout_ms = timeout_ms;
+                    // Reset rolling counters so the first frame starts a
+                    // fresh window. Cumulative counters left alone.
+                    stream.report_num_frames = 0;
+                    stream.report_num_drops = 0;
+                    stream.report_drops_seq_len = 0;
+                    stream.report_start_frame_mm_time = 0;
+                    stream.report_end_frame_mm_time = 0;
+                    stream.report_start_now_mm_time = 0;
+                } else {
+                    warn!(
+                        "display: stream_activate_report for unknown stream id={}",
+                        stream_id
+                    );
+                }
             }
 
             _ => {
