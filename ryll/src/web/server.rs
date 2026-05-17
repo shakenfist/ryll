@@ -662,7 +662,7 @@ mod tests {
         let cert_path = tmp.path().join("cert.pem");
         let key_path = tmp.path().join("key.pem");
         std::fs::write(&cert_path, cert.cert.pem()).unwrap();
-        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
 
         let config = super::load_tls_config(&cert_path, &key_path)
             .await
