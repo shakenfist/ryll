@@ -11,6 +11,57 @@ use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+/// Per-stream state for a single SPICE display video stream
+/// (e.g. an MJPEG stream the server promoted a region to). One
+/// instance per currently-open `STREAM_CREATE` lives in
+/// `DisplaySnapshot::streams_active`; entries disappear when the
+/// server sends `STREAM_DESTROY` / `STREAM_DESTROY_ALL`.
+///
+/// Added to answer "is the MJPEG path actually painting?" from
+/// bug reports: `frames_received` reflects what arrived on the
+/// wire for this stream, `frames_decoded_ok` reflects what was
+/// blit to the surface, and the timestamps show staleness. See
+/// the diagnostic gap that motivated this in the renderer's
+/// stream handling (`channels/display.rs::STREAM_DATA`).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StreamSnapshot {
+    pub stream_id: u32,
+    pub surface_id: u32,
+    /// Raw SPICE codec type (1=MJPEG, 2=VP8, 3=H264, 4=VP9, 5=H265).
+    pub codec_type: u8,
+    /// Native stream dimensions reported by `STREAM_CREATE`.
+    pub stream_width: u32,
+    pub stream_height: u32,
+    /// Destination rect on the surface (where decoded frames blit).
+    pub dest_top: u32,
+    pub dest_left: u32,
+    pub dest_bottom: u32,
+    pub dest_right: u32,
+    /// Session-relative seconds when `STREAM_CREATE` was processed.
+    pub created_at_secs: f64,
+    /// `STREAM_DATA` / `STREAM_DATA_SIZED` messages received for
+    /// this stream since `STREAM_CREATE`. Includes frames the
+    /// codec was unable to decode.
+    pub frames_received: u64,
+    /// Frames successfully decoded and dispatched as `ImageReady`.
+    pub frames_decoded_ok: u64,
+    /// Frames where the MJPEG decoder returned `None` (decode
+    /// error or unsupported pixel format) or the codec is not
+    /// supported by the renderer (anything other than MJPEG today).
+    pub frames_decode_failed: u64,
+    /// Session-relative seconds of the most recent `STREAM_DATA`
+    /// message for this stream. None until the first one arrives.
+    pub last_frame_ts_secs: Option<f64>,
+    /// Session-relative seconds of the most recent successful
+    /// decode. None until the first one succeeds. Compare with
+    /// `last_frame_ts_secs` to see "frames arriving but not
+    /// decoding".
+    pub last_decode_ok_ts_secs: Option<f64>,
+    /// Wall-clock microseconds for the most recent successful
+    /// decode. Zero until the first one succeeds.
+    pub last_decode_duration_us: u32,
+}
+
 /// Result of a single image decode in the display channel.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodeResult {
@@ -104,6 +155,20 @@ pub struct DisplaySnapshot {
     /// when triaging a "video not keeping up" report. See
     /// PLAN-video-keeping-up-phase-02-pcap-thread.md.
     pub writer_dropped_count: u64,
+    /// Currently-open SPICE video streams (one entry per active
+    /// `STREAM_CREATE`). Empty when the server has not promoted
+    /// any region to a stream. See `StreamSnapshot`.
+    pub streams_active: Vec<StreamSnapshot>,
+    /// Cumulative `STREAM_CREATE` count since session start.
+    pub streams_created_total: u64,
+    /// Cumulative count of streams removed via `STREAM_DESTROY`
+    /// or `STREAM_DESTROY_ALL` since session start.
+    pub streams_destroyed_total: u64,
+    /// `STREAM_DATA` / `STREAM_DATA_SIZED` messages whose
+    /// `stream_id` did not match any open stream. A non-zero
+    /// value points at a `STREAM_CREATE` we missed or processed
+    /// in the wrong order — symptom level, not root cause.
+    pub stream_data_orphan_count: u64,
 }
 
 /// A recorded input event for the inputs channel snapshot.

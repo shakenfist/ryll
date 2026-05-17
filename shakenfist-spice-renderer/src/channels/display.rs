@@ -8,7 +8,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
-use crate::snapshots::{DecodeResult, DisplaySnapshot};
+use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
@@ -136,11 +136,23 @@ pub(crate) fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 struct StreamState {
     surface_id: u32,
     codec_type: u8,
+    stream_width: u32,
+    stream_height: u32,
     dest_top: u32,
     dest_left: u32,
     dest_bottom: u32,
     dest_right: u32,
     cached_dht: Option<Vec<u8>>,
+    /// Session-relative seconds at `STREAM_CREATE`.
+    created_at_secs: f64,
+    /// Counters mirrored into `StreamSnapshot` by `update_snapshot`.
+    /// See snapshot field docs for semantics.
+    frames_received: u64,
+    frames_decoded_ok: u64,
+    frames_decode_failed: u64,
+    last_frame_ts_secs: Option<f64>,
+    last_decode_ok_ts_secs: Option<f64>,
+    last_decode_duration_us: u32,
 }
 
 /// Maximum number of recent decode results to keep in the snapshot.
@@ -604,6 +616,13 @@ pub struct DisplayChannel {
     /// writer task's queue. Mirrored into
     /// `DisplaySnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
+    /// Stream-channel diagnostics mirrored into
+    /// `DisplaySnapshot::streams_created_total` etc. Added so a
+    /// bug report can answer "did MJPEG frames reach blit?"
+    /// without the user enabling debug logging.
+    streams_created_total: u64,
+    streams_destroyed_total: u64,
+    stream_data_orphan_count: u64,
 }
 
 impl DisplayChannel {
@@ -660,6 +679,9 @@ impl DisplayChannel {
             last_ack_send_ts_secs: None,
             recent_ack_intervals_secs: VecDeque::new(),
             capture_dropped_count: 0,
+            streams_created_total: 0,
+            streams_destroyed_total: 0,
+            stream_data_orphan_count: 0,
         }
     }
 
@@ -1132,13 +1154,23 @@ impl DisplayChannel {
                         StreamState {
                             surface_id,
                             codec_type,
+                            stream_width: stream_w,
+                            stream_height: stream_h,
                             dest_top,
                             dest_left,
                             dest_bottom,
                             dest_right,
                             cached_dht: None,
+                            created_at_secs: self.traffic.elapsed().as_secs_f64(),
+                            frames_received: 0,
+                            frames_decoded_ok: 0,
+                            frames_decode_failed: 0,
+                            last_frame_ts_secs: None,
+                            last_decode_ok_ts_secs: None,
+                            last_decode_duration_us: 0,
                         },
                     );
+                    self.streams_created_total = self.streams_created_total.saturating_add(1);
                 }
             }
 
@@ -1171,6 +1203,10 @@ impl DisplayChannel {
                 };
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    let now_secs = self.traffic.elapsed().as_secs_f64();
+                    stream.frames_received = stream.frames_received.saturating_add(1);
+                    stream.last_frame_ts_secs = Some(now_secs);
+
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         let (top, left, bottom, right) = dest.unwrap_or((
                             stream.dest_top,
@@ -1193,23 +1229,33 @@ impl DisplayChannel {
                             jpeg_data
                         };
 
-                        match decode_mjpeg_frame(frame_data) {
+                        let decode_start = std::time::Instant::now();
+                        let decoded = decode_mjpeg_frame(frame_data);
+                        let decode_duration_us =
+                            u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+
+                        match decoded {
                             Some((rgba, fw, fh)) => {
                                 debug!(
                                     "display: stream {} MJPEG frame {}x{} → ({},{})",
                                     stream_id, fw, fh, left, top
                                 );
+                                stream.frames_decoded_ok =
+                                    stream.frames_decoded_ok.saturating_add(1);
+                                stream.last_decode_ok_ts_secs = Some(now_secs);
+                                stream.last_decode_duration_us = decode_duration_us;
+                                let surface_id = stream.surface_id;
                                 self.event_tx
                                     .send(ChannelEvent::ImageReady {
                                         display_channel_id: self.channel_id,
-                                        surface_id: stream.surface_id,
+                                        surface_id,
                                         left,
                                         top,
                                         width: fw.min(w),
                                         height: fh.min(h),
                                         pixels: rgba,
                                         image_id: 0,
-                                        produced_at_secs: self.traffic.elapsed().as_secs_f64(),
+                                        produced_at_secs: now_secs,
                                     })
                                     .await
                                     .ok();
@@ -1217,6 +1263,8 @@ impl DisplayChannel {
                             }
                             None => {
                                 debug!("display: stream {} MJPEG decode failed", stream_id);
+                                stream.frames_decode_failed =
+                                    stream.frames_decode_failed.saturating_add(1);
                             }
                         }
                     } else {
@@ -1224,7 +1272,15 @@ impl DisplayChannel {
                             "display: stream {} unsupported codec {}",
                             stream_id, stream.codec_type
                         );
+                        stream.frames_decode_failed = stream.frames_decode_failed.saturating_add(1);
                     }
+                } else {
+                    self.stream_data_orphan_count = self.stream_data_orphan_count.saturating_add(1);
+                    debug!(
+                        "display: stream_data for unknown stream {} \
+                         (orphan_count={})",
+                        stream_id, self.stream_data_orphan_count
+                    );
                 }
             }
 
@@ -1239,7 +1295,10 @@ impl DisplayChannel {
                 if payload.len() >= 4 {
                     let stream_id = read_u32_le(payload, 0);
                     info!("display: stream_destroy id={}", stream_id);
-                    self.streams.remove(&stream_id);
+                    if self.streams.remove(&stream_id).is_some() {
+                        self.streams_destroyed_total =
+                            self.streams_destroyed_total.saturating_add(1);
+                    }
                 }
             }
 
@@ -1249,11 +1308,10 @@ impl DisplayChannel {
                 // change or surface reconfiguration. Equivalent to
                 // spice-gtk's clear_streams() at
                 // channel-display.c:1855.
-                info!(
-                    "display: stream_destroy_all (clearing {} streams)",
-                    self.streams.len()
-                );
+                let cleared = self.streams.len() as u64;
+                info!("display: stream_destroy_all (clearing {} streams)", cleared);
                 self.streams.clear();
+                self.streams_destroyed_total = self.streams_destroyed_total.saturating_add(cleared);
             }
 
             display_server::STREAM_ACTIVATE_REPORT => {
@@ -2287,6 +2345,40 @@ impl DisplayChannel {
 
         // Phase-02: pcap writer-queue drop counter.
         snap.writer_dropped_count = self.capture_dropped_count;
+
+        // Stream diagnostics: copy per-stream counters and the
+        // aggregate totals so a bug report can answer "did MJPEG
+        // frames arrive / decode / paint?" directly. Streams are
+        // listed in stream_id order for stable JSON output.
+        let mut stream_ids: Vec<u32> = self.streams.keys().copied().collect();
+        stream_ids.sort_unstable();
+        snap.streams_active = stream_ids
+            .into_iter()
+            .map(|id| {
+                let s = &self.streams[&id];
+                StreamSnapshot {
+                    stream_id: id,
+                    surface_id: s.surface_id,
+                    codec_type: s.codec_type,
+                    stream_width: s.stream_width,
+                    stream_height: s.stream_height,
+                    dest_top: s.dest_top,
+                    dest_left: s.dest_left,
+                    dest_bottom: s.dest_bottom,
+                    dest_right: s.dest_right,
+                    created_at_secs: s.created_at_secs,
+                    frames_received: s.frames_received,
+                    frames_decoded_ok: s.frames_decoded_ok,
+                    frames_decode_failed: s.frames_decode_failed,
+                    last_frame_ts_secs: s.last_frame_ts_secs,
+                    last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
+                    last_decode_duration_us: s.last_decode_duration_us,
+                }
+            })
+            .collect();
+        snap.streams_created_total = self.streams_created_total;
+        snap.streams_destroyed_total = self.streams_destroyed_total;
+        snap.stream_data_orphan_count = self.stream_data_orphan_count;
     }
 
     async fn send_ack(&mut self) -> Result<()> {
