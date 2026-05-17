@@ -30,6 +30,27 @@
         "signature"
       ],
       "groupName": "rustcrypto digest ecosystem"
+    },
+    {
+      "description": "Hold sha1 < 0.11 until rsa 0.10 stable releases. sha1 0.11 moves to digest 0.11, but our transitive rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "matchPackageNames": [
+        "sha1"
+      ],
+      "allowedVersions": "<0.11"
+    },
+    {
+      "description": "Hold rand < 0.9 until rsa 0.10 stable releases. rand 0.9 restructured CryptoRngCore, which rsa 0.9 calls through. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "matchPackageNames": [
+        "rand"
+      ],
+      "allowedVersions": "<0.9"
+    },
+    {
+      "description": "Hold rand_core < 0.10 to stay aligned with the rand 0.8 / rsa 0.9 pin above. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
+      "matchPackageNames": [
+        "rand_core"
+      ],
+      "allowedVersions": "<0.10"
     }
   ],
   "minimumReleaseAge": "3 days",
