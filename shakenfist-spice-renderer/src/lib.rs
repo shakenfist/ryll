@@ -44,7 +44,7 @@ pub use notification_sink::NotificationSink;
 pub use session::{run_connection, run_headless};
 pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
-    InputEventRecord, InputsSnapshot, MainSnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
 };
 pub use surface_mirror::SurfaceMirror;
 pub use traffic::TrafficSink;

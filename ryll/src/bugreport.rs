@@ -25,7 +25,7 @@ use shakenfist_spice_renderer::traffic::TrafficSink;
 #[allow(unused_imports)]
 pub use shakenfist_spice_renderer::snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
-    InputEventRecord, InputsSnapshot, MainSnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
 };
 
 /// Direction of a protocol message.
@@ -1919,6 +1919,31 @@ mod tests {
             decode_duration_us: 1234,
         });
         snap.recent_ack_intervals_secs.push_back(0.42);
+        // Stream-diagnostics fields: one active MJPEG stream
+        // exercising every per-stream counter so the
+        // serialiser is locked in to the field names a bug
+        // report will expose.
+        snap.streams_active.push(StreamSnapshot {
+            stream_id: 38,
+            surface_id: 0,
+            codec_type: 1,
+            stream_width: 1600,
+            stream_height: 1200,
+            dest_top: 0,
+            dest_left: 0,
+            dest_bottom: 1200,
+            dest_right: 1600,
+            created_at_secs: 12.5,
+            frames_received: 240,
+            frames_decoded_ok: 200,
+            frames_decode_failed: 40,
+            last_frame_ts_secs: Some(45.5),
+            last_decode_ok_ts_secs: Some(45.4),
+            last_decode_duration_us: 18_321,
+        });
+        snap.streams_created_total = 2;
+        snap.streams_destroyed_total = 1;
+        snap.stream_data_orphan_count = 3;
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
@@ -1939,6 +1964,22 @@ mod tests {
         assert!(json.contains("\"recent_ack_intervals_secs\""));
         // Phase-02 field.
         assert!(json.contains("\"writer_dropped_count\": 11"));
+        // Stream-diagnostics fields. The presence of these in the
+        // serialised display channel state is what lets a bug
+        // report answer "did MJPEG frames arrive / decode / paint?".
+        assert!(json.contains("\"streams_active\""));
+        assert!(json.contains("\"stream_id\": 38"));
+        assert!(json.contains("\"codec_type\": 1"));
+        assert!(json.contains("\"stream_width\": 1600"));
+        assert!(json.contains("\"frames_received\": 240"));
+        assert!(json.contains("\"frames_decoded_ok\": 200"));
+        assert!(json.contains("\"frames_decode_failed\": 40"));
+        assert!(json.contains("\"last_frame_ts_secs\": 45.5"));
+        assert!(json.contains("\"last_decode_ok_ts_secs\": 45.4"));
+        assert!(json.contains("\"last_decode_duration_us\": 18321"));
+        assert!(json.contains("\"streams_created_total\": 2"));
+        assert!(json.contains("\"streams_destroyed_total\": 1"));
+        assert!(json.contains("\"stream_data_orphan_count\": 3"));
     }
 
     #[test]
