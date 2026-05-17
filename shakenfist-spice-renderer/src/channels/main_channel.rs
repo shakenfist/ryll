@@ -575,7 +575,7 @@ impl MainChannel {
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
                     last_heartbeat_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
-                    info!(
+                    debug!(
                         "main: heartbeat T+{:.1}s iter={} last_arm={} last_recv={:?} \
                          last_send={:?} keepalives={} pongs={}",
                         self.traffic.elapsed().as_secs_f64(),
