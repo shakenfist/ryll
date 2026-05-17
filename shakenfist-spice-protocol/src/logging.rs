@@ -413,6 +413,7 @@ pub mod message_names {
     pub fn display_client(msg_type: u16) -> &'static str {
         match msg_type {
             display_client::INIT => "init",
+            display_client::STREAM_REPORT => "stream_report",
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
@@ -517,7 +518,7 @@ mod tests {
     use super::{
         intern_key, log_unknown_once, message_names, register_gap_observer, warn_once_keys,
     };
-    use crate::constants::main_server;
+    use crate::constants::{display_client, main_server};
 
     // The registry is process-global and cargo-test runs tests in
     // parallel, so assertions here key off specific literals unique
@@ -678,5 +679,14 @@ mod tests {
             message_names::main_server(main_server::MULTI_MEDIA_TIME),
             "multi_media_time"
         );
+    }
+
+    // Guard against regressions where STREAM_REPORT (102) loses its
+    // const or name-table entry and starts appearing as an unknown
+    // display_client opcode in traffic logs.
+    #[test]
+    fn display_client_stream_report_const_and_name() {
+        assert_eq!(display_client::STREAM_REPORT, 102);
+        assert_eq!(message_names::display_client(102), "stream_report");
     }
 }

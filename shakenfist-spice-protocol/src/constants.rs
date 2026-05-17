@@ -118,13 +118,20 @@ pub mod capabilities {
     pub const DISPLAY_MONITORS_CONFIG: u32 = 1 << 1;
     pub const DISPLAY_COMPOSITE: u32 = 1 << 2;
     pub const DISPLAY_A8_SURFACE: u32 = 1 << 3;
+    // Bit 4: enables server to send STREAM_ACTIVATE_REPORT; we reply
+    // with STREAM_REPORT (opcode 102).  spice-gtk advertises this
+    // unconditionally (channel-display.c:976).
+    pub const DISPLAY_STREAM_REPORT: u32 = 1 << 4;
     pub const DISPLAY_LZ4_COMPRESSION: u32 = 1 << 5;
 
     // Advertise the caps that affect how the guest QXL driver
     // renders.  Without COMPOSITE the guest falls back to a
     // software path that produces far fewer display updates.
-    pub const DEFAULT_DISPLAY: u32 =
-        DISPLAY_SIZED_STREAM | DISPLAY_MONITORS_CONFIG | DISPLAY_COMPOSITE | DISPLAY_A8_SURFACE;
+    pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
+        | DISPLAY_MONITORS_CONFIG
+        | DISPLAY_COMPOSITE
+        | DISPLAY_A8_SURFACE
+        | DISPLAY_STREAM_REPORT;
 
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
@@ -222,6 +229,7 @@ pub mod display_server {
 /// Display channel message types (client -> server)
 pub mod display_client {
     pub const INIT: u16 = 101;
+    pub const STREAM_REPORT: u16 = 102;
     pub const ACK_SYNC: u16 = 1;
     pub const ACK: u16 = 2;
     pub const PONG: u16 = 3;
