@@ -525,28 +525,29 @@ mod macos {
     use super::{ProcessMetrics, RuntimeMetrics};
 
     // libc 0.2 does not expose mach_port_deallocate on Apple
-    // targets (verified against 0.2.186). The signature is
-    // documented and stable Mach ABI; a local extern "C" is
-    // simpler than pulling in the `mach2` crate for one call.
+    // targets (verified against 0.2.186), and as of libc 0.2.x
+    // the `mach_task_self_` static is deprecated in favour of
+    // the `mach2` crate. Both symbols are documented and stable
+    // Mach ABI; local extern declarations are simpler than
+    // pulling in `mach2` for two items.
     // See PLAN-macos-runtime-metrics-phase-02-threads.md.
     extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
             name: libc::mach_port_t,
         ) -> libc::kern_return_t;
+
+        static mach_task_self_: libc::mach_port_t;
     }
 
     /// Return the current task's Mach port. Reads the
-    /// `mach_task_self_` static rather than calling
-    /// `libc::mach_task_self()`, which libc 0.2 deprecates in
-    /// favour of the `mach2` crate. The static is the underlying
-    /// storage that the function returns, and is stable for the
-    /// process lifetime, so this avoids both the deprecation
-    /// warning and an extra dependency.
+    /// `mach_task_self_` static directly, which is the
+    /// underlying storage that `mach_task_self()` returns and is
+    /// stable for the process lifetime.
     fn task_self() -> libc::mach_port_t {
         // SAFETY: reading the static is sound; it is initialised
         // by the dynamic loader before any user code runs.
-        unsafe { libc::mach_task_self_ }
+        unsafe { mach_task_self_ }
     }
 
     static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
