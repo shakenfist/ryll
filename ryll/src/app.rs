@@ -1,4 +1,16 @@
-/// Main application - egui App.
+// Main application - egui App.
+//
+// eframe 0.34 deprecated a broad swath of the egui API we depend on
+// (`Frame::none`, `CentralPanel`/`SidePanel`/`TopBottomPanel` as type
+// aliases, `Panel::show*`, `Context::style` / `wants_pointer_input`,
+// `InputState::screen_rect`, `Ui::close_menu`, `menu::menu_button`,
+// and the `update()` trait method itself). The minimum-diff bump on
+// the renovate/eframe-0.x branch leaves these call sites alone and
+// silences the deprecation warnings module-wide so clippy's `-D
+// warnings` policy still passes. The migration is tracked in
+// `docs/plans/PLAN-egui-0.34-followups.md`.
+#![allow(deprecated)]
+
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -2609,7 +2621,16 @@ impl RyllApp {
 }
 
 impl eframe::App for RyllApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    // eframe 0.34 promoted `ui()` to the required trait method and
+    // deprecated `update()`. We adopt the minimum-diff migration:
+    // take the provided `Ui`, pull the `Context` out of it, and
+    // run the original body unchanged. The existing panel/window
+    // calls already wrap themselves on the `Context`, so the
+    // `ui` parameter is intentionally unused at this layer. See
+    // docs/plans/PLAN-egui-0.34-followups.md for the proper
+    // restructure.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
         // Mirror egui's per-frame focus state into the shared
         // AtomicBool that the FocusGatedClipboard reads. The
         // value flips on the same frame egui sees the
@@ -2863,7 +2884,7 @@ impl eframe::App for RyllApp {
         });
 
         let stats_frame = egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(4.0, 2.0))
+            .inner_margin(egui::Margin::symmetric(4, 2))
             .fill(ctx.style().visuals.panel_fill);
         egui::TopBottomPanel::bottom("stats")
             .frame(stats_frame)
@@ -4004,6 +4025,7 @@ impl eframe::App for RyllApp {
                     sel_rect,
                     0.0,
                     egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 0, 0)),
+                    egui::StrokeKind::Middle,
                 );
             }
 

@@ -81,11 +81,13 @@ allow = [
 confidence-threshold = 0.93
 
 # `epaint_default_fonts` embeds Ubuntu fonts which are distributed under
-# the Ubuntu Font Licence 1.0. UFL-1.0 is a permissive font licence but
-# is not in the SPDX identifier list, so cargo-deny requires an explicit
-# exception for the `LicenseRef-UFL-1.0` reference the crate declares.
+# the Ubuntu Font Licence 1.0. The crate declared this as
+# `LicenseRef-UFL-1.0` up to epaint 0.29.x and switched to the formal
+# SPDX identifier `Ubuntu-font-1.0` in epaint 0.34. UFL-1.0 is a
+# permissive font licence; we accept it under the SPDX id the crate
+# actually emits.
 exceptions = [
-    { allow = ["LicenseRef-UFL-1.0"], crate = "epaint_default_fonts" },
+    { allow = ["Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
 ]
 
 [bans]
