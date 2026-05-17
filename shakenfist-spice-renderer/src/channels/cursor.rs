@@ -43,6 +43,8 @@ pub struct CursorChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
+    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    capture_dropped_count: u64,
 }
 
 impl CursorChannel {
@@ -79,6 +81,7 @@ impl CursorChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
+            capture_dropped_count: 0,
         }
     }
 
@@ -124,7 +127,9 @@ impl CursorChannel {
 
             self.byte_counter.add(n as u64);
             if let Some(ref c) = self.capture {
-                c.packet_received("cursor", &chunk[..n]);
+                if !c.packet_received("cursor", &chunk[..n]) {
+                    self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+                }
             }
             self.buffer.extend_from_slice(&chunk[..n]);
             self.bytes_in += n as u64;
@@ -479,6 +484,7 @@ impl CursorChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+        snap.writer_dropped_count = self.capture_dropped_count;
     }
 
     async fn send_ack(&mut self) -> Result<()> {
@@ -502,7 +508,9 @@ impl CursorChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("cursor", data);
+            if !c.packet_sent("cursor", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;

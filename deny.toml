@@ -73,6 +73,10 @@ allow = [
     "0BSD",
     "CDLA-Permissive-2.0",
     "OFL-1.1",
+    # Pulled in by libbz2-rs-sys (pure-Rust libbz2 port) via
+    # bzip2 -> zip 8.x. Permissive BSD-style licence, safe for
+    # redistribution.
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.93
 

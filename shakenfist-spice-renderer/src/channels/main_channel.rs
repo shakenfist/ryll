@@ -176,6 +176,10 @@ pub struct MainChannel {
     /// (ChannelType, channel_id) tuples the server advertised,
     /// which the orchestrator uses to spawn secondary channels.
     channels_avail_signal: Option<oneshot::Sender<Vec<(ChannelType, u8)>>>,
+    /// Phase-02: count of pcap-capture packets rejected by the
+    /// writer task's queue. Mirrored into
+    /// `MainSnapshot::writer_dropped_count`.
+    capture_dropped_count: u64,
 }
 
 /// Idle window before the main-channel keepalive fires. The
@@ -239,6 +243,7 @@ impl MainChannel {
             mouse_mode_request_pending: false,
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
+            capture_dropped_count: 0,
         }
     }
 
@@ -488,7 +493,10 @@ impl MainChannel {
                     self.last_activity = tokio::time::Instant::now();
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
-                        c.packet_received("main", &chunk[..n]);
+                        if !c.packet_received("main", &chunk[..n]) {
+                            self.capture_dropped_count =
+                                self.capture_dropped_count.saturating_add(1);
+                        }
                     }
                     self.buffer.extend_from_slice(&chunk[..n]);
                     self.bytes_in += n as u64;
@@ -965,6 +973,7 @@ impl MainChannel {
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.client_keepalive_send_count = self.client_keepalive_send_count;
         snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
+        snap.writer_dropped_count = self.capture_dropped_count;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1381,7 +1390,9 @@ impl MainChannel {
 
     async fn send(&mut self, data: &[u8]) -> Result<()> {
         if let Some(ref c) = self.capture {
-            c.packet_sent("main", data);
+            if !c.packet_sent("main", data) {
+                self.capture_dropped_count = self.capture_dropped_count.saturating_add(1);
+            }
         }
         self.stream.write_all(data).await?;
         self.stream.flush().await?;

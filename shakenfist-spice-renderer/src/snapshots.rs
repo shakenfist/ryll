@@ -28,6 +28,10 @@ pub struct DecodeResult {
     pub success: bool,
     /// Seconds since session start when this decode occurred.
     pub timestamp_secs: f64,
+    /// Wall-clock microseconds spent decompressing this image.
+    /// Zero for `FromCache` and for failures that short-circuit
+    /// before the decoder is invoked.
+    pub decode_duration_us: u32,
 }
 
 /// Snapshot of the display channel's mutable state.
@@ -56,6 +60,50 @@ pub struct DisplaySnapshot {
     pub pong_send_count: u32,
     /// Session-relative seconds of the most recent server PING.
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// Total decodes recorded since session start. Counts every
+    /// `record_decode` call, including failures and cache hits.
+    pub decode_total_count: u64,
+    /// Decodes where `success == false`. Subset of the total.
+    pub decode_failed_count: u64,
+    /// Decodes where `from_cache == true`. Subset of the total.
+    pub decode_from_cache_count: u64,
+    /// Min / max / mean of `decode_duration_us` over the entries
+    /// currently in `recent_decodes` for which the decoder ran
+    /// (i.e. excluding cache hits and failures). Zero when the
+    /// ring contains no such entries.
+    pub decode_recent_min_us: u32,
+    pub decode_recent_max_us: u32,
+    pub decode_recent_mean_us: u32,
+    /// Total reads from the socket since session start. One per
+    /// `s.read(&mut chunk).await` that returned `n > 0`.
+    pub socket_read_count: u64,
+    /// Reads where `n == 262144` (the full chunk size). A high
+    /// ratio of these to `socket_read_count` indicates the OS
+    /// recv buffer was usually non-empty when we read — i.e.
+    /// the read loop is not keeping up with the arrival rate.
+    pub socket_reads_at_chunk_cap: u64,
+    /// Largest `n` observed over the session. Sanity check for
+    /// any future chunk-capacity tuning.
+    pub socket_max_chunk_bytes: u32,
+    /// Total ACK messages sent to the server since session
+    /// start.
+    pub ack_send_count: u32,
+    /// Session-relative seconds of the most recent ACK send.
+    /// None until the first ACK is sent.
+    pub last_ack_send_ts_secs: Option<f64>,
+    /// Intervals (seconds) between the most recent consecutive
+    /// ACK sends, oldest first. Bounded ring; see the
+    /// `RECENT_ACK_INTERVALS_CAP` constant in the display
+    /// channel for the cap.
+    pub recent_ack_intervals_secs: VecDeque<f64>,
+    /// Phase-02 "video not keeping up" diagnostic: number of
+    /// pcap-capture packets dropped because the writer-task
+    /// queue was full. Cumulative since session start; zero
+    /// when `--capture` is not in use. A non-zero value
+    /// implicates disk speed rather than decode or socket-read
+    /// when triaging a "video not keeping up" report. See
+    /// PLAN-video-keeping-up-phase-02-pcap-thread.md.
+    pub writer_dropped_count: u64,
 }
 
 /// A recorded input event for the inputs channel snapshot.
@@ -103,6 +151,8 @@ pub struct InputsSnapshot {
     /// Session-relative seconds at the most recent keepalive
     /// send. None until the first one fires.
     pub last_client_keepalive_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// Summary of a cached cursor shape.
@@ -136,6 +186,8 @@ pub struct CursorSnapshot {
     pub pong_send_count: u32,
     /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// Snapshot of the main channel's mutable state.
@@ -171,6 +223,8 @@ pub struct MainSnapshot {
     /// Session-relative seconds at the most recent keepalive
     /// send. None until the first one fires.
     pub last_client_keepalive_send_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// Generic snapshot for non-critical channels (playback,
@@ -192,6 +246,8 @@ pub struct PlaybackSnapshot {
     pub pong_send_count: u32,
     /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// See `PlaybackSnapshot`.
@@ -204,6 +260,8 @@ pub struct UsbredirSnapshot {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// See `PlaybackSnapshot`.
@@ -216,6 +274,8 @@ pub struct WebdavSnapshot {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
+    /// See `DisplaySnapshot::writer_dropped_count`.
+    pub writer_dropped_count: u64,
 }
 
 /// Holds every per-channel snapshot `Arc<Mutex<T>>`. Includes

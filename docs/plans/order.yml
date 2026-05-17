@@ -34,3 +34,9 @@
 - PLAN-connection-properties.md: Connection properties
 - PLAN-display-window-sizing.md: Display window sizing
 - PLAN-web-frontend.md: Web frontend
+- PLAN-opus-decoder.md: Opus decoder
+- PLAN-crate-release.md: Crate release
+- PLAN-session-001-feedback.md: Session 001 feedback
+- PLAN-video-keeping-up.md: Video keeping up
+- PLAN-macos-runtime-metrics.md: macOS runtime metrics
+- PLAN-ci-platform-matrix.md: CI platform matrix

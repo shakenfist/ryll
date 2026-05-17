@@ -631,6 +631,35 @@ pub struct AppSnapshot {
     /// session has accumulated. 0 for a session that never lost
     /// its connection; rising values indicate a rocky session.
     pub auto_reconnect_count: u32,
+    /// Phase-03 "video not keeping up" diagnostic: number of
+    /// display frames dropped because the H.264 encoder task's
+    /// bounded queue was full when `CaptureSession::frame()`
+    /// tried to enqueue. Cumulative since session start; zero
+    /// when `--capture` is not in use. A non-zero value
+    /// implicates encoder CPU (or downstream MP4 write speed)
+    /// rather than decode or socket-read when triaging a
+    /// "video not keeping up" report. See
+    /// PLAN-video-keeping-up-phase-03.
+    pub video_drop_count: u64,
+    /// Phase-04 "video not keeping up" diagnostic: min / max /
+    /// mean microseconds of mpsc-queue lag between the display
+    /// channel emitting `ImageReady*` events and the egui
+    /// frame loop processing them. Computed over a bounded
+    /// recent window (cap `RECENT_LAG_RING_CAP` in `app.rs`).
+    /// A high mean here when phase-1 decode and socket-fill
+    /// metrics look healthy implicates the egui loop / GUI
+    /// thread as the bottleneck. Within-batch samples are
+    /// correlated; `max` is the most informative single
+    /// number. See PLAN-video-keeping-up-phase-04.
+    pub image_ready_lag_recent_min_us: u32,
+    pub image_ready_lag_recent_max_us: u32,
+    pub image_ready_lag_recent_mean_us: u32,
+    /// Same shape but for `DisplayMark` events (per-frame
+    /// boundary). Lower cadence than `image_ready_*` so the
+    /// recent window covers a longer real-time interval.
+    pub display_mark_lag_recent_min_us: u32,
+    pub display_mark_lag_recent_max_us: u32,
+    pub display_mark_lag_recent_mean_us: u32,
 }
 
 impl Default for AppSnapshot {
@@ -648,6 +677,13 @@ impl Default for AppSnapshot {
             connected: false,
             uptime_secs: 0.0,
             auto_reconnect_count: 0,
+            video_drop_count: 0,
+            image_ready_lag_recent_min_us: 0,
+            image_ready_lag_recent_max_us: 0,
+            image_ready_lag_recent_mean_us: 0,
+            display_mark_lag_recent_min_us: 0,
+            display_mark_lag_recent_max_us: 0,
+            display_mark_lag_recent_mean_us: 0,
         }
     }
 }
@@ -1856,6 +1892,20 @@ mod tests {
             image_cache_ids: vec![1, 2, 3],
             image_cache_bytes: 12345,
             bytes_in: 100_000,
+            // Phase-01 "video not keeping up" diagnostic fields.
+            decode_total_count: 7,
+            decode_failed_count: 1,
+            decode_from_cache_count: 2,
+            decode_recent_min_us: 250,
+            decode_recent_max_us: 9000,
+            decode_recent_mean_us: 1500,
+            socket_read_count: 42,
+            socket_reads_at_chunk_cap: 5,
+            socket_max_chunk_bytes: 262_144,
+            ack_send_count: 3,
+            last_ack_send_ts_secs: Some(4.25),
+            // Phase-02 pcap writer-queue drop counter.
+            writer_dropped_count: 11,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -1866,17 +1916,36 @@ mod tests {
             from_cache: false,
             success: true,
             timestamp_secs: 1.5,
+            decode_duration_us: 1234,
         });
+        snap.recent_ack_intervals_secs.push_back(0.42);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
         assert!(json.contains("\"bytes_in\": 100000"));
+        // Phase-01 fields visible in channel-state.json.
+        assert!(json.contains("\"decode_duration_us\": 1234"));
+        assert!(json.contains("\"decode_total_count\": 7"));
+        assert!(json.contains("\"decode_failed_count\": 1"));
+        assert!(json.contains("\"decode_from_cache_count\": 2"));
+        assert!(json.contains("\"decode_recent_min_us\": 250"));
+        assert!(json.contains("\"decode_recent_max_us\": 9000"));
+        assert!(json.contains("\"decode_recent_mean_us\": 1500"));
+        assert!(json.contains("\"socket_read_count\": 42"));
+        assert!(json.contains("\"socket_reads_at_chunk_cap\": 5"));
+        assert!(json.contains("\"socket_max_chunk_bytes\": 262144"));
+        assert!(json.contains("\"ack_send_count\": 3"));
+        assert!(json.contains("\"last_ack_send_ts_secs\": 4.25"));
+        assert!(json.contains("\"recent_ack_intervals_secs\""));
+        // Phase-02 field.
+        assert!(json.contains("\"writer_dropped_count\": 11"));
     }
 
     #[test]
     fn test_inputs_snapshot_serialises() {
         let mut snap = InputsSnapshot {
             button_state: 1,
+            writer_dropped_count: 4,
             ..Default::default()
         };
         snap.recent_events.push_back(InputEventRecord {
@@ -1890,12 +1959,14 @@ mod tests {
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"button_state\": 1"));
         assert!(json.contains("\"event_type\": \"KeyDown\""));
+        assert!(json.contains("\"writer_dropped_count\": 4"));
     }
 
     #[test]
     fn test_cursor_snapshot_serialises() {
         let mut snap = CursorSnapshot {
             cache_entries: 1,
+            writer_dropped_count: 9,
             ..Default::default()
         };
         snap.cache_contents.push(CursorCacheEntry {
@@ -1907,6 +1978,7 @@ mod tests {
         });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"cursor_id\": 99"));
+        assert!(json.contains("\"writer_dropped_count\": 9"));
     }
 
     #[test]
@@ -1915,10 +1987,12 @@ mod tests {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
+            writer_dropped_count: 2,
             ..Default::default()
         };
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
+        assert!(json.contains("\"writer_dropped_count\": 2"));
     }
 
     #[test]
@@ -1926,6 +2000,14 @@ mod tests {
         let mut snap = AppSnapshot {
             fps: 59.9,
             connected: true,
+            video_drop_count: 13,
+            // Phase-04 render-latency aggregates.
+            image_ready_lag_recent_min_us: 50,
+            image_ready_lag_recent_max_us: 9000,
+            image_ready_lag_recent_mean_us: 750,
+            display_mark_lag_recent_min_us: 80,
+            display_mark_lag_recent_max_us: 12000,
+            display_mark_lag_recent_mean_us: 1100,
             ..Default::default()
         };
         snap.surfaces.push(SurfaceInfo {
@@ -1937,6 +2019,15 @@ mod tests {
         assert!(json.contains("\"fps\": 59.9"));
         assert!(json.contains("\"connected\": true"));
         assert!(json.contains("\"surface_id\": 0"));
+        // Phase-03 field.
+        assert!(json.contains("\"video_drop_count\": 13"));
+        // Phase-04 fields.
+        assert!(json.contains("\"image_ready_lag_recent_min_us\": 50"));
+        assert!(json.contains("\"image_ready_lag_recent_max_us\": 9000"));
+        assert!(json.contains("\"image_ready_lag_recent_mean_us\": 750"));
+        assert!(json.contains("\"display_mark_lag_recent_min_us\": 80"));
+        assert!(json.contains("\"display_mark_lag_recent_max_us\": 12000"));
+        assert!(json.contains("\"display_mark_lag_recent_mean_us\": 1100"));
     }
 
     #[test]

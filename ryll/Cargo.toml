@@ -43,7 +43,7 @@ rand = "0.8"
 # Audio playback. A dedicated audio thread owns the cpal stream
 # so it never needs to be Send. The rtrb ring buffer provides
 # lock-free sample transfer from the tokio network task.
-cpal = "0.15"
+cpal = "0.17"
 opus-decoder = "0.1"
 rtrb = "0.3"
 
@@ -164,7 +164,7 @@ url = "2"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 # Self-signed cert generation for the --web TLS integration tests.
-rcgen = "0.13"
+rcgen = "0.14"
 # Phase 4 step 4c uses a real webrtc-rs client PC to drive an
 # SDP offer through the in-process axum router. rustls is
 # pinned to ring because both aws-lc-rs and ring are pulled in

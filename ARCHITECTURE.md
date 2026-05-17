@@ -1577,16 +1577,36 @@ pcap file never triggers a length-overflow panic.
 surface (surface 0). Frames are emitted on MARK boundaries
 with real timestamps for variable-rate playback.
 
-Implementation: `capture::VideoWriter` lazily initialised on
-the first `DisplayMark` event. Uses `openh264` for RGBA →
-YUV420 → H.264 encoding, and the `mp4` crate for MP4 muxing.
+Implementation: `capture::VideoWriter` is owned exclusively by
+a dedicated tokio `video_writer_task` spawned in
+`CaptureSession::new` (phase 3, see
+`PLAN-video-keeping-up-phase-03-video-encode-thread.md`). The
+egui call site (`CaptureSession::frame`) is a non-blocking
+`try_send` into a bounded mpsc (cap `VIDEO_QUEUE_CAPACITY = 8`)
+that returns `bool`; `false` signals the encoder queue was
+full and the frame was dropped. The drop counter lands in
+`AppSnapshot::video_drop_count`. The encoder task lazy-inits
+`VideoWriter` from the first surface-0 frame, encodes RGBA →
+YUV420 → H.264 via `openh264`, and muxes into MP4 via the
+`mp4` crate. On sender drop the task drains, calls
+`VideoWriter::close()` to write the MP4 moov atom, then
+exits. Pcap follows the same pattern via `pcap_writer_task`
+(phase 2) with cap `PCAP_QUEUE_CAPACITY = 1024`.
 
 The capture session is `Arc<CaptureSession>` shared across all
 channels and the app. When `--capture` is not specified, the
 field is `None` and all capture code paths are skipped. The
 `CaptureSession` uses an `AtomicBool` guard to ensure `close()`
 is idempotent -- it may be called both explicitly during
-shutdown and again from the `Drop` implementation.
+shutdown and again from the `Drop` implementation. `close()`
+is **synchronous** and drops both writer senders without
+awaiting drain; the tokio tasks finalise (pcap flush is a
+no-op since pcap I/O is unbuffered; MP4 writes the moov atom)
+on the runtime. This means MP4 finalisation is no longer
+synchronous with `close()` — a bug report assembled within
+milliseconds of close may see an unfinalised MP4. See the
+phase-3 plan's "MP4 finalisation regression" note for the
+trade-off rationale.
 
 ## Graceful Shutdown
 
@@ -1606,8 +1626,20 @@ a clean shutdown instead of killing the process immediately.
 The pcap channel writers (`PcapChannelWriter` in `capture.rs`) write directly
 to `File` without `BufWriter`. This means every packet is persisted to disk
 immediately, so pcap data is never lost if the process is interrupted by
-SIGINT or any other signal. The MP4 video writer also uses unbuffered `File`
-I/O for the same reason.
+SIGINT or any other signal.
+
+After phase 2 these writes happen on the dedicated `pcap_writer_task`, fed
+by a bounded mpsc from the channel handlers. The hot path on each channel
+is a non-blocking `try_send`; queue-full means the packet is dropped and
+the per-channel `writer_dropped_count` counter is bumped. Slow disk no
+longer back-pressures the SPICE socket.
+
+The MP4 video writer also uses unbuffered `File` I/O. After phase 3 the
+encoder runs on a dedicated `video_writer_task` and the egui frame loop
+enqueues frames via `try_send`. MP4 finalisation (`write_end` for the
+moov atom) runs on the task after the sender drops; under SIGINT or abrupt
+shutdown the MP4 may be left unfinalised. See the phase-3 plan for the
+trade-off.
 
 ## Reconnection
 
@@ -1729,10 +1761,20 @@ Ryll tracks:
   in `app.rs` samples it once per second and renders the sparkline.
 - **Runtime metrics in bug reports**: each bug-report ZIP includes a
   `runtime-metrics.json` file with process and per-thread CPU%, RSS,
-  and VmSize sampled over a 2-second window. Linux-only (reads
-  `/proc/self/stat`, `/proc/self/status`, and `/proc/self/task/*/`);
-  non-Linux platforms emit a graceful "unavailable" payload.
-  Implemented in `ryll/src/metrics.rs`.
+  and VmSize sampled over a 2-second window. On **Linux** the data
+  comes from `/proc/self/stat`, `/proc/self/status`, and
+  `/proc/self/task/*/`. On **macOS** (phases 1–2 of
+  `PLAN-macos-runtime-metrics`) process-level data comes from
+  `task_info(MACH_TASK_BASIC_INFO)` and per-thread data from
+  `task_threads` + per-port `thread_info(THREAD_BASIC_INFO)` +
+  `thread_info(THREAD_IDENTIFIER_INFO)` (for the stable
+  64-bit thread id) + `pthread_getname_np` (for the name).
+  The Mach port array is held in a `MachThreadList` RAII guard
+  so port references are released on every exit path. Other
+  platforms emit a graceful "unavailable" payload. The `MacOS`
+  enum variant has the same JSON shape as `Linux`, distinguished
+  by the `platform` field. Implemented in
+  `shakenfist-spice-renderer/src/metrics.rs`.
 
 This instrumentation is the primary purpose of ryll -- measuring kerbside proxy
 performance.
@@ -1790,11 +1832,11 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20), ACK state, bytes in/out |
-| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), bytes in/out |
-| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, bytes in/out |
-| `MainSnapshot` | Main | Session ID, bytes in/out |
-| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime |
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter (phase 2), ACK state, bytes in/out |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), pcap writer-queue drop counter, bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, pcap writer-queue drop counter, bytes in/out |
+| `MainSnapshot` | Main | Session ID, pcap writer-queue drop counter, bytes in/out |
+| `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime, video encoder-queue drop counter (phase 3), render-side mpsc-queue lag aggregates for `ImageReady*` and `DisplayMark` events (phase 4) |
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside

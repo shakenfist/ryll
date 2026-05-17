@@ -305,6 +305,7 @@ mod tests {
                 height: 4,
                 pixels: pixels.clone(),
                 image_id: 0,
+                produced_at_secs: 0.0,
             });
         }
 
@@ -363,6 +364,7 @@ mod tests {
                 height: 2,
                 pixels,
                 image_id: 0,
+                produced_at_secs: 0.0,
             });
         }
         assert!(src.next_frame().is_some());

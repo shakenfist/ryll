@@ -277,7 +277,7 @@ impl AudioThread {
         };
         info!(
             "playback: device config: {}Hz, {} ch, {:?}",
-            default_config.sample_rate().0,
+            default_config.sample_rate(),
             default_config.channels(),
             default_config.sample_format()
         );
@@ -286,7 +286,7 @@ impl AudioThread {
             sample_rate: default_config.sample_rate(),
             buffer_size: cpal::BufferSize::Default,
         };
-        let device_rate = config.sample_rate.0;
+        let device_rate = config.sample_rate;
 
         // Build the callback state. The resampler and local buffer
         // live in the callback closure -- no mutex needed since the

@@ -13,20 +13,29 @@ mod capture {
         pub dir: std::path::PathBuf,
     }
     impl CaptureSession {
-        pub fn packet_sent(&self, _channel: &str, _data: &[u8]) {}
-        pub fn packet_received(&self, _channel: &str, _data: &[u8]) {}
-        pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) {}
+        /// Returns `true`: there is no queue to fill, so "accepted"
+        /// is the correct contract — callers must not record drops
+        /// in the no-capture build. Matches the trait's bool return.
+        pub fn packet_sent(&self, _channel: &str, _data: &[u8]) -> bool {
+            true
+        }
+        pub fn packet_received(&self, _channel: &str, _data: &[u8]) -> bool {
+            true
+        }
+        pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) -> bool {
+            true
+        }
         pub fn close(&self) {}
     }
     impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
-        fn packet_sent(&self, channel: &str, data: &[u8]) {
-            CaptureSession::packet_sent(self, channel, data);
+        fn packet_sent(&self, channel: &str, data: &[u8]) -> bool {
+            CaptureSession::packet_sent(self, channel, data)
         }
-        fn packet_received(&self, channel: &str, data: &[u8]) {
-            CaptureSession::packet_received(self, channel, data);
+        fn packet_received(&self, channel: &str, data: &[u8]) -> bool {
+            CaptureSession::packet_received(self, channel, data)
         }
-        fn frame(&self, id: u32, px: &[u8], w: u32, h: u32) {
-            CaptureSession::frame(self, id, px, w, h);
+        fn frame(&self, id: u32, px: &[u8], w: u32, h: u32) -> bool {
+            CaptureSession::frame(self, id, px, w, h)
         }
     }
 }
@@ -65,6 +74,15 @@ use crate::notifications::{
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> Result<()> {
+    // Baseline the runtime-metrics uptime clock at process
+    // start, before tokio runtime construction or any
+    // metrics::sample() call. On Linux this is a no-op; on
+    // macOS it forces the LazyLock<Instant> that backs
+    // `process.uptime_secs` so the field measures from
+    // here rather than the first bug-report trigger. See
+    // PLAN-macos-runtime-metrics-phase-03-integration.md.
+    shakenfist_spice_renderer::metrics::init_at_startup();
+
     // Install Ctrl+C handler so graceful shutdown works on all platforms.
     ctrlc::set_handler(|| {
         SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
