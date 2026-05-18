@@ -81,6 +81,7 @@ both ends of the traffic through the proxy. This would allow:
 
 - [Binary Portability](portability.md) - How to share built binaries
 - [Configuration](configuration.md) - CLI options and .vv file format
+- [Libvirt / SPICE Server Recommendations](libvirt-spice-recommendations.md) - Guest XML settings for best display responsiveness
 - [macOS Development](development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](troubleshooting.md) - Common issues and debugging
 

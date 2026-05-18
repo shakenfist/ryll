@@ -279,6 +279,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 6. Flap notification | PLAN-stream-caps-and-flap-phase-06-flap-notification.md | Not started |
 | 7. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-07-vdagent-probe.md | Not started |
 | 8. Documentation | PLAN-stream-caps-and-flap-phase-08-docs.md | Not started |
+| 9. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-09-remove-pong-keepalive.md | Not started |
 
 Per-phase intent:
 
@@ -403,6 +404,28 @@ Per-phase intent:
   `docs/troubleshooting.md` that explains the flap notification,
   the vdagent probe fields, and links to the bug-report fields
   a user should attach. Recommended planning effort: **low**.
+
+- **Phase 9 — Remove spurious-PONG keepalive.** Driven by
+  session 002c, where the operator's qemu log showed a
+  cadence of `Spice: main:0 (...): invalid net test stage,
+  ping id 0 test id 0 stage 0` warnings every ~15 s. Traced
+  to `send_idle_keepalive()` in `main_channel.rs:1458`,
+  added in commit `cfd4a20c` (2026-05-09) as a band-aid for
+  the K1 main-channel wedge. The K1 root cause was fully
+  fixed in commit `370d8ce5` (2026-05-11) by dropping the
+  abandoned temp event channel — the keepalive band-aid is
+  now redundant and leaks visible warnings into the server
+  log on every session. Remove `send_idle_keepalive`, the
+  `KEEPALIVE_IDLE` constant, the select-arm that calls it,
+  the `client_keepalive_send_count` /
+  `last_client_keepalive_send_ts_secs` fields, and the
+  matching `MainSnapshot` fields. Verify with a long-idle
+  (≥10 minutes) session against `sf-4` (the test target)
+  that main does not disconnect — the heartbeat log
+  (`main: heartbeat T+...`) should keep firing without any
+  keepalive. Recommended planning effort: **low** (single
+  commit; the risk is that K1 reproduces, which is what
+  the long-idle smoke test rules out).
 
 ## Agent guidance
 
