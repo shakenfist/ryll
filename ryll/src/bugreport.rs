@@ -1265,6 +1265,13 @@ impl BugReport {
         // (its pcap traffic is captured via channel_name()
         // → "usbredir" further below), so emit an empty
         // object.
+        // TODO: Connection reports (BugReportType::Connection) today only
+        // include MainSnapshot. Now that PlaybackSnapshot, UsbredirSnapshot,
+        // and WebdavSnapshot have diagnostic fields, consider whether a
+        // Connection report should also surface those if a record/playback/
+        // usbredir/webdav channel disconnect was implicated. This is a UI
+        // decision best deferred to the operator (Phase 4F: Haiku via Sonnet
+        // review).
         let channel_state_json = match &report_type {
             BugReportType::Usb => "{}".to_string(),
             _ => {

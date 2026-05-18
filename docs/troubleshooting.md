@@ -517,6 +517,55 @@ for live debugging without generating a full bug report.
   noisy display channel to focus on inputs).
 - Click **Pause** to freeze the display for inspection.
 
+## Playback channel observability
+
+The playback (audio) channel now exposes detailed diagnostics in bug
+reports to help characterise silent-audio or stuttering symptoms. If
+you file a Connection or Playback-typed bug report (F12), the
+`channel-state.json` will include a `playback` section with counters
+for every stage of the audio pipeline. Use this section to answer
+"where did the audio go?"
+
+**Reading playback diagnostics:**
+
+- **`data_packets_received` > 0**: Server is sending audio DATA packets.
+  If this is zero mid-session, the server stopped sending (check whether
+  audio is muted on the server, or whether the session is in a paused
+  state).
+
+- **`data_packets_decoded` (roughly equal to `data_packets_received`)**:
+  Audio decoder is keeping up. If decoded is significantly less than
+  received, the decoder is failing or too slow; check `data_packets_decode_failed`.
+
+- **`device_callbacks_total` increasing**: CoreAudio (macOS), WASAPI
+  (Windows), or ALSA (Linux) is pulling audio samples from the device.
+  If this is flat mid-session, the device has stopped requesting audio
+  (device-side problem, not ryll).
+
+- **`device_underrun_count` rising**: The audio pipeline ran out of decoded
+  samples when the device asked for them, so silence was fed to the speaker.
+  Non-zero = buffer starvation. Cross-check with `data_packets_decoded`;
+  if decoded is high but underruns are rising, the ring buffer is too small
+  or samples are being dropped upstream.
+
+- **`ring_overflow_count` rising**: Decoded samples were dropped because the
+  ring buffer was full. This suggests the device clock has stopped or is
+  running much slower than the network; the encoder is ahead of the consumer.
+
+- **`current_session: Some(...) vs None`**: When the session is `None`, audio
+  was never started (no SPICE_MSG_PLAYBACK_START received) or was stopped
+  (SPICE_MSG_PLAYBACK_STOP received). When present, it includes the sample
+  rate, channel count, and codec (Opus or raw PCM) the server declared.
+
+**USB and WebDAV analogues:**
+
+For USB redirect issues, the `usbredir` section includes
+`redirected_devices` (list of currently-forwarded devices with vendor/product
+IDs and per-device byte counts) and `device_connect_total` /
+`device_disconnect_total` (connection event counts). For file-share issues,
+the `webdav` section includes `http_requests_received` (HTTP request count)
+and `active_session_count` (currently-open connections).
+
 ## Getting Help
 
 If you can't resolve an issue:
