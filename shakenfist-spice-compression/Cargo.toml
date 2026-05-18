@@ -37,3 +37,33 @@ jpeg-decoder = { version = "0.3", optional = true }
 # libjpeg-turbo via `mozjpeg-sys`, so the produced binary has no
 # runtime libjpeg-turbo dependency.
 mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }
+
+# macOS-only: ImageIO JPEG decoder backend. Pinned to the 0.3.x
+# `objc2-*` family so the framework crates all agree on the
+# underlying `objc2` major version. Feature sets are trimmed to
+# only what `ImageIoDecoder` actually touches:
+#   - objc2-image-io      : CGImageSource (CFData/CFDictionary)
+#   - objc2-core-graphics : CGBitmapContext, CGColorSpace,
+#                           CGContext, CGImage, CGGeometry
+#   - objc2-core-foundation: CFData (for the input byte slice)
+# `default-features = false` keeps the dep tree from pulling
+# bitflags, block2, dispatch2, objc2, objc2-metal, etc., which
+# we don't use.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-image-io = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGImageSource",
+    "objc2-core-graphics",
+] }
+objc2-core-graphics = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "CGGeometry",
+] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "CFData",
+] }

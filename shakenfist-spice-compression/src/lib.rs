@@ -42,6 +42,9 @@ pub use jpeg::{best_for_platform, DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder
 #[cfg(feature = "mozjpeg")]
 pub use jpeg::MozJpegDecoder;
 
+#[cfg(all(feature = "jpeg", target_os = "macos"))]
+pub use jpeg::ImageIoDecoder;
+
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;
 

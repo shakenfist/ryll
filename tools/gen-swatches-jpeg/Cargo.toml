@@ -1,0 +1,10 @@
+[package]
+name = "gen-swatches-jpeg"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mozjpeg = { version = "=0.10.13", features = ["with_simd"] }
+
+[workspace]
