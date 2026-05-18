@@ -26,7 +26,7 @@ use shakenfist_spice_renderer::traffic::TrafficSink;
 pub use shakenfist_spice_renderer::snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot, PlaybackCodec, PlaybackSessionInfo,
-    PlaybackSnapshot, StreamSnapshot,
+    PlaybackSnapshot, RedirectedDevice, StreamSnapshot, UsbredirSnapshot, WebdavSnapshot,
 };
 
 /// Direction of a protocol message.
@@ -2252,6 +2252,67 @@ mod tests {
         let other = serde_json::to_string(&PlaybackCodec::Other(42)).unwrap();
         assert!(other.contains("\"kind\":\"other\""), "got {}", other);
         assert!(other.contains("\"value\":42"), "got {}", other);
+    }
+
+    #[test]
+    fn test_usbredir_snapshot_serialises() {
+        let mut snap = UsbredirSnapshot {
+            bytes_in: 8192,
+            bytes_out: 512,
+            ping_recv_count: 1,
+            pong_send_count: 1,
+            writer_dropped_count: 0,
+            unknown_opcode_count: 2,
+            last_unknown_opcode: Some(0xDEAD),
+            device_connect_total: 1,
+            device_disconnect_total: 0,
+            last_device_event_ts_secs: Some(1.5),
+            server_caps: 0x0000_00ff,
+            client_caps: 0x0000_001a,
+            ..Default::default()
+        };
+        snap.messages_recv_by_opcode.insert(1, 50);
+        snap.messages_recv_by_opcode.insert(2, 10);
+        snap.messages_send_by_opcode.insert(1, 1);
+        snap.redirected_devices.push(RedirectedDevice {
+            vendor_id: 0x1d6b,
+            product_id: 0x0104,
+            device_class: 0x08,
+            attached_at_secs: 1.5,
+            bytes_to_guest: 0,
+            bytes_from_guest: 0,
+        });
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common.
+        assert!(json.contains("\"bytes_in\": 8192"));
+        assert!(json.contains("\"bytes_out\": 512"));
+        assert!(json.contains("\"ping_recv_count\": 1"));
+        assert!(json.contains("\"writer_dropped_count\": 0"));
+
+        // Baseline additions.
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"1\": 50"));
+        assert!(json.contains("\"2\": 10"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"last_unknown_opcode\": 57005"));
+        assert!(json.contains("\"unknown_opcode_count\": 2"));
+
+        // USB-redirection specifics.
+        assert!(json.contains("\"redirected_devices\""));
+        assert!(json.contains("\"vendor_id\": 7531"));
+        assert!(json.contains("\"product_id\": 260"));
+        assert!(json.contains("\"device_class\": 8"));
+        assert!(json.contains("\"attached_at_secs\": 1.5"));
+        assert!(json.contains("\"bytes_to_guest\": 0"));
+        assert!(json.contains("\"bytes_from_guest\": 0"));
+        assert!(json.contains("\"device_connect_total\": 1"));
+        assert!(json.contains("\"device_disconnect_total\": 0"));
+        assert!(json.contains("\"last_device_event_ts_secs\": 1.5"));
+
+        // Protocol caps.
+        assert!(json.contains("\"server_caps\": 255"));
+        assert!(json.contains("\"client_caps\": 26"));
     }
 
     #[test]

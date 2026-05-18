@@ -583,9 +583,41 @@ pub struct PlaybackSnapshot {
     pub last_latency_ms: Option<u32>,
 }
 
-/// See `PlaybackSnapshot`.
+/// A USB device currently redirected to the guest via the
+/// usbredir channel. One entry per `usb_redir_device_connect`
+/// we have sent without a matching `device_disconnect`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RedirectedDevice {
+    /// USB vendor ID (e.g. 0x1d6b = Linux Foundation).
+    pub vendor_id: u16,
+    /// USB product ID (e.g. 0x0104 = ryll virtual disk).
+    pub product_id: u16,
+    /// USB device class code (0x00 = interface-defined,
+    /// 0x08 = mass storage, etc.).
+    pub device_class: u8,
+    /// Session-relative seconds when the device was connected.
+    pub attached_at_secs: f64,
+    /// Bytes sent to the guest for this device (placeholder;
+    /// per-device byte accounting not yet implemented).
+    // TODO: track per-device byte counts.
+    pub bytes_to_guest: u64,
+    /// Bytes received from the guest for this device
+    /// (placeholder; per-device byte accounting not yet
+    /// implemented).
+    // TODO: track per-device byte counts.
+    pub bytes_from_guest: u64,
+}
+
+/// Snapshot of the usbredir channel's mutable state.
+///
+/// The transport-common fields mirror the eight-field baseline
+/// shared by all channels. Baseline additions
+/// (`messages_*_by_opcode`, `unknown_opcode_count`,
+/// `last_unknown_opcode`) follow the 4B pattern. USB-specific
+/// fields surface device tracking and handshake caps.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsbredirSnapshot {
+    // --- transport common (8 fields) ---
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub last_recv_ts_secs: Option<f64>,
@@ -595,6 +627,47 @@ pub struct UsbredirSnapshot {
     pub last_ping_recv_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+
+    // --- baseline additions (per 4B pattern) ---
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
+
+    // --- USB-redirection specifics ---
+    /// Currently-active redirected devices. One entry per
+    /// `usb_redir_device_connect` we have sent without a
+    /// matching `device_disconnect`.
+    pub redirected_devices: Vec<RedirectedDevice>,
+    /// Monotonic count of device-connect events since session
+    /// start (incremented on every `connect_device` call).
+    pub device_connect_total: u64,
+    /// Monotonic count of device-disconnect events since session
+    /// start (incremented on every `disconnect_device` call).
+    pub device_disconnect_total: u64,
+    /// Session-relative seconds of the most recent device-connect
+    /// or device-disconnect event. `None` until the first one.
+    pub last_device_event_ts_secs: Option<f64>,
+
+    // --- protocol caps observed at handshake ---
+    /// Capability bitmask the server reported in its Hello
+    /// message. Set once during the hello exchange; zero until
+    /// then.
+    pub server_caps: u32,
+    /// Capability bitmask we sent to the server in our Hello
+    /// message (`RYLL_CAPS`). Set once during the hello
+    /// exchange; zero until then.
+    pub client_caps: u32,
 }
 
 /// See `PlaybackSnapshot`.
