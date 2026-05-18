@@ -274,12 +274,13 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
 | 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; smoke test (2C) folded into phase 3 step 3H |
 | 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G); 3H per-platform smoke test pending |
-| 4. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-04-h264.md | Not started |
-| 5. Preference messages | PLAN-stream-caps-and-flap-phase-05-pref-messages.md | Not started |
-| 6. Flap notification | PLAN-stream-caps-and-flap-phase-06-flap-notification.md | Not started |
-| 7. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-07-vdagent-probe.md | Not started |
-| 8. Documentation | PLAN-stream-caps-and-flap-phase-08-docs.md | Not started |
-| 9. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-09-remove-pong-keepalive.md | Not started |
+| 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Not started |
+| 5. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-05-h264.md | Not started |
+| 6. Preference messages | PLAN-stream-caps-and-flap-phase-06-pref-messages.md | Not started |
+| 7. Flap notification | PLAN-stream-caps-and-flap-phase-07-flap-notification.md | Not started |
+| 8. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-08-vdagent-probe.md | Not started |
+| 9. Documentation | PLAN-stream-caps-and-flap-phase-09-docs.md | Not started |
+| 10. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-10-remove-pong-keepalive.md | Not started |
 
 Per-phase intent:
 
@@ -325,7 +326,71 @@ Per-phase intent:
   implementations, COM threading on Windows, dlopen + JPEG
   header parsing for VA-API).
 
-- **Phase 4 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
+- **Phase 4 — Channel diagnostics audit + playback
+  observability.** Driven by sessions 002d/002e, where the
+  user reported audio worked for Gnome event sounds but went
+  silent during long video playback. The console logs showed
+  `playback: START → Opus decoder initialized → audio output
+  started`, then nothing — no errors, no packet counts, no
+  visibility into whether samples actually reached the
+  device. We hit the same observability gap in session 002
+  (display channel) and patched it under duress in phases 1
+  and 3; this phase is the systemic fix. Audit every channel
+  for "what diagnostic surface does the bug report
+  currently expose, and what is missing?", define a
+  consistent baseline, and close the gaps — with playback
+  detailed enough to characterise the audio-silence symptom
+  in a single bug report. Today's gap snapshot:
+
+  | Channel | Snapshot fields | Channel-specific signals |
+  |---|---|---|
+  | display | 40 | rich (post-phase-3) |
+  | main | 15 | yes (mm_time, session_id, keepalive) |
+  | inputs | 14 | yes (motion_count, recent_events) |
+  | cursor | 14 | yes (cache_entries) |
+  | playback | 8 | **none** — only generic transport |
+  | usbredir | 8 | **none** |
+  | webdav | 8 | **none** |
+  | record | 0 | channel skipped at link time |
+
+  Scope:
+  - Audit doc capturing the matrix above plus an explicit
+    "what would I want to see in a bug report for this
+    channel?" list per channel.
+  - Define and document the *minimum diagnostic baseline*
+    every channel should publish on top of the transport
+    common (recent-action ring, last-action timestamp,
+    per-message-type counters, error counts).
+  - `PlaybackSnapshot` gains audio-specific fields: DATA
+    packets received, packets decoded, decode failures,
+    decoder errors, samples enqueued, samples consumed,
+    ring-buffer underruns/overruns, last START/STOP info
+    (rate, channels, codec, mm_time), volume/mute state,
+    last_data_recv_ts, recent decode-duration ring.
+  - `UsbredirSnapshot` gains device-specific fields: USB
+    redirect packet counts by direction, active redirected
+    devices, last device add/remove.
+  - `WebdavSnapshot` gains HTTP-specific fields: request
+    count, response-body bytes, active session count.
+  - Decide whether `record` channel gets a snapshot or stays
+    explicitly skipped with a documented justification.
+  - Bug-report writer extended to include the new fields;
+    `test_display_snapshot_serialises`-style tests extended
+    for each new channel snapshot.
+
+  Out of scope:
+  - Implementing the `record` channel itself (we don't
+    expose mic capture in any UI today).
+  - Pretty-printing the new fields in the in-app stats
+    panel — this is bug-report observability, not live UI.
+
+  Recommended planning effort: **medium**. The audit is
+  straightforward; the playback work needs care (the
+  audio thread is a separate native thread, snapshot
+  writes from a tokio task) and is the highest-leverage
+  fix.
+
+- **Phase 5 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
   9 (CODEC_MJPEG), and 11 (CODEC_H264). Hook H.264 decoding into
   the existing `STREAM_DATA` / `STREAM_DATA_SIZED` path keyed on
   `StreamState::codec_type`. Use `openh264` (already in
@@ -337,7 +402,7 @@ Per-phase intent:
   threading, codec-specific framing, and the first time we add
   a video codec to the GUI binary).
 
-- **Phase 5 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
+- **Phase 6 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
   (opcode 103) and `display_client::PREFERRED_VIDEO_CODEC_TYPE`
   (opcode 104). Advertise caps 6 and 12. Send the preference
   messages once on link establishment. spice-gtk does this in
@@ -345,7 +410,7 @@ Per-phase intent:
   planning effort: **medium** (mechanical once the cap plumbing
   is in place from earlier phases).
 
-- **Phase 6 — Flap notification.** Add a small per-channel
+- **Phase 7 — Flap notification.** Add a small per-channel
   watcher (likely a tokio task or a tick inside
   `update_snapshot`) that examines the `streams_recently_destroyed`
   ring. If ≥3 streams destroyed in the last 30 s with mean
@@ -361,7 +426,7 @@ Per-phase intent:
   heuristic is well-defined; UI integration follows existing
   notification patterns).
 
-- **Phase 7 — Vdagent responsiveness probe.** The spice in-guest
+- **Phase 8 — Vdagent responsiveness probe.** The spice in-guest
   agent has no diagnostic message types of its own (see the
   *On vdagent diagnostics* note in `Situation`), but two
   client → agent messages are acknowledged by `VD_AGENT_REPLY`:
@@ -397,7 +462,7 @@ Per-phase intent:
   **medium** (small surface area; the only judgment call is
   probe cadence and the no-op assumption).
 
-- **Phase 8 — Documentation.** Update `ARCHITECTURE.md`
+- **Phase 9 — Documentation.** Update `ARCHITECTURE.md`
   capability tables, `AGENTS.md` reference list if a new
   external ref was added, `README.md` if user-visible behaviour
   changed, and add a "video troubleshooting" section to
@@ -405,7 +470,7 @@ Per-phase intent:
   the vdagent probe fields, and links to the bug-report fields
   a user should attach. Recommended planning effort: **low**.
 
-- **Phase 9 — Remove spurious-PONG keepalive.** Driven by
+- **Phase 10 — Remove spurious-PONG keepalive.** Driven by
   session 002c, where the operator's qemu log showed a
   cadence of `Spice: main:0 (...): invalid net test stage,
   ping id 0 test id 0 stage 0` warnings every ~15 s. Traced
