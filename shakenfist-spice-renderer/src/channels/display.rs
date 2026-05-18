@@ -189,6 +189,28 @@ const MAX_RECENT_DECODES: usize = 20;
 /// time without bloating channel-state.json.
 const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
 
+/// Sliding-window threshold for triggering a STREAM_REPORT
+/// early due to consecutive frame drops. Matches spice-gtk's
+/// `STREAM_REPORT_DROP_SEQ_LEN_LIMIT` at
+/// channel-display.c:1532.
+const STREAM_REPORT_DROP_SEQ_LEN_LIMIT: u32 = 3;
+
+/// Trigger predicate for STREAM_REPORT, extracted to a
+/// free function so each OR branch is unit-testable in
+/// isolation. Mirrors spice-gtk's check at
+/// channel-display.c:1559-1561.
+fn stream_report_should_send(
+    num_frames: u32,
+    max_window_size: u32,
+    elapsed_since_window_start: i32,
+    timeout_ms: u32,
+    drops_seq_len: u32,
+) -> bool {
+    num_frames >= max_window_size
+        || elapsed_since_window_start >= timeout_ms as i32
+        || drops_seq_len >= STREAM_REPORT_DROP_SEQ_LEN_LIMIT
+}
+
 /// Maximum number of consecutive ACK-send intervals retained in
 /// the snapshot for "video not keeping up" diagnostics. With a
 /// typical ACK window of a few hundred messages on a busy
@@ -659,11 +681,10 @@ pub struct DisplayChannel {
     /// Without this, a bug report filed between flap cycles loses
     /// the diagnostic data we just added.
     recently_destroyed_streams: VecDeque<StreamSnapshot>,
-    /// Shared mm_time clock — reader side. Phase 1F's
-    /// `STREAM_REPORT` send path reads `mm_clock.now()` to
-    /// compute `last_frame_delay`. Stored here in phase 1B as
-    /// plumbing only; no usage site exists yet.
-    #[allow(dead_code)]
+    /// Shared mm_time clock — reader side. Phase 1E reads
+    /// `mm_clock.now()` to evaluate the STREAM_REPORT trigger
+    /// predicate; phase 1F also uses it to compute
+    /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
 }
 
@@ -1304,7 +1325,7 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, _frame_mm_time, dest, jpeg_data) =
+                let (stream_id, frame_mm_time, dest, jpeg_data) =
                     if msg_type == display_server::STREAM_DATA_SIZED {
                         // SpiceMsgDisplayStreamDataSized layout (spice.proto):
                         //   offset  0: stream_id (u32)
@@ -1321,7 +1342,6 @@ impl DisplayChannel {
                             return Ok(());
                         }
                         let id = read_u32_le(payload, 0);
-                        // _frame_mm_time: consumed in step 1E
                         let mm_time = read_u32_le(payload, 4);
                         let dest_top = read_u32_le(payload, 16);
                         let dest_left = read_u32_le(payload, 20);
@@ -1345,17 +1365,75 @@ impl DisplayChannel {
                             return Ok(());
                         }
                         let id = read_u32_le(payload, 0);
-                        // _frame_mm_time: consumed in step 1E
                         let mm_time = read_u32_le(payload, 4);
                         let data_size = read_u32_le(payload, 8) as usize;
                         let data = &payload[12..12 + data_size.min(payload.len() - 12)];
                         (id, mm_time, None, data)
                     };
 
+                // Evaluate STREAM_REPORT bookkeeping BEFORE the MJPEG
+                // decode dispatch — `report_num_frames` counts every
+                // STREAM_DATA for an active stream, irrespective of
+                // decode outcome. The borrow on `self.streams` is
+                // released at the end of the `if let Some(stream)`
+                // scope so we can call `self.send_stream_report`
+                // afterwards without a borrow conflict.
+                let now_mm_time = self.mm_clock.now();
+                let report_action: Option<(u32, i32)> =
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        let now_secs = self.traffic.elapsed().as_secs_f64();
+                        stream.frames_received = stream.frames_received.saturating_add(1);
+                        stream.last_frame_ts_secs = Some(now_secs);
+
+                        let mut send: Option<(u32, i32)> = None;
+                        if stream.report_is_active {
+                            if stream.report_num_frames == 0 {
+                                stream.report_start_frame_mm_time = frame_mm_time;
+                                stream.report_start_now_mm_time = now_mm_time;
+                            }
+                            stream.report_num_frames = stream.report_num_frames.saturating_add(1);
+                            stream.report_end_frame_mm_time = frame_mm_time;
+
+                            // Modular i32 subtraction; mm_time wraps at
+                            // 2^32 ms so we cast through i64 and narrow.
+                            // Matches spice-gtk's spice_mmtime_diff
+                            // helper at channel-display.c:1482.
+                            let last_frame_delay: i32 =
+                                (frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
+
+                            if last_frame_delay < 0 {
+                                stream.report_num_drops = stream.report_num_drops.saturating_add(1);
+                                stream.report_drops_seq_len =
+                                    stream.report_drops_seq_len.saturating_add(1);
+                            } else {
+                                stream.report_drops_seq_len = 0;
+                            }
+
+                            let elapsed_since_window_start: i32 = (now_mm_time as i64)
+                                .wrapping_sub(stream.report_start_now_mm_time as i64)
+                                as i32;
+
+                            if stream_report_should_send(
+                                stream.report_num_frames,
+                                stream.report_max_window_size,
+                                elapsed_since_window_start,
+                                stream.report_timeout_ms,
+                                stream.report_drops_seq_len,
+                            ) {
+                                send = Some((stream_id, last_frame_delay));
+                            }
+                        }
+                        send
+                    } else {
+                        None
+                    };
+
+                if let Some((sid, lfd)) = report_action {
+                    self.send_stream_report(sid, lfd).await?;
+                }
+
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     let now_secs = self.traffic.elapsed().as_secs_f64();
-                    stream.frames_received = stream.frames_received.saturating_add(1);
-                    stream.last_frame_ts_secs = Some(now_secs);
 
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         let (top, left, bottom, right) = dest.unwrap_or((
@@ -2568,6 +2646,30 @@ impl DisplayChannel {
         snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
     }
 
+    /// Send a STREAM_REPORT for `stream_id`. Step 1E adds the
+    /// per-stream bookkeeping (mirror update, counter reset);
+    /// step 1F adds the actual wire-format marshal + transmit.
+    async fn send_stream_report(&mut self, stream_id: u32, last_frame_delay: i32) -> Result<()> {
+        let now_secs = self.traffic.elapsed().as_secs_f64();
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.last_report_num_frames = stream.report_num_frames;
+            stream.last_report_num_drops = stream.report_num_drops;
+            stream.last_report_last_frame_delay = last_frame_delay;
+            stream.report_send_count = stream.report_send_count.saturating_add(1);
+            stream.last_report_sent_ts_secs = Some(now_secs);
+            // Reset rolling window so the next frame starts fresh.
+            stream.report_num_frames = 0;
+            stream.report_num_drops = 0;
+            stream.report_drops_seq_len = 0;
+            stream.report_start_frame_mm_time = 0;
+            stream.report_end_frame_mm_time = 0;
+            stream.report_start_now_mm_time = 0;
+            // TODO step 1F: marshal the 32-byte payload and send
+            // via display_client::STREAM_REPORT.
+        }
+        Ok(())
+    }
+
     async fn send_ack(&mut self) -> Result<()> {
         let msg = make_message(display_client::ACK, &[]);
         self.send_with_log(display_client::ACK, &msg).await?;
@@ -3385,5 +3487,44 @@ mod tests {
         assert_eq!(ring.len(), 5);
         assert_eq!(ring.front().copied(), Some(0.0));
         assert_eq!(ring.back().copied(), Some(4.0));
+    }
+
+    // -------------------------------------------------------------------------
+    // stream_report_should_send tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn stream_report_predicate_fires_on_frame_window() {
+        assert!(stream_report_should_send(5, 5, 100, 1000, 0));
+        assert!(!stream_report_should_send(4, 5, 100, 1000, 0));
+    }
+
+    #[test]
+    fn stream_report_predicate_fires_on_timeout() {
+        assert!(stream_report_should_send(1, 5, 1000, 1000, 0));
+        assert!(!stream_report_should_send(1, 5, 999, 1000, 0));
+    }
+
+    #[test]
+    fn stream_report_predicate_fires_on_drop_sequence() {
+        assert!(stream_report_should_send(
+            1,
+            5,
+            100,
+            1000,
+            STREAM_REPORT_DROP_SEQ_LEN_LIMIT
+        ));
+        assert!(!stream_report_should_send(
+            1,
+            5,
+            100,
+            1000,
+            STREAM_REPORT_DROP_SEQ_LEN_LIMIT - 1
+        ));
+    }
+
+    #[test]
+    fn stream_report_predicate_does_not_fire_idle() {
+        assert!(!stream_report_should_send(0, 5, 0, 1000, 0));
     }
 }
