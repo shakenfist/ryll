@@ -1957,6 +1957,12 @@ mod tests {
         snap.stream_data_orphan_count = 3;
         snap.stream_reports_sent_total = 17;
         snap.stream_reports_unsupported_signals_sent = 2;
+        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        snap.mjpeg_decode_recent_min_us = 1_200;
+        snap.mjpeg_decode_recent_max_us = 45_000;
+        snap.mjpeg_decode_recent_mean_us = 8_500;
+        snap.mjpeg_decode_total_count = 350;
+        snap.mjpeg_decode_failed_count = 2;
         // Previously-active stream now in the recently-destroyed
         // ring: destroyed_at_secs is Some, counters are frozen.
         snap.streams_recently_destroyed.push_back(StreamSnapshot {
@@ -2048,6 +2054,12 @@ mod tests {
         // Phase-03 step 3A: MJPEG decoder backend name visible in
         // bug reports so a report identifies which path ran.
         assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
+        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        assert!(json.contains("\"mjpeg_decode_recent_min_us\": 1200"));
+        assert!(json.contains("\"mjpeg_decode_recent_max_us\": 45000"));
+        assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
+        assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
+        assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
     }
 
     #[test]

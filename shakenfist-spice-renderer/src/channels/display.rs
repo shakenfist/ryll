@@ -218,6 +218,28 @@ fn recent_decode_duration_stats(decodes: &VecDeque<DecodeResult>) -> (u32, u32, 
     }
 }
 
+/// Min / max / mean of a ring of raw microsecond durations.
+/// Returns `(0, 0, 0)` when the ring is empty.
+fn mjpeg_duration_stats(ring: &VecDeque<u32>) -> (u32, u32, u32) {
+    if ring.is_empty() {
+        return (0, 0, 0);
+    }
+    let mut min = u32::MAX;
+    let mut max = 0u32;
+    let mut sum = 0u64;
+    for &us in ring {
+        if us < min {
+            min = us;
+        }
+        if us > max {
+            max = us;
+        }
+        sum += u64::from(us);
+    }
+    let mean = u32::try_from(sum / ring.len() as u64).unwrap_or(u32::MAX);
+    (min, max, mean)
+}
+
 /// What we decided to do with a DRAW_FILL after classifying its
 /// rop/brush/mask. Extracted from `handle_draw_fill` so the
 /// parse-and-classify logic is independently testable without
@@ -653,6 +675,18 @@ pub struct DisplayChannel {
     /// predicate; phase 1F also uses it to compute
     /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
+    /// Phase-03 step 3F: bounded ring of the most recent MJPEG
+    /// decode durations in microseconds, newest at the back.
+    /// Capped at `MAX_RECENT_DECODES` to match the non-stream
+    /// recent-decode ring. Used by `update_snapshot` to compute
+    /// `mjpeg_decode_recent_min/max/mean_us`.
+    mjpeg_recent_durations: VecDeque<u32>,
+    /// Phase-03 step 3F: cumulative count of MJPEG decode
+    /// attempts (success + failure) since session start.
+    mjpeg_decode_total_count: u64,
+    /// Phase-03 step 3F: cumulative count of MJPEG decode
+    /// attempts that returned `None` since session start.
+    mjpeg_decode_failed_count: u64,
 }
 
 impl DisplayChannel {
@@ -717,6 +751,9 @@ impl DisplayChannel {
             stream_reports_sent_total: 0,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
+            mjpeg_recent_durations: VecDeque::new(),
+            mjpeg_decode_total_count: 0,
+            mjpeg_decode_failed_count: 0,
         }
     }
 
@@ -1436,6 +1473,22 @@ impl DisplayChannel {
                         let decoded = self.jpeg_decoder.decode(frame_data);
                         let decode_duration_us =
                             u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+
+                        // Phase-03 step 3F: aggregate MJPEG decode
+                        // duration tracking. Push every timing into
+                        // the bounded ring (success and failure both),
+                        // bump total always, bump failed on None.
+                        self.mjpeg_decode_total_count =
+                            self.mjpeg_decode_total_count.saturating_add(1);
+                        self.mjpeg_recent_durations.push_back(decode_duration_us);
+                        if self.mjpeg_recent_durations.len() > MAX_RECENT_DECODES {
+                            self.mjpeg_recent_durations.pop_front();
+                        }
+
+                        if decoded.is_none() {
+                            self.mjpeg_decode_failed_count =
+                                self.mjpeg_decode_failed_count.saturating_add(1);
+                        }
 
                         match decoded {
                             Some(DecodedJpeg {
@@ -2625,6 +2678,17 @@ impl DisplayChannel {
         snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
         snap.stream_reports_sent_total = self.stream_reports_sent_total;
         snap.stream_reports_unsupported_signals_sent = 0; // phase 4 writes this
+
+        // Phase-03 step 3F: aggregate MJPEG decode duration stats.
+        // Mirrors the non-stream decode_recent_* pattern but draws
+        // from the MJPEG-only duration ring rather than the
+        // per-image decode ring.
+        let (mjpeg_min, mjpeg_max, mjpeg_mean) = mjpeg_duration_stats(&self.mjpeg_recent_durations);
+        snap.mjpeg_decode_recent_min_us = mjpeg_min;
+        snap.mjpeg_decode_recent_max_us = mjpeg_max;
+        snap.mjpeg_decode_recent_mean_us = mjpeg_mean;
+        snap.mjpeg_decode_total_count = self.mjpeg_decode_total_count;
+        snap.mjpeg_decode_failed_count = self.mjpeg_decode_failed_count;
     }
 
     /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte

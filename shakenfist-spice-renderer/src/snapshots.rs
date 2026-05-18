@@ -234,6 +234,25 @@ pub struct DisplaySnapshot {
     /// multi-codec streams and need to tell the server to give
     /// up on one.
     pub stream_reports_unsupported_signals_sent: u64,
+    /// Min MJPEG decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls. Zero when no MJPEG frame
+    /// has been decoded this session.
+    pub mjpeg_decode_recent_min_us: u32,
+    /// Max MJPEG decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls. Zero when no MJPEG frame
+    /// has been decoded this session.
+    pub mjpeg_decode_recent_max_us: u32,
+    /// Mean MJPEG decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls (integer; sum/count). Zero
+    /// when no MJPEG frame has been decoded this session.
+    pub mjpeg_decode_recent_mean_us: u32,
+    /// Total MJPEG decode attempts since session start
+    /// (success + failure).
+    pub mjpeg_decode_total_count: u64,
+    /// MJPEG decode attempts that returned `None` (decode
+    /// error or unsupported format). Subset of
+    /// `mjpeg_decode_total_count`.
+    pub mjpeg_decode_failed_count: u64,
 }
 
 /// A recorded input event for the inputs channel snapshot.
