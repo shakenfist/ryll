@@ -272,7 +272,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
-| 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; awaiting smoke test (2C) |
+| 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; smoke test (2C) folded into phase 3 step 3H |
 | 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Planned |
 | 4. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-04-h264.md | Not started |
 | 5. Preference messages | PLAN-stream-caps-and-flap-phase-05-pref-messages.md | Not started |
