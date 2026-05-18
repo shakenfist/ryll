@@ -25,7 +25,8 @@ use shakenfist_spice_renderer::traffic::TrafficSink;
 #[allow(unused_imports)]
 pub use shakenfist_spice_renderer::snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
-    InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot, PlaybackCodec, PlaybackSessionInfo,
+    PlaybackSnapshot, StreamSnapshot,
 };
 
 /// Direction of a protocol message.
@@ -2155,6 +2156,102 @@ mod tests {
         assert!(json.contains("\"5\": 8"));
         assert!(json.contains("\"last_unknown_opcode\": 4660"));
         assert!(json.contains("\"unknown_opcode_count\": 2"));
+    }
+
+    #[test]
+    fn test_playback_snapshot_serialises() {
+        let mut snap = PlaybackSnapshot {
+            bytes_in: 4096,
+            bytes_out: 256,
+            ping_recv_count: 2,
+            pong_send_count: 2,
+            writer_dropped_count: 1,
+            unknown_opcode_count: 4,
+            last_unknown_opcode: Some(0xC0DE),
+            current_session: Some(PlaybackSessionInfo {
+                started_at_secs: 3.5,
+                mm_time_at_start: 0xAB_CD_EF_12,
+                sample_rate_hz: 48000,
+                channels: 2,
+                codec: PlaybackCodec::Opus,
+            }),
+            start_count: 2,
+            stop_count: 1,
+            data_packets_received: 100,
+            data_packets_decoded: 98,
+            data_packets_decode_failed: 2,
+            data_bytes_received: 65536,
+            pcm_bytes_produced: 1_048_576,
+            device_callbacks_total: 500,
+            device_underrun_count: 7,
+            ring_overflow_count: 3,
+            samples_consumed_total: 96_000,
+            last_volume_per_channel: vec![32768, 32768],
+            last_mute: Some(false),
+            last_latency_ms: Some(40),
+            ..Default::default()
+        };
+        snap.recent_decode_durations_us.push_back(180);
+        snap.recent_decode_durations_us.push_back(220);
+        snap.messages_recv_by_opcode.insert(101, 100);
+        snap.messages_recv_by_opcode.insert(103, 2);
+        snap.messages_send_by_opcode.insert(3, 2);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common + baseline.
+        assert!(json.contains("\"bytes_in\": 4096"));
+        assert!(json.contains("\"writer_dropped_count\": 1"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"101\": 100"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 2"));
+        assert!(json.contains("\"last_unknown_opcode\": 49374"));
+        assert!(json.contains("\"unknown_opcode_count\": 4"));
+
+        // Per-session.
+        assert!(json.contains("\"current_session\""));
+        assert!(json.contains("\"started_at_secs\": 3.5"));
+        assert!(json.contains("\"mm_time_at_start\": 2882400018"));
+        assert!(json.contains("\"sample_rate_hz\": 48000"));
+        assert!(json.contains("\"channels\": 2"));
+        assert!(json.contains("\"kind\": \"opus\""));
+        assert!(json.contains("\"start_count\": 2"));
+        assert!(json.contains("\"stop_count\": 1"));
+
+        // Data plumbing.
+        assert!(json.contains("\"data_packets_received\": 100"));
+        assert!(json.contains("\"data_packets_decoded\": 98"));
+        assert!(json.contains("\"data_packets_decode_failed\": 2"));
+        assert!(json.contains("\"data_bytes_received\": 65536"));
+        assert!(json.contains("\"pcm_bytes_produced\": 1048576"));
+        assert!(json.contains("\"recent_decode_durations_us\""));
+        assert!(json.contains("180"));
+        assert!(json.contains("220"));
+
+        // Device-side.
+        assert!(json.contains("\"device_callbacks_total\": 500"));
+        assert!(json.contains("\"device_underrun_count\": 7"));
+        assert!(json.contains("\"ring_overflow_count\": 3"));
+        assert!(json.contains("\"samples_consumed_total\": 96000"));
+
+        // Server-controlled params.
+        assert!(json.contains("\"last_volume_per_channel\""));
+        assert!(json.contains("32768"));
+        assert!(json.contains("\"last_mute\": false"));
+        assert!(json.contains("\"last_latency_ms\": 40"));
+    }
+
+    #[test]
+    fn test_playback_codec_round_trips() {
+        // Tuple-variant Other is the failure-prone case; check it
+        // serialises with `kind` + `value` as expected.
+        let raw = serde_json::to_string(&PlaybackCodec::Raw).unwrap();
+        assert!(raw.contains("\"kind\":\"raw\""), "got {}", raw);
+        let opus = serde_json::to_string(&PlaybackCodec::Opus).unwrap();
+        assert!(opus.contains("\"kind\":\"opus\""), "got {}", opus);
+        let other = serde_json::to_string(&PlaybackCodec::Other(42)).unwrap();
+        assert!(other.contains("\"kind\":\"other\""), "got {}", other);
+        assert!(other.contains("\"value\":42"), "got {}", other);
     }
 
     #[test]

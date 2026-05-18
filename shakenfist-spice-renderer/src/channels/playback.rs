@@ -1,9 +1,9 @@
 use anyhow::Result;
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
@@ -26,6 +26,40 @@ const AUDIO_DATA_MODE_OPUS: u16 = 3;
 /// ~2 seconds. Prevents unbounded memory growth if audio data
 /// arrives faster than it is consumed.
 const MAX_AUDIO_BUFFER_SAMPLES: usize = 48000 * 2 * 2;
+
+/// Cap for the recent-decode-duration ring published into the
+/// playback snapshot. Mirrors display.rs's `recent_decodes`
+/// pattern: a bounded window of recent measurements so a bug
+/// report has fresh latency data without growing unbounded.
+const MAX_RECENT_PLAYBACK_DECODES: usize = 64;
+
+/// Lock-free counters owned by the audio-thread side of the
+/// playback pipeline. The cpal callback writes to the
+/// `device_callbacks_total`, `device_underrun_count`, and
+/// `samples_consumed_total` atomics with `Relaxed` ordering on
+/// every callback; the producer-push path writes
+/// `ring_overflow_count` when the ring is full. The tokio side
+/// reads them via `load(Relaxed)` from `update_snapshot` —
+/// single load per counter, no contention with the audio
+/// callback. Counters are cumulative across audio-session
+/// restarts (the Arcs survive STOP → START cycles).
+struct AudioCounters {
+    device_callbacks_total: AtomicU64,
+    device_underrun_count: AtomicU64,
+    ring_overflow_count: AtomicU64,
+    samples_consumed_total: AtomicU64,
+}
+
+impl AudioCounters {
+    fn new() -> Arc<Self> {
+        Arc::new(AudioCounters {
+            device_callbacks_total: AtomicU64::new(0),
+            device_underrun_count: AtomicU64::new(0),
+            ring_overflow_count: AtomicU64::new(0),
+            samples_consumed_total: AtomicU64::new(0),
+        })
+    }
+}
 
 pub struct VolumeControl {
     volume: AtomicU8,
@@ -237,6 +271,7 @@ impl AudioThread {
         vol: Arc<VolumeControl>,
         source_rate: u32,
         source_channels: u32,
+        counters: Arc<AudioCounters>,
     ) -> Option<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_flag = shutdown.clone();
@@ -244,7 +279,14 @@ impl AudioThread {
         let handle = std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
-                Self::run_audio(consumer, vol, source_rate, source_channels, shutdown_flag);
+                Self::run_audio(
+                    consumer,
+                    vol,
+                    source_rate,
+                    source_channels,
+                    shutdown_flag,
+                    counters,
+                );
             })
             .ok()?;
 
@@ -257,6 +299,7 @@ impl AudioThread {
         source_rate: u32,
         source_channels: u32,
         shutdown: Arc<AtomicBool>,
+        counters: Arc<AudioCounters>,
     ) {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -307,14 +350,31 @@ impl AudioThread {
             }
         };
 
+        // Clone the per-format counter Arcs once so each closure
+        // captures its own handle. Per Q3 of the phase-04 plan,
+        // the authoritative underrun signal is
+        // `consumer.slots() == 0` at the top of the callback —
+        // checked here before draining.
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::I16 => {
                 let vol = vol.clone();
+                let counters = counters.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
+                        counters
+                            .device_callbacks_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        if consumer.slots() == 0 {
+                            counters
+                                .device_underrun_count
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         drain_ring(&mut consumer, &mut local_buf);
                         write_samples_i16(data, &mut local_buf, &vol, &mut resampler);
+                        counters
+                            .samples_consumed_total
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
                     },
                     |err| warn!("playback: audio stream error: {}", err),
                     None,
@@ -322,11 +382,23 @@ impl AudioThread {
             }
             cpal::SampleFormat::F32 => {
                 let vol = vol.clone();
+                let counters = counters.clone();
                 device.build_output_stream(
                     &config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        counters
+                            .device_callbacks_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        if consumer.slots() == 0 {
+                            counters
+                                .device_underrun_count
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
                         drain_ring(&mut consumer, &mut local_buf);
                         write_samples_f32(data, &mut local_buf, &vol, &mut resampler);
+                        counters
+                            .samples_consumed_total
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
                     },
                     |err| warn!("playback: audio stream error: {}", err),
                     None,
@@ -409,6 +481,45 @@ pub struct PlaybackChannel {
     /// the orchestrator's cancel flag flips (Ctrl+C bridge in
     /// the host, or a fresh Reconnect superseding this attempt).
     cancel: Arc<AtomicBool>,
+    /// Lock-free counters shared with the cpal audio callback.
+    /// See [`AudioCounters`]. Created once at channel init and
+    /// reused across audio-session restarts so the counters are
+    /// cumulative over the channel's lifetime.
+    audio_counters: Arc<AudioCounters>,
+    /// Baseline per-opcode receive count.
+    messages_recv_by_opcode: BTreeMap<u16, u64>,
+    /// Baseline per-opcode send count.
+    messages_send_by_opcode: BTreeMap<u16, u64>,
+    /// Baseline last unknown opcode.
+    last_unknown_opcode: Option<u16>,
+    /// Baseline unknown-opcode count.
+    unknown_opcode_count: u64,
+    /// Per-session metadata for the currently-active audio
+    /// session (Some between START and STOP).
+    current_session: Option<crate::snapshots::PlaybackSessionInfo>,
+    /// Cumulative START message count.
+    start_count: u64,
+    /// Cumulative STOP message count.
+    stop_count: u64,
+    /// Cumulative DATA packet receive count.
+    data_packets_received: u64,
+    /// DATA packets successfully decoded.
+    data_packets_decoded: u64,
+    /// DATA packets that failed to decode.
+    data_packets_decode_failed: u64,
+    /// Sum of DATA payload bytes received.
+    data_bytes_received: u64,
+    /// Sum of decoded PCM bytes pushed at the ring buffer.
+    pcm_bytes_produced: u64,
+    /// Bounded ring of recent successful decode durations
+    /// (microseconds). Cap [`MAX_RECENT_PLAYBACK_DECODES`].
+    recent_decode_durations_us: VecDeque<u32>,
+    /// Most recent VOLUME message per-channel vector.
+    last_volume_per_channel: Vec<u16>,
+    /// Most recent MUTE flag.
+    last_mute: Option<bool>,
+    /// Most recent LATENCY value in milliseconds.
+    last_latency_ms: Option<u32>,
 }
 
 impl PlaybackChannel {
@@ -454,6 +565,23 @@ impl PlaybackChannel {
             volume_control,
             opus_sink,
             cancel,
+            audio_counters: AudioCounters::new(),
+            messages_recv_by_opcode: BTreeMap::new(),
+            messages_send_by_opcode: BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
+            current_session: None,
+            start_count: 0,
+            stop_count: 0,
+            data_packets_received: 0,
+            data_packets_decoded: 0,
+            data_packets_decode_failed: 0,
+            data_bytes_received: 0,
+            pcm_bytes_produced: 0,
+            recent_decode_durations_us: VecDeque::with_capacity(MAX_RECENT_PLAYBACK_DECODES),
+            last_volume_per_channel: Vec::new(),
+            last_mute: None,
+            last_latency_ms: None,
         }
     }
 
@@ -538,6 +666,11 @@ impl PlaybackChannel {
             let payload = self.buffer[MessageHeader::SIZE..total].to_vec();
             self.buffer.drain(..total);
             let msg_type = header.message_type;
+
+            // Per-opcode recv counter (baseline addition; mirrors
+            // 4B's pattern). Bumped before dispatch so both known
+            // and unknown opcodes are counted uniformly.
+            *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
 
             if self.log_config.verbose {
                 logging::log_message(
@@ -639,6 +772,14 @@ impl PlaybackChannel {
                             "playback: START: {}Hz, {} channels, format={}, time={}",
                             self.sample_rate, self.channels, format, time
                         );
+                        self.start_count = self.start_count.saturating_add(1);
+                        self.current_session = Some(crate::snapshots::PlaybackSessionInfo {
+                            started_at_secs: self.traffic.elapsed().as_secs_f64(),
+                            mm_time_at_start: time,
+                            sample_rate_hz: self.sample_rate,
+                            channels: self.channels.min(u8::MAX as u32) as u8,
+                            codec: codec_from_mode(self.audio_mode),
+                        });
                         self.start_audio_output();
                         // Opus always operates at 48kHz internally; the
                         // channel count comes from the SPICE START message.
@@ -661,13 +802,23 @@ impl PlaybackChannel {
                     if payload.len() >= 6 {
                         self.audio_mode = u16::from_le_bytes([payload[4], payload[5]]);
                         info!("playback: MODE: {}", self.audio_mode);
+                        // If a session is active, refresh its codec
+                        // to match the new MODE — the server can
+                        // change codec mid-session in principle.
+                        if let Some(ref mut session) = self.current_session {
+                            session.codec = codec_from_mode(self.audio_mode);
+                        }
                     }
                 }
                 playback_server::DATA => {
                     // SpiceMsgPlaybackPacket: time(u32) + data.
                     // Skip the 4-byte multimedia timestamp.
+                    self.data_packets_received = self.data_packets_received.saturating_add(1);
                     if payload.len() > 4 {
                         let audio_data = &payload[4..];
+                        self.data_bytes_received = self
+                            .data_bytes_received
+                            .saturating_add(audio_data.len() as u64);
                         if self.audio_mode == AUDIO_DATA_MODE_RAW {
                             // Pre-decode tap: forward to the optional
                             // sink before the decode-to-cpal path.
@@ -680,7 +831,10 @@ impl PlaybackChannel {
                                     self.channels as u8,
                                 );
                             }
+                            let start = Instant::now();
                             self.push_samples_raw(audio_data);
+                            let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                            self.record_decode_success(dur_us, audio_data.len() as u64);
                         } else if self.audio_mode == AUDIO_DATA_MODE_OPUS {
                             // Pre-decode tap: forward the raw Opus
                             // packet to the optional sink before the
@@ -689,55 +843,131 @@ impl PlaybackChannel {
                                 let samples = opus_packet_samples_48k(audio_data);
                                 sink.on_opus_packet(audio_data, samples);
                             }
-                            self.push_samples_opus(audio_data);
+                            let start = Instant::now();
+                            let pcm_bytes = self.push_samples_opus(audio_data);
+                            let dur_us = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
+                            match pcm_bytes {
+                                Some(bytes) => self.record_decode_success(dur_us, bytes),
+                                None => {
+                                    self.data_packets_decode_failed =
+                                        self.data_packets_decode_failed.saturating_add(1);
+                                }
+                            }
                         }
                     }
                 }
                 playback_server::STOP => {
                     info!("playback: STOP");
+                    self.stop_count = self.stop_count.saturating_add(1);
+                    self.current_session = None;
                     self.stop_audio();
                     self.opus_decoder = None;
                 }
-                playback_server::VOLUME | playback_server::MUTE | playback_server::LATENCY => {
-                    debug!("playback: received opcode {} (ignored)", msg_type);
+                playback_server::VOLUME => {
+                    // SPICE_MSG_PLAYBACK_VOLUME: u8 nchannels, u16 volumes[nchannels].
+                    // TODO: confirm field order against spice-protocol headers
+                    // — the libspice-client-glib reader treats volumes as
+                    // little-endian u16 per channel, which is what we
+                    // assume here.
+                    if !payload.is_empty() {
+                        let nch = payload[0] as usize;
+                        let needed = 1 + nch * 2;
+                        if payload.len() >= needed {
+                            let mut vols = Vec::with_capacity(nch);
+                            for i in 0..nch {
+                                let off = 1 + i * 2;
+                                vols.push(u16::from_le_bytes([payload[off], payload[off + 1]]));
+                            }
+                            self.last_volume_per_channel = vols;
+                            debug!("playback: VOLUME: {:?}", self.last_volume_per_channel);
+                        }
+                    }
+                }
+                playback_server::MUTE => {
+                    // SPICE_MSG_PLAYBACK_MUTE: u8 mute.
+                    if !payload.is_empty() {
+                        self.last_mute = Some(payload[0] != 0);
+                        debug!("playback: MUTE: {:?}", self.last_mute);
+                    }
+                }
+                playback_server::LATENCY => {
+                    // SPICE_MSG_PLAYBACK_LATENCY: u32 latency_ms.
+                    if payload.len() >= 4 {
+                        let lat =
+                            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                        self.last_latency_ms = Some(lat);
+                        debug!("playback: LATENCY: {} ms", lat);
+                    }
                 }
                 _ => {
                     logging::log_unknown_once("playback", msg_type, &payload);
+                    self.unknown_opcode_count = self.unknown_opcode_count.saturating_add(1);
+                    self.last_unknown_opcode = Some(msg_type);
                 }
             }
         }
         Ok(())
     }
 
-    /// Push raw PCM samples into the ring buffer.
+    /// Push raw PCM samples into the ring buffer. Bumps the
+    /// `ring_overflow_count` atomic on each sample that the
+    /// producer fails to enqueue. Always treated as a successful
+    /// "decode" (raw mode skips decoding).
     fn push_samples_raw(&mut self, audio_data: &[u8]) {
         if let Some(ref mut producer) = self.audio_producer {
             for chunk in audio_data.chunks_exact(2) {
                 let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-                // Drop samples if the ring buffer is full (back-pressure).
-                let _ = producer.push(sample);
+                if producer.push(sample).is_err() {
+                    self.audio_counters
+                        .ring_overflow_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
 
     /// Decode Opus audio and push PCM samples into the ring buffer.
-    fn push_samples_opus(&mut self, audio_data: &[u8]) {
-        if let Some(ref mut decoder) = self.opus_decoder {
-            let ch = self.channels as usize;
-            let mut pcm = vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
-            match decoder.decode(audio_data, &mut pcm, false) {
-                Ok(samples) => {
-                    if let Some(ref mut producer) = self.audio_producer {
-                        for &s in &pcm[..samples * ch] {
-                            let _ = producer.push(s);
+    /// Returns `Some(byte_count)` of decoded PCM bytes produced
+    /// on success, `None` if the decoder errored or no decoder
+    /// is active. Bumps `ring_overflow_count` on each sample the
+    /// producer fails to enqueue.
+    fn push_samples_opus(&mut self, audio_data: &[u8]) -> Option<u64> {
+        let decoder = self.opus_decoder.as_mut()?;
+        let ch = self.channels as usize;
+        let mut pcm = vec![0i16; opus_decoder::OpusDecoder::MAX_FRAME_SIZE_48K * ch];
+        match decoder.decode(audio_data, &mut pcm, false) {
+            Ok(samples) => {
+                let total = samples * ch;
+                if let Some(ref mut producer) = self.audio_producer {
+                    for &s in &pcm[..total] {
+                        if producer.push(s).is_err() {
+                            self.audio_counters
+                                .ring_overflow_count
+                                .fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 }
-                Err(e) => {
-                    debug!("playback: Opus decode error: {}", e);
-                }
+                // Each i16 sample is 2 bytes of PCM.
+                Some((total as u64).saturating_mul(2))
+            }
+            Err(e) => {
+                debug!("playback: Opus decode error: {}", e);
+                None
             }
         }
+    }
+
+    /// Bookkeeping helper for a successful DATA packet decode:
+    /// bumps the success / pcm-byte counters and pushes the
+    /// decode duration into the bounded ring (cap
+    /// [`MAX_RECENT_PLAYBACK_DECODES`]).
+    fn record_decode_success(&mut self, dur_us: u32, pcm_bytes: u64) {
+        self.data_packets_decoded = self.data_packets_decoded.saturating_add(1);
+        self.pcm_bytes_produced = self.pcm_bytes_produced.saturating_add(pcm_bytes);
+        if self.recent_decode_durations_us.len() >= MAX_RECENT_PLAYBACK_DECODES {
+            self.recent_decode_durations_us.pop_front();
+        }
+        self.recent_decode_durations_us.push_back(dur_us);
     }
 
     /// Create the ring buffer and spawn the audio thread.
@@ -753,6 +983,7 @@ impl PlaybackChannel {
             self.volume_control.clone(),
             self.sample_rate,
             self.channels,
+            self.audio_counters.clone(),
         ) {
             Some(thread) => {
                 self.audio_thread = Some(thread);
@@ -783,6 +1014,9 @@ impl PlaybackChannel {
                 payload_size,
             );
         }
+        // Per-opcode send counter — single send path, single
+        // bump site (mirrors 4B's inputs/cursor/main pattern).
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         match &mut self.stream {
             SpiceStream::Plain(s) => {
                 use tokio::io::AsyncWriteExt;
@@ -799,9 +1033,15 @@ impl PlaybackChannel {
         Ok(())
     }
 
-    /// Sync local state to the shared snapshot.
+    /// Sync local state to the shared snapshot. The atomic
+    /// `device_*` / `ring_overflow_count` /
+    /// `samples_consumed_total` counters are loaded with
+    /// `Ordering::Relaxed` — single non-blocking load per
+    /// counter, so the cpal callback is never blocked by a
+    /// snapshot read.
     fn update_snapshot(&self) {
         if let Ok(mut snap) = self.snapshot.lock() {
+            // Transport common.
             snap.bytes_in = self.bytes_in;
             snap.bytes_out = self.bytes_out;
             snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -809,7 +1049,64 @@ impl PlaybackChannel {
             snap.ping_recv_count = self.ping_recv_count;
             snap.pong_send_count = self.pong_send_count;
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
+
+            // Baseline additions.
+            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+            snap.last_unknown_opcode = self.last_unknown_opcode;
+            snap.unknown_opcode_count = self.unknown_opcode_count;
+
+            // Per-session audio state.
+            snap.current_session = self.current_session.clone();
+            snap.start_count = self.start_count;
+            snap.stop_count = self.stop_count;
+
+            // Audio-data plumbing counters.
+            snap.data_packets_received = self.data_packets_received;
+            snap.data_packets_decoded = self.data_packets_decoded;
+            snap.data_packets_decode_failed = self.data_packets_decode_failed;
+            snap.data_bytes_received = self.data_bytes_received;
+            snap.pcm_bytes_produced = self.pcm_bytes_produced;
+            snap.recent_decode_durations_us = self.recent_decode_durations_us.clone();
+
+            // Device-side counters from the audio thread atomics.
+            // `load` and `fetch_add(0, ..)` are equivalent for
+            // reading; `load` is the natural choice here.
+            snap.device_callbacks_total = self
+                .audio_counters
+                .device_callbacks_total
+                .load(Ordering::Relaxed);
+            snap.device_underrun_count = self
+                .audio_counters
+                .device_underrun_count
+                .load(Ordering::Relaxed);
+            snap.ring_overflow_count = self
+                .audio_counters
+                .ring_overflow_count
+                .load(Ordering::Relaxed);
+            snap.samples_consumed_total = self
+                .audio_counters
+                .samples_consumed_total
+                .load(Ordering::Relaxed);
+
+            // Last server-controlled audio params.
+            snap.last_volume_per_channel = self.last_volume_per_channel.clone();
+            snap.last_mute = self.last_mute;
+            snap.last_latency_ms = self.last_latency_ms;
         }
+    }
+}
+
+/// Map a SPICE audio-mode value to a [`PlaybackCodec`]. The
+/// mode comes from `SPICE_MSG_PLAYBACK_MODE`; values 1 and 3
+/// are the standard RAW and OPUS modes, anything else is
+/// surfaced via `Other` so a bug report can spot a codec we
+/// haven't seen.
+fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
+    match mode {
+        AUDIO_DATA_MODE_RAW => crate::snapshots::PlaybackCodec::Raw,
+        AUDIO_DATA_MODE_OPUS => crate::snapshots::PlaybackCodec::Opus,
+        other => crate::snapshots::PlaybackCodec::Other(other),
     }
 }
 

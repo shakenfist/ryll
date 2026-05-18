@@ -439,11 +439,54 @@ pub struct MainSnapshot {
     pub unknown_opcode_count: u64,
 }
 
-/// Generic snapshot for non-critical channels (playback,
-/// usbredir, webdav). These don't carry channel-specific
-/// state worth surfacing in bug reports today, but we want
-/// disconnect-cause diagnostics to include them so a dropped
-/// non-critical channel produces actionable data.
+/// SPICE playback audio codec, as inferred from the most
+/// recent `SPICE_MSG_PLAYBACK_MODE` value.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
+pub enum PlaybackCodec {
+    /// Raw little-endian signed 16-bit PCM (mode 1).
+    Raw,
+    /// Opus (mode 3).
+    Opus,
+    /// Any other server-reported mode value (kept for surfacing
+    /// unexpected codecs in bug reports rather than silently
+    /// failing).
+    Other(u16),
+}
+
+/// Per-session metadata for a SPICE playback audio session.
+///
+/// Populated on `SPICE_MSG_PLAYBACK_START` and cleared on
+/// `SPICE_MSG_PLAYBACK_STOP`. Captures the parameters the
+/// server negotiated for the active session so a bug report
+/// can answer "was the session even started, and with what
+/// shape?".
+#[derive(Debug, Clone, Serialize)]
+pub struct PlaybackSessionInfo {
+    /// Session-relative seconds when the START message was
+    /// processed.
+    pub started_at_secs: f64,
+    /// SPICE `multi-media time` field from the START message
+    /// (32-bit millisecond counter that wraps at ~49.7 days).
+    pub mm_time_at_start: u32,
+    /// Source sample rate the server declared in START. The
+    /// audio thread resamples to the device rate.
+    pub sample_rate_hz: u32,
+    /// Source channel count the server declared in START.
+    pub channels: u8,
+    /// Codec inferred from the most recent MODE message at
+    /// START time.
+    pub codec: PlaybackCodec,
+}
+
+/// Snapshot of the playback (audio) channel's mutable state.
+///
+/// Counters in the `device_*` / `ring_overflow_count` /
+/// `samples_consumed_total` group are cumulative across the
+/// entire ryll process lifetime — they survive
+/// SPICE_MSG_PLAYBACK_STOP / restart cycles. This gives
+/// operators monotonic graphs; per-session deltas can be
+/// computed from two bug reports.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PlaybackSnapshot {
     pub bytes_in: u64,
@@ -460,6 +503,84 @@ pub struct PlaybackSnapshot {
     pub last_ping_recv_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+
+    // --- baseline additions (mirror 4B's pattern) ---
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps that
+    /// `warn_once` would otherwise swallow silently.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
+
+    // --- per-session audio state ---
+    /// Metadata for the currently-active audio session. Set on
+    /// every SPICE_MSG_PLAYBACK_START. `None` when no session
+    /// has been started or the most recent session has been
+    /// STOPped.
+    pub current_session: Option<PlaybackSessionInfo>,
+    /// Monotonic count of START messages observed.
+    pub start_count: u64,
+    /// Monotonic count of STOP messages observed.
+    pub stop_count: u64,
+
+    // --- audio-data plumbing counters ---
+    /// Count of SPICE_MSG_PLAYBACK_DATA packets received.
+    pub data_packets_received: u64,
+    /// Count of DATA packets successfully decoded by the
+    /// active codec path (Opus or raw passthrough).
+    pub data_packets_decoded: u64,
+    /// Count of DATA packets that failed to decode.
+    pub data_packets_decode_failed: u64,
+    /// Bytes of compressed audio received (sum of DATA
+    /// message payload lengths since session start).
+    pub data_bytes_received: u64,
+    /// Bytes of decoded PCM samples produced.
+    pub pcm_bytes_produced: u64,
+    /// Recent decode-duration ring (microseconds, cap 64).
+    pub recent_decode_durations_us: VecDeque<u32>,
+
+    // --- device-side pipeline counters (from audio thread atomics) ---
+    /// Count of cpal output callbacks invoked since the ryll
+    /// process started (cumulative across audio-session
+    /// restarts).
+    pub device_callbacks_total: u64,
+    /// Count of callbacks where the ring buffer had zero
+    /// slots ready at callback entry (true underruns: we
+    /// handed the device silence). Cumulative across
+    /// audio-session restarts.
+    pub device_underrun_count: u64,
+    /// Count of times we attempted to push decoded samples
+    /// into the ring buffer and dropped because the ring
+    /// was full (encoder ahead of consumer; suggests the
+    /// device clock has stopped). Cumulative across
+    /// audio-session restarts.
+    pub ring_overflow_count: u64,
+    /// Samples consumed by the device since the ryll process
+    /// started (per-channel count; multiply by channel count
+    /// for frames). Cumulative across audio-session restarts.
+    pub samples_consumed_total: u64,
+
+    // --- last server-controlled audio params we got ---
+    /// Most recent per-channel volume vector from
+    /// SPICE_MSG_PLAYBACK_VOLUME. Empty until the first
+    /// VOLUME message arrives.
+    pub last_volume_per_channel: Vec<u16>,
+    /// Most recent mute flag from SPICE_MSG_PLAYBACK_MUTE.
+    /// `None` until the first MUTE message arrives.
+    pub last_mute: Option<bool>,
+    /// Most recent latency value (milliseconds) from
+    /// SPICE_MSG_PLAYBACK_LATENCY. `None` until the first
+    /// LATENCY message arrives.
+    pub last_latency_ms: Option<u32>,
 }
 
 /// See `PlaybackSnapshot`.
