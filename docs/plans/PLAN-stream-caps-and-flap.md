@@ -236,7 +236,7 @@ it too.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
-| 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Planned |
+| 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; awaiting smoke test (2C) |
 | 3. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-03-h264.md | Not started |
 | 4. Preference messages | PLAN-stream-caps-and-flap-phase-04-pref-messages.md | Not started |
 | 5. Flap notification | PLAN-stream-caps-and-flap-phase-05-flap-notification.md | Not started |
