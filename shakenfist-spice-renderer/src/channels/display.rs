@@ -676,6 +676,10 @@ pub struct DisplayChannel {
     streams_created_total: u64,
     streams_destroyed_total: u64,
     stream_data_orphan_count: u64,
+    /// Cumulative count of STREAM_REPORT messages sent to the
+    /// server since session start. Mirrored into
+    /// `DisplaySnapshot::stream_reports_sent_total` by step 1G.
+    stream_reports_sent_total: u64,
     /// Bounded ring of recently-destroyed `StreamState`s captured
     /// at teardown so per-stream counters survive `STREAM_DESTROY`.
     /// Without this, a bug report filed between flap cycles loses
@@ -746,6 +750,7 @@ impl DisplayChannel {
             streams_created_total: 0,
             streams_destroyed_total: 0,
             stream_data_orphan_count: 0,
+            stream_reports_sent_total: 0,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
         }
@@ -1379,13 +1384,13 @@ impl DisplayChannel {
                 // scope so we can call `self.send_stream_report`
                 // afterwards without a borrow conflict.
                 let now_mm_time = self.mm_clock.now();
-                let report_action: Option<(u32, i32)> =
+                let report_action: Option<u32> =
                     if let Some(stream) = self.streams.get_mut(&stream_id) {
                         let now_secs = self.traffic.elapsed().as_secs_f64();
                         stream.frames_received = stream.frames_received.saturating_add(1);
                         stream.last_frame_ts_secs = Some(now_secs);
 
-                        let mut send: Option<(u32, i32)> = None;
+                        let mut send: Option<u32> = None;
                         if stream.report_is_active {
                             if stream.report_num_frames == 0 {
                                 stream.report_start_frame_mm_time = frame_mm_time;
@@ -1397,7 +1402,11 @@ impl DisplayChannel {
                             // Modular i32 subtraction; mm_time wraps at
                             // 2^32 ms so we cast through i64 and narrow.
                             // Matches spice-gtk's spice_mmtime_diff
-                            // helper at channel-display.c:1482.
+                            // helper at channel-display.c:1482. Used
+                            // here only for the drop-counter check;
+                            // STREAM_REPORT's `last_frame_delay` field
+                            // is recomputed at send time inside
+                            // `send_stream_report`.
                             let last_frame_delay: i32 =
                                 (frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
 
@@ -1420,7 +1429,7 @@ impl DisplayChannel {
                                 stream.report_timeout_ms,
                                 stream.report_drops_seq_len,
                             ) {
-                                send = Some((stream_id, last_frame_delay));
+                                send = Some(stream_id);
                             }
                         }
                         send
@@ -1428,8 +1437,8 @@ impl DisplayChannel {
                         None
                     };
 
-                if let Some((sid, lfd)) = report_action {
-                    self.send_stream_report(sid, lfd).await?;
+                if let Some(sid) = report_action {
+                    self.send_stream_report(sid).await?;
                 }
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
@@ -2646,27 +2655,65 @@ impl DisplayChannel {
         snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
     }
 
-    /// Send a STREAM_REPORT for `stream_id`. Step 1E adds the
-    /// per-stream bookkeeping (mirror update, counter reset);
-    /// step 1F adds the actual wire-format marshal + transmit.
-    async fn send_stream_report(&mut self, stream_id: u32, last_frame_delay: i32) -> Result<()> {
+    /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte
+    /// LE payload per `SpiceMsgcDisplayStreamReport`
+    /// (spice.proto:1004-1026), updates the per-stream mirrors,
+    /// resets the rolling-window counters, and bumps the
+    /// cumulative `stream_reports_sent_total` counter.
+    ///
+    /// `last_frame_delay` is recomputed here at send time as
+    /// `report_end_frame_mm_time - mm_clock.now()` to match
+    /// spice-gtk's "margin from the most recent frame, relative
+    /// to now" semantic (channel-display.c:1572).
+    async fn send_stream_report(&mut self, stream_id: u32) -> Result<()> {
+        // Snapshot the values we need into locals so the mutable
+        // borrow on `self.streams` ends before we call
+        // `send_with_log` (which takes `&mut self`).
+        let now_mm_time = self.mm_clock.now();
         let now_secs = self.traffic.elapsed().as_secs_f64();
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
+
+        let payload = if let Some(stream) = self.streams.get_mut(&stream_id) {
+            let last_frame_delay: i32 =
+                (stream.report_end_frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
+
+            let mut buf = Vec::with_capacity(32);
+            buf.extend_from_slice(&stream_id.to_le_bytes());
+            buf.extend_from_slice(&stream.report_unique_id.to_le_bytes());
+            buf.extend_from_slice(&stream.report_start_frame_mm_time.to_le_bytes());
+            buf.extend_from_slice(&stream.report_end_frame_mm_time.to_le_bytes());
+            buf.extend_from_slice(&stream.report_num_frames.to_le_bytes());
+            buf.extend_from_slice(&stream.report_num_drops.to_le_bytes());
+            buf.extend_from_slice(&last_frame_delay.to_le_bytes());
+            // audio_delay = UINT32_MAX (no audio latency surfaced
+            // yet — see phase plan "Scope > Out of scope").
+            buf.extend_from_slice(&u32::MAX.to_le_bytes());
+
+            // Mirror counters into last_report_* and reset rolling.
             stream.last_report_num_frames = stream.report_num_frames;
             stream.last_report_num_drops = stream.report_num_drops;
             stream.last_report_last_frame_delay = last_frame_delay;
             stream.report_send_count = stream.report_send_count.saturating_add(1);
             stream.last_report_sent_ts_secs = Some(now_secs);
-            // Reset rolling window so the next frame starts fresh.
             stream.report_num_frames = 0;
             stream.report_num_drops = 0;
             stream.report_drops_seq_len = 0;
             stream.report_start_frame_mm_time = 0;
             stream.report_end_frame_mm_time = 0;
             stream.report_start_now_mm_time = 0;
-            // TODO step 1F: marshal the 32-byte payload and send
-            // via display_client::STREAM_REPORT.
+
+            debug_assert_eq!(buf.len(), 32, "STREAM_REPORT payload must be 32 bytes");
+            Some(buf)
+        } else {
+            None
+        };
+
+        if let Some(payload) = payload {
+            let msg = make_message(display_client::STREAM_REPORT, &payload);
+            self.send_with_log(display_client::STREAM_REPORT, &msg)
+                .await?;
+            self.stream_reports_sent_total = self.stream_reports_sent_total.saturating_add(1);
         }
+
         Ok(())
     }
 
@@ -3526,5 +3573,47 @@ mod tests {
     #[test]
     fn stream_report_predicate_does_not_fire_idle() {
         assert!(!stream_report_should_send(0, 5, 0, 1000, 0));
+    }
+
+    // -------------------------------------------------------------------------
+    // STREAM_REPORT wire-format round-trip
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn stream_report_payload_round_trip() {
+        // Hand-built payload using known values; assert each
+        // offset decodes back to the input. Layout per
+        // spice.proto's SpiceMsgcDisplayStreamReport
+        // (spice-common spice.proto:1004-1026).
+        let stream_id: u32 = 0x1111_2222;
+        let unique_id: u32 = 0xDEAD_BEEF;
+        let start_mm: u32 = 100;
+        let end_mm: u32 = 200;
+        let num_frames: u32 = 5;
+        let num_drops: u32 = 1;
+        let last_frame_delay: i32 = -42;
+        let audio_delay: u32 = u32::MAX;
+
+        let mut buf = Vec::with_capacity(32);
+        buf.extend_from_slice(&stream_id.to_le_bytes());
+        buf.extend_from_slice(&unique_id.to_le_bytes());
+        buf.extend_from_slice(&start_mm.to_le_bytes());
+        buf.extend_from_slice(&end_mm.to_le_bytes());
+        buf.extend_from_slice(&num_frames.to_le_bytes());
+        buf.extend_from_slice(&num_drops.to_le_bytes());
+        buf.extend_from_slice(&last_frame_delay.to_le_bytes());
+        buf.extend_from_slice(&audio_delay.to_le_bytes());
+
+        assert_eq!(buf.len(), 32);
+        assert_eq!(read_u32_le(&buf, 0), stream_id);
+        assert_eq!(read_u32_le(&buf, 4), unique_id);
+        assert_eq!(read_u32_le(&buf, 8), start_mm);
+        assert_eq!(read_u32_le(&buf, 12), end_mm);
+        assert_eq!(read_u32_le(&buf, 16), num_frames);
+        assert_eq!(read_u32_le(&buf, 20), num_drops);
+        // i32 round-trip via u32 reinterpretation — the same 4
+        // bytes; signedness is purely interpretation.
+        assert_eq!(read_u32_le(&buf, 24) as i32, last_frame_delay);
+        assert_eq!(read_u32_le(&buf, 28), audio_delay);
     }
 }
