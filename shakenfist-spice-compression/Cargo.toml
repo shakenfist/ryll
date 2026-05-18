@@ -67,3 +67,24 @@ objc2-core-foundation = { version = "=0.3.2", default-features = false, features
     "std",
     "CFData",
 ] }
+
+# Windows-only: WIC JPEG decoder backend via the official `windows`
+# crate. Feature set is trimmed to exactly what `WicDecoder` touches:
+#   - Win32_Graphics_Imaging         : IWICImagingFactory,
+#                                      IWICBitmapDecoder, IWICStream,
+#                                      IWICFormatConverter, GUIDs
+#                                      (CLSID_WICImagingFactory,
+#                                      GUID_ContainerFormatJpeg,
+#                                      GUID_WICPixelFormat32bppRGBA)
+#   - Win32_System_Com               : CoInitializeEx,
+#                                      CoCreateInstance, CLSCTX_*,
+#                                      COINIT_MULTITHREADED
+# `Win32_Foundation` (HRESULT etc.) is pulled in transitively via
+# the imaging / com features. The `windows` crate's monolithic
+# feature wall means adding more here would not bloat the build:
+# only the listed feature modules' bindings are compiled.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com",
+] }

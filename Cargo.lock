@@ -5725,6 +5725,7 @@ dependencies = [
  "objc2-image-io",
  "tokio",
  "tracing",
+ "windows",
 ]
 
 [[package]]

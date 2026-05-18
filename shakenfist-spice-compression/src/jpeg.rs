@@ -389,6 +389,336 @@ impl JpegDecoder for ImageIoDecoder {
     }
 }
 
+/// Windows WIC-backed JPEG decoder.
+///
+/// Wraps Windows Imaging Component:
+/// `IWICImagingFactory::CreateDecoderFromStream` (with the JPEG
+/// container GUID) → `GetFrame(0)` → `IWICFormatConverter` to
+/// `GUID_WICPixelFormat32bppRGBA` → `CopyPixels` into a `Vec<u8>`.
+///
+/// # Pixel format
+///
+/// The converter target is `GUID_WICPixelFormat32bppRGBA` — RGBA
+/// byte order in memory. WIC's "default" 32bpp format is BGRA
+/// (`GUID_WICPixelFormat32bppBGRA`); using that would silently
+/// produce the "all images look blue" failure mode on Windows.
+/// The format converter does the R↔B swap as part of its
+/// conversion pass, so the bytes the trait returns are (R, G, B,
+/// A) regardless of WIC's preferred internal layout.
+///
+/// # COM threading — Option A: lazy per-thread `CoInitializeEx`
+///
+/// WIC requires the calling thread to be in a COM apartment.
+/// Decode runs on tokio worker threads, which are NOT
+/// COM-initialised. Two options were considered:
+///
+/// - **Option A (chosen): `thread_local!` cell that calls
+///   `CoInitializeEx(None, COINIT_MULTITHREADED)` lazily on first
+///   decode per thread.** Lower per-call latency than option B
+///   (no thread-pool hop), and tokio worker threads are long-
+///   lived so the one-time init cost amortises to zero across
+///   the session.
+/// - Option B: `tokio::task::spawn_blocking` per decode, with COM
+///   init at the start of each closure. Cleaner separation but
+///   adds a thread-pool hop on every frame.
+///
+/// `CoInitializeEx` returns `RPC_E_CHANGED_MODE` (`0x80010106`)
+/// if a *different* apartment model (STA) was previously set on
+/// this thread. We treat that as a non-fatal warning: WIC works
+/// from either apartment, and the existing model has already
+/// been honoured by whatever set it.
+///
+/// We deliberately never call `CoUninitialize`. Tokio worker
+/// threads outlive any single decode (and outlive the
+/// `WicDecoder` itself), so balancing the init would mean
+/// tearing down COM mid-session — which would break any other
+/// COM-using code on the same thread. The thread_local guard
+/// stays alive for the thread's lifetime; this is the
+/// idiomatic pattern for COM init on long-lived worker pools.
+///
+/// # `Send` / `Sync`
+///
+/// All WIC interface objects (`IWICImagingFactory`,
+/// `IWICBitmapDecoder`, `IWICStream`, `IWICBitmapFrameDecode`,
+/// `IWICFormatConverter`, `IWICBitmapSource`) are intentionally
+/// `!Send + !Sync` in the `windows` crate — they must only be
+/// used on the thread that created them. That's fine here:
+/// `WicDecoder::decode()` constructs and consumes every WIC
+/// object within a single synchronous call (no `.await` inside
+/// it), so the COM objects never cross a thread boundary. The
+/// `WicDecoder` struct itself holds no WIC state, so the
+/// `impl JpegDecoder for WicDecoder` `Send + Sync` requirement
+/// is trivially satisfied.
+///
+/// # Why we don't cache `IWICImagingFactory`
+///
+/// Caching the factory across calls would avoid one
+/// `CoCreateInstance` per frame, but the factory is `!Send` so
+/// caching it on `WicDecoder` (which must be `Send + Sync`)
+/// would require a per-thread cache (`thread_local!` again). The
+/// factory creation cost is small relative to the JPEG decode
+/// itself; punted as a future optimisation if profiling shows
+/// it matters.
+#[cfg(target_os = "windows")]
+pub struct WicDecoder;
+
+#[cfg(target_os = "windows")]
+impl WicDecoder {
+    /// Construct a decoder. Returns `Some` unconditionally on
+    /// Windows (WIC is part of the OS — there is no probe step
+    /// that can fail at construction time). The `Option`-returning
+    /// shape mirrors the planned VA-API selector so
+    /// `best_for_platform` cascades uniformly.
+    pub fn try_new() -> Option<Self> {
+        Some(WicDecoder)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Default for WicDecoder {
+    fn default() -> Self {
+        WicDecoder
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_com_initialised() {
+    use std::cell::Cell;
+
+    use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+
+    thread_local! {
+        /// `true` once `CoInitializeEx` has been attempted on this
+        /// thread. We never unset it — see the struct docstring
+        /// for why we don't call `CoUninitialize`.
+        static COM_INIT_DONE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    COM_INIT_DONE.with(|done| {
+        if done.get() {
+            return;
+        }
+        // SAFETY: CoInitializeEx is the documented entry point
+        // for putting the current thread into a COM apartment.
+        // It is safe to call repeatedly; subsequent calls with
+        // the same model are no-ops returning `S_FALSE`, and
+        // calls with a different model return `RPC_E_CHANGED_MODE`
+        // (which we treat as non-fatal — WIC works from either
+        // apartment).
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_err() {
+            // RPC_E_CHANGED_MODE = 0x80010106: a different apartment
+            // model was already set on this thread (e.g. by some
+            // other crate's STA initialisation). WIC works from
+            // STA too, so log and proceed.
+            const RPC_E_CHANGED_MODE: i32 = 0x8001_0106_u32 as i32;
+            if hr.0 == RPC_E_CHANGED_MODE {
+                warn!(
+                    "WicDecoder: CoInitializeEx returned RPC_E_CHANGED_MODE; \
+                     proceeding with the existing apartment model"
+                );
+            } else {
+                warn!(
+                    "WicDecoder: CoInitializeEx failed with HRESULT {:#010x}; \
+                     WIC calls may still succeed if COM was init'd elsewhere",
+                    hr.0 as u32
+                );
+            }
+        }
+        done.set(true);
+    });
+}
+
+#[cfg(target_os = "windows")]
+impl JpegDecoder for WicDecoder {
+    fn decode(&self, data: &[u8]) -> Option<DecodedJpeg> {
+        use windows::core::Interface;
+        use windows::Win32::Graphics::Imaging::{
+            CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat32bppRGBA,
+            IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapPaletteTypeCustom,
+            WICDecodeMetadataCacheOnLoad,
+        };
+        use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+
+        // Reject empty input early — WIC will fail on it anyway
+        // but the error path is cheaper to short-circuit here.
+        if data.is_empty() {
+            return None;
+        }
+
+        ensure_com_initialised();
+
+        // SAFETY: CoCreateInstance is the documented constructor
+        // for COM objects. We pass CLSID_WICImagingFactory and ask
+        // for the IWICImagingFactory interface; the cast is
+        // type-checked by the windows crate via the Interface
+        // trait. CLSCTX_INPROC_SERVER means in-process DLL (WIC
+        // lives in windowscodecs.dll).
+        let factory: IWICImagingFactory =
+            match unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    warn!("WicDecoder: CoCreateInstance(WICImagingFactory) failed: {e}");
+                    return None;
+                }
+            };
+
+        // Create a WIC stream and initialise it from our in-memory
+        // byte slice. CreateStream returns an IWICStream which is
+        // an ISequentialStream; InitializeFromMemory copies our
+        // buffer (it does NOT borrow), so the slice does not need
+        // to outlive the stream.
+        let stream = match unsafe { factory.CreateStream() } {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("WicDecoder: IWICImagingFactory::CreateStream failed: {e}");
+                return None;
+            }
+        };
+
+        // SAFETY: InitializeFromMemory takes a *mut u8 + length.
+        // The WIC contract is that the memory must remain valid
+        // for the lifetime of the stream — the docs say the call
+        // does NOT copy. We keep `data` alive (it's a parameter
+        // borrow) for the entire decode call, and the stream is
+        // dropped at end-of-function before `data` goes out of
+        // scope. The cast from &[u8] to *mut u8 is sound because
+        // WIC only reads from the buffer (it's a decoder source);
+        // it never writes through this pointer.
+        if let Err(e) = unsafe {
+            stream.InitializeFromMemory(std::slice::from_raw_parts_mut(
+                data.as_ptr() as *mut u8,
+                data.len(),
+            ))
+        } {
+            warn!("WicDecoder: IWICStream::InitializeFromMemory failed: {e}");
+            return None;
+        }
+
+        // Build the decoder against the JPEG container format.
+        // Passing the format GUID skips WIC's container sniffing —
+        // we know it's JPEG (this is the MJPEG fast path).
+        // DecodeMetadataCacheOnLoad keeps the decode synchronous;
+        // OnDemand would defer reads until pixel access and
+        // complicates the lifetime story.
+        let decoder = match unsafe {
+            factory.CreateDecoderFromStream(
+                &stream,
+                &GUID_ContainerFormatJpeg,
+                WICDecodeMetadataCacheOnLoad,
+            )
+        } {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("WicDecoder: CreateDecoderFromStream(JPEG) failed: {e}");
+                return None;
+            }
+        };
+
+        // MJPEG frames are always single-image. GetFrame(0) gets
+        // the IWICBitmapFrameDecode for the only frame.
+        let frame = match unsafe { decoder.GetFrame(0) } {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("WicDecoder: IWICBitmapDecoder::GetFrame(0) failed: {e}");
+                return None;
+            }
+        };
+
+        // Pull out width/height from the frame BEFORE doing the
+        // RGBA conversion so we can bound-check and skip the
+        // converter+copy step on implausible inputs.
+        let (mut width, mut height): (u32, u32) = (0, 0);
+        if let Err(e) = unsafe { frame.GetSize(&mut width, &mut height) } {
+            warn!("WicDecoder: IWICBitmapFrameDecode::GetSize failed: {e}");
+            return None;
+        }
+        if width == 0 || height == 0 || width > 65535 || height > 65535 {
+            warn!(
+                "WicDecoder: implausible dimensions {}x{}, dropping frame",
+                width, height
+            );
+            return None;
+        }
+
+        // Set up a format converter to force RGBA byte order
+        // regardless of the JPEG's native colour space. JPEGs are
+        // YCbCr in the file; WIC normally decodes to BGRA. The
+        // converter does the YCbCr→RGB conversion AND the
+        // BGRA→RGBA byte reorder in a single pass.
+        let converter = match unsafe { factory.CreateFormatConverter() } {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("WicDecoder: CreateFormatConverter failed: {e}");
+                return None;
+            }
+        };
+
+        // SAFETY: Initialize takes the source bitmap (the frame,
+        // cast to IWICBitmapSource), the target pixel format
+        // GUID, the dither mode (None — JPEG is 8bpc so no dither
+        // needed), an optional palette (null — we're not going to
+        // an indexed format), the alpha threshold (0.0 — no alpha
+        // in JPEG), and the palette translation type (Custom is
+        // the docs-recommended value when no palette is supplied).
+        if let Err(e) = unsafe {
+            converter.Initialize(
+                &frame
+                    .cast::<windows::Win32::Graphics::Imaging::IWICBitmapSource>()
+                    .ok()?,
+                &GUID_WICPixelFormat32bppRGBA,
+                WICBitmapDitherTypeNone,
+                None,
+                0.0,
+                WICBitmapPaletteTypeCustom,
+            )
+        } {
+            warn!("WicDecoder: IWICFormatConverter::Initialize(RGBA) failed: {e}");
+            return None;
+        }
+
+        // Allocate the output buffer. 4 bytes per pixel; we've
+        // already bounded width*height to ≤ 65535*65535 above so
+        // this can't overflow on a 64-bit platform.
+        let stride = (width as usize) * 4;
+        let buf_len = stride * (height as usize);
+        let mut rgba = vec![0u8; buf_len];
+
+        // CopyPixels signature: an optional source rect (None = full
+        // image), the destination stride in bytes, and the
+        // destination buffer slice. The buffer must be at least
+        // stride * height bytes; we just allocated exactly that.
+        if let Err(e) = unsafe { converter.CopyPixels(std::ptr::null(), stride as u32, &mut rgba) }
+        {
+            warn!("WicDecoder: IWICBitmapSource::CopyPixels failed: {e}");
+            return None;
+        }
+
+        // Drop the COM objects in reverse construction order.
+        // Strictly speaking the lifetimes end at end-of-function
+        // anyway, but explicit drops make the dataflow obvious
+        // and ensure the stream (which borrowed `data`) is
+        // released before this function returns and `data` could
+        // theoretically be invalidated by a caller's drop.
+        drop(converter);
+        drop(frame);
+        drop(decoder);
+        drop(stream);
+        drop(factory);
+
+        Some(DecodedJpeg {
+            rgba,
+            width,
+            height,
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "WIC"
+    }
+}
+
 /// Select the best available JPEG decoder for this platform.
 ///
 /// Today the chain is:
@@ -400,9 +730,9 @@ impl JpegDecoder for ImageIoDecoder {
 ///   other   →                  MozJpegDecoder → JpegDecoderRsDecoder
 /// ```
 ///
-/// Steps 3A–3C have landed: pure-Rust + libjpeg-turbo
-/// cross-platform, plus ImageIO on macOS. WIC and VA-API land in
-/// steps 3D–3E. `MozJpegDecoder` is only present when the
+/// Steps 3A–3D have landed: pure-Rust + libjpeg-turbo
+/// cross-platform, ImageIO on macOS, and WIC on Windows. VA-API
+/// lands in step 3E. `MozJpegDecoder` is only present when the
 /// `mozjpeg` Cargo feature is enabled (defaulted on); building
 /// without it falls back to the pure-Rust path.
 ///
@@ -419,6 +749,18 @@ pub fn best_for_platform() -> Arc<dyn JpegDecoder> {
     // out uniformly if a future failure mode appears.
     #[cfg(target_os = "macos")]
     if let Some(d) = ImageIoDecoder::try_new() {
+        let decoder: Arc<dyn JpegDecoder> = Arc::new(d);
+        info!("MJPEG decoder backend selected: {}", decoder.name());
+        return decoder;
+    }
+
+    // Windows: prefer WIC (uses the OS codec stack, which engages
+    // GPU acceleration on hardware where the driver supports it).
+    // Like ImageIoDecoder, try_new() can't fail today — WIC is
+    // part of the OS — but the Option-returning shape keeps the
+    // cascade uniform with VA-API.
+    #[cfg(target_os = "windows")]
+    if let Some(d) = WicDecoder::try_new() {
         let decoder: Arc<dyn JpegDecoder> = Arc::new(d);
         info!("MJPEG decoder backend selected: {}", decoder.name());
         return decoder;
@@ -709,5 +1051,122 @@ mod imageio_tests {
     fn imageio_decoder_name_is_imageio() {
         let decoder = ImageIoDecoder::try_new().unwrap();
         assert_eq!(decoder.name(), "ImageIO");
+    }
+}
+
+/// Tests for the Windows WIC decoder backend. These compile and
+/// run only on Windows — Linux/macOS CI never executes them. The
+/// real cross-platform smoke test lives in step 3H of the phase 3
+/// plan and is operator-driven.
+///
+/// Uses the same `swatches.jpg` fixture as the macOS test (32x32,
+/// four 16x16 quadrants painted red / green / blue / yellow at
+/// quality 85). Asserting against the same fixture means a future
+/// regression that swaps R↔B in either backend is caught
+/// symmetrically.
+#[cfg(all(test, target_os = "windows"))]
+mod wic_tests {
+    use super::*;
+
+    /// The fixture JPEG. Shared with the macOS ImageIO test.
+    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/swatches.jpg");
+    const FIXTURE_W: u32 = 32;
+    const FIXTURE_H: u32 = 32;
+
+    /// Per-channel tolerance for the centre-of-quadrant samples.
+    /// Matches the ImageIO test's tolerance so cross-platform
+    /// regressions are visible at the same threshold.
+    const TOL: i32 = 35;
+
+    fn pixel(decoded: &DecodedJpeg, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * decoded.width + x) * 4) as usize;
+        [
+            decoded.rgba[i],
+            decoded.rgba[i + 1],
+            decoded.rgba[i + 2],
+            decoded.rgba[i + 3],
+        ]
+    }
+
+    fn near(actual: u8, expected: u8, label: &str) {
+        let diff = (actual as i32 - expected as i32).abs();
+        assert!(
+            diff <= TOL,
+            "{label}: got {actual}, expected ~{expected} (diff {diff} > tol {TOL})"
+        );
+    }
+
+    #[test]
+    fn wic_decodes_swatches_in_rgba_order() {
+        let decoder = WicDecoder::try_new().expect("WicDecoder::try_new returned None");
+        assert_eq!(decoder.name(), "WIC");
+
+        let decoded = decoder
+            .decode(FIXTURE)
+            .expect("WicDecoder returned None on fixture");
+        assert_eq!(decoded.width, FIXTURE_W, "width mismatch");
+        assert_eq!(decoded.height, FIXTURE_H, "height mismatch");
+        assert_eq!(
+            decoded.rgba.len(),
+            (FIXTURE_W * FIXTURE_H * 4) as usize,
+            "rgba buffer length wrong",
+        );
+
+        // Sample the centre of each quadrant (offset 8 from each
+        // edge — 8 pixels into a 16-pixel quadrant). If we'd
+        // targeted GUID_WICPixelFormat32bppBGRA instead of RGBA,
+        // every channel here would be wrong (R↔B swap), so this
+        // test catches the canonical "everything is blue" bug.
+        let tl = pixel(&decoded, 8, 8); // expected red    (255, 0,   0,   255)
+        let tr = pixel(&decoded, 24, 8); // expected green  (0,   255, 0,   255)
+        let bl = pixel(&decoded, 8, 24); // expected blue   (0,   0,   255, 255)
+        let br = pixel(&decoded, 24, 24); // expected yellow (255, 255, 0,   255)
+
+        near(tl[0], 255, "TL.R");
+        near(tl[1], 0, "TL.G");
+        near(tl[2], 0, "TL.B");
+        assert_eq!(tl[3], 255, "TL.A should be 255 (opaque)");
+
+        near(tr[0], 0, "TR.R");
+        near(tr[1], 255, "TR.G");
+        near(tr[2], 0, "TR.B");
+        assert_eq!(tr[3], 255, "TR.A should be 255 (opaque)");
+
+        near(bl[0], 0, "BL.R");
+        near(bl[1], 0, "BL.G");
+        near(bl[2], 255, "BL.B");
+        assert_eq!(bl[3], 255, "BL.A should be 255 (opaque)");
+
+        near(br[0], 255, "BR.R");
+        near(br[1], 255, "BR.G");
+        near(br[2], 0, "BR.B");
+        assert_eq!(br[3], 255, "BR.A should be 255 (opaque)");
+    }
+
+    #[test]
+    fn wic_empty_input_returns_none() {
+        let decoder = WicDecoder::try_new().unwrap();
+        assert!(decoder.decode(&[]).is_none());
+    }
+
+    #[test]
+    fn wic_truncated_input_returns_none() {
+        let decoder = WicDecoder::try_new().unwrap();
+        // SOI + APP0 stub, nothing more — not a valid JPEG.
+        assert!(decoder.decode(&[0xFF, 0xD8, 0xFF, 0xE0]).is_none());
+    }
+
+    #[test]
+    fn wic_garbage_input_returns_none() {
+        let decoder = WicDecoder::try_new().unwrap();
+        // 32 bytes of "definitely not a JPEG".
+        let junk: Vec<u8> = (0..32u8).collect();
+        assert!(decoder.decode(&junk).is_none());
+    }
+
+    #[test]
+    fn wic_decoder_name_is_wic() {
+        let decoder = WicDecoder::try_new().unwrap();
+        assert_eq!(decoder.name(), "WIC");
     }
 }

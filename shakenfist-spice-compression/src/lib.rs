@@ -45,6 +45,9 @@ pub use jpeg::MozJpegDecoder;
 #[cfg(all(feature = "jpeg", target_os = "macos"))]
 pub use jpeg::ImageIoDecoder;
 
+#[cfg(all(feature = "jpeg", target_os = "windows"))]
+pub use jpeg::WicDecoder;
+
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;
 
