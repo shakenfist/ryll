@@ -284,8 +284,7 @@ impl JpegDecoder for ImageIoDecoder {
     fn decode(&self, data: &[u8]) -> Option<DecodedJpeg> {
         use objc2_core_foundation::{CFData, CGPoint, CGRect, CGSize};
         use objc2_core_graphics::{
-            CGBitmapContextCreate, CGColorSpaceCreateDeviceRGB, CGContext, CGImageAlphaInfo,
-            CGImageByteOrderInfo, CGImageGetHeight, CGImageGetWidth,
+            CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, CGImageByteOrderInfo,
         };
         use objc2_image_io::CGImageSource;
 
@@ -312,8 +311,8 @@ impl JpegDecoder for ImageIoDecoder {
         }
         let cg_image = unsafe { source.image_at_index(0, None) }?;
 
-        let width = CGImageGetWidth(Some(&cg_image));
-        let height = CGImageGetHeight(Some(&cg_image));
+        let width = cg_image.width();
+        let height = cg_image.height();
 
         // Bound the allocation: same defensive check as
         // MozJpegDecoder. 65535x65535 is the JPEG maximum; anything
@@ -336,7 +335,7 @@ impl JpegDecoder for ImageIoDecoder {
         // drop the context below.
         let mut rgba = vec![0u8; buf_len];
 
-        let color_space = CGColorSpaceCreateDeviceRGB()?;
+        let color_space = CGColorSpace::new_device_rgb()?;
 
         // Pixel format bits: PremultipliedLast (alpha trailing) +
         // 32-bit big-endian byte order = bytes are (R, G, B, A)
