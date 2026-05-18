@@ -14,8 +14,8 @@ use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 use shakenfist_spice_compression::{
-    decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
-    GlzDictionary,
+    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode,
+    DecodedJpeg, DecompressedImage, GlzDictionary, JpegDecoder,
 };
 use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
@@ -86,54 +86,6 @@ pub(crate) fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
     out
 }
 
-pub(crate) fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let mut decoder = jpeg_decoder::Decoder::new(data);
-    let pixels = match decoder.decode() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(
-                "MJPEG decode error: {}, data_len={}, header={:02x?}",
-                e,
-                data.len(),
-                &data[..data.len().min(16)]
-            );
-            return None;
-        }
-    };
-    let info = decoder.info()?;
-    let w = info.width as u32;
-    let h = info.height as u32;
-
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => {
-            let mut out = Vec::with_capacity(pixels.len() * 4 / 3);
-            for chunk in pixels.chunks(3) {
-                out.push(chunk[0]);
-                out.push(chunk[1]);
-                out.push(chunk[2]);
-                out.push(255);
-            }
-            out
-        }
-        jpeg_decoder::PixelFormat::L8 => {
-            let mut out = Vec::with_capacity(pixels.len() * 4);
-            for &gray in &pixels {
-                out.push(gray);
-                out.push(gray);
-                out.push(gray);
-                out.push(255);
-            }
-            out
-        }
-        other => {
-            warn!("MJPEG decode: unsupported pixel format {:?}", other);
-            return None;
-        }
-    };
-
-    Some((rgba, w, h))
-}
-
 struct StreamState {
     surface_id: u32,
     codec_type: u8,
@@ -144,6 +96,11 @@ struct StreamState {
     dest_bottom: u32,
     dest_right: u32,
     cached_dht: Option<Vec<u8>>,
+    /// MJPEG decoder backend name captured at `STREAM_CREATE` from
+    /// the active `DisplayChannel::jpeg_decoder.name()`. Surfaced in
+    /// `StreamSnapshot::mjpeg_decoder_backend` so a bug report shows
+    /// which backend was in use for each stream.
+    mjpeg_decoder_backend: String,
     /// Session-relative seconds at `STREAM_CREATE`.
     created_at_secs: f64,
     /// Counters mirrored into `StreamSnapshot` by `update_snapshot`.
@@ -633,6 +590,12 @@ pub struct DisplayChannel {
     repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
+    /// MJPEG decoder backend selected once at construction via
+    /// `best_for_platform()`. Shared as `Arc<dyn JpegDecoder>`
+    /// so future steps can swap in faster backends (ImageIO,
+    /// WIC, VA-API) without changing call sites. See
+    /// `PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
+    jpeg_decoder: Arc<dyn JpegDecoder>,
     image_cache: HashMap<u64, Vec<u8>>,
     streams: HashMap<u32, StreamState>,
     capture: Option<Arc<dyn CaptureSink>>,
@@ -718,6 +681,7 @@ impl DisplayChannel {
             repaint_notify,
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
+            jpeg_decoder: best_for_platform(),
             image_cache: HashMap::new(),
             streams: HashMap::new(),
             capture,
@@ -792,6 +756,7 @@ impl DisplayChannel {
             last_report_num_frames: s.last_report_num_frames,
             last_report_num_drops: s.last_report_num_drops,
             last_report_last_frame_delay: s.last_report_last_frame_delay,
+            mjpeg_decoder_backend: s.mjpeg_decoder_backend.clone(),
         }
     }
 
@@ -1301,6 +1266,7 @@ impl DisplayChannel {
                             dest_bottom,
                             dest_right,
                             cached_dht: None,
+                            mjpeg_decoder_backend: self.jpeg_decoder.name().to_string(),
                             created_at_secs: self.traffic.elapsed().as_secs_f64(),
                             frames_received: 0,
                             frames_decoded_ok: 0,
@@ -1467,12 +1433,16 @@ impl DisplayChannel {
                         };
 
                         let decode_start = std::time::Instant::now();
-                        let decoded = decode_mjpeg_frame(frame_data);
+                        let decoded = self.jpeg_decoder.decode(frame_data);
                         let decode_duration_us =
                             u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
 
                         match decoded {
-                            Some((rgba, fw, fh)) => {
+                            Some(DecodedJpeg {
+                                rgba,
+                                width: fw,
+                                height: fh,
+                            }) => {
                                 debug!(
                                     "display: stream {} MJPEG frame {}x{} → ({},{})",
                                     stream_id, fw, fh, left, top
@@ -2893,12 +2863,14 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // decode_mjpeg_frame tests
+    // JpegDecoderRsDecoder tests (replaces old decode_mjpeg_frame tests;
+    // the function moved to shakenfist-spice-compression::jpeg in step 3A).
     // -------------------------------------------------------------------------
 
     #[test]
-    fn decode_mjpeg_frame_valid_jpeg_returns_rgba() {
+    fn jpeg_decoder_rs_valid_jpeg_returns_rgba() {
         use image::{DynamicImage, RgbImage};
+        use shakenfist_spice_compression::{DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
         use std::io::Cursor;
 
         // Create a tiny 2×2 solid-red image and encode it as JPEG.
@@ -2908,26 +2880,35 @@ mod tests {
         img.write_to(&mut Cursor::new(&mut jpeg_data), image::ImageFormat::Jpeg)
             .expect("failed to encode test JPEG");
 
-        let result = decode_mjpeg_frame(&jpeg_data);
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&jpeg_data);
         assert!(result.is_some(), "expected Some for valid JPEG");
 
-        let (rgba, w, h) = result.unwrap();
-        assert_eq!(w, 2, "width should be 2");
-        assert_eq!(h, 2, "height should be 2");
+        let DecodedJpeg {
+            rgba,
+            width,
+            height,
+        } = result.unwrap();
+        assert_eq!(width, 2, "width should be 2");
+        assert_eq!(height, 2, "height should be 2");
         // RGBA: 4 bytes per pixel.
         assert_eq!(rgba.len(), 2 * 2 * 4, "expected 16 bytes of RGBA data");
     }
 
     #[test]
-    fn decode_mjpeg_frame_empty_input_returns_none() {
-        let result = decode_mjpeg_frame(&[]);
+    fn jpeg_decoder_rs_empty_input_returns_none() {
+        use shakenfist_spice_compression::{JpegDecoder, JpegDecoderRsDecoder};
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&[]);
         assert!(result.is_none(), "expected None for empty input");
     }
 
     #[test]
-    fn decode_mjpeg_frame_truncated_input_returns_none() {
+    fn jpeg_decoder_rs_truncated_input_returns_none() {
+        use shakenfist_spice_compression::{JpegDecoder, JpegDecoderRsDecoder};
         // A few bytes that look like a JPEG start but are truncated.
-        let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&[0xFF, 0xD8, 0xFF, 0xE0]);
         assert!(result.is_none(), "expected None for truncated JPEG");
     }
 

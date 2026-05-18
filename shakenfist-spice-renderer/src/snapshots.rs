@@ -99,6 +99,13 @@ pub struct StreamSnapshot {
     /// frame's mm_time and "now" at send time). Zero until the
     /// first send.
     pub last_report_last_frame_delay: i32,
+    /// Name of the MJPEG decoder backend active when this
+    /// stream was created. One of `"ImageIO"`, `"WIC"`,
+    /// `"VA-API"`, `"libjpeg-turbo"`, `"jpeg-decoder"`.
+    /// Identical for all streams in the same session because
+    /// the backend is chosen once at `DisplayChannel::new`.
+    /// Empty string in snapshots produced before phase 3.
+    pub mjpeg_decoder_backend: String,
 }
 
 /// Result of a single image decode in the display channel.

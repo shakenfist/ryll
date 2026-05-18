@@ -5672,6 +5672,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "byteorder",
+ "jpeg-decoder",
  "lz4_flex",
  "tokio",
  "tracing",
@@ -5711,7 +5712,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "image",
- "jpeg-decoder",
  "libc",
  "lz4_flex",
  "nusb",

@@ -21,6 +21,9 @@
 #[cfg(feature = "glz")]
 pub mod glz;
 
+#[cfg(feature = "jpeg")]
+pub mod jpeg;
+
 #[cfg(feature = "lz")]
 pub mod lz;
 
@@ -32,6 +35,9 @@ pub mod quic;
 
 #[cfg(feature = "glz")]
 pub use glz::{decompress_glz, GlzDictionary};
+
+#[cfg(feature = "jpeg")]
+pub use jpeg::{best_for_platform, DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
 
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;

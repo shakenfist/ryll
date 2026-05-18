@@ -1950,6 +1950,7 @@ mod tests {
             last_report_num_frames: 5,
             last_report_num_drops: 1,
             last_report_last_frame_delay: -42,
+            mjpeg_decoder_backend: "jpeg-decoder".to_string(),
         });
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
@@ -1985,6 +1986,7 @@ mod tests {
             last_report_num_frames: 0,
             last_report_num_drops: 0,
             last_report_last_frame_delay: 0,
+            mjpeg_decoder_backend: "jpeg-decoder".to_string(),
         });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
@@ -2043,6 +2045,9 @@ mod tests {
         assert!(json.contains("\"last_report_last_frame_delay\": -42"));
         assert!(json.contains("\"stream_reports_sent_total\": 17"));
         assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
+        // Phase-03 step 3A: MJPEG decoder backend name visible in
+        // bug reports so a report identifies which path ran.
+        assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
     }
 
     #[test]

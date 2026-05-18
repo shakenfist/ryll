@@ -9,11 +9,12 @@ description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ
 readme = "README.md"
 
 [features]
-default = ["quic", "glz", "lz", "lz4"]
+default = ["quic", "glz", "lz", "lz4", "jpeg"]
 quic = []
 glz = ["dep:tokio"]
 lz = []
 lz4 = ["dep:lz4_flex"]
+jpeg = ["dep:jpeg-decoder"]
 
 [dependencies]
 anyhow = "1"
@@ -21,3 +22,4 @@ byteorder = "1"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.13", optional = true }
+jpeg-decoder = { version = "0.3", optional = true }
