@@ -80,6 +80,7 @@ both ends of the traffic through the proxy. This would allow:
 ## Documentation Index
 
 - [Binary Portability](portability.md) - How to share built binaries
+- [Channel Diagnostics Audit](channel-diagnostics-audit.md) - Per-channel observability checklist
 - [Configuration](configuration.md) - CLI options and .vv file format
 - [Libvirt / SPICE Server Recommendations](libvirt-spice-recommendations.md) - Guest XML settings for best display responsiveness
 - [macOS Development](development-macos.md) - Build and test locally on macOS
