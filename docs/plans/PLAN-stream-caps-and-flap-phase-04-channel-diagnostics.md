@@ -418,7 +418,7 @@ Manual (4G):
   counter means and what value ranges to expect.
 - `AGENTS.md` updated in 4F only if it currently lists the
   snapshot schema fields.
-- Phase 9 (the documentation phase) will further consolidate
+- Phase 10 (the documentation phase) will further consolidate
   these docs alongside the other stream-caps-and-flap
   changes.
 

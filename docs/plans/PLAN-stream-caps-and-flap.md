@@ -275,12 +275,13 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; smoke test (2C) folded into phase 3 step 3H |
 | 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G); 3H per-platform smoke test pending |
 | 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Code landed (4A-4F); 4G operator smoke test pending |
-| 5. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-05-h264.md | Not started |
-| 6. Preference messages | PLAN-stream-caps-and-flap-phase-06-pref-messages.md | Not started |
-| 7. Flap notification | PLAN-stream-caps-and-flap-phase-07-flap-notification.md | Not started |
-| 8. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-08-vdagent-probe.md | Not started |
-| 9. Documentation | PLAN-stream-caps-and-flap-phase-09-docs.md | Not started |
-| 10. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-10-remove-pong-keepalive.md | Not started |
+| 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Not started |
+| 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Not started |
+| 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Not started |
+| 8. Flap notification | PLAN-stream-caps-and-flap-phase-08-flap-notification.md | Not started |
+| 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
+| 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
+| 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
 
 Per-phase intent:
 
@@ -390,7 +391,30 @@ Per-phase intent:
   writes from a tokio task) and is the highest-leverage
   fix.
 
-- **Phase 5 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
+- **Phase 5 — Auto-snapshot bug-report mode.** Driven by
+  session 002f, where audio worked for that run and so no
+  bug report was filed — leaving us with no diagnostics to
+  compare against the 002d/002e silence symptom. Manual
+  bug-report-while-symptom-is-active is fundamentally
+  fragile for intermittent issues: you only know to hit
+  the button after you notice, and by then the relevant
+  window has often passed. Add a flight-data-recorder mode
+  that fires a full bug report (channel-state.json, pcap,
+  metadata, runtime-metrics — same artefact shape as a
+  manual report) every N seconds into a rolling subdirectory
+  with a fixed cap. Operator sets it once at session start
+  via a CLI flag (`--auto-snapshot-interval`) and walks
+  away; whatever happens during the run is captured by
+  construction. Per operator direction, pcap stays in
+  auto-snapshots — the disk cost (~700 KiB per snapshot,
+  ~14 MiB at 20-snapshot cap) is acceptable for the
+  diagnostic value. Recommended planning effort: **low**
+  (small, well-scoped; the existing `BugReport::new` +
+  `write_zip` already do all the hard work — this phase
+  is mostly about plumbing them to a tokio interval task
+  with file rotation).
+
+- **Phase 6 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
   9 (CODEC_MJPEG), and 11 (CODEC_H264). Hook H.264 decoding into
   the existing `STREAM_DATA` / `STREAM_DATA_SIZED` path keyed on
   `StreamState::codec_type`. Use `openh264` (already in
@@ -402,7 +426,7 @@ Per-phase intent:
   threading, codec-specific framing, and the first time we add
   a video codec to the GUI binary).
 
-- **Phase 6 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
+- **Phase 7 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
   (opcode 103) and `display_client::PREFERRED_VIDEO_CODEC_TYPE`
   (opcode 104). Advertise caps 6 and 12. Send the preference
   messages once on link establishment. spice-gtk does this in
@@ -410,7 +434,7 @@ Per-phase intent:
   planning effort: **medium** (mechanical once the cap plumbing
   is in place from earlier phases).
 
-- **Phase 7 — Flap notification.** Add a small per-channel
+- **Phase 8 — Flap notification.** Add a small per-channel
   watcher (likely a tokio task or a tick inside
   `update_snapshot`) that examines the `streams_recently_destroyed`
   ring. If ≥3 streams destroyed in the last 30 s with mean
@@ -426,7 +450,7 @@ Per-phase intent:
   heuristic is well-defined; UI integration follows existing
   notification patterns).
 
-- **Phase 8 — Vdagent responsiveness probe.** The spice in-guest
+- **Phase 9 — Vdagent responsiveness probe.** The spice in-guest
   agent has no diagnostic message types of its own (see the
   *On vdagent diagnostics* note in `Situation`), but two
   client → agent messages are acknowledged by `VD_AGENT_REPLY`:
@@ -462,7 +486,7 @@ Per-phase intent:
   **medium** (small surface area; the only judgment call is
   probe cadence and the no-op assumption).
 
-- **Phase 9 — Documentation.** Update `ARCHITECTURE.md`
+- **Phase 10 — Documentation.** Update `ARCHITECTURE.md`
   capability tables, `AGENTS.md` reference list if a new
   external ref was added, `README.md` if user-visible behaviour
   changed, and add a "video troubleshooting" section to
@@ -470,7 +494,7 @@ Per-phase intent:
   the vdagent probe fields, and links to the bug-report fields
   a user should attach. Recommended planning effort: **low**.
 
-- **Phase 10 — Remove spurious-PONG keepalive.** Driven by
+- **Phase 11 — Remove spurious-PONG keepalive.** Driven by
   session 002c, where the operator's qemu log showed a
   cadence of `Spice: main:0 (...): invalid net test stage,
   ping id 0 test id 0 stage 0` warnings every ~15 s. Traced

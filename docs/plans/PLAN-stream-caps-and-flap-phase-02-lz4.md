@@ -45,7 +45,7 @@ Out of scope for this phase:
   and skips at `lz4.rs:111-115`; very rare in modern
   spice-server output).
 - Wiring an LZ4-vs-Zlib preference into a future
-  `PREF_COMPRESSION` message — that lands in phase 6.
+  `PREF_COMPRESSION` message — that lands in phase 7.
 
 ## Background
 
@@ -223,7 +223,7 @@ Manual (2C):
 ## Documentation impact
 
 `ARCHITECTURE.md`'s capability list (if any) needs the LZ4
-entry. Strictly that's phase 9's job; if step 2B's
+entry. Strictly that's phase 10's job; if step 2B's
 implementer happens to be editing nearby docs, they may add it
 opportunistically.
 
