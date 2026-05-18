@@ -74,6 +74,28 @@ In scope:
   `auto-snapshots/ryll-auto-snapshot-<utc_iso>-T+<uptime_secs>.zip`
   — UTC ISO timestamp for sorting, uptime appended so the
   filename alone tells you when in the run it fired.
+- **Operator awareness — startup notification.** When the
+  auto-snapshot interval task spawns at session start, push
+  one `NotifySeverity::Info` notification via
+  `push_notification` with `NotificationSource::Internal`:
+  `"Auto-snapshot mode enabled — every {N}s, max {cap}
+  snapshots, saving to {path}"`. One-shot, never repeated,
+  no cool-down (this is the operator's confirmation that
+  the flag took effect). Without it, the operator has no
+  in-app signal that the mode is active until the first
+  zip lands on disk.
+- **Operator awareness — live counter in the stats panel.**
+  Surface `auto_snapshots_saved: u64` and
+  `auto_snapshots_pruned: u64` on a snapshot the stats panel
+  reads (`AppSnapshot` is the natural home; it already
+  carries other session-wide counters). Render a single
+  line in the existing stats panel as
+  `"Auto-snapshot: {saved}/{cap}"` when the mode is enabled
+  (hide the line entirely when disabled so it doesn't add
+  visual noise to non-auto sessions). Operator can glance
+  at it any time without scrolling notifications. Updated
+  by the interval task after each successful write_zip
+  (saved += 1) and after each prune (pruned += deleted).
 
 Out of scope:
 
@@ -95,6 +117,14 @@ Out of scope:
   drop the screenshot for auto reports — pcap +
   channel-state is the high-value payload. Document the
   decision in code comments.
+- **A notification per snapshot.** At 30s × 10min that's
+  20 notifications, which would bury everything else in
+  the panel. The startup notification + live stats-panel
+  counter cover awareness without the noise. If a future
+  operator wants per-snapshot logging, a separate
+  `--auto-snapshot-verbose` flag with a milestone-cadence
+  notification (`"10 saved, 1 pruned"` every Nth tick) is
+  the cheap-to-add follow-up; deferred deliberately.
 - Disconnect-triggered auto-snapshot. The existing
   auto-disconnect path already fires a bug report on
   disconnect; auto-snapshot mode is independent of that.
@@ -228,9 +258,9 @@ interval of 10 s in the CLI help text.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 5A | medium | sonnet | none | **Core implementation.** Add `auto_snapshot_interval: Option<u64>` and `auto_snapshot_cap: Option<usize>` to `ryll/src/config.rs` (clap derive). Thread through `main.rs` to `RyllApp::new`. Add `AutoSnapshotState` struct in a new `ryll/src/auto_snapshot.rs` (or `bugreport.rs` if cleaner) holding Arc'd handles to traffic, channel_snapshots, app_snapshot, notifications, plus resolved target_host/port, output_dir, cap, interval. Per Q1 working proposal: if any of these fields on `RyllApp` aren't already `Arc`-backed, bump them. Add `BugReport::new_auto(...)` helper that wraps `BugReport::new` with auto-generated description (`format!("auto-snapshot T+{:.1}s", session_uptime_secs)`) and `BugReportType::AutoSnapshot` (new variant — defaults its channel name dispatch to include playback + main + display + cursor + inputs + usbredir + webdav so a single zip carries everything). Spawn the interval task from `RyllApp::on_session_ready` (or wherever the session-bring-up code lives) when `auto_snapshot_interval` is set. Implement the prune-to-cap step per Q2: glob `auto-snapshots/ryll-auto-snapshot-*.zip`, sort by filename, delete oldest beyond cap. Per Q3: handle write_zip errors with a notification cool-down (5 min, single warn log on first failure). Per Q4: subdirectory is `<bug_report_dir>/auto-snapshots/` using `manual_bug_report_dir`'s fallback chain. Verify `make build && make test && make lint && pre-commit run --all-files`. |
+| 5A | medium | sonnet | none | **Core implementation.** Add `auto_snapshot_interval: Option<u64>` and `auto_snapshot_cap: Option<usize>` to `ryll/src/config.rs` (clap derive). Thread through `main.rs` to `RyllApp::new`. Add `AutoSnapshotState` struct in a new `ryll/src/auto_snapshot.rs` (or `bugreport.rs` if cleaner) holding Arc'd handles to traffic, channel_snapshots, app_snapshot, notifications, plus resolved target_host/port, output_dir, cap, interval. Per Q1 working proposal: if any of these fields on `RyllApp` aren't already `Arc`-backed, bump them. Add `BugReport::new_auto(...)` helper that wraps `BugReport::new` with auto-generated description (`format!("auto-snapshot T+{:.1}s", session_uptime_secs)`) and `BugReportType::AutoSnapshot` (new variant — defaults its channel name dispatch to include playback + main + display + cursor + inputs + usbredir + webdav so a single zip carries everything). Spawn the interval task from `RyllApp::on_session_ready` (or wherever the session-bring-up code lives) when `auto_snapshot_interval` is set. **At spawn time** push one `NotifySeverity::Info` notification (`NotificationSource::Internal`): `"Auto-snapshot mode enabled — every {N}s, max {cap} snapshots, saving to {path}"` — one-shot, no cool-down. Add `auto_snapshots_saved: u64` and `auto_snapshots_pruned: u64` to `AppSnapshot` (or the snapshot the stats panel reads); bump after each successful write_zip / prune respectively. Render in the existing stats panel as `"Auto-snapshot: {saved}/{cap}"` only when the mode is enabled (hide the line entirely when disabled). Implement the prune-to-cap step per Q2: glob `auto-snapshots/ryll-auto-snapshot-*.zip`, sort by filename, delete oldest beyond cap. Per Q3: handle write_zip errors with a notification cool-down (5 min, single warn log on first failure). Per Q4: subdirectory is `<bug_report_dir>/auto-snapshots/` using `manual_bug_report_dir`'s fallback chain. Verify `make build && make test && make lint && pre-commit run --all-files`. |
 | 5B | low | haiku | none | **Docs touch-up.** Update `README.md` (if it covers CLI flags) and `docs/configuration.md` to document `--auto-snapshot-interval` and `--auto-snapshot-cap`. Add a short paragraph to `docs/troubleshooting.md` under or near the playback-observability section explaining when to enable auto-snapshot mode (intermittent issues, flight-data-recorder use case). Cross-link from `docs/libvirt-spice-recommendations.md`'s "Side-by-side testing recipe" section as an alternative to manual periodic reports. Run `pre-commit run --all-files`. |
-| 5C | — | — | — | **Operator smoke test.** Run a ryll session against `sf-4` with `--auto-snapshot-interval 30 --auto-snapshot-cap 20`. Let it run for ≥ 3 minutes while doing typical workload. Confirm: (a) `<bug-report-dir>/auto-snapshots/` contains 6+ zips spaced ~30s apart; (b) each zip's `channel-state.json` shows playback fields populating differently across snapshots (proves the snapshot is being re-taken not just the same data re-zipped); (c) after the cap is exceeded, oldest zips are pruned; (d) pcap is present in each zip and contains the ~20 seconds of traffic preceding the snapshot. This is operator verification, not a code change. |
+| 5C | — | — | — | **Operator smoke test.** Run a ryll session against `sf-4` with `--auto-snapshot-interval 30 --auto-snapshot-cap 20`. Let it run for ≥ 3 minutes while doing typical workload. Confirm: (a) at session start the notification panel shows one `Info` notification confirming auto-snapshot mode is enabled with the interval, cap, and target path; (b) the stats panel shows `"Auto-snapshot: N/20"` and N increments by 1 every ~30 s; (c) `<bug-report-dir>/auto-snapshots/` contains 6+ zips spaced ~30 s apart; (d) each zip's `channel-state.json` shows playback fields populating differently across snapshots (proves the snapshot is being re-taken not just the same data re-zipped); (e) after the cap is exceeded, oldest zips are pruned and the stats counter still reads N/20 (no overflow); (f) pcap is present in each zip and contains the ~20 seconds of traffic preceding the snapshot; (g) the notification panel does NOT show one notification per snapshot (proves we didn't accidentally make it noisy). This is operator verification, not a code change. |
 
 Commits: one per step (5A, 5B). 5C is operator verification.
 
@@ -266,6 +296,12 @@ Manual (5C):
   `cap × ~1 MiB per zip`.
 - The auto-snapshot task does not interfere with the GUI
   thread, the audio thread, or the manual F8 report path.
+- Operator awareness: one `Info` notification at session
+  start confirms the mode is enabled (with interval, cap,
+  and target path). A live counter in the stats panel
+  shows `"Auto-snapshot: {saved}/{cap}"` and increments
+  on each successful write; hidden when the mode is
+  disabled. No per-snapshot notifications.
 - `make build && make test && make lint && pre-commit run
   --all-files` clean.
 
