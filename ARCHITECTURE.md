@@ -1844,10 +1844,22 @@ written to JSON for bug reports.
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
 | `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter (phase 2), ACK state, bytes in/out |
-| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), pcap writer-queue drop counter, bytes in/out |
-| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, pcap writer-queue drop counter, bytes in/out |
-| `MainSnapshot` | Main | Session ID, pcap writer-queue drop counter, bytes in/out |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `MainSnapshot` | Main | Session ID, mm_time, keepalive, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `PlaybackSnapshot` | Playback | Per-session audio metadata (`PlaybackSessionInfo`), start/stop counts, data-packet and decode counters, PCM byte counts, recent decode-duration ring (cap 64), device-side atomics (callbacks, underruns, ring overflows, samples consumed), volume/mute/latency params, per-opcode recv/send maps |
+| `UsbredirSnapshot` | Usbredir | Redirected device list (`RedirectedDevice`), device connect/disconnect totals with timestamps, server/client capability bitmasks from hello handshake, per-opcode recv/send maps, unknown-opcode counter, bytes in/out |
+| `WebdavSnapshot` | Webdav | Transport common + per-opcode recv/send maps (phase 4E, pending) |
 | `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime, video encoder-queue drop counter (phase 3), render-side mpsc-queue lag aggregates for `ImageReady*` and `DisplayMark` events (phase 4) |
+
+All channel snapshots share an eight-field transport common baseline
+(`bytes_in`, `bytes_out`, `last_recv_ts_secs`, `last_send_ts_secs`,
+`ping_recv_count`, `pong_send_count`, `last_ping_recv_ts_secs`,
+`writer_dropped_count`) plus four baseline additions
+(`messages_recv_by_opcode`, `messages_send_by_opcode`,
+`last_unknown_opcode`, `unknown_opcode_count`). See
+`docs/channel-diagnostics-audit.md` for the full audit matrix and
+minimum-baseline rationale.
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside
