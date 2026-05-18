@@ -536,6 +536,55 @@ impl TrafficBuffers {
         }
     }
 
+    /// Drain pcap bytes from ALL channels, merged into a single pcap
+    /// stream. Used by `BugReportType::AutoSnapshot` so the zip's
+    /// `traffic.pcap` carries the full session picture rather than
+    /// a single channel's traffic.
+    ///
+    /// Entries from all six channels are interleaved in timestamp order.
+    /// Returns `None` when the `capture` feature is disabled.
+    pub fn drain_all_pcap_bytes(&self) -> Option<Vec<u8>> {
+        #[cfg(feature = "capture")]
+        {
+            use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+            use pcap_file::DataLink;
+
+            // Collect every entry from every channel.
+            let mut entries: Vec<(std::time::Duration, Vec<std::sync::Arc<[u8]>>)> = Vec::new();
+            for name in &CHANNELS {
+                if let Some(buf) = self.buffer_for(name) {
+                    let guard = buf.lock().unwrap();
+                    for entry in guard.entries().iter() {
+                        let mut segs: Vec<std::sync::Arc<[u8]>> = vec![entry.pcap_frame.clone()];
+                        segs.extend(entry.additional_segments.iter().cloned());
+                        entries.push((entry.timestamp, segs));
+                    }
+                }
+            }
+
+            // Sort by timestamp so the merged pcap is chronological.
+            entries.sort_by_key(|(ts, _)| *ts);
+
+            let header = PcapHeader {
+                datalink: DataLink::ETHERNET,
+                ..Default::default()
+            };
+            let mut output = Vec::new();
+            let mut pcap = PcapWriter::with_header(&mut output, header).ok()?;
+            for (ts, segs) in &entries {
+                for seg in segs {
+                    let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
+                    pcap.write_packet(&packet).ok();
+                }
+            }
+            Some(output)
+        }
+        #[cfg(not(feature = "capture"))]
+        {
+            None
+        }
+    }
+
     /// Collect recent entries from all channels for the traffic
     /// viewer.  Returns at most `max` entries sorted by timestamp
     /// (oldest first).  Does not copy pcap frame data.
@@ -661,6 +710,12 @@ pub struct AppSnapshot {
     pub display_mark_lag_recent_min_us: u32,
     pub display_mark_lag_recent_max_us: u32,
     pub display_mark_lag_recent_mean_us: u32,
+    /// Phase 5 auto-snapshot counters. Both are 0 when
+    /// `--auto-snapshot-interval` is not set. The stats panel
+    /// renders `"Auto-snapshot: {saved}/{cap}"` when the mode
+    /// is active; the line is hidden when mode is disabled.
+    pub auto_snapshots_saved: u64,
+    pub auto_snapshots_pruned: u64,
 }
 
 impl Default for AppSnapshot {
@@ -685,6 +740,8 @@ impl Default for AppSnapshot {
             display_mark_lag_recent_min_us: 0,
             display_mark_lag_recent_max_us: 0,
             display_mark_lag_recent_mean_us: 0,
+            auto_snapshots_saved: 0,
+            auto_snapshots_pruned: 0,
         }
     }
 }
@@ -882,11 +939,22 @@ pub enum BugReportType {
         notification_id: u64,
         snapshot_state: NotificationSnapshotState,
     },
+    /// Auto-generated periodically by `--auto-snapshot-interval`
+    /// (Phase 5). Captures full session state across all channels
+    /// so a single zip carries everything needed to diagnose any
+    /// channel's behaviour at the moment of the snapshot.
+    /// `channel_name()` returns `"all"` to trigger the merged
+    /// all-channel embedding in `channel-state.json`.
+    AutoSnapshot,
 }
 
 impl BugReportType {
     /// SPICE channel name used for ring buffer drain and snapshot
     /// selection.
+    ///
+    /// The special value `"all"` (returned by `AutoSnapshot`) causes
+    /// `BugReport::assemble` to embed a merged JSON object containing
+    /// every channel's snapshot rather than a single channel's state.
     pub fn channel_name(&self) -> &'static str {
         match self {
             BugReportType::Display => "display",
@@ -917,6 +985,11 @@ impl BugReportType {
             // channel-state.json defaults to main as a
             // sensible session anchor.
             BugReportType::Notification { .. } => "main",
+            // Phase 5: auto-snapshots embed every channel so a single
+            // zip tells the full story.  The "all" arm in
+            // ChannelSnapshots::snapshot_json_for merges all channels
+            // into one JSON object.
+            BugReportType::AutoSnapshot => "all",
         }
     }
 }
@@ -1260,11 +1333,12 @@ impl BugReport {
         // 2. Channel state snapshot — pick the channel from
         // report_type.channel_name() and delegate the
         // lock/clone/serialise to ChannelSnapshots'
-        // snapshot_json_for helper. The Usb variant is the
-        // only special case: it has no dedicated snapshot
-        // (its pcap traffic is captured via channel_name()
-        // → "usbredir" further below), so emit an empty
-        // object.
+        // snapshot_json_for helper. Special cases:
+        //   - Usb: no dedicated snapshot (pcap only); emit "{}".
+        //   - AutoSnapshot: channel_name() returns "all", which
+        //     snapshot_json_for handles by merging every channel's
+        //     state into a single JSON object — gives the full
+        //     session picture in one zip.
         // TODO: Connection reports (BugReportType::Connection) today only
         // include MainSnapshot. Now that PlaybackSnapshot, UsbredirSnapshot,
         // and WebdavSnapshot have diagnostic fields, consider whether a
@@ -1299,9 +1373,15 @@ impl BugReport {
             .unwrap_or_default();
         let notifications_json = serde_json::to_string_pretty(&notifications_snapshot)?;
 
-        // 4. Pcap traffic for the affected channel
+        // 4. Pcap traffic for the affected channel.
+        //    AutoSnapshot uses channel_name "all" → drain all six
+        //    channels merged into one pcap stream.
         let channel_name = report_type.channel_name();
-        let pcap_bytes = traffic.drain_channel_pcap_bytes(channel_name);
+        let pcap_bytes = if channel_name == "all" {
+            traffic.drain_all_pcap_bytes()
+        } else {
+            traffic.drain_channel_pcap_bytes(channel_name)
+        };
 
         // 5. PNG screenshot (display reports only). Prefer a
         //    precomputed PNG from the trigger-time encoder thread
@@ -1394,6 +1474,65 @@ impl BugReport {
 
         let filename = format!("ryll-bugreport-{}.zip", filename_timestamp());
         let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(self.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(self.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(self.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = self.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        if let Some(ref png) = self.screenshot_png {
+            zip.start_file("screenshot.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        if let Some(ref png) = self.screenshot_region_png {
+            zip.start_file("screenshot-region.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(self.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&self.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
+    /// Write the bug report as a zip file to `dir` using a caller-
+    /// supplied `filename` instead of the default timestamp-based name.
+    ///
+    /// Creates `dir` if it does not exist.
+    /// Returns the path of the written file.
+    ///
+    /// Used by the auto-snapshot task so it can embed the session
+    /// uptime in the filename (see `auto_snapshot_filename()`).
+    pub fn write_zip_named(
+        &self,
+        dir: &std::path::Path,
+        filename: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        std::fs::create_dir_all(dir)?;
+
+        let path = dir.join(filename);
         let file = std::fs::File::create(&path)?;
         let mut zip = ZipWriter::new(file);
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);

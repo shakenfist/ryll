@@ -1004,6 +1004,51 @@ When the user clicks the button:
   `PostEventOnly` / `postevent`. Useful, but without the
   run-up to the event.
 
+### Auto-snapshot mode (`--auto-snapshot-interval`)
+
+Phase 5 of the stream-caps-and-flap plan adds a
+flight-data-recorder mode. When `--auto-snapshot-interval N`
+is set, a background tokio task fires a complete bug report
+every N seconds into `<bug-report-dir>/auto-snapshots/`. This
+captures full session state regardless of whether the operator
+notices a symptom in real time — useful for intermittent issues
+like audio silences that last only 30 seconds.
+
+Key design points:
+
+- `BugReportType::AutoSnapshot` — a new variant whose
+  `channel_name()` returns `"all"`. This causes `BugReport::
+  assemble` to embed a merged JSON object in `channel-state.json`
+  containing every channel's snapshot (display, inputs, cursor,
+  main, playback, usbredir, webdav). The traffic pcap also covers
+  all channels via `TrafficBuffers::drain_all_pcap_bytes()`.
+- `AutoSnapshotState` in `ryll/src/auto_snapshot.rs` bundles the
+  Arc handles the task needs (traffic, channel snapshots, app
+  snapshot, notifications, target host/port, output dir, cap,
+  interval). All are already Arc-backed on `RyllApp`.
+- The task runs in its own std::thread with a dedicated
+  `tokio::runtime::Builder::new_current_thread` runtime, spawned
+  once on the first `ChannelEvent::SessionInitialized` (a latch
+  prevents a second spawn on reconnect).
+- A startup `NotifySeverity::Info` notification confirms the mode
+  is active: `"Auto-snapshot mode enabled — every {N}s, max {cap}
+  snapshots, saving to {path}"`.
+- The stats panel renders `"Auto-snapshot: {saved}/{cap}"` when
+  the mode is active; the line is hidden when disabled.
+- Rolling cap: after each successful write, `prune_to_cap` lists
+  `ryll-auto-snapshot-*.zip` in the output dir, sorts
+  lexicographically (= chronologically by filename construction),
+  and deletes the oldest beyond cap. `auto_snapshots_pruned`
+  in `AppSnapshot` tracks the total deleted.
+- Write failures: `warn!` always; a `NotifySeverity::Warn`
+  notification is pushed at most once per 5-minute cool-down so a
+  persistent disk error does not spam the panel. The interval task
+  continues regardless.
+- Filename scheme:
+  `ryll-auto-snapshot-2026-05-18T20-37-42Z-T+47.3s.zip` —
+  UTC ISO timestamp (colons replaced with hyphens for Windows
+  filesystem portability) plus session uptime suffix.
+
 The button's visual state reflects which path a click would
 take: weak/dimmed text + a "snapshot expired" hover tooltip
 when no live snapshot exists. `BugReport::write_notification`

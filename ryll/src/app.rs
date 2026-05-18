@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::auto_snapshot::AutoSnapshotState;
 use crate::bugreport::{
     chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
     NotificationSnapshotState, PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers,
@@ -802,6 +803,14 @@ pub struct RyllApp {
     /// flag so reconnect can build a runtime of the same
     /// shape as the initial connect. Diagnostic-only.
     debug_single_thread_runtime: bool,
+
+    // Phase 5 auto-snapshot config. `None` means the mode is
+    // disabled. `auto_snapshot_spawned` is latched to `true`
+    // after the interval task is spawned on `SessionInitialized`
+    // so reconnect does not spawn a second task.
+    auto_snapshot_interval: Option<u64>,
+    auto_snapshot_cap: usize,
+    auto_snapshot_spawned: bool,
 }
 
 /// Build the per-connection tokio runtime, honouring the
@@ -907,6 +916,8 @@ impl RyllApp {
         bug_report_dir: Option<PathBuf>,
         obey_guest_size: bool,
         debug_single_thread_runtime: bool,
+        auto_snapshot_interval: Option<u64>,
+        auto_snapshot_cap: Option<usize>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -1142,6 +1153,10 @@ impl RyllApp {
             connection_cancel: Some(connection_cancel),
             app_focused,
             debug_single_thread_runtime,
+            auto_snapshot_interval,
+            auto_snapshot_cap: auto_snapshot_cap
+                .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
+            auto_snapshot_spawned: false,
         }
     }
 
@@ -1476,6 +1491,52 @@ impl RyllApp {
                         NotifySeverity::Info,
                         format!("Connected to {}:{}", self.target_host, self.target_port),
                     );
+
+                    // Phase 5: spawn the auto-snapshot interval task
+                    // on the first SessionInitialized event. The latch
+                    // prevents a second task on reconnect (the first
+                    // task's tokio runtime continues across reconnects
+                    // since it is independent of the connection thread).
+                    if let Some(interval_secs) = self.auto_snapshot_interval {
+                        if !self.auto_snapshot_spawned {
+                            self.auto_snapshot_spawned = true;
+                            let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
+                            let cap = self.auto_snapshot_cap;
+
+                            // One-shot startup notification.
+                            self.push_notification(
+                                NotifySeverity::Info,
+                                NotificationSource::Internal,
+                                format!(
+                                    "Auto-snapshot mode enabled \
+                                     — every {}s, max {} snapshots, \
+                                     saving to {}",
+                                    interval_secs,
+                                    cap,
+                                    output_dir.display(),
+                                ),
+                            );
+
+                            let state = AutoSnapshotState {
+                                traffic: self.traffic.clone(),
+                                channel_snapshots: self.channel_snapshots.clone(),
+                                app_snapshot: self.app_snapshot.clone(),
+                                notifications: self.notifications.clone(),
+                                target_host: self.target_host.clone(),
+                                target_port: self.target_port,
+                                output_dir,
+                                interval: Duration::from_secs(interval_secs),
+                                cap,
+                            };
+                            std::thread::spawn(move || {
+                                let rt = tokio::runtime::Builder::new_current_thread()
+                                    .enable_all()
+                                    .build()
+                                    .expect("auto-snapshot: failed to build tokio runtime");
+                                rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
+                            });
+                        }
+                    }
                 }
 
                 ChannelEvent::SurfaceCreated {
@@ -2932,6 +2993,22 @@ impl eframe::App for RyllApp {
                     if self.cadence_enabled {
                         ui.separator();
                         ui.label("Cadence: ON");
+                    }
+
+                    // Phase 5: show auto-snapshot counter only when the mode
+                    // is active (hiding the line avoids visual noise in normal
+                    // sessions).
+                    if let Some(_interval_secs) = self.auto_snapshot_interval {
+                        let (saved, _pruned) = self
+                            .app_snapshot
+                            .lock()
+                            .map(|s| (s.auto_snapshots_saved, s.auto_snapshots_pruned))
+                            .unwrap_or((0, 0));
+                        ui.separator();
+                        ui.label(format!(
+                            "Auto-snapshot: {}/{}",
+                            saved, self.auto_snapshot_cap
+                        ));
                     }
 
                     if let ReconnectState::Pending { attempt, .. } = &self.reconnect_state {

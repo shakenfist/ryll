@@ -97,6 +97,25 @@ pub struct Args {
     #[arg(long)]
     pub bug_report_dir: Option<std::path::PathBuf>,
 
+    /// Automatically save a complete bug-report zip every N seconds
+    /// into <bug-report-dir>/auto-snapshots/. Use this as a
+    /// "flight-data-recorder" for intermittent issues: set it before
+    /// the session, walk away, and the evidence is captured by
+    /// construction even if the symptom is transient.
+    ///
+    /// Minimum recommended interval: 10 s (BugReport::new blocks for
+    /// ~2 s sampling runtime metrics; shorter intervals cause overlapping
+    /// samples which is harmless but wasteful). Values below 10 s log
+    /// a warning at startup.
+    #[arg(long)]
+    pub auto_snapshot_interval: Option<u64>,
+
+    /// Maximum number of auto-snapshot zips to keep on disk
+    /// (default: 20). Oldest zips are pruned when the cap is
+    /// exceeded. Only meaningful when --auto-snapshot-interval is set.
+    #[arg(long)]
+    pub auto_snapshot_cap: Option<usize>,
+
     /// Diagnostic flag for the K1 hang investigation
     /// (PLAN-session-001-feedback Phase 02). When set, ryll's
     /// per-connection tokio runtime is built with

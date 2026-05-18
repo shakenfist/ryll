@@ -327,6 +327,9 @@ ryll/src/
 │                        #   GUI panels (traffic viewer, USB,
 │                        #   Folders, Notifications), bug report
 │                        #   dialog, reconnect, thin trait impls
+├── auto_snapshot.rs     # Phase 5 auto-snapshot mode: AutoSnapshotState,
+│                        #   run_auto_snapshot_loop, auto_snapshot_filename,
+│                        #   prune_to_cap (rolling cap enforcement)
 ├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
 │                        #   TrafficRingBuffer, TrafficBuffers —
 │                        #   implements TrafficSink), bug report

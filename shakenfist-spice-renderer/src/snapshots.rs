@@ -808,6 +808,30 @@ impl ChannelSnapshots {
                 let snap = self.webdav.lock().unwrap().clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
+            // Phase 5 (auto-snapshot): merge every channel's snapshot
+            // into a single JSON object keyed by channel name. A single
+            // zip then carries the full session picture without the
+            // caller needing to know which channel is "most interesting".
+            "all" => {
+                use serde_json::json;
+                let display = self.display.lock().unwrap().clone();
+                let inputs = self.inputs.lock().unwrap().clone();
+                let cursor = self.cursor.lock().unwrap().clone();
+                let main = self.main.lock().unwrap().clone();
+                let playback = self.playback.lock().unwrap().clone();
+                let usbredir = self.usbredir.lock().unwrap().clone();
+                let webdav = self.webdav.lock().unwrap().clone();
+                let merged = json!({
+                    "display": display,
+                    "inputs": inputs,
+                    "cursor": cursor,
+                    "main": main,
+                    "playback": playback,
+                    "usbredir": usbredir,
+                    "webdav": webdav,
+                });
+                Some(serde_json::to_string_pretty(&merged))
+            }
             _ => None,
         }
     }

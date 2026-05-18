@@ -1,4 +1,5 @@
 mod app;
+mod auto_snapshot;
 mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
@@ -771,6 +772,20 @@ fn run_gui(
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let bug_report_dir = args.bug_report_dir.clone();
     let debug_single_thread_runtime = args.debug_single_thread_runtime;
+    let auto_snapshot_interval = args.auto_snapshot_interval;
+    let auto_snapshot_cap = args.auto_snapshot_cap;
+
+    if let Some(interval) = auto_snapshot_interval {
+        if interval < 10 {
+            tracing::warn!(
+                "auto-snapshot: --auto-snapshot-interval {} is below the recommended \
+                 minimum of 10 s (BugReport::new samples metrics for ~2 s; \
+                 shorter intervals cause overlapping samples)",
+                interval
+            );
+        }
+    }
+
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -789,6 +804,8 @@ fn run_gui(
                 bug_report_dir,
                 obey_guest_size,
                 debug_single_thread_runtime,
+                auto_snapshot_interval,
+                auto_snapshot_cap,
             )))
         }),
     )

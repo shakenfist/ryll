@@ -271,6 +271,40 @@ ICE failures with 1 s/2 s/4 s/8 s/16 s backoff. A reference
 systemd unit is at `examples/ryll-web.service`. See
 `docs/web-frontend.md` for the full operator guide.
 
+### Auto-snapshot mode (`--auto-snapshot-interval`)
+
+When `--auto-snapshot-interval N` is set, ryll fires a complete
+bug-report zip every N seconds into a rolling subdirectory
+`<bug-report-dir>/auto-snapshots/`. This "flight-data-recorder"
+mode captures full session state regardless of whether the
+operator notices a symptom — useful for intermittent issues like
+audio silences that last only 30 seconds mid-session.
+
+A startup `Info` notification confirms the mode is active. The
+status bar shows `Auto-snapshot: {saved}/{cap}` while the mode
+is enabled. The default rolling cap is 20 zips; oldest are pruned
+when the cap is exceeded.
+
+Each zip is a full bug-report artefact (channel-state.json with
+all channels merged, traffic.pcap covering all channels, metadata,
+runtime-metrics, notifications) equivalent to a manual F12 report.
+
+```bash
+# Fire every 30 s, keep last 20 zips
+ryll --file connection.vv --auto-snapshot-interval 30
+
+# Custom cap and output directory
+ryll --file connection.vv --auto-snapshot-interval 60 \
+     --auto-snapshot-cap 10 --bug-report-dir /tmp/session
+
+# Minimum recommended interval is 10 s (assembly blocks ~2 s
+# for runtime-metrics sampling; shorter intervals cause
+# overlapping samples, which is harmless but wasteful).
+```
+
+The zip filename encodes the UTC timestamp and session uptime:
+`ryll-auto-snapshot-2026-05-18T20-37-42Z-T+47.3s.zip`
+
 ### `--pedantic` mode
 
 When enabled with `--pedantic`, ryll writes a bug-report
