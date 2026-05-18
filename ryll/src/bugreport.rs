@@ -1954,6 +1954,8 @@ mod tests {
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
         snap.stream_data_orphan_count = 3;
+        snap.stream_reports_sent_total = 17;
+        snap.stream_reports_unsupported_signals_sent = 2;
         // Previously-active stream now in the recently-destroyed
         // ring: destroyed_at_secs is Some, counters are frozen.
         snap.streams_recently_destroyed.push_back(StreamSnapshot {
@@ -2039,6 +2041,8 @@ mod tests {
         assert!(json.contains("\"last_report_num_frames\": 5"));
         assert!(json.contains("\"last_report_num_drops\": 1"));
         assert!(json.contains("\"last_report_last_frame_delay\": -42"));
+        assert!(json.contains("\"stream_reports_sent_total\": 17"));
+        assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
     }
 
     #[test]
