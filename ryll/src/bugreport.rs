@@ -2067,6 +2067,8 @@ mod tests {
         let mut snap = InputsSnapshot {
             button_state: 1,
             writer_dropped_count: 4,
+            unknown_opcode_count: 3,
+            last_unknown_opcode: Some(0xBEEF),
             ..Default::default()
         };
         snap.recent_events.push_back(InputEventRecord {
@@ -2077,10 +2079,20 @@ mod tests {
             button_mask: 0,
             timestamp_secs: 2.0,
         });
+        snap.messages_recv_by_opcode.insert(101, 5);
+        snap.messages_recv_by_opcode.insert(102, 2);
+        snap.messages_send_by_opcode.insert(1, 10);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"button_state\": 1"));
         assert!(json.contains("\"event_type\": \"KeyDown\""));
         assert!(json.contains("\"writer_dropped_count\": 4"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"101\": 5"));
+        assert!(json.contains("\"102\": 2"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"1\": 10"));
+        assert!(json.contains("\"last_unknown_opcode\": 48879"));
+        assert!(json.contains("\"unknown_opcode_count\": 3"));
     }
 
     #[test]
@@ -2088,6 +2100,8 @@ mod tests {
         let mut snap = CursorSnapshot {
             cache_entries: 1,
             writer_dropped_count: 9,
+            unknown_opcode_count: 1,
+            last_unknown_opcode: Some(0xFF),
             ..Default::default()
         };
         snap.cache_contents.push(CursorCacheEntry {
@@ -2097,14 +2111,22 @@ mod tests {
             hot_spot_x: 0,
             hot_spot_y: 0,
         });
+        snap.messages_recv_by_opcode.insert(200, 7);
+        snap.messages_send_by_opcode.insert(3, 4);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"cursor_id\": 99"));
         assert!(json.contains("\"writer_dropped_count\": 9"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"200\": 7"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 4"));
+        assert!(json.contains("\"last_unknown_opcode\": 255"));
+        assert!(json.contains("\"unknown_opcode_count\": 1"));
     }
 
     #[test]
     fn test_main_snapshot_serialises() {
-        let snap = MainSnapshot {
+        let mut snap = MainSnapshot {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
@@ -2113,14 +2135,26 @@ mod tests {
             mm_time_now: 123_456,
             mm_time_set_count: 7,
             last_mm_time_set_ts_secs: Some(12.5),
+            unknown_opcode_count: 2,
+            last_unknown_opcode: Some(0x1234),
             ..Default::default()
         };
+        snap.messages_recv_by_opcode.insert(10, 3);
+        snap.messages_recv_by_opcode.insert(20, 1);
+        snap.messages_send_by_opcode.insert(5, 8);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
         assert!(json.contains("\"writer_dropped_count\": 2"));
         assert!(json.contains("\"mm_time_now\": 123456"));
         assert!(json.contains("\"mm_time_set_count\": 7"));
         assert!(json.contains("\"last_mm_time_set_ts_secs\": 12.5"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"10\": 3"));
+        assert!(json.contains("\"20\": 1"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"5\": 8"));
+        assert!(json.contains("\"last_unknown_opcode\": 4660"));
+        assert!(json.contains("\"unknown_opcode_count\": 2"));
     }
 
     #[test]

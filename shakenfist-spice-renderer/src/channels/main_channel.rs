@@ -181,6 +181,16 @@ pub struct MainChannel {
     /// writer task's queue. Mirrored into
     /// `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
+    /// Per-opcode receive counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent unrecognised receive opcode.
+    last_unknown_opcode: Option<u16>,
+    /// Count of unrecognised receive opcodes.
+    unknown_opcode_count: u64,
     /// Shared mm_time clock — writer side. Updated from
     /// `MAIN_INIT::multi_media_time` and from
     /// `MULTI_MEDIA_TIME` messages. The display channel reads
@@ -252,6 +262,10 @@ impl MainChannel {
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
             capture_dropped_count: 0,
+            messages_recv_by_opcode: std::collections::BTreeMap::new(),
+            messages_send_by_opcode: std::collections::BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
             mm_clock,
         }
     }
@@ -646,6 +660,10 @@ impl MainChannel {
             );
         }
 
+        // Increment per-opcode recv counter before dispatch so
+        // both known and unknown opcodes are counted uniformly.
+        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+
         match msg_type {
             main_server::INIT => {
                 let init = MainInit::read(payload)?;
@@ -969,9 +987,11 @@ impl MainChannel {
                 self.maybe_send_announce_capabilities().await?;
             }
 
-            _ => {
+            unknown => {
                 // Unknown opcode — log hex once per msg_type, silent on repeat.
-                logging::log_unknown_once("main", msg_type, payload);
+                logging::log_unknown_once("main", unknown, payload);
+                self.unknown_opcode_count += 1;
+                self.last_unknown_opcode = Some(unknown);
             }
         }
 
@@ -1002,6 +1022,10 @@ impl MainChannel {
         snap.mm_time_now = self.mm_clock.now();
         snap.mm_time_set_count = self.mm_clock.set_count();
         snap.last_mm_time_set_ts_secs = self.mm_clock.last_set_ts_secs();
+        snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+        snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+        snap.last_unknown_opcode = self.last_unknown_opcode;
+        snap.unknown_opcode_count = self.unknown_opcode_count;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1411,6 +1435,8 @@ impl MainChannel {
             logging::log_message("sent", "main", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("main", msg_type, msg_name, data);
+        // Increment per-opcode send counter here — single send path.
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         let result = self.send(data).await;
         self.update_snapshot();
         result

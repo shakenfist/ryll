@@ -302,6 +302,22 @@ pub struct InputsSnapshot {
     pub last_client_keepalive_send_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode. Gives a complete picture of what message
+    /// types the server has sent on this channel.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps that
+    /// `warn_once` would otherwise swallow silently.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
 }
 
 /// Summary of a cached cursor shape.
@@ -337,6 +353,22 @@ pub struct CursorSnapshot {
     pub last_ping_recv_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode. Gives a complete picture of what message
+    /// types the server has sent on this channel.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps that
+    /// `warn_once` would otherwise swallow silently.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
 }
 
 /// Snapshot of the main channel's mutable state.
@@ -389,6 +421,22 @@ pub struct MainSnapshot {
     pub last_client_keepalive_send_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode. Gives a complete picture of what message
+    /// types the server has sent on this channel.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps that
+    /// `warn_once` would otherwise swallow silently.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
 }
 
 /// Generic snapshot for non-critical channels (playback,

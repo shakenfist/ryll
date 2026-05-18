@@ -79,6 +79,16 @@ pub struct InputsChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
+    /// Per-opcode receive counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent unrecognised receive opcode.
+    last_unknown_opcode: Option<u16>,
+    /// Count of unrecognised receive opcodes.
+    unknown_opcode_count: u64,
     /// Most recent KEY_MODIFIERS value we've sent. Restated by
     /// the idle keepalive (Phase 02 K1 fix) with the same value
     /// to keep the inputs channel non-idle without changing
@@ -147,6 +157,10 @@ impl InputsChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
+            messages_recv_by_opcode: std::collections::BTreeMap::new(),
+            messages_send_by_opcode: std::collections::BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
             last_modifiers_sent: 0,
             last_activity: tokio::time::Instant::now(),
             client_keepalive_send_count: 0,
@@ -402,6 +416,10 @@ impl InputsChannel {
             );
         }
 
+        // Increment per-opcode recv counter before dispatch so
+        // both known and unknown opcodes are counted uniformly.
+        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+
         match msg_type {
             inputs_server::INIT => {
                 debug!("inputs: init received");
@@ -499,9 +517,11 @@ impl InputsChannel {
                 self.repaint_notify.notify_one();
             }
 
-            _ => {
+            unknown => {
                 // Unknown opcode — log hex once per msg_type, silent on repeat.
-                logging::log_unknown_once("inputs", msg_type, payload);
+                logging::log_unknown_once("inputs", unknown, payload);
+                self.unknown_opcode_count += 1;
+                self.last_unknown_opcode = Some(unknown);
             }
         }
 
@@ -833,6 +853,10 @@ impl InputsChannel {
         snap.client_keepalive_send_count = self.client_keepalive_send_count;
         snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+        snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+        snap.last_unknown_opcode = self.last_unknown_opcode;
+        snap.unknown_opcode_count = self.unknown_opcode_count;
     }
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
@@ -870,6 +894,8 @@ impl InputsChannel {
             logging::log_message("sent", "inputs", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("inputs", msg_type, msg_name, data);
+        // Increment per-opcode send counter here — single send path.
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         let result = self.send(data).await;
         self.update_snapshot();
         result
