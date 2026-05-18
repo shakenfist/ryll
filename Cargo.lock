@@ -5718,6 +5718,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "jpeg-decoder",
+ "libloading",
  "lz4_flex",
  "mozjpeg",
  "objc2-core-foundation",

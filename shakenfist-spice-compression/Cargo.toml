@@ -88,3 +88,13 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
 ] }
+
+# Linux-only: VA-API JPEG decoder backend probed via dlopen.
+# `libloading` is the safe wrapper around dlopen/dlsym. We
+# deliberately do NOT add libva as a link-time dependency — the
+# entire point of `VaapiDecoder` is one Linux binary that adapts
+# at runtime to whatever libva (if any) is installed. Picked up
+# only on Linux; other Unix-like targets fall through to the
+# mozjpeg / pure-Rust chain.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
