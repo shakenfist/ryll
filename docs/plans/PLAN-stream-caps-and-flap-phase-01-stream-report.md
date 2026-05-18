@@ -64,11 +64,11 @@ Out of scope for this phase:
 - The "unsupported codec" special-case signal
   (`num_frames == 0, num_drops == UINT32_MAX`) for orphan
   STREAM_DATA. We count orphans but don't reply yet. The signal
-  matters when we accept multi-codec streams (phase 3), so we
+  matters when we accept multi-codec streams (phase 4), so we
   fold it in there alongside H.264 decode failures.
 - Adaptive UI surfacing of report cadence — `channel-state.json`
   is enough for now.
-- Cross-validation against virt-viewer / spice-gtk. The phase 3
+- Cross-validation against virt-viewer / spice-gtk. The phase 4
   plan owns that test; we don't need it for STREAM_REPORT
   alone.
 
@@ -276,7 +276,7 @@ Also add to `DisplaySnapshot` aggregate:
 
 ```rust
 pub stream_reports_sent_total: u64,
-pub stream_reports_unsupported_signals_sent: u64,  // for phase 3 — initialised to 0
+pub stream_reports_unsupported_signals_sent: u64,  // for phase 4 — initialised to 0
 ```
 
 `MainSnapshot` gains:
@@ -305,7 +305,7 @@ Logging: extend `shakenfist-spice-protocol/src/logging.rs` so the new opcode pri
 | 1D | medium | sonnet | none | **STREAM_ACTIVATE_REPORT handler.** Replace the no-op `debug!` at `shakenfist-spice-renderer/src/channels/display.rs:1317`. Parse the 16-byte payload: `(stream_id, unique_id, max_window_size, timeout_ms)`. Look up the matching `StreamState` and set `report_is_active = true; report_unique_id = unique_id; report_max_window_size = max_window_size; report_timeout_ms = timeout_ms`. Reset rolling counters to zero. Log at INFO: `"display: stream_activate_report: id={} unique_id={} window={} timeout_ms={}"`. If no matching stream, log a `warn!` (mirrors the existing `stream_data` orphan path) and otherwise no-op. Extend `StreamState` (display.rs:136) and `StreamSnapshot` (snapshots.rs) with the new fields per *Design notes / Per-stream report state additions* and *Snapshot additions*; default all to zero / false / None. Update `stream_state_to_snapshot` (display.rs) to copy them. Update the snapshot-serialisation test in `ryll/src/bugreport.rs::test_display_snapshot_serialises` to populate and assert each new field. Verify `make build && make test && make lint`. |
 | 1E | high | opus | none | **Per-frame report counters and trigger predicate.** In `display.rs::STREAM_DATA` handler (after step 1D & 1C), once `frame_mm_time` is in scope and `stream.report_is_active` is true, update the rolling counters per the trigger pseudocode in *Design notes / Trigger predicate*. Use modular `i32` subtraction throughout: `(a as i64).wrapping_sub(b as i64) as i32`. Introduce `const STREAM_REPORT_DROP_SEQ_LEN_LIMIT: u32 = 3;` near `MAX_RECENT_DESTROYED_STREAMS`. Evaluate the predicate after updates; if true, call `self.send_stream_report(stream_id).await?` (built in step 1F) and reset rolling counters. **Important**: the predicate is evaluated *whether or not* MJPEG decode succeeded — a dropped or undecodable frame still counts toward `report_num_frames`. Add a focused unit test that drives the predicate with a struct-of-counters helper to assert each of the three OR branches independently (window, timeout, drop-seq). **Why opus**: the state machine is small but every field has a subtle "reset on send" / "carry across frames" boundary; spice-gtk's implementation took several years to settle. Getting wraparound and signed handling right matters. |
 | 1F | high | opus | none | **STREAM_REPORT marshal + send.** Add `async fn send_stream_report(&mut self, stream_id: u32) -> Result<()>` on `DisplayChannel`. Build the 32-byte LE payload per *Design notes / Wire formats*. Use `last_frame_delay` computed at send time as `(report_end_frame_mm_time as i64).wrapping_sub(mm_clock.now() as i64) as i32`. `audio_delay = u32::MAX` always for now (out of scope). Use the existing `send_with_log(display_client::STREAM_REPORT, &msg)` send path; the logging name was added in step 1A. After send: increment `stream.report_send_count`, set `last_report_sent_ts_secs`, copy `report_num_frames` / `report_num_drops` / `last_frame_delay` into the `last_report_*` mirrors, then zero the rolling counters. Also bump `self.stream_reports_sent_total`. Add a wire-format round-trip unit test: build a known-input report, parse back the 32 bytes, assert every field. Use the same little-endian helpers the rest of the channel does. Verify `make build && make test && make lint`. **Why opus**: send path mirrors several existing channels but the post-send reset is easy to get wrong; the wire-format test must be exact. |
-| 1G | low | haiku | none | **Snapshot test fields + aggregate counter.** Extend `DisplaySnapshot` with `stream_reports_sent_total: u64` and `stream_reports_unsupported_signals_sent: u64` (the latter initialised to 0 — written in phase 3). Wire both through `update_snapshot` in `display.rs`. Extend the `test_display_snapshot_serialises` test in `ryll/src/bugreport.rs` to assert these appear in the JSON output. Verify `make build && make test && make lint`. |
+| 1G | low | haiku | none | **Snapshot test fields + aggregate counter.** Extend `DisplaySnapshot` with `stream_reports_sent_total: u64` and `stream_reports_unsupported_signals_sent: u64` (the latter initialised to 0 — written in phase 4). Wire both through `update_snapshot` in `display.rs`. Extend the `test_display_snapshot_serialises` test in `ryll/src/bugreport.rs` to assert these appear in the JSON output. Verify `make build && make test && make lint`. |
 
 Commits: one per step (1A through 1G). The commit-message
 template at the repo root should be used; each commit message
@@ -347,7 +347,7 @@ Automated:
 
 `ARCHITECTURE.md` lists the display channel capabilities; this
 phase adds `STREAM_REPORT (4)` to that table. Strictly speaking
-that's phase 7's job, but the implementing agent for step 1A
+that's phase 8's job, but the implementing agent for step 1A
 should note the entry needs updating later if it edits docs
 adjacent to the cap list.
 

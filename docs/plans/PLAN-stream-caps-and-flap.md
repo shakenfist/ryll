@@ -134,10 +134,36 @@ Of these, only the agent-responsiveness probe would add new
 diagnostic signal. Worth a small follow-up after this plan;
 not in scope here.
 
+### Update from test session 002b (post-phase-1)
+
+The first dogfood session under the new STREAM_REPORT
+instrumentation (`test-session-002b`, ryll commit `241ba13f`)
+ran against a larger 2048×1152 instance and surfaced a
+distinct symptom: drag/resize gestures are unresponsive even
+without video playback. The per-stream snapshot data this
+phase-1 work added pins the cause: MJPEG decode in the
+pure-Rust `jpeg-decoder` crate takes 76–175 ms per frame at
+2048×1152, so frames arrive late
+(`last_report_last_frame_delay: -142 to -504 ms` across eight
+of ten destroyed streams), the spice-server's streaming
+heuristic loses confidence, and the stream gets destroyed
+within 2 seconds. During the long gaps between streams, the
+screen visibly freezes. Network is clean (0 retransmits,
+27 KB average packet size), client CPU is idle (process 0%),
+and the user's host-side `top` reading on sf-4 agreed —
+nothing is CPU-bound at the wire level.
+
+This pushed a new piece of work into the plan: a per-platform
+JPEG decoder selector (phase 3, ahead of the H.264 work in
+phase 4) so we close the decode-latency gap on every platform
+before adding more codecs on top.
+
 ## Mission and problem statement
 
 Implement four SPICE display capabilities that ryll should
-advertise and use, and add a UI signal that surfaces the
+advertise and use, replace the pure-Rust MJPEG decoder with a
+per-platform optimal selector (driven by session 002b's
+finding above), and add a UI signal that surfaces the
 spice-server's stream-flapping behaviour to operators triaging
 "video doesn't play" reports.
 
@@ -151,19 +177,27 @@ In priority order:
    images from the server. Modest bandwidth/CPU win on the
    static-UI Zlib/GLZ path. `lz4_flex` or similar is the
    obvious decoder choice.
-3. **`MULTI_CODEC` + `CODEC_MJPEG` + `CODEC_H264` (caps 8/9/11)**
+3. **Fast per-platform MJPEG decode** — replace the pure-Rust
+   `jpeg-decoder` crate with a runtime-selected best-of-breed
+   decoder per platform (ImageIO on macOS, WIC on Windows,
+   VA-API on Linux with vendored libjpeg-turbo as the always-
+   available baseline, pure-Rust as the universal fallback).
+   Inserted ahead of the codec work after session-002b
+   evidence that pure-Rust JPEG decode at 2048×1152 is the
+   dominant client-side bottleneck.
+4. **`MULTI_CODEC` + `CODEC_MJPEG` + `CODEC_H264` (caps 8/9/11)**
    — advertise multi-codec, keep MJPEG as fallback, decode H.264
    stream data via `openh264` (already in tree). Significantly
    reduces bandwidth and may stabilise the server's stream
    lifecycle for video workloads.
-4. **`PREF_COMPRESSION` + `PREF_VIDEO_CODEC_TYPE` (caps 6/12)** —
+5. **`PREF_COMPRESSION` + `PREF_VIDEO_CODEC_TYPE` (caps 6/12)** —
    send the corresponding preference messages once on link-up so
    the server picks the codec/compression we prefer. Cheap once
    the multi-codec path exists.
 
 And one UI feature:
 
-5. **Stream-flap notification** — detect rapid create/destroy
+6. **Stream-flap notification** — detect rapid create/destroy
    cycles in the per-stream snapshot data we just landed, and
    raise a one-shot notification (in the existing
    `NotificationStore`) so the operator knows the SPICE server
@@ -181,7 +215,7 @@ marked **decide in phase** belong in the phase plan.
    or VP8 first?** `openh264` is already pulled in; adding it
    adds no new dependencies. VP8 would require `libvpx` or a
    pure-Rust decoder (none mature). **Recommendation: H.264
-   only in phase 3; defer VP8/VP9/H265 to follow-up.** Capture
+   only in phase 4; defer VP8/VP9/H265 to follow-up.** Capture
    that explicitly in the plan.
 
 2. **(decide now) Are we OK adding `openh264` as a runtime
@@ -204,14 +238,14 @@ marked **decide in phase** belong in the phase plan.
    `shakenfist-spice-compression` crate. The phase plan needs to
    identify the right hook.
 
-5. **(decide in phase 3) Where does H.264 decode run — inline in
+5. **(decide in phase 4) Where does H.264 decode run — inline in
    the display-channel task, or on a dedicated `spawn_blocking`
    task like the encoder?** H.264 decode is meaningfully heavier
    than MJPEG. Inline would simplify the data flow; offloaded
    would protect the channel task from stutter. Investigate in
    the phase plan.
 
-6. **(decide in phase 5) Flap-detection heuristic.** Candidates:
+6. **(decide in phase 6) Flap-detection heuristic.** Candidates:
    "N streams destroyed in M seconds with mean lifetime < T"
    (e.g. ≥3 destroys in 30 s, mean lifetime < 3 s). The phase
    plan picks the constants and the cool-down period for the
@@ -219,29 +253,32 @@ marked **decide in phase** belong in the phase plan.
    with mean lifetime < 3 s, one-shot per 60 s cool-down.**
 
 7. **(open) Should we cross-validate against virt-viewer before
-   shipping H.264?** Yes — see `Future work`. The phase 3 plan
+   shipping H.264?** Yes — see `Future work`. The phase 4 plan
    should call for a manual test against the same VM under both
    ryll and virt-viewer to confirm the flap pattern is or isn't
    shared. Cheap and informative.
 
 ## Execution
 
-Seven phases, sequenced so cheap-and-independent work lands first
-and the higher-risk codec work lands after we've validated
-client-side capability handling end-to-end with `STREAM_REPORT`.
-Phase 6 (vdagent probe) is independent of the cap work and could
-run at any time; it's listed last-but-one so phase 7 docs cover
-it too.
+Eight phases, sequenced so cheap-and-independent work lands
+first; per-platform decoder work lands before multi-codec so
+the JPEG decode floor is healthy before we add H.264; vdagent
+probe is independent and sits late so the documentation phase
+covers it. Phase 3 (fast JPEG decode) was inserted after
+session 002b showed that MJPEG decode in the pure-Rust
+`jpeg-decoder` crate is the dominant bottleneck on macOS at
+2048×1152 (76–175 ms per frame).
 
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
 | 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; awaiting smoke test (2C) |
-| 3. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-03-h264.md | Not started |
-| 4. Preference messages | PLAN-stream-caps-and-flap-phase-04-pref-messages.md | Not started |
-| 5. Flap notification | PLAN-stream-caps-and-flap-phase-05-flap-notification.md | Not started |
-| 6. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-06-vdagent-probe.md | Not started |
-| 7. Documentation | PLAN-stream-caps-and-flap-phase-07-docs.md | Not started |
+| 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Planned |
+| 4. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-04-h264.md | Not started |
+| 5. Preference messages | PLAN-stream-caps-and-flap-phase-05-pref-messages.md | Not started |
+| 6. Flap notification | PLAN-stream-caps-and-flap-phase-06-flap-notification.md | Not started |
+| 7. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-07-vdagent-probe.md | Not started |
+| 8. Documentation | PLAN-stream-caps-and-flap-phase-08-docs.md | Not started |
 
 Per-phase intent:
 
@@ -267,7 +304,27 @@ Per-phase intent:
   **medium** (well-defined; the only judgment call is hook
   placement).
 
-- **Phase 3 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
+- **Phase 3 — Fast JPEG decode.** Replace the pure-Rust
+  `jpeg-decoder` crate (currently called from
+  `shakenfist-spice-renderer/src/channels/display.rs::decode_mjpeg_frame`)
+  with a platform-optimal selector chain: ImageIO on macOS,
+  WIC on Windows, VA-API (dlopen-probed) on Linux with
+  vendored libjpeg-turbo (`mozjpeg` crate) as the always-
+  available baseline, and pure-Rust as the universal
+  fallback. Driven by session 002b's finding that MJPEG
+  decode at 2048×1152 takes 76–175 ms in the pure-Rust path,
+  causing frames to arrive late, the spice-server's
+  streaming heuristic to lose confidence, and the user to
+  see frozen displays between streams. New `JpegDecoder`
+  trait + `best_for_platform()` selector in
+  `shakenfist-spice-compression`; per-stream
+  `mjpeg_decoder_backend` and aggregate
+  `mjpeg_decode_recent_*` fields in bug reports. Recommended
+  planning effort: **high** (cross-platform, four backend
+  implementations, COM threading on Windows, dlopen + JPEG
+  header parsing for VA-API).
+
+- **Phase 4 — Multi-codec + H.264.** Advertise caps 8 (MULTI_CODEC),
   9 (CODEC_MJPEG), and 11 (CODEC_H264). Hook H.264 decoding into
   the existing `STREAM_DATA` / `STREAM_DATA_SIZED` path keyed on
   `StreamState::codec_type`. Use `openh264` (already in
@@ -279,7 +336,7 @@ Per-phase intent:
   threading, codec-specific framing, and the first time we add
   a video codec to the GUI binary).
 
-- **Phase 4 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
+- **Phase 5 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
   (opcode 103) and `display_client::PREFERRED_VIDEO_CODEC_TYPE`
   (opcode 104). Advertise caps 6 and 12. Send the preference
   messages once on link establishment. spice-gtk does this in
@@ -287,7 +344,7 @@ Per-phase intent:
   planning effort: **medium** (mechanical once the cap plumbing
   is in place from earlier phases).
 
-- **Phase 5 — Flap notification.** Add a small per-channel
+- **Phase 6 — Flap notification.** Add a small per-channel
   watcher (likely a tokio task or a tick inside
   `update_snapshot`) that examines the `streams_recently_destroyed`
   ring. If ≥3 streams destroyed in the last 30 s with mean
@@ -303,7 +360,7 @@ Per-phase intent:
   heuristic is well-defined; UI integration follows existing
   notification patterns).
 
-- **Phase 6 — Vdagent responsiveness probe.** The spice in-guest
+- **Phase 7 — Vdagent responsiveness probe.** The spice in-guest
   agent has no diagnostic message types of its own (see the
   *On vdagent diagnostics* note in `Situation`), but two
   client → agent messages are acknowledged by `VD_AGENT_REPLY`:
@@ -335,11 +392,11 @@ Per-phase intent:
   Optional UI: raise a `NotifySeverity::Warn` notification if
   `outstanding_agent_request_count > 0` for more than 5 s
   after a probe send. Mirror the cool-down pattern from
-  phase 5 to avoid noise. Recommended planning effort:
+  phase 6 to avoid noise. Recommended planning effort:
   **medium** (small surface area; the only judgment call is
   probe cadence and the no-op assumption).
 
-- **Phase 7 — Documentation.** Update `ARCHITECTURE.md`
+- **Phase 8 — Documentation.** Update `ARCHITECTURE.md`
   capability tables, `AGENTS.md` reference list if a new
   external ref was added, `README.md` if user-visible behaviour
   changed, and add a "video troubleshooting" section to
@@ -389,7 +446,7 @@ in the main tree.
 
 Phase plans should be created at the effort level recommended
 in the phase summary above. Most of this plan's phases are
-high or medium effort; phase 6 is low.
+high or medium effort; phase 8 is low.
 
 ### Step-level guidance
 
@@ -446,6 +503,13 @@ all of the following are true:
   `STREAM_REPORT` replies whose contents match spice-gtk's
   semantics. The reports are visible in `channel-state.json`
   (new per-stream `last_report_*` fields).
+* `shakenfist-spice-compression::jpeg::best_for_platform()`
+  selects ImageIO on macOS, WIC on Windows, VA-API (when
+  available) or libjpeg-turbo on Linux. The active backend is
+  visible in `channel-state.json::streams_active[*].mjpeg_decoder_backend`,
+  and `mjpeg_decode_recent_mean_us` is well under the prior
+  pure-Rust baseline on each platform (target ≤30 ms at
+  2048×1152 on macOS Apple Silicon).
 * The server can negotiate H.264 stream encoding with ryll;
   H.264 stream_data frames are decoded and painted with
   per-stream counters incrementing in line with frames_received.
@@ -472,10 +536,10 @@ Items deliberately deferred from this plan:
   than H.264 once that is in. Reconsider if the H.264 path is
   consistently chosen by the server but a workload (e.g. an
   H.265-only camera feed) shows up.
-* **Stream-flap heuristic tuning.** Phase 5 starts with the
+* **Stream-flap heuristic tuning.** Phase 6 starts with the
   ≥3-in-30 s rule; we may want to revisit constants once we
   have field experience.
-* **Vdagent probe heuristic tuning.** Phase 6 starts with a
+* **Vdagent probe heuristic tuning.** Phase 7 starts with a
   30 s probe cadence and a 5 s outstanding-reply timeout; the
   right values depend on what we see in the field.
 * **`GL_SCANOUT` cap.** Only useful if we add a zero-copy GL

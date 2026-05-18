@@ -223,7 +223,7 @@ pub struct DisplaySnapshot {
     pub stream_reports_sent_total: u64,
     /// Cumulative count of "unsupported codec" wildcard reports
     /// (num_frames=0, num_drops=UINT32_MAX) sent to the server.
-    /// Currently always zero; written by phase 3 when we accept
+    /// Currently always zero; written by phase 4 when we accept
     /// multi-codec streams and need to tell the server to give
     /// up on one.
     pub stream_reports_unsupported_signals_sent: u64,

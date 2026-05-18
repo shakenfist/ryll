@@ -2654,7 +2654,7 @@ impl DisplayChannel {
         snap.stream_data_orphan_count = self.stream_data_orphan_count;
         snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
         snap.stream_reports_sent_total = self.stream_reports_sent_total;
-        snap.stream_reports_unsupported_signals_sent = 0; // phase 3 writes this
+        snap.stream_reports_unsupported_signals_sent = 0; // phase 4 writes this
     }
 
     /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte
