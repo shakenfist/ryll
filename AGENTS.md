@@ -629,10 +629,16 @@ applies to all future webrtc-rs work:
   On Linux, CI installs `libopus-dev` so audiopus_sys dynamic-links
   libopus and the `.deb` declares `libopus0` via cargo-deb's `$auto`;
   on macOS and Windows audiopus_sys source-builds libopus for a
-  self-contained binary. CI also runs `tools/web-smoke.sh` (plain +
-  `--tls` variants) on Linux to verify `--web` mode startup and
-  graceful shutdown. PRs also receive an automated code review via
-  the shared `shakenfist/actions/review-pr-with-claude` action.
+  self-contained binary. No system libraries are required at runtime for
+  MJPEG decoding — libjpeg-turbo is vendored via `mozjpeg`, and VA-API is
+  probed dynamically via `dlopen` on Linux, gracefully absent if the system
+  lacks libva or GPU hardware. To enable VA-API hardware acceleration on
+  Linux systems with compatible GPUs, install `libva-dev` (or distro
+  equivalent) and ensure a render node is available at `/dev/dri/renderD128`.
+  CI also runs `tools/web-smoke.sh` (plain + `--tls` variants) on Linux to
+  verify `--web` mode startup and graceful shutdown. PRs also receive an
+  automated code review via the shared `shakenfist/actions/review-pr-with-claude`
+  action.
 - **Bot-triggered workflows** for PR automation:
   `@shakenfist-bot please re-review`, `please address comments`,
   `please retest`
@@ -763,6 +769,7 @@ partial state.
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
 | rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |
 | image | JPEG decoding (with `jpeg` feature only) |
+| mozjpeg | Vendored libjpeg-turbo for cross-platform MJPEG decoding. No runtime system dependency; built as part of the ryll binary. Used as fallback when OS-native decoders (ImageIO/WIC/VA-API) are unavailable. |
 | serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
 | zip | Zip file output for bug reports |
 | png | PNG encoding for bug report screenshots |

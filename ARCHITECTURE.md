@@ -754,7 +754,18 @@ Values from `spice-protocol/spice/enums.h`:
 MJPEG is handled separately: it is not an `ImageType` but a streaming video
 codec delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages. The codec
 type byte in the stream header selects MJPEG (value 1). Frames are decoded
-inline in `display.rs` using the same JPEG path as `ImageType::Jpeg`.
+inline in `display.rs` using a platform-optimized JPEG decoder selected at
+session start via `shakenfist_spice_compression::jpeg::best_for_platform()`.
+
+**JPEG decoder selection** runs once per display channel at startup and
+selects the fastest available decoder based on the host OS and available
+hardware:
+- **macOS**: ImageIO (uses Apple Silicon's dedicated media block when available)
+- **Windows**: WIC (uses hardware codec support where available)
+- **Linux**: VA-API (hardware-accelerated JPEG via libva, probed at runtime via dlopen; gracefully unavailable on systems without VA-API drivers)
+- **Fallback**: libjpeg-turbo via the `mozjpeg` crate (vendored, no runtime dependency), then pure-Rust `jpeg-decoder` crate as a last resort
+
+The active decoder backend is exposed in the channel snapshot as `mjpeg_decoder_backend` so bug reports identify which path was used. Aggregate decode-duration statistics (min/max/mean) are tracked per display channel and included in bug reports for performance analysis.
 
 ### Wire format differences
 

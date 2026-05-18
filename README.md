@@ -8,7 +8,7 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Full draw-op coverage** - Handles `DRAW_FILL`, `DRAW_OPAQUE`, `DRAW_COPY`, `DRAW_BLEND`, `DRAW_BLACKNESS`, `DRAW_WHITENESS`, `DRAW_INVERS`, `DRAW_TRANSPARENT`, `DRAW_ALPHA_BLEND`, and `COPY_BITS`. BIOS, GRUB, and kernel-console rendering now paints correctly (solid backgrounds, clean scroll regions). Deferred ops (`DRAW_ROP3`, `DRAW_STROKE`, `DRAW_TEXT`, `DRAW_COMPOSITE`) warn once per session with a first-occurrence hex dump so gaps are visible without flooding the log
-- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming with hardware-accelerated decoding where available (ImageIO on macOS, WIC on Windows, VA-API on Linux) and automatic fallback to software decoders
 - **Audio playback** - SPICE playback channel with raw PCM and Opus codec support; lock-free ring buffer to dedicated audio thread via cpal
 - **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
 - **Window auto-fit** - The ryll window tracks the guest's display surface size: every primary `SURFACE_CREATE`
@@ -329,7 +329,7 @@ native TLS) have landed. Quick-start: `docs/web-frontend.md`.
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
-| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel), per-platform MJPEG decoders (ImageIO/WIC/VA-API with fallback to libjpeg-turbo and pure-Rust decoder); see `docs/plans/PLAN-stream-caps-and-flap.md` for platform decoder details |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
