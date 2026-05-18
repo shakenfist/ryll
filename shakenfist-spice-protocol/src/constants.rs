@@ -127,11 +127,14 @@ pub mod capabilities {
     // Advertise the caps that affect how the guest QXL driver
     // renders.  Without COMPOSITE the guest falls back to a
     // software path that produces far fewer display updates.
+    // LZ4_COMPRESSION allows the server to choose LZ4 over Zlib
+    // for static-UI regions, improving bandwidth efficiency.
     pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
         | DISPLAY_MONITORS_CONFIG
         | DISPLAY_COMPOSITE
         | DISPLAY_A8_SURFACE
-        | DISPLAY_STREAM_REPORT;
+        | DISPLAY_STREAM_REPORT
+        | DISPLAY_LZ4_COMPRESSION;
 
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
