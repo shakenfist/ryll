@@ -9,12 +9,19 @@ description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ
 readme = "README.md"
 
 [features]
-default = ["quic", "glz", "lz", "lz4", "jpeg"]
+default = ["quic", "glz", "lz", "lz4", "jpeg", "mozjpeg"]
 quic = []
 glz = ["dep:tokio"]
 lz = []
 lz4 = ["dep:lz4_flex"]
 jpeg = ["dep:jpeg-decoder"]
+# Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
+# crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
+# default, which builds a vendored libjpeg-turbo with SIMD —
+# no runtime system dependency on libjpeg. Implies `jpeg` so the
+# `JpegDecoder` trait surface exists; the pure-Rust
+# `jpeg-decoder` crate remains the universal fallback.
+mozjpeg = ["dep:mozjpeg", "jpeg"]
 
 [dependencies]
 anyhow = "1"
@@ -23,3 +30,10 @@ tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.13", optional = true }
 jpeg-decoder = { version = "0.3", optional = true }
+# Pinned to 0.10.13 — the mozjpeg crate's surface has shifted
+# across minor versions, so we lock to a specific release we have
+# code paths for. Bump deliberately when the API is reverified.
+# `with_simd` enables the SIMD-accelerated build of the vendored
+# libjpeg-turbo via `mozjpeg-sys`, so the produced binary has no
+# runtime libjpeg-turbo dependency.
+mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }

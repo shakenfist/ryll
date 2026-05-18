@@ -39,6 +39,9 @@ pub use glz::{decompress_glz, GlzDictionary};
 #[cfg(feature = "jpeg")]
 pub use jpeg::{best_for_platform, DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
 
+#[cfg(feature = "mozjpeg")]
+pub use jpeg::MozJpegDecoder;
+
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;
 
