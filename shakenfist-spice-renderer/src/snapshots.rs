@@ -670,9 +670,17 @@ pub struct UsbredirSnapshot {
     pub client_caps: u32,
 }
 
-/// See `PlaybackSnapshot`.
+/// Snapshot of the webdav channel's mutable state.
+///
+/// The transport-common fields mirror the eight-field baseline
+/// shared by all channels. Baseline additions
+/// (`messages_*_by_opcode`, `unknown_opcode_count`,
+/// `last_unknown_opcode`) follow the 4B pattern. HTTP/WebDAV
+/// specifics surface request and session activity so an operator
+/// can confirm the spice-vmc bridge is being exercised.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct WebdavSnapshot {
+    // --- transport common (8 fields) ---
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub last_recv_ts_secs: Option<f64>,
@@ -682,6 +690,53 @@ pub struct WebdavSnapshot {
     pub last_ping_recv_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+
+    // --- baseline additions (per 4B pattern) ---
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm. Surfaces protocol-coverage gaps that
+    /// `warn_once` would otherwise swallow silently.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
+
+    // --- HTTP / WebDAV specifics ---
+    /// Monotonic count of HTTP connections accepted from the
+    /// guest's spice-webdavd daemon since session start. Each
+    /// new mux client represents one HTTP/1.1 connection; for
+    /// typical WebDAV clients (which open one connection per
+    /// request) this is a good proxy for HTTP requests
+    /// received.
+    pub http_requests_received: u64,
+    /// Total bytes of HTTP response data forwarded to the
+    /// guest (mux-frame payload bytes, i.e. the raw HTTP
+    /// response bytes including headers). Accumulated across
+    /// all sessions.
+    pub http_response_bytes_sent: u64,
+    /// Number of currently-open mux HTTP connections (one
+    /// per guest-side spice-webdavd client stream).
+    pub active_session_count: u32,
+    /// Session-relative seconds when the most recent HTTP
+    /// connection was opened (new mux client). `None` until
+    /// the first connection arrives.
+    pub last_request_ts_secs: Option<f64>,
+    /// Session-relative seconds when the most recent HTTP
+    /// response chunk was forwarded to the guest. `None`
+    /// until the first response is sent.
+    pub last_response_ts_secs: Option<f64>,
+    /// Count of `COMPRESSED_DATA` frames dropped because the
+    /// declared uncompressed size exceeded the 64 MiB safety
+    /// cap. A non-zero value indicates a misbehaving or
+    /// malicious server.
+    pub decompressed_size_limit_exceeded_count: u64,
 }
 
 /// Holds every per-channel snapshot `Arc<Mutex<T>>`. Includes

@@ -2316,6 +2316,53 @@ mod tests {
     }
 
     #[test]
+    fn test_webdav_snapshot_serialises() {
+        let mut snap = WebdavSnapshot {
+            bytes_in: 4096,
+            bytes_out: 2048,
+            ping_recv_count: 2,
+            pong_send_count: 2,
+            writer_dropped_count: 0,
+            unknown_opcode_count: 1,
+            last_unknown_opcode: Some(0xBEEF),
+            http_requests_received: 3,
+            http_response_bytes_sent: 65536,
+            active_session_count: 1,
+            last_request_ts_secs: Some(0.5),
+            last_response_ts_secs: Some(0.9),
+            decompressed_size_limit_exceeded_count: 1,
+            ..Default::default()
+        };
+        snap.messages_recv_by_opcode.insert(1, 10);
+        snap.messages_recv_by_opcode.insert(5, 2);
+        snap.messages_send_by_opcode.insert(3, 7);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common.
+        assert!(json.contains("\"bytes_in\": 4096"));
+        assert!(json.contains("\"bytes_out\": 2048"));
+        assert!(json.contains("\"ping_recv_count\": 2"));
+        assert!(json.contains("\"writer_dropped_count\": 0"));
+
+        // Baseline additions.
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"1\": 10"));
+        assert!(json.contains("\"5\": 2"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 7"));
+        assert!(json.contains("\"last_unknown_opcode\": 48879"));
+        assert!(json.contains("\"unknown_opcode_count\": 1"));
+
+        // HTTP / WebDAV specifics.
+        assert!(json.contains("\"http_requests_received\": 3"));
+        assert!(json.contains("\"http_response_bytes_sent\": 65536"));
+        assert!(json.contains("\"active_session_count\": 1"));
+        assert!(json.contains("\"last_request_ts_secs\": 0.5"));
+        assert!(json.contains("\"last_response_ts_secs\": 0.9"));
+        assert!(json.contains("\"decompressed_size_limit_exceeded_count\": 1"));
+    }
+
+    #[test]
     fn test_app_snapshot_serialises() {
         let mut snap = AppSnapshot {
             fps: 59.9,
