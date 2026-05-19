@@ -117,7 +117,7 @@ Older libvirt templates often include:
 
 The `always` setting forces the server's "wan" code path on every
 image, regardless of what the client advertises. This is what causes
-ryll's `LZ4_COMPRESSION` and (once phase 5 lands) `PREF_COMPRESSION`
+ryll's `LZ4_COMPRESSION` and (once phase 7 lands) `PREF_COMPRESSION`
 hints to be silently ignored — the server has been told "I don't care
 what the client wants, always use this."
 
@@ -186,7 +186,7 @@ in the guest (`apt install spice-vdagent` on Debian/Ubuntu;
   guest-side resolution change) does not work.
 
 Ryll's bug-report `MainSnapshot::agent_request_count` and related
-fields (phase 7 of the stream-caps work, when it lands) report
+fields (phase 9 of the stream-caps work, when it lands) report
 whether the agent is responding to probes. A `0` agent reply count
 in a bug report usually means `spice-vdagent` is not installed or
 not running.
@@ -307,7 +307,7 @@ The server makes the encoding decisions. Ryll can:
 - Advertise capabilities (`LZ4_COMPRESSION`, `STREAM_REPORT`, etc.)
   so the server *can* use efficient paths.
 - Send preference hints (`PREF_COMPRESSION`, `PREF_VIDEO_CODEC_TYPE`
-  — phase 5 of the stream-caps work) to bias server choices.
+  — phase 7 of the stream-caps work) to bias server choices.
 - Decode whatever arrives as fast as the host hardware allows.
 
 But ryll cannot override a server config that says
