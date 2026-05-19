@@ -282,7 +282,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
-| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | Not started |
+| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | Code landed (12A-12C); 12D operator smoke test pending (re-run 002h workload with --image-cache-cap-mib 256 and confirm the cap holds across a long session) |
 | 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Not started |
 
 Per-phase intent:
