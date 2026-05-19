@@ -276,7 +276,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G); 3H per-platform smoke test pending |
 | 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Complete (4G verified in session 002g: `data_packets_received == data_packets_decoded`, no decode failures, underruns visible — instrumentation distinguishes the four failure modes as designed) |
 | 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Code landed (5A-5B); 5C operator smoke test pending |
-| 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Not started |
+| 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Code landed (6A-6E); 6F operator smoke test pending (needs an H.264-capable spice-server build to actually exercise the new path) |
 | 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Not started |
 | 8. Flap notification | PLAN-stream-caps-and-flap-phase-08-flap-notification.md | Not started |
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
