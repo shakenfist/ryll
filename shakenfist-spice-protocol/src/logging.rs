@@ -509,6 +509,37 @@ pub mod message_names {
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
+
+    /// Return the human-readable name for a display channel
+    /// capability bit, or `None` if the bit position is not
+    /// known to this version of the protocol crate.
+    ///
+    /// Used by the traffic viewer to annotate capability
+    /// bitmask values with symbolic names.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use shakenfist_spice_protocol::logging::message_names;
+    /// assert_eq!(
+    ///     message_names::display_cap_name(4),
+    ///     Some("stream_report"),
+    /// );
+    /// ```
+    pub fn display_cap_name(bit: u8) -> Option<&'static str> {
+        match bit {
+            0 => Some("sized_stream"),
+            1 => Some("monitors_config"),
+            2 => Some("composite"),
+            3 => Some("a8_surface"),
+            4 => Some("stream_report"),
+            5 => Some("lz4_compression"),
+            8 => Some("multi_codec"),
+            9 => Some("codec_mjpeg"),
+            11 => Some("codec_h264"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -688,5 +719,49 @@ mod tests {
     fn display_client_stream_report_const_and_name() {
         assert_eq!(display_client::STREAM_REPORT, 102);
         assert_eq!(message_names::display_client(102), "stream_report");
+    }
+
+    // Guard against regressions where the new multi-codec display
+    // capability bit positions shift or lose their name-table
+    // entries, which would cause the traffic viewer to emit
+    // unlabelled cap bits in session logs.
+    #[test]
+    fn display_cap_name_multi_codec_bits() {
+        use crate::constants::capabilities;
+        // Verify bit positions match the constants.rs definitions.
+        assert_eq!(capabilities::DISPLAY_MULTI_CODEC, 1 << 8);
+        assert_eq!(capabilities::DISPLAY_CODEC_MJPEG, 1 << 9);
+        assert_eq!(capabilities::DISPLAY_CODEC_H264, 1 << 11);
+        // Verify the name-table returns the expected strings.
+        assert_eq!(message_names::display_cap_name(8), Some("multi_codec"),);
+        assert_eq!(message_names::display_cap_name(9), Some("codec_mjpeg"),);
+        assert_eq!(message_names::display_cap_name(11), Some("codec_h264"),);
+        // Bit 10 is not allocated (VP8 in the SPICE spec but not
+        // advertised); verify we return None for it.
+        assert_eq!(message_names::display_cap_name(10), None);
+    }
+
+    // Guard against DEFAULT_DISPLAY accidentally dropping any of the
+    // three new codec caps, which would silently stop the server
+    // from offering H.264 streams.
+    #[test]
+    fn default_display_includes_codec_caps() {
+        use crate::constants::capabilities;
+        let d = capabilities::DEFAULT_DISPLAY;
+        assert_ne!(
+            d & capabilities::DISPLAY_MULTI_CODEC,
+            0,
+            "DEFAULT_DISPLAY must include DISPLAY_MULTI_CODEC"
+        );
+        assert_ne!(
+            d & capabilities::DISPLAY_CODEC_MJPEG,
+            0,
+            "DEFAULT_DISPLAY must include DISPLAY_CODEC_MJPEG"
+        );
+        assert_ne!(
+            d & capabilities::DISPLAY_CODEC_H264,
+            0,
+            "DEFAULT_DISPLAY must include DISPLAY_CODEC_H264"
+        );
     }
 }

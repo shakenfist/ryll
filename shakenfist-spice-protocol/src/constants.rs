@@ -123,18 +123,34 @@ pub mod capabilities {
     // unconditionally (channel-display.c:976).
     pub const DISPLAY_STREAM_REPORT: u32 = 1 << 4;
     pub const DISPLAY_LZ4_COMPRESSION: u32 = 1 << 5;
+    /// Client supports multiple codecs in a single session;
+    /// required alongside DISPLAY_CODEC_* to enable codec
+    /// negotiation (SPICE_DISPLAY_CAP_MULTI_CODEC).
+    pub const DISPLAY_MULTI_CODEC: u32 = 1 << 8;
+    /// Client can decode MJPEG video streams
+    /// (SPICE_DISPLAY_CAP_CODEC_MJPEG).
+    pub const DISPLAY_CODEC_MJPEG: u32 = 1 << 9;
+    /// Client can decode H.264 video streams via openh264
+    /// (SPICE_DISPLAY_CAP_CODEC_H264).
+    pub const DISPLAY_CODEC_H264: u32 = 1 << 11;
 
     // Advertise the caps that affect how the guest QXL driver
     // renders.  Without COMPOSITE the guest falls back to a
     // software path that produces far fewer display updates.
     // LZ4_COMPRESSION allows the server to choose LZ4 over Zlib
     // for static-UI regions, improving bandwidth efficiency.
+    // MULTI_CODEC + CODEC_MJPEG + CODEC_H264 tell the server it
+    // may use H.264 for video streams (smaller on the wire than
+    // MJPEG for sustained playback).
     pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
         | DISPLAY_MONITORS_CONFIG
         | DISPLAY_COMPOSITE
         | DISPLAY_A8_SURFACE
         | DISPLAY_STREAM_REPORT
-        | DISPLAY_LZ4_COMPRESSION;
+        | DISPLAY_LZ4_COMPRESSION
+        | DISPLAY_MULTI_CODEC
+        | DISPLAY_CODEC_MJPEG
+        | DISPLAY_CODEC_H264;
 
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
