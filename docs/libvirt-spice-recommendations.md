@@ -143,6 +143,11 @@ extremes are wrong for typical desktop workloads:
   for everything else. This is the right answer for almost every
   workload.
 
+As of ryll Phase 6, both MJPEG and H.264 streams are decoded client-side.
+For sustained video playback with `streaming-video=filter`, the server will
+prefer H.264 when available, which is typically more bandwidth-efficient than
+MJPEG and results in cheaper sustained-video transmission.
+
 ### TLS channels
 
 ```xml

@@ -633,7 +633,9 @@ applies to all future webrtc-rs work:
   libopus and the `.deb` declares `libopus0` via cargo-deb's `$auto`;
   on macOS and Windows audiopus_sys source-builds libopus for a
   self-contained binary. No system libraries are required at runtime for
-  MJPEG decoding — libjpeg-turbo is vendored via `mozjpeg`, and VA-API is
+  video decoding (MJPEG/H.264) — libjpeg-turbo is vendored via `mozjpeg`,
+  H.264 is decoded via `openh264-sys2` (which builds and links libopenh264
+  from source; `cc` compiler is needed at build time), and VA-API is
   probed dynamically via `dlopen` on Linux, gracefully absent if the system
   lacks libva or GPU hardware. To enable VA-API hardware acceleration on
   Linux systems with compatible GPUs, install `libva-dev` (or distro

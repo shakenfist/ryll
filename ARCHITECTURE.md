@@ -751,19 +751,22 @@ Values from `spice-protocol/spice/enums.h`:
 |  108 | JpegAlpha        | Not implemented |
 |  109 | LZ4              | Supported (per-row compressed) |
 
-MJPEG (and eventually H.264) are handled separately: they are not `ImageType`s
-but streaming video codecs delivered via `STREAM_DATA` / `STREAM_DATA_SIZED`
-messages. The codec type byte in the stream header selects the decoder. At
-`STREAM_CREATE`, `shakenfist_spice_compression::video::for_stream(codec_type,
-jpeg_decoder)` constructs a boxed `VideoDecoder` stored on `StreamState`.
-Each `STREAM_DATA` packet is dispatched through `stream.video_decoder.decode(packet)`
-regardless of codec — the per-codec logic lives in the impl, not the dispatch.
+Streaming video codecs (MJPEG and H.264) are handled separately: they are not
+`ImageType`s but delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages.
+The codec type byte in the stream header selects the decoder. At `STREAM_CREATE`,
+`shakenfist_spice_compression::video::for_stream(codec_type, jpeg_decoder)`
+constructs a boxed `VideoDecoder` stored on `StreamState`. Each `STREAM_DATA`
+packet is dispatched through `stream.video_decoder.decode(packet)` regardless
+of codec — the per-codec logic lives in the impl, not the dispatch.
 
 Currently supported codec types:
 - `1` (MJPEG): decoded by `MJpegVideoDecoder`, which wraps the
   platform-optimised JPEG backend and maintains a DHT cache for frames
-  that omit the Huffman tables after the first.
-- H.264 (`3`): wired in phase 6B via `H264VideoDecoder` (openh264).
+  that omit the Huffman tables after the first. JPEG decoder selection
+  and architecture details are in `docs/plans/PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
+- `3` (H.264): decoded via `H264VideoDecoder` using the openh264 software
+  decoder; H.264 is typically more bandwidth-efficient than MJPEG for
+  sustained video playback.
 
 **JPEG decoder selection** (used by `MJpegVideoDecoder`) runs once per
 display channel at startup and selects the fastest available backend:

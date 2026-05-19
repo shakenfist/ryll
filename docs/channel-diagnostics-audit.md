@@ -78,9 +78,11 @@ if a future channel needs a time-ordered event log.
 
 The display channel already meets the baseline and, post phase 3, carries
 rich channel-specific instrumentation: per-stream packet/decode/frame
-counters, the active MJPEG decoder backend, recent decode-duration rings,
-STREAM_REPORT fields, and a `streams_recently_destroyed` ring that feeds
-the phase-7 flap-notification work. No additions needed in phase 4.
+counters, the active video decoder backend (exposed as `video_decoder_backend`
+per stream, e.g. "MJPEG (ImageIO)" or "H264 (openh264)"), recent decode-duration
+rings, STREAM_REPORT fields, and a `streams_recently_destroyed` ring that feeds
+the phase-7 flap-notification work. Phase 6 adds H.264 support and per-stream
+decoder backend identification. No additions needed in phase 4.
 
 ### main
 
