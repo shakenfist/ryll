@@ -8,6 +8,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::image_cache::BoundedImageCache;
 use crate::mm_clock::MmClock;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
@@ -566,7 +567,7 @@ pub struct DisplayChannel {
     /// WIC, VA-API) without changing call sites. See
     /// `PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
     jpeg_decoder: Arc<dyn JpegDecoder>,
-    image_cache: HashMap<u64, Vec<u8>>,
+    image_cache: BoundedImageCache,
     streams: HashMap<u32, StreamState>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
@@ -670,6 +671,7 @@ impl DisplayChannel {
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
+        image_cache_cap_bytes: usize,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -679,7 +681,7 @@ impl DisplayChannel {
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
             jpeg_decoder: best_for_platform(),
-            image_cache: HashMap::new(),
+            image_cache: BoundedImageCache::new(image_cache_cap_bytes),
             streams: HashMap::new(),
             capture,
             byte_counter,
@@ -1206,7 +1208,7 @@ impl DisplayChannel {
                             break;
                         }
                         let id = read_u64_le(payload, offset);
-                        if self.image_cache.remove(&id).is_some() {
+                        if self.image_cache.remove(&id) {
                             removed += 1;
                         }
                         if self.glz_dictionary.remove(&id) {
@@ -2221,7 +2223,7 @@ impl DisplayChannel {
                 }
             } else if (img_desc.flags & IMAGE_FLAGS_CACHE_ME) != 0 {
                 // Only cache non-GLZ images when the server requests it.
-                self.image_cache.insert(img.image_id, img.pixels.clone());
+                let _ = self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 
             let mut out_width = img.width;
@@ -2648,13 +2650,15 @@ impl DisplayChannel {
         let glz_bytes = self.glz_dictionary.total_bytes();
         let glz_ids = self.glz_dictionary.image_ids();
         snap.image_cache_entries = self.image_cache.len() + glz_len;
-        snap.image_cache_bytes =
-            self.image_cache.values().map(|v| v.len()).sum::<usize>() + glz_bytes;
+        snap.image_cache_bytes = self.image_cache.bytes() + glz_bytes;
         snap.image_cache_ids = {
             let mut ids: Vec<u64> = self.image_cache.keys().copied().chain(glz_ids).collect();
             ids.sort_unstable();
             ids
         };
+        snap.image_cache_evictions_total = self.image_cache.evictions_total();
+        snap.image_cache_evicted_bytes_total = self.image_cache.evicted_bytes_total();
+        snap.image_cache_cap_bytes = self.image_cache.cap_bytes() as u64;
         snap.recent_decodes = self.recent_decodes.clone();
 
         // Phase-01: cumulative decode counters and recent-window

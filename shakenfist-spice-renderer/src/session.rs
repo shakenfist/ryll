@@ -91,6 +91,7 @@ pub async fn run_connection(
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    image_cache_cap_bytes: usize,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -185,6 +186,7 @@ pub async fn run_connection(
                     shared_glz_dictionary.clone(),
                     log_config,
                     mm_clock.clone(),
+                    image_cache_cap_bytes,
                 );
                 handles.push((
                     ChannelType::Display,
@@ -415,6 +417,7 @@ pub async fn run_headless(
     notifications: Arc<dyn NotificationSink>,
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
+    image_cache_cap_bytes: usize,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -456,6 +459,7 @@ pub async fn run_headless(
             cancel_for_conn,
             None, // headless mode: no clipboard
             None, // headless mode: no opus sink (cpal output only)
+            image_cache_cap_bytes,
         )
         .await
     });

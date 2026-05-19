@@ -264,6 +264,21 @@ pub struct DisplaySnapshot {
     /// error or unsupported format). Subset of
     /// `mjpeg_decode_total_count`.
     pub mjpeg_decode_failed_count: u64,
+    /// Cumulative count of image-cache entries evicted by the
+    /// LRU cap since session start. Separate from server-driven
+    /// invalidations (inval_list / inval_all).
+    pub image_cache_evictions_total: u64,
+    /// Cumulative bytes freed by LRU evictions since session
+    /// start. Reading this alongside `image_cache_bytes` tells
+    /// you whether the cache is steady-state under churn (high
+    /// evicted_bytes_total with stable image_cache_bytes) or
+    /// growing toward cap (low evicted_bytes_total).
+    pub image_cache_evicted_bytes_total: u64,
+    /// The configured cap in bytes for this session. Mirrors
+    /// the value passed via --image-cache-cap-mib (default
+    /// 256 MiB). Surfaced so a bug report tells you what cap
+    /// the session ran under.
+    pub image_cache_cap_bytes: u64,
     /// Min H.264 decode duration (µs) over the most recent
     /// `MAX_RECENT_DECODES` calls. Zero when no H.264 frame
     /// has been decoded this session.

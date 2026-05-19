@@ -172,6 +172,14 @@ pub struct Args {
     /// --web-tls-cert is supplied.
     #[arg(long, requires = "web_tls_cert")]
     pub web_tls_key: Option<PathBuf>,
+
+    /// Maximum total bytes for the SPICE display image cache,
+    /// in MiB. Defaults to 256. The cache holds decoded RGBA
+    /// for images the server flagged with CACHE_ME; without a
+    /// cap, video workloads can consume gigabytes (see
+    /// session-002g).
+    #[arg(long, default_value_t = 256)]
+    pub image_cache_cap_mib: u64,
 }
 
 /// SPICE connection configuration

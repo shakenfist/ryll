@@ -2228,6 +2228,17 @@ mod tests {
         assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
         assert!(json.contains("\"h264_decode_total_count\": 120"));
         assert!(json.contains("\"h264_decode_failed_count\": 1"));
+        // Phase-12B: bounded image-cache eviction and cap fields.
+        // These must appear in bug reports so an operator can tell
+        // how much eviction pressure the session experienced and
+        // what cap was in effect.
+        snap.image_cache_evictions_total = 42;
+        snap.image_cache_evicted_bytes_total = 441_450_496;
+        snap.image_cache_cap_bytes = 268_435_456; // 256 MiB default
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"image_cache_evictions_total\": 42"));
+        assert!(json.contains("\"image_cache_evicted_bytes_total\": 441450496"));
+        assert!(json.contains("\"image_cache_cap_bytes\": 268435456"));
     }
 
     #[test]
