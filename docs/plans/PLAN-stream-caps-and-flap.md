@@ -283,6 +283,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
 | 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | Not started |
+| 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Not started |
 
 Per-phase intent:
 
@@ -558,6 +559,82 @@ Per-phase intent:
   flap-notification phase (phase 8) and for any
   future investigation into why streaming is intermittent
   on QXL guests.
+
+- **Phase 13 — Investigate intermittent server-side
+  streaming.** Driven by sessions 002e / 002g / 002h,
+  which are now a 2-out-of-3 reproduction of "server
+  stops streaming MJPEG/H.264 and falls back to
+  full-frame ZlibGlzRgb blasts" on the **same** Debian
+  11 QXL guest with the **same** server config
+  (`streaming-video=all`). 002e streamed for 17 s with
+  135 MJPEG frames at 7.9 fps; 002g and 002h streamed
+  zero frames over their entire runs. Once H.264 was
+  wired (phase 6) the natural assumption was that 6F
+  would land via the next dogfood — but the server
+  never elected to stream the video at all, so the
+  H.264 path remains untested on the wire and the user
+  perceives no improvement in video performance. This
+  blocks both (a) the 6F smoke test and (b) any
+  meaningful video-performance comparison across guest
+  configurations.
+
+  This phase is an **investigation, not a code
+  delivery**: the bug (if it is a bug) is on the
+  server side, and the goal is to identify whether
+  ryll is doing something that confuses the server's
+  stream-create heuristic, whether the spice-server's
+  heuristic itself is misfiring, or whether the
+  workload-side conditions for streaming are subtle
+  enough that "same guest, same config" reproductions
+  vary by accident. Scope:
+
+  - Read `spice/server/video-stream.cpp` (especially
+    `red_stream_input_fps_timeout_callback` and
+    `mjpeg_encoder_can_drop_stream` / the streaming-mode
+    decision points around `display-channel.cpp`'s
+    `display_channel_create_stream` site) to understand
+    the heuristics ground-truth.
+  - Compare the pcap traces from 002e (which streamed)
+    against 002g/002h (which didn't) at the protocol
+    level. Look for differences in: monitor config
+    sequence, ack cadence, what we acknowledge first,
+    how many surface_create messages we send before
+    interacting, anything client-side that could
+    influence the server's "is this a streamable
+    region" detector.
+  - Enable spice-server-side debug logging
+    (`SPICE_DEBUG_LEVEL=2` or
+    `G_MESSAGES_DEBUG=all` against a libspice-server
+    debug build) on the test host and capture a side-
+    by-side log of a streaming and a non-streaming
+    session of the same workload.
+  - Build a minimal-reproduction recipe: a fixed
+    workload (specific video file, specific player) +
+    fixed VM start sequence that reliably triggers
+    one outcome or the other. Even non-determinism
+    is useful information once it's pinned to a
+    workload.
+  - Document findings: either (a) a server-side bug
+    that should be filed upstream against spice-server
+    with the minimal reproducer, (b) a workload-side
+    condition we can document for operators, or (c) a
+    client-side behaviour we can adjust to be more
+    streaming-friendly.
+
+  Out of scope: actually patching spice-server. If we
+  find a bug, file upstream and apply a local workaround
+  via libvirt config (mentioned in
+  `docs/libvirt-spice-recommendations.md`). If the issue
+  is client-side, it lands as its own follow-up phase
+  rather than being shoehorned into this investigation.
+
+  Recommended planning effort: **high** (open-ended
+  investigation; success criterion is "we know which of
+  the three categories the bug falls into," not "we
+  shipped code"). Output: a writeup at
+  `docs/spice-server-streaming-investigation.md` plus
+  whatever upstream-issue links or libvirt
+  recommendations updates follow.
 
 ## Agent guidance
 
