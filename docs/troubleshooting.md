@@ -566,6 +566,78 @@ IDs and per-device byte counts) and `device_connect_total` /
 the `webdav` section includes `http_requests_received` (HTTP request count)
 and `active_session_count` (currently-open connections).
 
+## Auto-snapshot mode for intermittent issues
+
+When you're hunting for an intermittent issue (audio that drops silent for 30
+seconds, streams that flap between encodings, latency that spikes mid-session),
+it's often too late to hit F12 after the symptom passes. **Auto-snapshot mode**
+is a "flight-data-recorder" that fires a complete bug-report zip every N seconds
+into a rolling subdirectory, capturing whatever was happening at that moment
+regardless of whether you noticed a problem in real time.
+
+### When to enable auto-snapshot mode
+
+- **Intermittent audio issues** — audio works fine for minutes, then goes silent
+  for 30 seconds, then returns. You can correlate playback counters across
+  snapshots before and after the silence to find where the pipeline broke.
+- **Stream flapping** — SPICE streams are constantly created and destroyed,
+  causing display lag. Auto-snapshot captures stream-state transitions across
+  multiple snapshots.
+- **Intermittent latency spikes** — responsiveness drops for 10 seconds then
+  recovers. The snapshots before, during, and after the spike show CPU usage,
+  decode latencies, and buffer states.
+- **Mysterious disconnects** — the session drops unexpectedly and you didn't
+  see an error message. Auto-snapshots up to the disconnect provide the
+  channel state and traffic at the moment before the fault.
+
+### Usage
+
+```bash
+# Fire a snapshot every 30 seconds, keep the last 20 zips (~30 MiB at typical sizes)
+ryll --file connection.vv --auto-snapshot-interval 30
+
+# Custom cap and output directory
+ryll --file connection.vv --auto-snapshot-interval 60 \
+     --auto-snapshot-cap 10 --bug-report-dir /tmp/session-debug
+```
+
+At session start, an `Info` notification confirms auto-snapshot mode is enabled
+with the interval, cap, and target path. The status bar shows
+`Auto-snapshot: N/{cap}` while the mode runs; the counter increments every N
+seconds. No per-snapshot notifications are sent so the panel doesn't spam.
+
+### Finding and reading auto-snapshot files
+
+Snapshots are written to `<bug-report-dir>/auto-snapshots/` with filenames that
+encode the UTC timestamp and session uptime:
+
+```
+ryll-auto-snapshot-2026-05-18T20-37-42Z-T+47.3s.zip
+```
+
+Each zip is a complete bug-report artefact containing:
+- **`channel-state.json`** — all channels merged with full diagnostics (playback
+  counters, stream state, latencies, decoding metrics, etc.)
+- **`traffic.pcap`** — raw SPICE traffic covering all channels for the ~N-second
+  window preceding the snapshot
+- **`metadata.json`** — session context (ryll version, platform, target host)
+- **`runtime-metrics.json`** — CPU, memory, and FD usage at snapshot time
+- **`notifications.json`** — all in-app notifications (channel events, gaps, etc.)
+- **Screenshot** — the display surface at snapshot time (if available)
+
+To diagnose an intermittent issue:
+1. Run the session with auto-snapshot enabled
+2. After reproducing the symptom, review the snapshots around the time it occurred
+3. Compare `channel-state.json` across adjacent snapshots to see what changed
+4. Use `tools/pcap-inspect.py` on the `.pcap` files to see what traffic flowed
+
+The rolling cap is enforced by age (oldest files pruned first), so disk usage
+stays bounded. At the default cap of 20 zips with typical sizes (~1 MiB each),
+you'll use ~20 MiB total.
+
+See the [README section on auto-snapshot mode](../README.md#auto-snapshot-mode)
+for more details on what each field means.
+
 ## Getting Help
 
 If you can't resolve an issue:

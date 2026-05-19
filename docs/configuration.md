@@ -42,6 +42,16 @@ the phodav project) and `davfs2` for mounting. The QEMU VM must be configured
 with a spiceport chardev named `org.spice-space.webdav.0` — see the QEMU
 configuration section below.
 
+### Bug Reports and Auto-snapshot Mode
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bug-report-dir <DIR>` | none | Output directory for manual and auto-snapshot bug reports (falls back to `<capture>/bug-reports/` if `--capture` is set, then current directory) |
+| `--auto-snapshot-interval <SECONDS>` | disabled | Enable flight-data-recorder mode: fire a complete bug-report zip every N seconds into `<bug-report-dir>/auto-snapshots/`. Minimum recommended interval is 10 seconds |
+| `--auto-snapshot-cap <N>` | 20 | Maximum number of auto-snapshot zips to keep on disk; oldest are pruned when capacity is exceeded |
+| `--pedantic` | false | Write a bug-report zip to `./ryll-pedantic-reports/` (or `--pedantic-dir`) the first time each distinct protocol gap is detected |
+| `--pedantic-dir <DIR>` | none | Output directory for pedantic bug reports |
+
 ### Capture and Debugging
 
 | Option | Default | Description |
@@ -94,6 +104,16 @@ ryll --file test.vv --share-dir /home/user/documents --share-dir-ro
 
 # Headless mode with folder sharing
 ryll --file test.vv --headless --share-dir /tmp/test-share
+
+# Enable auto-snapshot mode: fire a bug report every 30 seconds, keep last 20
+ryll --file test.vv --auto-snapshot-interval 30
+
+# Custom output directory and rolling cap
+ryll --file test.vv --auto-snapshot-interval 30 \
+     --auto-snapshot-cap 10 --bug-report-dir /tmp/session-debug
+
+# Pedantic mode: report on protocol gaps
+ryll --file test.vv --pedantic
 ```
 
 ## .vv File Format

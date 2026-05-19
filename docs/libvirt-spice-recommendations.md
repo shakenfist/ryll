@@ -293,6 +293,13 @@ The ryll bug-report fields make these comparisons cheap; the
 `Display` report type in particular includes everything needed to
 characterise an A/B difference.
 
+**Alternative: Auto-snapshot mode for long-running tests** — Instead of
+manually filing reports at specific points, use `ryll --auto-snapshot-interval 30`
+to fire a bug-report zip every 30 seconds into a rolling cap throughout the test.
+This eliminates the risk of missing a transient lag spike or flap event that
+happens between manual report points. Compare metrics across snapshots before,
+during, and after the test to see the full timeline of changes.
+
 ## What ryll cannot fix from the client side
 
 The server makes the encoding decisions. Ryll can:
