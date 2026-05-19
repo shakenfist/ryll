@@ -104,8 +104,19 @@ pub struct StreamSnapshot {
     /// `"VA-API"`, `"libjpeg-turbo"`, `"jpeg-decoder"`.
     /// Identical for all streams in the same session because
     /// the backend is chosen once at `DisplayChannel::new`.
-    /// Empty string in snapshots produced before phase 3.
+    /// Empty string in snapshots produced before phase 3, and
+    /// empty string for non-MJPEG streams (H.264, etc.) —
+    /// use `video_decoder_backend` as the general-purpose
+    /// field; this one is kept for backwards compat with
+    /// existing bug-report consumers that key on it.
     pub mjpeg_decoder_backend: String,
+    /// Name of the video decoder backend active for this
+    /// stream, regardless of codec. Populated from
+    /// `stream.video_decoder.name()` at `STREAM_CREATE`.
+    /// Examples: `"ImageIO"`, `"libjpeg-turbo"` (MJPEG),
+    /// `"H264 (openh264)"` (H.264). Supersedes
+    /// `mjpeg_decoder_backend` for non-MJPEG streams.
+    pub video_decoder_backend: String,
 }
 
 /// Result of a single image decode in the display channel.

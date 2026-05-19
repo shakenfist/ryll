@@ -2098,6 +2098,7 @@ mod tests {
             last_report_num_drops: 1,
             last_report_last_frame_delay: -42,
             mjpeg_decoder_backend: "jpeg-decoder".to_string(),
+            video_decoder_backend: "jpeg-decoder".to_string(),
         });
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
@@ -2110,6 +2111,13 @@ mod tests {
         snap.mjpeg_decode_recent_mean_us = 8_500;
         snap.mjpeg_decode_total_count = 350;
         snap.mjpeg_decode_failed_count = 2;
+        // Phase-06 step 6B: aggregate H.264 decode duration fields
+        // (same shape as MJPEG aggregates).
+        snap.h264_decode_recent_min_us = 5_000;
+        snap.h264_decode_recent_max_us = 28_000;
+        snap.h264_decode_recent_mean_us = 12_500;
+        snap.h264_decode_total_count = 120;
+        snap.h264_decode_failed_count = 1;
         // Previously-active stream now in the recently-destroyed
         // ring: destroyed_at_secs is Some, counters are frozen.
         snap.streams_recently_destroyed.push_back(StreamSnapshot {
@@ -2140,6 +2148,7 @@ mod tests {
             last_report_num_drops: 0,
             last_report_last_frame_delay: 0,
             mjpeg_decoder_backend: "jpeg-decoder".to_string(),
+            video_decoder_backend: "jpeg-decoder".to_string(),
         });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
@@ -2207,6 +2216,18 @@ mod tests {
         assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
         assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
         assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
+        // Phase-06 step 6D: general-purpose video_decoder_backend field
+        // visible for every stream regardless of codec. For MJPEG streams
+        // this matches mjpeg_decoder_backend; for H.264 it would show
+        // "H264 (openh264)" while mjpeg_decoder_backend is empty.
+        assert!(json.contains("\"video_decoder_backend\": \"jpeg-decoder\""));
+        // Phase-06 step 6B: aggregate H.264 decode duration fields
+        // (same shape and naming convention as the MJPEG aggregates).
+        assert!(json.contains("\"h264_decode_recent_min_us\": 5000"));
+        assert!(json.contains("\"h264_decode_recent_max_us\": 28000"));
+        assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
+        assert!(json.contains("\"h264_decode_total_count\": 120"));
+        assert!(json.contains("\"h264_decode_failed_count\": 1"));
     }
 
     #[test]

@@ -759,10 +759,20 @@ impl DisplayChannel {
             last_report_num_frames: s.last_report_num_frames,
             last_report_num_drops: s.last_report_num_drops,
             last_report_last_frame_delay: s.last_report_last_frame_delay,
-            // Populate the snapshot's backend field from the boxed
-            // decoder's name so bug reports show which backend was
-            // active for each stream (e.g. "libjpeg-turbo", "ImageIO").
-            mjpeg_decoder_backend: s.video_decoder.name().to_string(),
+            // video_decoder_backend is the general field: always the
+            // active decoder's name regardless of codec (e.g.
+            // "libjpeg-turbo", "ImageIO", "H264 (openh264)").
+            video_decoder_backend: s.video_decoder.name().to_string(),
+            // mjpeg_decoder_backend is the backwards-compat field for
+            // existing bug-report consumers. Populated only for MJPEG
+            // streams; empty string for H.264 and any other codec so
+            // consumers can distinguish "MJPEG with a named backend"
+            // from "this field doesn't apply to this stream's codec".
+            mjpeg_decoder_backend: if s.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
+                s.video_decoder.name().to_string()
+            } else {
+                String::new()
+            },
         }
     }
 
