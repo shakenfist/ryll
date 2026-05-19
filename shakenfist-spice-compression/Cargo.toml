@@ -26,6 +26,7 @@ mozjpeg = ["dep:mozjpeg", "jpeg"]
 [dependencies]
 anyhow = "1"
 byteorder = "1"
+thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.13", optional = true }

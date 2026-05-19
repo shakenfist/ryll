@@ -33,11 +33,26 @@ pub mod lz4;
 #[cfg(feature = "quic")]
 pub mod quic;
 
+/// Video decoder abstraction for SPICE video streams.
+///
+/// The `video` module is gated on the `jpeg` feature because
+/// [`video::MJpegVideoDecoder`] depends on [`jpeg::JpegDecoder`].
+/// Enabling the default feature set (which includes `jpeg`)
+/// makes the entire module available.
+#[cfg(feature = "jpeg")]
+pub mod video;
+
 #[cfg(feature = "glz")]
 pub use glz::{decompress_glz, GlzDictionary};
 
 #[cfg(feature = "jpeg")]
 pub use jpeg::{best_for_platform, DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
+
+#[cfg(feature = "jpeg")]
+pub use video::{
+    for_stream, DecodedFrame, MJpegVideoDecoder, VideoDecoder, VideoDecoderError,
+    SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
+};
 
 #[cfg(feature = "mozjpeg")]
 pub use jpeg::MozJpegDecoder;

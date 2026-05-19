@@ -14,8 +14,9 @@ use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 use shakenfist_spice_compression::{
-    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode,
-    DecodedJpeg, DecompressedImage, GlzDictionary, JpegDecoder,
+    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, video,
+    DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
+    SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
 use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
@@ -33,59 +34,6 @@ use shakenfist_spice_protocol::{
 
 use super::ChannelEvent;
 
-const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
-
-pub(crate) fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
-    let mut dht = Vec::new();
-    let mut i = 0;
-    while i + 3 < jpeg.len() {
-        if jpeg[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = jpeg[i + 1];
-        if marker == 0xC4 {
-            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
-            if i + seg_len <= jpeg.len() {
-                dht.extend_from_slice(&jpeg[i..i + seg_len]);
-            }
-            i += seg_len;
-        } else if marker == 0xD8 || marker == 0x00 || (0xD0..=0xD7).contains(&marker) {
-            i += 2;
-        } else if marker == 0xD9 || marker == 0xDA {
-            break;
-        } else if i + 3 < jpeg.len() {
-            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
-            i += seg_len;
-        } else {
-            break;
-        }
-    }
-    dht
-}
-
-pub(crate) fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(jpeg.len() + dht.len());
-    let mut i = 0;
-    // SOI marker
-    if jpeg.len() >= 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8 {
-        out.extend_from_slice(&jpeg[..2]);
-        i = 2;
-    }
-    // skip APP0/APP1 if present (bounds check matches extract_dht_segments)
-    while i + 3 < jpeg.len() && jpeg[i] == 0xFF && (jpeg[i + 1] == 0xE0 || jpeg[i + 1] == 0xE1) {
-        let seg_len = (u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize).saturating_add(2);
-        if i + seg_len > jpeg.len() {
-            break;
-        }
-        out.extend_from_slice(&jpeg[i..i + seg_len]);
-        i += seg_len;
-    }
-    out.extend_from_slice(dht);
-    out.extend_from_slice(&jpeg[i..]);
-    out
-}
-
 struct StreamState {
     surface_id: u32,
     codec_type: u8,
@@ -95,12 +43,12 @@ struct StreamState {
     dest_left: u32,
     dest_bottom: u32,
     dest_right: u32,
-    cached_dht: Option<Vec<u8>>,
-    /// MJPEG decoder backend name captured at `STREAM_CREATE` from
-    /// the active `DisplayChannel::jpeg_decoder.name()`. Surfaced in
-    /// `StreamSnapshot::mjpeg_decoder_backend` so a bug report shows
-    /// which backend was in use for each stream.
-    mjpeg_decoder_backend: String,
+    /// Per-stream video decoder, selected at `STREAM_CREATE` by
+    /// [`shakenfist_spice_compression::video::for_stream`]. Holds any
+    /// codec-specific state (e.g. the MJPEG DHT cache, or H.264
+    /// reference frames in phase 6B). The boxed trait object is
+    /// moved when the stream is retired.
+    video_decoder: Box<dyn VideoDecoder>,
     /// Session-relative seconds at `STREAM_CREATE`.
     created_at_secs: f64,
     /// Counters mirrored into `StreamSnapshot` by `update_snapshot`.
@@ -793,7 +741,10 @@ impl DisplayChannel {
             last_report_num_frames: s.last_report_num_frames,
             last_report_num_drops: s.last_report_num_drops,
             last_report_last_frame_delay: s.last_report_last_frame_delay,
-            mjpeg_decoder_backend: s.mjpeg_decoder_backend.clone(),
+            // Populate the snapshot's backend field from the boxed
+            // decoder's name so bug reports show which backend was
+            // active for each stream (e.g. "libjpeg-turbo", "ImageIO").
+            mjpeg_decoder_backend: s.video_decoder.name().to_string(),
         }
     }
 
@@ -1291,6 +1242,31 @@ impl DisplayChannel {
                         dest_bottom
                     );
 
+                    // Select the video decoder for this stream's codec.
+                    // If the codec is unsupported, log and skip the stream
+                    // (preserving the pre-refactor behaviour where
+                    // unsupported codecs were ignored).
+                    let video_decoder =
+                        match video::for_stream(codec_type, self.jpeg_decoder.clone()) {
+                            Ok(dec) => dec,
+                            Err(VideoDecoderError::UnsupportedCodec(ct)) => {
+                                warn!(
+                                    "display: stream_create: unsupported codec {} \
+                                     for stream {} — skipping",
+                                    ct, stream_id
+                                );
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "display: stream_create: failed to create decoder \
+                                     for stream {}: {}",
+                                    stream_id, e
+                                );
+                                return Ok(());
+                            }
+                        };
+
                     self.streams.insert(
                         stream_id,
                         StreamState {
@@ -1302,8 +1278,7 @@ impl DisplayChannel {
                             dest_left,
                             dest_bottom,
                             dest_right,
-                            cached_dht: None,
-                            mjpeg_decoder_backend: self.jpeg_decoder.name().to_string(),
+                            video_decoder,
                             created_at_secs: self.traffic.elapsed().as_secs_f64(),
                             frames_received: 0,
                             frames_decoded_ok: 0,
@@ -1447,92 +1422,95 @@ impl DisplayChannel {
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     let now_secs = self.traffic.elapsed().as_secs_f64();
 
+                    let (top, left, bottom, right) = dest.unwrap_or((
+                        stream.dest_top,
+                        stream.dest_left,
+                        stream.dest_bottom,
+                        stream.dest_right,
+                    ));
+                    let w = right.saturating_sub(left);
+                    let h = bottom.saturating_sub(top);
+
+                    // Codec-agnostic decode dispatch. Pre-refactor
+                    // per-codec logic (DHT extract/inject for MJPEG)
+                    // has been absorbed into `MJpegVideoDecoder`.
+                    let decode_start = std::time::Instant::now();
+                    let decode_result = stream.video_decoder.decode(jpeg_data);
+                    let decode_duration_us =
+                        u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+
+                    // Phase-03 step 3F: aggregate MJPEG decode duration
+                    // tracking. Gate on codec_type so only MJPEG frames
+                    // populate the MJPEG aggregate counters; phase 6B
+                    // will add parallel h264_decode_* counters for H.264.
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
-                        let (top, left, bottom, right) = dest.unwrap_or((
-                            stream.dest_top,
-                            stream.dest_left,
-                            stream.dest_bottom,
-                            stream.dest_right,
-                        ));
-                        let w = right.saturating_sub(left);
-                        let h = bottom.saturating_sub(top);
-
-                        let dht = extract_dht_segments(jpeg_data);
-                        let decode_data;
-                        let frame_data = if !dht.is_empty() {
-                            stream.cached_dht = Some(dht);
-                            jpeg_data
-                        } else if let Some(ref cached) = stream.cached_dht {
-                            decode_data = inject_dht(jpeg_data, cached);
-                            &decode_data
-                        } else {
-                            jpeg_data
-                        };
-
-                        let decode_start = std::time::Instant::now();
-                        let decoded = self.jpeg_decoder.decode(frame_data);
-                        let decode_duration_us =
-                            u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
-
-                        // Phase-03 step 3F: aggregate MJPEG decode
-                        // duration tracking. Push every timing into
-                        // the bounded ring (success and failure both),
-                        // bump total always, bump failed on None.
                         self.mjpeg_decode_total_count =
                             self.mjpeg_decode_total_count.saturating_add(1);
                         self.mjpeg_recent_durations.push_back(decode_duration_us);
                         if self.mjpeg_recent_durations.len() > MAX_RECENT_DECODES {
                             self.mjpeg_recent_durations.pop_front();
                         }
-
-                        if decoded.is_none() {
+                        if decode_result.is_err() {
                             self.mjpeg_decode_failed_count =
                                 self.mjpeg_decode_failed_count.saturating_add(1);
                         }
+                    }
 
-                        match decoded {
-                            Some(DecodedJpeg {
-                                rgba,
-                                width: fw,
-                                height: fh,
-                            }) => {
-                                debug!(
-                                    "display: stream {} MJPEG frame {}x{} → ({},{})",
-                                    stream_id, fw, fh, left, top
-                                );
-                                stream.frames_decoded_ok =
-                                    stream.frames_decoded_ok.saturating_add(1);
-                                stream.last_decode_ok_ts_secs = Some(now_secs);
-                                stream.last_decode_duration_us = decode_duration_us;
-                                let surface_id = stream.surface_id;
-                                self.event_tx
-                                    .send(ChannelEvent::ImageReady {
-                                        display_channel_id: self.channel_id,
-                                        surface_id,
-                                        left,
-                                        top,
-                                        width: fw.min(w),
-                                        height: fh.min(h),
-                                        pixels: rgba,
-                                        image_id: 0,
-                                        produced_at_secs: now_secs,
-                                    })
-                                    .await
-                                    .ok();
-                                self.repaint_notify.notify_one();
-                            }
-                            None => {
-                                debug!("display: stream {} MJPEG decode failed", stream_id);
-                                stream.frames_decode_failed =
-                                    stream.frames_decode_failed.saturating_add(1);
-                            }
+                    match decode_result {
+                        Ok(Some(frame)) => {
+                            debug!(
+                                "display: stream {} {} frame {}x{} → ({},{})",
+                                stream_id,
+                                stream.video_decoder.name(),
+                                frame.width,
+                                frame.height,
+                                left,
+                                top
+                            );
+                            stream.frames_decoded_ok = stream.frames_decoded_ok.saturating_add(1);
+                            stream.last_decode_ok_ts_secs = Some(now_secs);
+                            stream.last_decode_duration_us = decode_duration_us;
+                            let surface_id = stream.surface_id;
+                            self.event_tx
+                                .send(ChannelEvent::ImageReady {
+                                    display_channel_id: self.channel_id,
+                                    surface_id,
+                                    left,
+                                    top,
+                                    width: frame.width.min(w),
+                                    height: frame.height.min(h),
+                                    pixels: frame.rgba,
+                                    image_id: 0,
+                                    produced_at_secs: now_secs,
+                                })
+                                .await
+                                .ok();
+                            self.repaint_notify.notify_one();
                         }
-                    } else {
-                        debug!(
-                            "display: stream {} unsupported codec {}",
-                            stream_id, stream.codec_type
-                        );
-                        stream.frames_decode_failed = stream.frames_decode_failed.saturating_add(1);
+                        Ok(None) => {
+                            // No complete frame assembled yet — this is
+                            // normal for H.264 (needs multiple packets
+                            // per frame) and should not occur for MJPEG.
+                            debug!(
+                                "display: stream {} decoder returned no frame \
+                                 (codec={})",
+                                stream_id, stream.codec_type
+                            );
+                        }
+                        Err(VideoDecoderError::Decode(ref msg)) => {
+                            debug!("display: stream {} decode failed: {}", stream_id, msg);
+                            stream.frames_decode_failed =
+                                stream.frames_decode_failed.saturating_add(1);
+                        }
+                        Err(VideoDecoderError::UnsupportedCodec(_)) => {
+                            // Cannot happen: `for_stream` only constructs
+                            // a decoder for supported codecs; STREAM_CREATE
+                            // skips unsupported ones, so this stream would
+                            // not exist.
+                            unreachable!(
+                                "video_decoder set at STREAM_CREATE only for supported codecs"
+                            );
+                        }
                     }
                 } else {
                     self.stream_data_orphan_count = self.stream_data_orphan_count.saturating_add(1);
@@ -2802,129 +2780,10 @@ mod tests {
     use super::*;
 
     // -------------------------------------------------------------------------
-    // extract_dht_segments tests
+    // Note: extract_dht_segments / inject_dht tests have moved to
+    // shakenfist_spice_compression::video (video.rs) alongside the
+    // functions themselves (phase 6A refactor).
     // -------------------------------------------------------------------------
-
-    /// Build a minimal JPEG byte sequence:
-    ///   SOI (FF D8) + one segment (marker + 2-byte BE length + payload) + EOI (FF D9)
-    ///
-    /// `length` in the JPEG encoding is `payload.len() + 2` (includes the 2 length bytes).
-    fn make_jpeg_with_marker(marker: u8, payload: &[u8]) -> Vec<u8> {
-        let seg_len = (payload.len() + 2) as u16;
-        let mut jpeg = vec![0xFF, 0xD8]; // SOI
-        jpeg.push(0xFF);
-        jpeg.push(marker);
-        jpeg.extend_from_slice(&seg_len.to_be_bytes());
-        jpeg.extend_from_slice(payload);
-        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
-        jpeg
-    }
-
-    #[test]
-    fn extract_dht_segments_finds_dht_marker() {
-        // Build a JPEG with a DHT segment (marker 0xC4).
-        let payload = vec![0x01, 0x02, 0x03, 0x04];
-        let jpeg = make_jpeg_with_marker(0xC4, &payload);
-
-        let dht = extract_dht_segments(&jpeg);
-
-        // The returned data should start with the FF C4 marker.
-        assert!(!dht.is_empty(), "expected non-empty DHT output");
-        assert_eq!(dht[0], 0xFF);
-        assert_eq!(dht[1], 0xC4);
-        // Length field (big-endian) = payload.len() + 2
-        let encoded_len = u16::from_be_bytes([dht[2], dht[3]]) as usize;
-        assert_eq!(encoded_len, payload.len() + 2);
-        // Payload bytes are present.
-        assert_eq!(&dht[4..], payload.as_slice());
-    }
-
-    #[test]
-    fn extract_dht_segments_no_dht_returns_empty() {
-        // Build a JPEG with a comment segment (0xFE) — not a DHT.
-        let jpeg = make_jpeg_with_marker(0xFE, b"hello");
-        let dht = extract_dht_segments(&jpeg);
-        assert!(dht.is_empty(), "expected empty Vec when no DHT present");
-    }
-
-    #[test]
-    fn extract_dht_segments_empty_input_returns_empty() {
-        let dht = extract_dht_segments(&[]);
-        assert!(dht.is_empty());
-    }
-
-    // -------------------------------------------------------------------------
-    // inject_dht tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn inject_dht_inserts_after_soi_when_no_app_markers() {
-        // Plain JPEG: SOI + some non-APP data + EOI
-        let jpeg = vec![0xFF, 0xD8, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9];
-        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // Output should start with SOI.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-        // Immediately followed by the injected DHT.
-        assert_eq!(&out[2..2 + dht.len()], dht.as_slice());
-        // Then the remaining data (everything after SOI in the original).
-        assert_eq!(&out[2 + dht.len()..], &jpeg[2..]);
-    }
-
-    #[test]
-    fn inject_dht_inserts_after_app0_segment() {
-        // Build a JPEG: SOI + APP0 (0xE0) segment + remaining data.
-        let app0_payload = vec![0x4A, 0x46, 0x49, 0x46, 0x00]; // "JFIF\0"
-        let app0_seg_len = (app0_payload.len() + 2) as u16;
-        let mut jpeg = vec![0xFF, 0xD8]; // SOI
-        jpeg.push(0xFF);
-        jpeg.push(0xE0); // APP0
-        jpeg.extend_from_slice(&app0_seg_len.to_be_bytes());
-        jpeg.extend_from_slice(&app0_payload);
-        // Some remaining data
-        jpeg.extend_from_slice(&[0xDE, 0xAD]);
-
-        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // Output should start with SOI.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-
-        // Next: APP0 segment (marker + length bytes + payload).
-        let app0_total = 2 + 2 + app0_payload.len(); // FF E0 + len_bytes + payload
-        let app0_in_out = &out[2..2 + app0_total];
-        assert_eq!(app0_in_out[0], 0xFF);
-        assert_eq!(app0_in_out[1], 0xE0);
-
-        // After APP0: injected DHT.
-        let dht_start = 2 + app0_total;
-        assert_eq!(&out[dht_start..dht_start + dht.len()], dht.as_slice());
-
-        // After DHT: the remaining bytes from the original JPEG.
-        let remaining_start = dht_start + dht.len();
-        assert_eq!(&out[remaining_start..], &[0xDE, 0xAD]);
-    }
-
-    #[test]
-    fn inject_dht_output_structure_soi_app_dht_rest() {
-        // Quick structural check: SOI, then optional APP markers, then DHT, then rest.
-        let jpeg = vec![0xFF, 0xD8, 0x01, 0x02, 0x03];
-        let dht = vec![0xFF, 0xC4, 0x00, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // SOI must be first.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-        // DHT must appear before the original trailing bytes.
-        let dht_pos = out.windows(dht.len()).position(|w| w == dht.as_slice());
-        assert!(dht_pos.is_some(), "DHT not found in output");
-        let dht_end = dht_pos.unwrap() + dht.len();
-        // The remaining original data (after SOI) should follow the DHT.
-        assert_eq!(&out[dht_end..], &jpeg[2..]);
-    }
 
     // -------------------------------------------------------------------------
     // JpegDecoderRsDecoder tests (replaces old decode_mjpeg_frame tests;
