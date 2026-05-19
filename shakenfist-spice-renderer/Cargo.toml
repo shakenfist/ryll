@@ -66,6 +66,11 @@ nusb = "0.2"
 # Per-thread CPU metrics via sysconf(_SC_CLK_TCK) (Linux only)
 libc = "0.2"
 
+# LRU cache for the bounded image cache (BoundedImageCache).
+# The crate is already in the lockfile at 0.16.3 as a transitive
+# dep; pinning to "0.16" keeps it at that resolution.
+lru = "0.16"
+
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107), used in
 # the display channel
 flate2 = "1"

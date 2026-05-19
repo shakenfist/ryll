@@ -16,6 +16,7 @@ pub mod clipboard;
 pub mod device_config;
 pub mod display;
 pub mod encoder;
+pub mod image_cache;
 pub mod log_config;
 pub mod metrics;
 pub mod mm_clock;
@@ -39,6 +40,7 @@ pub use encoder::{
     EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder, RealFrameSource,
     SyntheticFrameSource,
 };
+pub use image_cache::{BoundedImageCache, InsertOutcome, RefusedReason};
 pub use log_config::LogConfig;
 pub use mm_clock::MmClock;
 pub use notification::{NotificationEntry, NotificationSource};

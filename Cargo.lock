@@ -5766,6 +5766,7 @@ dependencies = [
  "hyper-util",
  "image",
  "libc",
+ "lru",
  "lz4_flex",
  "nusb",
  "openh264",
