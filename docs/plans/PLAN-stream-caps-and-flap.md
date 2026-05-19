@@ -274,7 +274,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
 | 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; smoke test (2C) folded into phase 3 step 3H |
 | 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G); 3H per-platform smoke test pending |
-| 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Code landed (4A-4F); 4G operator smoke test pending |
+| 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Complete (4G verified in session 002g: `data_packets_received == data_packets_decoded`, no decode failures, underruns visible — instrumentation distinguishes the four failure modes as designed) |
 | 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Code landed (5A-5B); 5C operator smoke test pending |
 | 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Not started |
 | 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Not started |
@@ -282,6 +282,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
+| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | Not started |
 
 Per-phase intent:
 
@@ -515,6 +516,48 @@ Per-phase intent:
   keepalive. Recommended planning effort: **low** (single
   commit; the risk is that K1 reproduces, which is what
   the long-idle smoke test rules out).
+
+- **Phase 12 — Bounded image cache.** Driven by session
+  002g, where auto-snapshot revealed `image_cache_bytes`
+  growing from 884 MiB → 1843 MiB → 2803 MiB across the
+  three 30 s snapshots — a linear 30 MiB/s leak driven by
+  full-frame `ZlibGlzRgb` payloads (1920×1472 RGBA ≈
+  10.7 MiB each) that the server kept marking with
+  `IMAGE_FLAGS_CACHE_ME`. We honour every cache-me request
+  via `display.rs:2204
+  (self.image_cache.insert(img.image_id, img.pixels.clone()))`
+  with no upper bound and no LRU eviction — the cache only
+  shrinks when the server sends an explicit `inval_*`
+  message, which for video workloads it rarely does. At
+  the observed rate, a 10-minute video would consume
+  ~18 GiB and OOM the client on any reasonable Mac. The
+  server's over-eager `CACHE_ME` flagging on transient
+  frames is a server-side decision; we have to defend
+  client-side. Scope: replace the unbounded `HashMap<u64,
+  Vec<u8>>` with a size-bounded LRU (cap by total bytes,
+  default ~256 MiB, operator-overridable via CLI flag);
+  on insert evict oldest entries until under cap; surface
+  `image_cache_evictions_total: u64` and
+  `image_cache_evicted_bytes_total: u64` on
+  `DisplaySnapshot` so an operator can see the eviction
+  pressure in a bug report. Honour every existing
+  `inval_*` path unchanged — this only adds eviction on
+  insert, not new invalidation logic. Recommended planning
+  effort: **low** (well-scoped; the `lru` crate is a
+  drop-in replacement, or a hand-rolled `VecDeque` +
+  `HashMap` works fine).
+
+  Open observation worth keeping with this phase: session
+  002g also showed zero MJPEG streams (`streams_created_total:
+  0`) despite the operator NOT changing the server config
+  between 002e (which streamed) and 002g (which didn't).
+  Same Debian 11 QXL guest, same `streaming-video=all`
+  setting. This suggests the server's streaming heuristic
+  is non-deterministic with respect to workload / timing
+  / content, not just config. Worth noting for the
+  flap-notification phase (phase 8) and for any
+  future investigation into why streaming is intermittent
+  on QXL guests.
 
 ## Agent guidance
 
