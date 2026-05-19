@@ -638,6 +638,63 @@ you'll use ~20 MiB total.
 See the [README section on auto-snapshot mode](../README.md#auto-snapshot-mode)
 for more details on what each field means.
 
+## Display image cache pressure
+
+The SPICE server flags certain decoded image frames with `CACHE_ME` to
+reduce bandwidth on future repeated use. Ryll caches these decoded RGBA
+frames client-side; without a bound, sustained video playback can cause
+the cache to grow unbounded (see session 002g: 30 MiB/s growth during
+full-frame ZlibGlzRgb video, reaching 2.8 GiB in 90 seconds).
+
+The `--image-cache-cap-mib` flag (default 256 MiB) bounds the cache with
+an LRU eviction policy: when the total cached bytes exceed the cap, the
+least-recently-used entries are evicted until the cap is satisfied. This
+is essential for long-running desktop sessions without risk of OOM.
+
+### Interpreting cache statistics in a bug report
+
+When you file a Display bug report (F12), the `channel-state.json`
+includes three cache-related fields under the display channel entry:
+
+- **`image_cache_cap_bytes`** — the configured cap in bytes. This
+  confirms what cap the session ran under without re-reading the CLI
+  invocation. Multiply by 1,048,576 to convert MiB flags (e.g. `256 MiB
+  = 268,435,456 bytes`).
+
+- **`image_cache_evictions_total`** — cumulative count of LRU evictions
+  since the session started. High counts indicate the workload is
+  churning past the cap; compare this across snapshots to see eviction
+  rate. If the eviction count is zero but `image_cache_bytes` is steady
+  around the cap, the cache is at equilibrium (most accesses hit
+  recently-cached entries).
+
+- **`image_cache_evicted_bytes_total`** — cumulative bytes freed by LRU
+  evictions since the session started. Correlate with
+  `image_cache_bytes` to assess cache pressure: if
+  `image_cache_evicted_bytes_total` is much larger than
+  `image_cache_cap_bytes`, the workload is heavily churning past the
+  cap; if `image_cache_evicted_bytes_total` is small and
+  `image_cache_bytes` is steady well below the cap, the workload is
+  not pressuring the cache at all.
+
+### Adjusting the cache cap
+
+**Lower the cap on small-RAM hosts.** Ryll's default is 256 MiB,
+suitable for typical 8–16 GiB desktop machines. On a 2 GiB or 4 GiB
+embedded system, reduce the cap (e.g. `--image-cache-cap-mib 64` or
+`--image-cache-cap-mib 128`) to leave more RAM for other processes.
+Monitor auto-snapshots to confirm `image_cache_bytes` never exceeds the
+cap and evictions are not excessive.
+
+**Raise the cap for heavy CACHE_ME workloads.** If you are running
+sustained video playback (e.g. a full-frame animated desktop) and you
+see high `image_cache_evictions_total` across auto-snapshots with
+`image_cache_bytes` constantly at the cap, the workload is aggressively
+churning. Increase the cap (e.g. `--image-cache-cap-mib 512`) so more
+frames stay hot in cache, reducing the decode load on the next replay.
+This is a trade-off: larger cache = higher RAM cost but potentially
+fewer redecompressions of the same frame.
+
 ## Getting Help
 
 If you can't resolve an issue:

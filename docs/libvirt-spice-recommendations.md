@@ -148,6 +148,12 @@ For sustained video playback with `streaming-video=filter`, the server will
 prefer H.264 when available, which is typically more bandwidth-efficient than
 MJPEG and results in cheaper sustained-video transmission.
 
+The server's `CACHE_ME` flag on every video frame drives client-side image cache
+pressure — tuning `streaming-video` to `filter` (or away from `all`) reduces how
+often video frames hit the cache. See [Display image cache pressure](troubleshooting.md#display-image-cache-pressure)
+in the troubleshooting guide for client-side cache-cap tuning that complements
+these server-side settings.
+
 ### TLS channels
 
 ```xml

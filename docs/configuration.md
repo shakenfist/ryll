@@ -49,6 +49,7 @@ configuration section below.
 | `--bug-report-dir <DIR>` | none | Output directory for manual and auto-snapshot bug reports (falls back to `<capture>/bug-reports/` if `--capture` is set, then current directory) |
 | `--auto-snapshot-interval <SECONDS>` | disabled | Enable flight-data-recorder mode: fire a complete bug-report zip every N seconds into `<bug-report-dir>/auto-snapshots/`. Minimum recommended interval is 10 seconds |
 | `--auto-snapshot-cap <N>` | 20 | Maximum number of auto-snapshot zips to keep on disk; oldest are pruned when capacity is exceeded |
+| `--image-cache-cap-mib <N>` | 256 | Cap the SPICE display image cache at N MiB. The cache holds decoded RGBA frames flagged with CACHE_ME by the server; an LRU evicts oldest entries when the cap is exceeded. Default is enough for typical desktop sessions, but increase it for heavy CACHE_ME workloads (sustained video) or lower it on small-RAM hosts |
 | `--pedantic` | false | Write a bug-report zip to `./ryll-pedantic-reports/` (or `--pedantic-dir`) the first time each distinct protocol gap is detected |
 | `--pedantic-dir <DIR>` | none | Output directory for pedantic bug reports |
 
