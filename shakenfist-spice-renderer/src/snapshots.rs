@@ -253,6 +253,26 @@ pub struct DisplaySnapshot {
     /// error or unsupported format). Subset of
     /// `mjpeg_decode_total_count`.
     pub mjpeg_decode_failed_count: u64,
+    /// Min H.264 decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls. Zero when no H.264 frame
+    /// has been decoded this session.
+    pub h264_decode_recent_min_us: u32,
+    /// Max H.264 decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls. Zero when no H.264 frame
+    /// has been decoded this session.
+    pub h264_decode_recent_max_us: u32,
+    /// Mean H.264 decode duration (µs) over the most recent
+    /// `MAX_RECENT_DECODES` calls (integer; sum/count). Zero
+    /// when no H.264 frame has been decoded this session.
+    pub h264_decode_recent_mean_us: u32,
+    /// Total H.264 decode attempts since session start
+    /// (success + failure). Includes the H.264 "needs more
+    /// data" (`Ok(None)`) outcome as a successful attempt.
+    pub h264_decode_total_count: u64,
+    /// H.264 decode attempts that returned `Err` since session
+    /// start. Subset of `h264_decode_total_count`; `Ok(None)`
+    /// is not counted as a failure.
+    pub h264_decode_failed_count: u64,
 }
 
 /// A recorded input event for the inputs channel snapshot.

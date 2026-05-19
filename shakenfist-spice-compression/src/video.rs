@@ -7,15 +7,18 @@
 //! `Box<dyn VideoDecoder>` selected at `STREAM_CREATE` by
 //! [`for_stream`].
 //!
-//! Today only MJPEG is implemented (`MJpegVideoDecoder`), which
-//! wraps the existing [`JpegDecoder`] backend from phase 3 and
-//! absorbs the DHT extract/inject state that used to live on
-//! `StreamState`. H.264 decoding is added in phase 6B.
+//! Today MJPEG (`MJpegVideoDecoder`) wraps the phase-3
+//! [`JpegDecoder`] backend and absorbs the DHT extract/inject
+//! state that used to live on `StreamState`. H.264
+//! (`H264VideoDecoder`) wraps `openh264::decoder::Decoder` for
+//! software decode of SPICE H.264 streams.
 //!
 //! The codec-type constants here mirror the wire values in the
 //! SPICE protocol (`SPICE_VIDEO_CODEC_TYPE_*`).
 
 use std::sync::Arc;
+
+use tracing::warn;
 
 use crate::jpeg::{DecodedJpeg, JpegDecoder};
 
@@ -29,9 +32,7 @@ pub const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 
 /// SPICE wire codec type for H.264 streams
 /// (`SpiceMsgDisplayStreamCreate::codec_type == 3`).
-/// Not decoded in phase 6A — [`for_stream`] returns
-/// [`VideoDecoderError::UnsupportedCodec`] for this value until
-/// phase 6B adds `H264VideoDecoder`.
+/// Decoded via [`H264VideoDecoder`] (openh264 software backend).
 pub const SPICE_VIDEO_CODEC_TYPE_H264: u8 = 3;
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ pub fn for_stream(
 ) -> Result<Box<dyn VideoDecoder>, VideoDecoderError> {
     match codec_type {
         SPICE_VIDEO_CODEC_TYPE_MJPEG => Ok(Box::new(MJpegVideoDecoder::new(jpeg_decoder))),
-        // Phase 6B adds H264VideoDecoder here.
+        SPICE_VIDEO_CODEC_TYPE_H264 => Ok(Box::new(H264VideoDecoder::new()?)),
         other => Err(VideoDecoderError::UnsupportedCodec(other)),
     }
 }
@@ -209,6 +210,125 @@ impl VideoDecoder for MJpegVideoDecoder {
 
     fn name(&self) -> &'static str {
         self.inner.name()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H.264 implementation (openh264 software backend)
+// ---------------------------------------------------------------------------
+
+/// Video decoder for SPICE H.264 streams, backed by Cisco's
+/// openh264 via the `openh264` crate (built from vendored source
+/// — no runtime libopenh264 dependency).
+///
+/// Maintains the full per-stream H.264 codec context (SPS/PPS,
+/// reference frame buffer, picture order, etc.) inside the wrapped
+/// `openh264::decoder::Decoder`. The decoder is stateful: every
+/// `STREAM_DATA` packet on a stream is fed in order so reference
+/// frames remain valid.
+///
+/// `consecutive_failures` is a small counter used to escalate
+/// persistent decoder errors from `debug!` to `warn!` after three
+/// failures in a row, per the phase-6 plan (Q5). It resets on any
+/// successful decode (including `Ok(None)`, which is a normal
+/// "need more data" outcome — not an error).
+pub struct H264VideoDecoder {
+    decoder: openh264::decoder::Decoder,
+    /// Caller-owned RGBA scratch buffer reused across frames to
+    /// avoid reallocating on each decode. `DecodedYUV::write_rgba8`
+    /// requires exactly `width * height * 4` bytes and panics
+    /// otherwise, so we resize on dimension change.
+    rgba_scratch: Vec<u8>,
+    /// Number of consecutive `Err` returns from
+    /// [`openh264::decoder::Decoder::decode`]. Reset to zero on
+    /// any non-error return (including the "not enough data yet"
+    /// `Ok(None)` case).
+    consecutive_failures: u32,
+}
+
+/// Number of consecutive H.264 decode errors before we escalate
+/// the log level from `debug!` to `warn!`. Chosen to avoid noise
+/// from single-packet glitches but surface persistent corruption.
+const H264_WARN_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
+
+impl H264VideoDecoder {
+    /// Construct a new openh264-backed decoder.
+    ///
+    /// Maps any initialisation error from openh264 to
+    /// [`VideoDecoderError::Decode`]. Initialisation failures are
+    /// rare — openh264's own docs note this "should never error,
+    /// but the underlying OpenH264 decoder has an error indication
+    /// and since we don't know their code that well we just can't
+    /// guarantee it."
+    pub fn new() -> Result<Self, VideoDecoderError> {
+        let decoder = openh264::decoder::Decoder::new()
+            .map_err(|e| VideoDecoderError::Decode(format!("openh264 init: {e}")))?;
+        Ok(Self {
+            decoder,
+            rgba_scratch: Vec::new(),
+            consecutive_failures: 0,
+        })
+    }
+}
+
+impl VideoDecoder for H264VideoDecoder {
+    fn decode(&mut self, packet: &[u8]) -> Result<Option<DecodedFrame>, VideoDecoderError> {
+        // SPICE STREAM_DATA carries H.264 NAL units in Annex B
+        // framing (start codes `00 00 00 01` between NALUs).
+        // `openh264::decoder::Decoder::decode` accepts Annex B
+        // payloads directly, so we pass the packet through
+        // unmodified. The encoder side
+        // (shakenfist-spice-renderer/src/encoder/h264.rs) also
+        // emits Annex B, so the round-trip unit test below
+        // exercises the same framing the real SPICE server uses.
+        match self.decoder.decode(packet) {
+            Ok(None) => {
+                // Decoder consumed the packet but has not yet
+                // assembled a full picture (e.g. SPS/PPS only, or
+                // the IDR slice is still missing). This is not an
+                // error — keep the failure counter at zero.
+                self.consecutive_failures = 0;
+                Ok(None)
+            }
+            Ok(Some(yuv)) => {
+                use openh264::formats::YUVSource;
+
+                let (w, h) = yuv.dimensions();
+                let buf_len = w
+                    .checked_mul(h)
+                    .and_then(|n| n.checked_mul(4))
+                    .ok_or_else(|| {
+                        VideoDecoderError::Decode(format!(
+                            "H264 decoded frame dimensions overflow: {w}x{h}"
+                        ))
+                    })?;
+                if self.rgba_scratch.len() != buf_len {
+                    self.rgba_scratch.resize(buf_len, 0);
+                }
+                yuv.write_rgba8(&mut self.rgba_scratch);
+                self.consecutive_failures = 0;
+                Ok(Some(DecodedFrame {
+                    rgba: self.rgba_scratch.clone(),
+                    width: u32::try_from(w).unwrap_or(u32::MAX),
+                    height: u32::try_from(h).unwrap_or(u32::MAX),
+                }))
+            }
+            Err(e) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                let msg = e.to_string();
+                if self.consecutive_failures == H264_WARN_AFTER_CONSECUTIVE_FAILURES {
+                    warn!(
+                        "H264 decode: {} consecutive failures; stream may be corrupted: {}",
+                        self.consecutive_failures, msg
+                    );
+                }
+                Err(VideoDecoderError::Decode(msg))
+            }
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "H264 (openh264)"
     }
 }
 
@@ -304,14 +424,20 @@ mod tests {
     }
 
     #[test]
-    fn for_stream_h264_returns_unsupported_in_phase_6a() {
+    fn for_stream_h264_returns_h264_decoder() {
         let jpeg_dec: Arc<dyn JpegDecoder> = Arc::new(JpegDecoderRsDecoder::new());
         let result = for_stream(SPICE_VIDEO_CODEC_TYPE_H264, jpeg_dec);
-        match result {
-            Err(VideoDecoderError::UnsupportedCodec(3)) => {}
-            Err(e) => panic!("expected UnsupportedCodec(3), got Err({e})"),
-            Ok(_) => panic!("expected Err(UnsupportedCodec(3)), got Ok"),
-        }
+        assert!(
+            result.is_ok(),
+            "expected Ok for H264 codec_type, got Err({:?})",
+            result.err()
+        );
+        let dec = result.unwrap();
+        assert_eq!(
+            dec.name(),
+            "H264 (openh264)",
+            "H264VideoDecoder name should identify the openh264 backend"
+        );
     }
 
     #[test]
@@ -615,5 +741,208 @@ mod mjpeg_round_trip_tests {
             }
         }
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// H264VideoDecoder round-trip test
+// ---------------------------------------------------------------------------
+//
+// Encodes a small RGBA fixture via `openh264::encoder::Encoder`
+// (the same crate the real renderer uses in
+// `shakenfist-spice-renderer/src/encoder/h264.rs`) and feeds the
+// emitted Annex-B NAL units back through `H264VideoDecoder`.
+// Asserts the decoded RGBA is within H.264-lossy tolerance.
+//
+// We encode TWO frames of the same content and decode all NAL
+// units in order, because:
+//   1. The first frame is an IDR carrying SPS+PPS, which the
+//      decoder needs before any picture can be produced.
+//   2. openh264's `decode_frame_no_delay` is happy to return the
+//      decoded IDR on the first call, but feeding a second access
+//      unit lets the round-trip exercise the steady-state path
+//      that real SPICE streams hit (most frames are non-IDR).
+//   3. Asserting against the second decoded frame gives motion
+//      estimation a chance to align with the source, keeping the
+//      tolerance reasonable.
+//
+// Tolerances target H.264 at low resolution: per-channel max diff
+// up to 50, mean up to 15. H.264 with no rate control hint at
+// 64x64 is unusually lossy compared to 1080p video — these
+// numbers are calibrated to the worst case, not the typical one.
+#[cfg(test)]
+mod h264_round_trip_tests {
+    use super::*;
+
+    /// Build a 64×64 RGBA quadrant fixture: four solid colours,
+    /// one per corner. Width is a multiple of 8 so the YUV→RGBA
+    /// converter hits its f32x8 fast path on the decode side; the
+    /// dimensions are H.264 macroblock-aligned (16-pixel
+    /// multiples) which keeps the encoder out of edge-padding
+    /// pathology.
+    fn quadrant_fixture() -> (u32, u32, Vec<u8>) {
+        const W: u32 = 64;
+        const H: u32 = 64;
+        let mut buf = Vec::with_capacity((W * H * 4) as usize);
+        for y in 0..H {
+            for x in 0..W {
+                let (r, g, b) = match (x < W / 2, y < H / 2) {
+                    (true, true) => (220, 30, 30),    // top-left red
+                    (false, true) => (30, 220, 30),   // top-right green
+                    (true, false) => (30, 30, 220),   // bottom-left blue
+                    (false, false) => (220, 220, 30), // bottom-right yellow
+                };
+                buf.push(r);
+                buf.push(g);
+                buf.push(b);
+                buf.push(255);
+            }
+        }
+        (W, H, buf)
+    }
+
+    /// Encode `rgba` via `openh264::encoder::Encoder` and return
+    /// the concatenated Annex-B byte stream produced by the
+    /// encoder for that frame. Mirrors the encoder-side flow in
+    /// `shakenfist-spice-renderer/src/encoder/h264.rs`.
+    fn encode_one_frame(
+        enc: &mut openh264::encoder::Encoder,
+        rgba: &[u8],
+        w: u32,
+        h: u32,
+    ) -> Vec<u8> {
+        use openh264::formats::{RgbaSliceU8, YUVBuffer};
+
+        let rgba_slice = RgbaSliceU8::new(rgba, (w as usize, h as usize));
+        let yuv = YUVBuffer::from_rgb_source(rgba_slice);
+        let bitstream = enc.encode(&yuv).expect("openh264 encode failed");
+
+        let mut raw: Vec<u8> = Vec::new();
+        for layer_idx in 0..bitstream.num_layers() {
+            if let Some(layer) = bitstream.layer(layer_idx) {
+                for nal_idx in 0..layer.nal_count() {
+                    if let Some(nal) = layer.nal_unit(nal_idx) {
+                        raw.extend_from_slice(nal);
+                    }
+                }
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn h264_round_trip_within_tolerance() {
+        let (w, h, src) = quadrant_fixture();
+
+        // Encode two frames of identical content. The first is an
+        // implicit IDR (openh264 default); the second is a P-frame
+        // that closely tracks the reference, which is the
+        // steady-state case for SPICE STREAM_DATA.
+        let mut enc = openh264::encoder::Encoder::new().expect("openh264 encoder init failed");
+        let frame1 = encode_one_frame(&mut enc, &src, w, h);
+        let frame2 = encode_one_frame(&mut enc, &src, w, h);
+        assert!(
+            !frame1.is_empty(),
+            "encoder produced empty bitstream for frame 1"
+        );
+        assert!(
+            !frame2.is_empty(),
+            "encoder produced empty bitstream for frame 2"
+        );
+
+        let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
+
+        // First access unit: contains SPS+PPS+IDR slice. Feed the
+        // entire access unit as one packet (matches how SPICE
+        // delivers it).
+        let first = dec.decode(&frame1).expect("first decode returned Err");
+        assert!(
+            first.is_some(),
+            "first IDR access unit should decode to a frame"
+        );
+
+        // Second access unit: P-frame. The decoder may have
+        // returned the IDR on the first call, so the second call's
+        // output is the picture we compare against the source.
+        let second = dec
+            .decode(&frame2)
+            .expect("second decode returned Err")
+            .unwrap_or_else(|| {
+                // If the encoder buffers the P-frame's output one
+                // call further, fall back to the first frame for
+                // comparison. Encoders should not, but this keeps
+                // the test resilient to crate-version flushing
+                // changes.
+                first.expect("second decode returned None AND first was None")
+            });
+
+        assert_eq!(second.width, w, "decoded width mismatch");
+        assert_eq!(second.height, h, "decoded height mismatch");
+        assert_eq!(
+            second.rgba.len(),
+            (w * h * 4) as usize,
+            "decoded RGBA length mismatch"
+        );
+
+        let mut max_diff: u32 = 0;
+        let mut sum_diff: u64 = 0;
+        let mut sample_count: u64 = 0;
+        for (i, (a, b)) in src.iter().zip(second.rgba.iter()).enumerate() {
+            if i % 4 == 3 {
+                // openh264 writes alpha = 255 explicitly in
+                // `write_rgba8` for the YUV420 → RGBA conversion.
+                assert_eq!(*b, 255, "alpha at byte {i} should be 255, got {b}");
+                continue;
+            }
+            let diff = (i32::from(*a) - i32::from(*b)).unsigned_abs();
+            max_diff = max_diff.max(diff);
+            sum_diff += u64::from(diff);
+            sample_count += 1;
+        }
+        let mean_diff = sum_diff as f64 / sample_count as f64;
+        eprintln!("h264 round-trip: max_diff={max_diff} mean_diff={mean_diff:.2}");
+        assert!(
+            max_diff <= 50,
+            "per-channel max diff {max_diff} exceeds tolerance 50"
+        );
+        assert!(
+            mean_diff <= 15.0,
+            "per-channel mean diff {mean_diff:.2} exceeds tolerance 15.0"
+        );
+
+        // After two successful decodes, the consecutive-failure
+        // counter should be zero. Verifying this here keeps the
+        // Q5 escalation behaviour exercised end-to-end without a
+        // separate test that constructs an invalid bitstream
+        // (which is fiddly to do reliably across openh264 builds).
+        assert_eq!(
+            dec.consecutive_failures, 0,
+            "consecutive_failures should reset on successful decode"
+        );
+    }
+
+    #[test]
+    fn h264_consecutive_failures_increments_on_error() {
+        // Feed obviously-invalid bytes (no NAL start codes) and
+        // confirm the failure counter advances. Three errors in a
+        // row triggers the warn-level log (asserted by inspection
+        // — capturing tracing output across versions is brittle).
+        let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
+        let garbage = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11];
+
+        let mut error_count = 0u32;
+        for _ in 0..4 {
+            if dec.decode(&garbage).is_err() {
+                error_count += 1;
+            }
+        }
+        assert!(
+            error_count > 0,
+            "expected at least one decode error on garbage input"
+        );
+        assert!(
+            dec.consecutive_failures > 0,
+            "consecutive_failures should be > 0 after error returns"
+        );
     }
 }

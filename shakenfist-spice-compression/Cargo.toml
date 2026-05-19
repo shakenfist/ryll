@@ -39,6 +39,13 @@ jpeg-decoder = { version = "0.3", optional = true }
 # runtime libjpeg-turbo dependency.
 mozjpeg = { version = "=0.10.13", optional = true, features = ["with_simd"] }
 
+# H.264 software decode via Cisco's openh264 (built from vendored
+# source via openh264-sys2 — no system libopenh264 runtime
+# dependency). The same crate is used on the encode side in
+# shakenfist-spice-renderer/src/encoder/h264.rs. Used by
+# `H264VideoDecoder` in `src/video.rs`.
+openh264 = "0.9"
+
 # macOS-only: ImageIO JPEG decoder backend. Pinned to the 0.3.x
 # `objc2-*` family so the framework crates all agree on the
 # underlying `objc2` major version. Feature sets are trimmed to

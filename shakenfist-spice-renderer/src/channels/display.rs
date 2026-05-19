@@ -16,7 +16,7 @@ use crate::{
 use shakenfist_spice_compression::{
     best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, video,
     DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
-    SPICE_VIDEO_CODEC_TYPE_MJPEG,
+    SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
 use shakenfist_spice_protocol::constants::ropd;
 use shakenfist_spice_protocol::link::SpiceStream;
@@ -635,6 +635,21 @@ pub struct DisplayChannel {
     /// Phase-03 step 3F: cumulative count of MJPEG decode
     /// attempts that returned `None` since session start.
     mjpeg_decode_failed_count: u64,
+    /// Phase-06 step 6B: bounded ring of the most recent H.264
+    /// decode durations in microseconds, newest at the back.
+    /// Capped at `MAX_RECENT_DECODES`. Used by `update_snapshot`
+    /// to compute `h264_decode_recent_min/max/mean_us`. Parallel
+    /// to `mjpeg_recent_durations`; the dispatch site selects
+    /// which ring receives the sample based on
+    /// `stream.codec_type`.
+    h264_recent_durations: VecDeque<u32>,
+    /// Phase-06 step 6B: cumulative count of H.264 decode
+    /// attempts (success + failure) since session start.
+    h264_decode_total_count: u64,
+    /// Phase-06 step 6B: cumulative count of H.264 decode
+    /// attempts that returned `Err` since session start.
+    /// `Ok(None)` (needs more data) is not counted as a failure.
+    h264_decode_failed_count: u64,
 }
 
 impl DisplayChannel {
@@ -702,6 +717,9 @@ impl DisplayChannel {
             mjpeg_recent_durations: VecDeque::new(),
             mjpeg_decode_total_count: 0,
             mjpeg_decode_failed_count: 0,
+            h264_recent_durations: VecDeque::new(),
+            h264_decode_total_count: 0,
+            h264_decode_failed_count: 0,
         }
     }
 
@@ -1439,10 +1457,13 @@ impl DisplayChannel {
                     let decode_duration_us =
                         u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
 
-                    // Phase-03 step 3F: aggregate MJPEG decode duration
-                    // tracking. Gate on codec_type so only MJPEG frames
-                    // populate the MJPEG aggregate counters; phase 6B
-                    // will add parallel h264_decode_* counters for H.264.
+                    // Phase-03 step 3F + phase-06 step 6B: aggregate
+                    // decode duration tracking per codec. Gate on
+                    // codec_type so each ring receives only its own
+                    // samples — keeping the two streams separate lets
+                    // bug reports tell MJPEG and H.264 cost apart.
+                    // `Ok(None)` (H.264 "needs more data") counts
+                    // toward total but not toward failures.
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         self.mjpeg_decode_total_count =
                             self.mjpeg_decode_total_count.saturating_add(1);
@@ -1453,6 +1474,17 @@ impl DisplayChannel {
                         if decode_result.is_err() {
                             self.mjpeg_decode_failed_count =
                                 self.mjpeg_decode_failed_count.saturating_add(1);
+                        }
+                    } else if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_H264 {
+                        self.h264_decode_total_count =
+                            self.h264_decode_total_count.saturating_add(1);
+                        self.h264_recent_durations.push_back(decode_duration_us);
+                        if self.h264_recent_durations.len() > MAX_RECENT_DECODES {
+                            self.h264_recent_durations.pop_front();
+                        }
+                        if decode_result.is_err() {
+                            self.h264_decode_failed_count =
+                                self.h264_decode_failed_count.saturating_add(1);
                         }
                     }
 
@@ -2667,6 +2699,17 @@ impl DisplayChannel {
         snap.mjpeg_decode_recent_mean_us = mjpeg_mean;
         snap.mjpeg_decode_total_count = self.mjpeg_decode_total_count;
         snap.mjpeg_decode_failed_count = self.mjpeg_decode_failed_count;
+
+        // Phase-06 step 6B: aggregate H.264 decode duration stats.
+        // Parallel to the MJPEG block above. Reuses the same
+        // `mjpeg_duration_stats` helper (renaming would just add
+        // churn; the function is codec-agnostic).
+        let (h264_min, h264_max, h264_mean) = mjpeg_duration_stats(&self.h264_recent_durations);
+        snap.h264_decode_recent_min_us = h264_min;
+        snap.h264_decode_recent_max_us = h264_max;
+        snap.h264_decode_recent_mean_us = h264_mean;
+        snap.h264_decode_total_count = self.h264_decode_total_count;
+        snap.h264_decode_failed_count = self.h264_decode_failed_count;
     }
 
     /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte
