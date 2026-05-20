@@ -282,7 +282,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
-| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | Code landed (12A-12C); 12D operator smoke test pending (re-run 002h workload with --image-cache-cap-mib 256 and confirm the cap holds across a long session) |
+| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | 12A-12C landed; 12D smoke test FAILED (session 003a showed image_cache_bytes 5 GiB / 256 MiB cap because GlzDictionary is a separate unbounded cache the snapshot sums in); 12E (bound GLZ), 12F (split snapshot fields), 12G (docs), 12H (re-run smoke) pending |
 | 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Not started |
 
 Per-phase intent:
@@ -637,6 +637,34 @@ Per-phase intent:
   recommendations updates follow.
 
 ## Agent guidance
+
+### Read the source first
+
+When a question about server / qemu / SPICE protocol behaviour
+comes up — "why does the server do X?", "is the encoder
+hardware-accelerated?", "what's the streaming heuristic?" —
+**read the actual code before speculating**. The canonical
+references live locally:
+
+- `/srv/src-reference/spice/spice-protocol/` — wire format definitions, vd_agent.h, enums.h, message structs
+- `/srv/src-reference/spice/spice/server/` — the spice-server implementation (display-channel.cpp, video-stream.cpp, mjpeg-encoder.c, gstreamer-encoder.c, image-encoders.cpp)
+- `/srv/src-reference/spice/spice-gtk/` — the reference C client (for cross-checking how a known-good client interprets a given message)
+- `/srv/src-reference/qemu/qemu/` — qemu, especially `ui/spice-*.c` for the server-side glue and `hw/display/qxl*` for the QXL device
+
+Session 003a was an object lesson: I spent five sessions
+inferring streaming heuristics from client-side counters
+when the answer (`#define RED_STREAM_MIN_SIZE (96*96)`,
+`SPICE_IMAGE_TYPE_BITMAP` requirement, `QXL_DRAW_COPY +
+QXL_EFFECT_OPAQUE + SPICE_ROPD_OP_PUT`) was sitting in
+`spice/server/display-channel.cpp:1057-1078` the whole
+time. Two minutes of `grep` would have replaced two weeks
+of guessing. **Default to reading the code; speculate only
+when the code can't answer the question.**
+
+Sub-agent briefs that touch protocol behaviour should
+explicitly point at the relevant source paths under
+`/srv/src-reference` so the agent's first move is grep,
+not guess.
 
 ### Execution model
 
