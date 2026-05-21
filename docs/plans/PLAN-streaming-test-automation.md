@@ -86,6 +86,81 @@ assert on the resulting auto-snapshot. Even a single
 "this pcap should produce ≥1 stream" assertion would
 have caught the phase 6 wiring before it landed.
 
+## A different shape: input record-and-replay + dedicated CI hardware
+
+A complementary approach (not alternative — they answer
+different questions). **Pcap replay** tests "given THIS
+server behaviour, does ryll do the right thing?" — frozen
+wire data, deterministic, but doesn't exercise the
+server+guest+ryll loop. **Input replay** tests "given
+THESE user inputs, does the full client+server+guest
+combination produce the expected state?" — exercises the
+real loop, closer to production behaviour, but requires
+real infrastructure.
+
+Sequencing toward this:
+
+1. **Now-cheap: record inputs to session bundle.**
+   ryll already knows every keypress and mouse event it
+   sends (the inputs channel handler is the funnel).
+   Log them to a JSONL alongside the auto-snapshots.
+   Useful immediately for human review of bug reports
+   ("the operator clicked here, then typed `top`, then
+   …"), even before any replay machinery exists. Tiny
+   feature, possibly justifying its own small phase.
+
+2. **Later-medium: open-loop input replay** at wall-clock
+   timing, with protocol-level wait points so a click
+   doesn't fire until the display channel reports N
+   frames received / a specific surface state / an
+   image_ready_lag settle. Combined with a known-good
+   guest snapshot + dedicated CI hardware (one physical
+   box in the homelab running the workload guest; the
+   build runner runs ryll itself), this becomes a real
+   behavioural CI test that exercises the full loop.
+   Assert on `channel-state.json` properties, NOT on
+   pixels — sidesteps visual brittleness while still
+   testing decode + stream + cache behaviour.
+
+3. **Later-harder: AT-SPI-based semantic replay.** The
+   wall-clock + wait-point replay above is brittle when
+   the UI shifts. AT-SPI (the Linux accessibility
+   framework) lets you reference widgets by label
+   ("click the button labelled 'Send'") instead of by
+   coordinates. Requires an in-guest helper to expose
+   AT-SPI over a channel ryll can reach (extension to
+   vdagent, or a tiny standalone TCP daemon, or
+   gdbus-over-SSH from outside the guest). Higher
+   effort but makes input replay robust AND opens an
+   interesting parallel: an **MCP server backed by
+   AT-SPI** lets an agent reason about UI state during
+   a remote SPICE session. "What's the title of the
+   current window?" "Is there a dialog open?" "What
+   buttons are visible?" — all answerable without
+   screenshot-and-OCR. That's a genuinely interesting
+   agent surface, distinct from the visual approach,
+   and dovetails with future MCP-tooling work.
+
+The AT-SPI coverage caveats are real: it's great for
+GTK/Qt apps, partial for terminals, useless for games
+or video players. So input-replay-with-AT-SPI works for
+"clicks through a settings dialog" and not for "plays a
+YouTube clip." For the video-streaming workloads that
+dominate the current ryll dogfood cycles, wall-clock
+replay + protocol-level wait points is the right tool;
+AT-SPI is for the next class of tests (clipboard,
+USB-redirect interaction, vdagent behaviour, future
+input-method tests).
+
+### Why a separate stub isn't worth it yet
+
+All three of these approaches are answering "how do we
+test ryll programmatically?" — they belong in the same
+conceptual home and the decision tree across them
+should live in one plan, not three. When (and if) one
+of them gets enough commitment to start phasing, the
+detail moves to a dedicated plan file then.
+
 ## When to plan this in detail
 
 After the 002/003 cycle wraps and phase 13 (streaming
