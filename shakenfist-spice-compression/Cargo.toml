@@ -30,6 +30,10 @@ thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.13", optional = true }
+# Byte-bounded LRU shared by the GLZ dictionary (this crate) and
+# the renderer's image_cache wrapper.  Same version pin as the
+# renderer's previous `lru` dep.
+lru = "0.16"
 jpeg-decoder = { version = "0.3", optional = true }
 # Pinned to 0.10.13 — the mozjpeg crate's surface has shifted
 # across minor versions, so we lock to a specific release we have

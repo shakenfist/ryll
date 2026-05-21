@@ -809,6 +809,11 @@ pub struct RyllApp {
     /// so reconnect passes the same value each time.
     image_cache_cap_bytes: usize,
 
+    /// Byte cap for the shared GLZ dictionary, converted from
+    /// `--glz-dictionary-cap-mib` at startup. Persisted here so
+    /// reconnect passes the same value each time. Phase 12E.
+    glz_dictionary_cap_bytes: usize,
+
     // Phase 5 auto-snapshot config. `None` means the mode is
     // disabled. `auto_snapshot_spawned` is latched to `true`
     // after the interval task is spawned on `SessionInitialized`
@@ -924,6 +929,7 @@ impl RyllApp {
         auto_snapshot_interval: Option<u64>,
         auto_snapshot_cap: Option<usize>,
         image_cache_cap_bytes: usize,
+        glz_dictionary_cap_bytes: usize,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -1045,6 +1051,7 @@ impl RyllApp {
                     clipboard,
                     /* opus_sink */ None,
                     image_cache_cap_bytes,
+                    glz_dictionary_cap_bytes,
                 )
                 .await
                 {
@@ -1161,6 +1168,7 @@ impl RyllApp {
             app_focused,
             debug_single_thread_runtime,
             image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
             auto_snapshot_interval,
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
@@ -1269,6 +1277,7 @@ impl RyllApp {
         let focused_for_conn = self.app_focused.clone();
         let single_thread_for_conn = self.debug_single_thread_runtime;
         let image_cache_cap_bytes = self.image_cache_cap_bytes;
+        let glz_dictionary_cap_bytes = self.glz_dictionary_cap_bytes;
 
         std::thread::spawn(move || {
             let runtime = build_connection_runtime(single_thread_for_conn);
@@ -1310,6 +1319,7 @@ impl RyllApp {
                     clipboard,
                     /* opus_sink */ None,
                     image_cache_cap_bytes,
+                    glz_dictionary_cap_bytes,
                 )
                 .await
                 {

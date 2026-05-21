@@ -305,6 +305,7 @@ fn run_headless(
     let cadence = args.cadence;
     let monitors = args.monitors;
     let image_cache_cap_bytes = args.image_cache_cap_mib as usize * 1024 * 1024;
+    let glz_dictionary_cap_bytes = args.glz_dictionary_cap_mib as usize * 1024 * 1024;
 
     // Build the host-side scaffolding the renderer's `run_headless`
     // expects. Notifications, traffic, snapshots, and the byte
@@ -392,6 +393,7 @@ fn run_headless(
             log_config,
             cancel,
             image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
         )
         .await;
 
@@ -449,6 +451,7 @@ fn run_web(
     let web_tls_key = args.web_tls_key.clone();
     let monitors = args.monitors;
     let image_cache_cap_bytes = args.image_cache_cap_mib as usize * 1024 * 1024;
+    let glz_dictionary_cap_bytes = args.glz_dictionary_cap_mib as usize * 1024 * 1024;
 
     let runtime = tokio::runtime::Runtime::new()
         .with_context(|| "failed to construct tokio runtime for --web")?;
@@ -604,6 +607,7 @@ fn run_web(
                 /* clipboard */ None,
                 /* opus_sink */ Some(opus_sink_dyn),
                 image_cache_cap_bytes,
+                glz_dictionary_cap_bytes,
             )
             .await
         });
@@ -779,6 +783,7 @@ fn run_gui(
     let auto_snapshot_interval = args.auto_snapshot_interval;
     let auto_snapshot_cap = args.auto_snapshot_cap;
     let image_cache_cap_bytes = args.image_cache_cap_mib as usize * 1024 * 1024;
+    let glz_dictionary_cap_bytes = args.glz_dictionary_cap_mib as usize * 1024 * 1024;
 
     if let Some(interval) = auto_snapshot_interval {
         if interval < 10 {
@@ -812,6 +817,7 @@ fn run_gui(
                 auto_snapshot_interval,
                 auto_snapshot_cap,
                 image_cache_cap_bytes,
+                glz_dictionary_cap_bytes,
             )))
         }),
     )

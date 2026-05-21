@@ -1,78 +1,32 @@
 //! Byte-bounded LRU image cache.
 //!
-//! `BoundedImageCache` wraps [`lru::LruCache`] and adds a byte-level
-//! cap on top of the crate's entry-count cap.  The inner `LruCache`
-//! is created as *unbounded* (no entry limit); all capacity management
-//! is done here in terms of total `Vec<u8>` length.
+//! `BoundedImageCache` is a thin wrapper around
+//! [`shakenfist_spice_compression::ByteBoundedLru`] that adds the
+//! image-cache-specific first-eviction info log (so an operator
+//! reading the log knows which cache hit its cap first — image cache
+//! vs GLZ dictionary).  The byte-cap accounting, LRU eviction, refusal
+//! of oversize entries, and the [`InsertOutcome`] / [`RefusedReason`]
+//! enums are all provided by the shared `ByteBoundedLru` in the
+//! compression crate so the GLZ dictionary can reuse them.
 //!
-//! On each [`BoundedImageCache::insert`] call the cache evicts the
-//! least-recently-used entries until `total_bytes <= cap_bytes`.  If a
-//! single entry is larger than the entire cap it is *refused* rather
-//! than accepted (which would thrash the LRU evicting everything and
-//! then immediately needing to re-fetch the giant frame anyway).
-//!
-//! Eviction counters (`evictions_total`, `evicted_bytes_total`) are
-//! session-wide: they survive [`clear`][BoundedImageCache::clear] so
-//! that an operator reading a bug report sees the cumulative eviction
-//! pressure regardless of how many `inval_all` messages arrived.
+//! See phase 12E of
+//! `docs/plans/PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md`
+//! for the refactor that moved the underlying data structure into the
+//! compression crate.
 
-use lru::LruCache;
+pub use shakenfist_spice_compression::byte_bounded_lru::{InsertOutcome, RefusedReason};
+
+use shakenfist_spice_compression::byte_bounded_lru::ByteBoundedLru;
 use tracing::{debug, info};
-
-/// Outcome of a [`BoundedImageCache::insert`] call.
-#[derive(Debug, PartialEq, Eq)]
-pub enum InsertOutcome {
-    /// The entry was stored; no eviction was needed.
-    Inserted,
-    /// The entry was stored after one or more LRU entries were evicted
-    /// to bring total bytes back within the cap.
-    InsertedAfterEviction {
-        /// Number of entries evicted.
-        evicted: u32,
-        /// Bytes freed by those evictions.
-        freed_bytes: usize,
-    },
-    /// The entry was not stored; see [`RefusedReason`].
-    Refused {
-        /// Why the entry was refused.
-        reason: RefusedReason,
-    },
-}
-
-/// Why [`BoundedImageCache::insert`] refused to store an entry.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RefusedReason {
-    /// The single entry's byte length exceeds `cap_bytes`.  Inserting
-    /// it would require evicting everything and the entry would still
-    /// not fit; refuse it so the caller can handle a cache miss.
-    EntryLargerThanCap,
-}
 
 /// Byte-bounded LRU cache for decoded SPICE image RGBA data.
 ///
 /// Keys are SPICE `image_id` values (`u64`); values are raw RGBA pixel
-/// buffers (`Vec<u8>`).
-///
-/// ## Byte cap enforcement
-///
-/// After each successful insert the cache evicts the LRU entry
-/// repeatedly until `bytes() <= cap_bytes()`.  A single entry whose
-/// size exceeds `cap_bytes()` is refused up-front (see
-/// [`InsertOutcome::Refused`]).
-///
-/// ## Eviction counters
-///
-/// `evictions_total` and `evicted_bytes_total` count cap-driven
-/// evictions only.  Explicit [`remove`][Self::remove] calls (the
-/// `inval_list` path) and [`clear`][Self::clear] calls (the `inval_all`
-/// path) are *not* counted as evictions — they represent server-driven
-/// invalidation, not memory pressure.
+/// buffers (`Vec<u8>`).  All capacity management is delegated to
+/// [`ByteBoundedLru`]; this type only adds the renderer-specific
+/// first-eviction info log.
 pub struct BoundedImageCache {
-    inner: LruCache<u64, Vec<u8>>,
-    bytes: usize,
-    cap_bytes: usize,
-    evictions_total: u64,
-    evicted_bytes_total: u64,
+    inner: ByteBoundedLru,
     first_eviction_logged: bool,
 }
 
@@ -81,65 +35,24 @@ impl BoundedImageCache {
     ///
     /// Panics if `cap_bytes` is 0.
     pub fn new(cap_bytes: usize) -> Self {
-        assert!(cap_bytes > 0, "BoundedImageCache: cap_bytes must be > 0");
         Self {
-            inner: LruCache::unbounded(),
-            bytes: 0,
-            cap_bytes,
-            evictions_total: 0,
-            evicted_bytes_total: 0,
+            inner: ByteBoundedLru::new(cap_bytes),
             first_eviction_logged: false,
         }
     }
 
-    /// Insert (or replace) an entry.
-    ///
-    /// Returns [`InsertOutcome::Refused`] if `value.len() > cap_bytes`.
-    /// Otherwise stores the entry and evicts LRU entries until
-    /// `bytes <= cap_bytes`, then returns either
-    /// [`InsertOutcome::Inserted`] or
-    /// [`InsertOutcome::InsertedAfterEviction`].
+    /// Insert (or replace) an entry.  See
+    /// [`ByteBoundedLru::insert`] for the byte-cap semantics.
     pub fn insert(&mut self, key: u64, value: Vec<u8>) -> InsertOutcome {
-        let incoming_bytes = value.len();
-
-        // Refuse entries that can never fit.
-        if incoming_bytes > self.cap_bytes {
-            return InsertOutcome::Refused {
-                reason: RefusedReason::EntryLargerThanCap,
-            };
-        }
-
-        // `put` returns the previous value if the key already existed,
-        // so we can subtract the old byte count from our running total.
-        let displaced = self.inner.put(key, value);
-        if let Some(old_val) = &displaced {
-            self.bytes = self.bytes.saturating_sub(old_val.len());
-        }
-        self.bytes += incoming_bytes;
-
-        // Evict LRU entries until we are within the cap.
-        let mut evicted: u32 = 0;
-        let mut freed_bytes: usize = 0;
-
-        while self.bytes > self.cap_bytes {
-            match self.inner.pop_lru() {
-                // Should not happen; cache has the entry we just inserted.
-                None => break,
-                Some((_k, v)) => {
-                    let n = v.len();
-                    self.bytes = self.bytes.saturating_sub(n);
-                    evicted += 1;
-                    freed_bytes += n;
-                    self.evictions_total += 1;
-                    self.evicted_bytes_total += n as u64;
-                }
-            }
-        }
-
-        if evicted > 0 {
+        let outcome = self.inner.insert(key, value);
+        if let InsertOutcome::InsertedAfterEviction {
+            evicted,
+            freed_bytes,
+        } = outcome
+        {
             if !self.first_eviction_logged {
                 self.first_eviction_logged = true;
-                let cap_mib = self.cap_bytes / (1024 * 1024);
+                let cap_mib = self.inner.cap_bytes() / (1024 * 1024);
                 info!(
                     "image_cache: cap {} MiB reached; oldest entries will be evicted",
                     cap_mib,
@@ -148,53 +61,30 @@ impl BoundedImageCache {
                 debug!(
                     evicted,
                     freed_bytes,
-                    bytes = self.bytes,
-                    cap_bytes = self.cap_bytes,
+                    bytes = self.inner.bytes(),
+                    cap_bytes = self.inner.cap_bytes(),
                     "image_cache: evicted LRU entries",
                 );
             }
-
-            InsertOutcome::InsertedAfterEviction {
-                evicted,
-                freed_bytes,
-            }
-        } else {
-            InsertOutcome::Inserted
         }
+        outcome
     }
 
     /// Return a reference to the value for `key`, bumping it to MRU.
-    ///
-    /// Returns `None` on a cache miss.
     pub fn get(&mut self, key: &u64) -> Option<&Vec<u8>> {
         self.inner.get(key)
     }
 
-    /// Remove `key` from the cache.
-    ///
-    /// Returns `true` iff the key was present.  Decrements the byte
-    /// counter by the removed value's length.  Does **not** increment
-    /// `evictions_total` — explicit removes are server-driven
-    /// invalidation, not cap-driven eviction.
+    /// Remove `key` from the cache.  Returns `true` iff the key was
+    /// present.
     pub fn remove(&mut self, key: &u64) -> bool {
-        match self.inner.pop(key) {
-            None => false,
-            Some(v) => {
-                self.bytes = self.bytes.saturating_sub(v.len());
-                true
-            }
-        }
+        self.inner.remove(key)
     }
 
-    /// Empty the cache, resetting `bytes` to 0.
-    ///
-    /// `evictions_total` and `evicted_bytes_total` are **not** reset —
-    /// those are session-wide counters that survive cache resets so that
-    /// an operator reading a bug report sees cumulative eviction pressure
-    /// regardless of how many `inval_all` messages arrived.
+    /// Empty the cache, resetting `bytes` to 0.  Eviction counters
+    /// survive (see [`ByteBoundedLru::clear`]).
     pub fn clear(&mut self) {
         self.inner.clear();
-        self.bytes = 0;
     }
 
     /// Number of entries currently in the cache.
@@ -209,29 +99,29 @@ impl BoundedImageCache {
 
     /// Total bytes currently held by all cached values.
     pub fn bytes(&self) -> usize {
-        self.bytes
+        self.inner.bytes()
     }
 
     /// The configured byte cap.
     pub fn cap_bytes(&self) -> usize {
-        self.cap_bytes
+        self.inner.cap_bytes()
     }
 
     /// Iterate over all keys in MRU→LRU order.
     pub fn keys(&self) -> impl Iterator<Item = &u64> + '_ {
-        self.inner.iter().map(|(k, _)| k)
+        self.inner.keys()
     }
 
-    /// Cumulative count of entries evicted by the byte cap since session
-    /// start.
+    /// Cumulative count of entries evicted by the byte cap since
+    /// session start.
     pub fn evictions_total(&self) -> u64 {
-        self.evictions_total
+        self.inner.evictions_total()
     }
 
     /// Cumulative bytes freed by cap-driven evictions since session
     /// start.
     pub fn evicted_bytes_total(&self) -> u64 {
-        self.evicted_bytes_total
+        self.inner.evicted_bytes_total()
     }
 
     /// Whether the first-eviction info log has been emitted this

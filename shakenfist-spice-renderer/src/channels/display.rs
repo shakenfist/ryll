@@ -654,8 +654,8 @@ pub struct DisplayChannel {
 }
 
 impl DisplayChannel {
-    pub fn new_shared_glz_dictionary() -> SharedGlzDictionary {
-        Arc::new(GlzDictionary::new())
+    pub fn new_shared_glz_dictionary(cap_bytes: usize) -> SharedGlzDictionary {
+        Arc::new(GlzDictionary::with_cap(cap_bytes))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -18,6 +18,8 @@
 //! Extracted from the
 //! [ryll](https://github.com/shakenfist/ryll) SPICE client.
 
+pub mod byte_bounded_lru;
+
 #[cfg(feature = "glz")]
 pub mod glz;
 
@@ -41,6 +43,8 @@ pub mod quic;
 /// makes the entire module available.
 #[cfg(feature = "jpeg")]
 pub mod video;
+
+pub use byte_bounded_lru::{ByteBoundedLru, InsertOutcome, RefusedReason};
 
 #[cfg(feature = "glz")]
 pub use glz::{decompress_glz, GlzDictionary};

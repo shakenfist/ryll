@@ -180,6 +180,15 @@ pub struct Args {
     /// session-002g).
     #[arg(long, default_value_t = 256)]
     pub image_cache_cap_mib: u64,
+
+    /// Maximum total bytes for the shared SPICE GLZ dictionary,
+    /// in MiB. Defaults to 256. The dictionary holds decoded
+    /// RGBA for GLZ images so cross-frame references resolve;
+    /// without a cap, full-screen ZlibGlzRgb workloads observed
+    /// in sessions 003a / 004d-g consumed gigabytes (~30 MiB/s
+    /// of growth). Phase 12E.
+    #[arg(long, default_value_t = 256)]
+    pub glz_dictionary_cap_mib: u64,
 }
 
 /// SPICE connection configuration

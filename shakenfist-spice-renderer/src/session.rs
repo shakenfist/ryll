@@ -92,6 +92,7 @@ pub async fn run_connection(
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
     image_cache_cap_bytes: usize,
+    glz_dictionary_cap_bytes: usize,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
 
@@ -158,7 +159,7 @@ pub async fn run_connection(
     )> = vec![(ChannelType::Main, main_handle)];
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
-    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
+    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary(glz_dictionary_cap_bytes);
 
     let main_only = std::env::var("RYLL_K1_MAIN_ONLY").is_ok();
     if main_only {
@@ -418,6 +419,7 @@ pub async fn run_headless(
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
     image_cache_cap_bytes: usize,
+    glz_dictionary_cap_bytes: usize,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -460,6 +462,7 @@ pub async fn run_headless(
             None, // headless mode: no clipboard
             None, // headless mode: no opus sink (cpal output only)
             image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
         )
         .await
     });
