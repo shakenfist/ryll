@@ -284,6 +284,8 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
 | 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | 12A-12C landed; 12D smoke test FAILED (session 003a showed image_cache_bytes 5 GiB / 256 MiB cap because GlzDictionary is a separate unbounded cache the snapshot sums in); 12E (bound GLZ), 12F (split snapshot fields), 12G (docs), 12H (re-run smoke) pending |
 | 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Not started |
+| 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Not started |
+| 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | Not started |
 
 Per-phase intent:
 
@@ -662,6 +664,102 @@ Per-phase intent:
   `docs/spice-server-streaming-investigation.md` plus
   whatever upstream-issue links or libvirt
   recommendations updates follow.
+
+- **Phase 14 — Stop status-bar pointer events leaking into
+  the guest.** Driven by session 004f, where the operator
+  observed that clicks on the egui status-bar volume widgets
+  also registered inside the guest. Root cause is visible in
+  `ryll/src/app.rs:3814-3885`: the `MouseMotion` / `MouseMove`
+  path correctly gates on `response.hover_pos()` (constrained
+  to the SPICE surface's `egui::Image` rect), but the button
+  and scroll paths use `ctx.input(...)` which sees every
+  pointer event in the egui window regardless of which widget
+  is under the cursor, and forwards `MouseDown` / `MouseUp` /
+  scroll-wheel events to the guest at `last_mouse_pos`
+  (the *last* image-relative coordinate). Result: clicking
+  the volume slider, mute button, bug-report widgets, or any
+  other status-bar control fires a phantom click into the
+  guest at wherever the cursor was last over the image.
+
+  Fix shape: replace the `ctx.input(...)` button-and-scroll
+  block with `response.*` interrogation
+  (`response.is_pointer_button_down_on()` for press state,
+  `response.clicked_by()` / `response.dragged_by()` for
+  edges, `response.hovered() && ctx.input(|i| i.smooth_scroll_delta)`
+  for scroll), so press/release/scroll events only forward
+  when the pointer is actually over the SPICE surface. Verify
+  by clicking each status-bar control (volume slider, mute,
+  reconnect, USB-device label, FPS label) while the guest has
+  a focusable target in the click-through region (e.g. an open
+  terminal) and confirming no click reaches the guest. Add a
+  small input-channel test that the bug-dialog / region-select
+  `input_suppressed` path still works (it shares the same code
+  block — easy to regress).
+
+  Scope is intentionally narrow: no new input semantics, no
+  refactor of the input forwarding architecture. One file
+  (`ryll/src/app.rs`), one logical change, one commit.
+
+  Recommended planning effort: **low** (well-scoped UI bug
+  fix; the only judgment call is whether to use
+  `response.interact_pointer_pos()` or
+  `ctx.input(|i| i.pointer.button_pressed(b))` gated on
+  `response.contains_pointer()` — the phase plan picks).
+
+- **Phase 15 — Track down `build_tcp_frame: payload too large`
+  warns.** Driven by a live observation during session 004
+  H.264 follow-up testing, where the Mac client logged:
+
+  ```
+  WARN build_tcp_frame: payload too large for IPv4 (2246044 bytes), dropping
+  WARN build_tcp_frame: payload too large for IPv4 (2245427 bytes), dropping
+  ```
+
+  The K2 fix (`d95d4b3c`, 2026-05-12) introduced
+  `capture::segment_payload` which chunks at
+  `MAX_PAYLOAD = 65495` and is the only caller of
+  `build_tcp_frame` in the current tree. Given segmentation,
+  every `build_tcp_frame` invocation should arrive with
+  `payload.len() ≤ 65495`, making the `ip_payload_len > 65515`
+  check at `capture.rs:183` defensively unreachable.
+
+  Two possibilities:
+
+  1. **The running binary predates K2.** If `cargo build`
+     on the Mac was done before pulling the K2 commit,
+     the old `build_frame` path called `build_tcp_frame`
+     with the whole SPICE message. A 2.2 MiB payload
+     matches a single un-segmented display-channel message
+     at ~1920×1440 RGBA. Confirm by reading
+     `ryll --version` (embedded git sha) on the Mac and
+     comparing against `93474db2` (which has K2). If
+     pre-K2, the fix is a rebuild; phase closes.
+
+  2. **There is a `build_tcp_frame` caller `grep` didn't
+     find.** Possibilities: a sub-binary, a `cfg`-gated
+     path, a hand-rolled frame builder using `etherparse`
+     directly. If so, find it and route it through
+     `segment_payload` like the other callers.
+
+  Scope:
+  - Confirm the running binary's sha (one shell command,
+    no code changes).
+  - If post-K2: instrument the warn with a one-shot
+    backtrace (`tracing::warn!` + `std::backtrace::Backtrace::capture()`
+    formatted with `{:?}` debug-level only on first hit,
+    so subsequent firings don't spam) and reproduce.
+    Find the caller; fix it.
+  - Either way, once the actual call site is known and
+    routes through `segment_payload`, demote the
+    `if ip_payload_len > 65515` warn at `capture.rs:183`
+    to a `debug_assert!` plus a `debug!` log. The check
+    is defensive; once segmentation is the only path,
+    a fired warn is a code bug to crash on in tests
+    rather than a runtime condition to log around.
+
+  Recommended planning effort: **low** (one of two
+  outcomes is "rebuild and done"; the other is a
+  one-file fix once the caller is located).
 
 ## Agent guidance
 
