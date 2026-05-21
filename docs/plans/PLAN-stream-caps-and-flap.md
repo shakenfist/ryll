@@ -278,7 +278,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Code landed (5A-5B); 5C operator smoke test pending |
 | 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Code landed (6A-6E); 6F operator smoke test pending (needs an H.264-capable spice-server build to actually exercise the new path) |
 | 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Not started |
-| 8. Flap notification | PLAN-stream-caps-and-flap-phase-08-flap-notification.md | Not started |
+| 8. Live streaming indicator + flap notification | PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md | Not started |
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
@@ -436,21 +436,48 @@ Per-phase intent:
   planning effort: **medium** (mechanical once the cap plumbing
   is in place from earlier phases).
 
-- **Phase 8 — Flap notification.** Add a small per-channel
-  watcher (likely a tokio task or a tick inside
-  `update_snapshot`) that examines the `streams_recently_destroyed`
-  ring. If ≥3 streams destroyed in the last 30 s with mean
-  lifetime < 3 s, push a `NotifySeverity::Warn` notification
-  via `push_notification` with `NotificationSource::Internal`
-  (one-shot, 60 s cool-down) saying something like
-  "Server is rapidly creating and tearing down video streams
-  ({N} cycles in {Ms}, mean lifetime {Ts}); this usually means
-  the guest is producing frames in bursts." Also expose the
-  flap state via a transient annotation in the stats panel so
-  the user can see it without waiting for the notification
-  cool-down. Recommended planning effort: **medium** (the
-  heuristic is well-defined; UI integration follows existing
-  notification patterns).
+- **Phase 8 — Live streaming indicator + flap
+  notification.** Two complementary UI affordances that
+  share the same data source (`streams_active` and
+  `streams_recently_destroyed` on the display channel):
+
+  - **Live status-bar icon.** A small video-camera-style
+    icon in the status bar whose colour reflects current
+    streaming state: grey/dim when no streams are
+    active, green when at least one stream is active and
+    healthy, amber when a stream was recently destroyed
+    (within the last few seconds), red when the flap
+    heuristic below fires. Hovering shows a per-stream
+    tooltip: codec, surface size, frames decoded, current
+    lifetime. Updates live (driven by `update_snapshot`
+    cadence, no extra polling). Operator can watch a
+    session and see streams come and go in real time —
+    directly useful for the phase 13 streaming-
+    intermittency investigation, where being able to say
+    "the stream was alive when the video started and died
+    after exactly N seconds" without ad-hoc bug-report
+    capture would speed every test cycle.
+  - **Flap notification.** A small per-channel watcher
+    (likely a tokio task or a tick inside
+    `update_snapshot`) that examines the
+    `streams_recently_destroyed` ring. If ≥3 streams
+    destroyed in the last 30 s with mean lifetime < 3 s,
+    push a `NotifySeverity::Warn` notification via
+    `push_notification` with
+    `NotificationSource::Internal` (one-shot, 60 s
+    cool-down) saying something like "Server is rapidly
+    creating and tearing down video streams ({N} cycles
+    in {Ms}, mean lifetime {Ts}); this usually means
+    the guest is producing frames in bursts." The
+    notification is the alert for batch-job operators
+    who aren't watching the status bar; the icon is the
+    primary signal for interactive use.
+
+  Recommended planning effort: **medium**. Icon + flap
+  notification share a derived-state computation; both
+  read from the same display-channel snapshot fields
+  that already exist post-phase 1. UI integration follows
+  existing stats-panel + notification patterns.
 
 - **Phase 9 — Vdagent responsiveness probe.** The spice in-guest
   agent has no diagnostic message types of its own (see the
