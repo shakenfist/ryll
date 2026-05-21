@@ -282,7 +282,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
 | 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
-| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | 12A-12C landed; 12D smoke test FAILED (session 003a showed image_cache_bytes 5 GiB / 256 MiB cap because GlzDictionary is a separate unbounded cache the snapshot sums in); 12E (bound GLZ), 12F (split snapshot fields), 12G (docs), 12H (re-run smoke) pending |
+| 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | 12A-12C landed; 12D smoke test FAILED (session 003a showed image_cache_bytes 5 GiB / 256 MiB cap because GlzDictionary is a separate unbounded cache the snapshot sums in); 12E (bound GLZ, commit `49cb5e81`), 12F (split snapshot fields, commit `0f13292b`), 12G (docs, commit `1505c26e`) all landed; 12H (re-run smoke) is the only pending step and needs an operator run |
 | 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Not started |
 | 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Not started |
 | 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | Not started |
