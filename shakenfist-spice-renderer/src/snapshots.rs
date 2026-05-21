@@ -279,6 +279,29 @@ pub struct DisplaySnapshot {
     /// 256 MiB). Surfaced so a bug report tells you what cap
     /// the session ran under.
     pub image_cache_cap_bytes: u64,
+    /// Total bytes currently held in the SPICE GLZ decompression
+    /// dictionary. Distinct from `image_cache_bytes` (which only
+    /// counts the CACHE_ME-flagged decoded RGBA frames the
+    /// renderer keeps). Prior to phase 12F this was summed into
+    /// `image_cache_bytes`; that summing obscured the 002g/003a
+    /// failure mode where the GLZ dictionary, not the image
+    /// cache, was the source of the leak.
+    pub glz_dictionary_bytes: usize,
+    /// Number of entries currently in the GLZ dictionary.
+    /// Parallel to `image_cache_entries`.
+    pub glz_dictionary_entries: usize,
+    /// The configured byte cap for the GLZ dictionary. Mirrors
+    /// the value passed via --glz-dictionary-cap-mib (default
+    /// 256 MiB).
+    pub glz_dictionary_cap_bytes: u64,
+    /// Cumulative count of GLZ-dictionary entries evicted by the
+    /// LRU byte cap since session start. Server-driven
+    /// invalidations (inval_list / inval_all / `evict_older_than`)
+    /// are not counted here.
+    pub glz_dictionary_evictions_total: u64,
+    /// Cumulative bytes freed by GLZ-dictionary cap-driven
+    /// evictions since session start.
+    pub glz_dictionary_evicted_bytes_total: u64,
     /// Min H.264 decode duration (µs) over the most recent
     /// `MAX_RECENT_DECODES` calls. Zero when no H.264 frame
     /// has been decoded this session.

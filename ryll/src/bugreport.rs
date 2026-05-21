@@ -2234,11 +2234,27 @@ mod tests {
         // what cap was in effect.
         snap.image_cache_evictions_total = 42;
         snap.image_cache_evicted_bytes_total = 441_450_496;
-        snap.image_cache_cap_bytes = 268_435_456; // 256 MiB default
+        // 256 MiB default cap.
+        snap.image_cache_cap_bytes = 268_435_456;
+        // Phase-12F: GLZ-dictionary cache stats now live in their
+        // own snapshot fields rather than being summed into
+        // image_cache_*. A bug report must surface both sets so an
+        // operator can tell which cache is under pressure.
+        snap.glz_dictionary_entries = 17;
+        snap.glz_dictionary_bytes = 4_194_304;
+        // 256 MiB default cap (matches the image-cache default).
+        snap.glz_dictionary_cap_bytes = 268_435_456;
+        snap.glz_dictionary_evictions_total = 5;
+        snap.glz_dictionary_evicted_bytes_total = 1_048_576;
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_evictions_total\": 42"));
         assert!(json.contains("\"image_cache_evicted_bytes_total\": 441450496"));
         assert!(json.contains("\"image_cache_cap_bytes\": 268435456"));
+        assert!(json.contains("\"glz_dictionary_entries\": 17"));
+        assert!(json.contains("\"glz_dictionary_bytes\": 4194304"));
+        assert!(json.contains("\"glz_dictionary_cap_bytes\": 268435456"));
+        assert!(json.contains("\"glz_dictionary_evictions_total\": 5"));
+        assert!(json.contains("\"glz_dictionary_evicted_bytes_total\": 1048576"));
     }
 
     #[test]

@@ -651,6 +651,27 @@ an LRU eviction policy: when the total cached bytes exceed the cap, the
 least-recently-used entries are evicted until the cap is satisfied. This
 is essential for long-running desktop sessions without risk of OOM.
 
+### Schema change (phase 12F)
+
+Prior to phase 12F, `image_cache_bytes`, `image_cache_entries`, and
+`image_cache_ids` summed the renderer's `BoundedImageCache` together
+with the SPICE `GlzDictionary` decompression cache. This made bug
+reports ambiguous: a 5 GiB `image_cache_bytes` reading against a
+256 MiB cap (as seen in session 003a) actually came from the GLZ
+dictionary, not the image cache, but nothing in the snapshot
+distinguished the two.
+
+After 12F, the `image_cache_*` fields reflect only the
+`BoundedImageCache` (CACHE_ME-flagged decoded RGBA frames). The GLZ
+dictionary's state is now reported separately as
+`glz_dictionary_bytes`, `glz_dictionary_entries`,
+`glz_dictionary_cap_bytes`, `glz_dictionary_evictions_total`, and
+`glz_dictionary_evicted_bytes_total`. As a result, `image_cache_bytes`
+in a bug report from a recent ryll build will be roughly an order of
+magnitude smaller than the same field from a pre-12F bug report under
+an equivalent workload; if you need the pre-12F sum, add
+`image_cache_bytes + glz_dictionary_bytes`.
+
 ### Interpreting cache statistics in a bug report
 
 When you file a Display bug report (F12), the `channel-state.json`

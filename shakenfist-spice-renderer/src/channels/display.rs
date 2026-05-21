@@ -2646,19 +2646,28 @@ impl DisplayChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
-        let glz_len = self.glz_dictionary.len();
-        let glz_bytes = self.glz_dictionary.total_bytes();
-        let glz_ids = self.glz_dictionary.image_ids();
-        snap.image_cache_entries = self.image_cache.len() + glz_len;
-        snap.image_cache_bytes = self.image_cache.bytes() + glz_bytes;
+        // Phase 12F: keep the image_cache_* snapshot fields
+        // scoped to the renderer's BoundedImageCache only. Until
+        // 12F these summed the GLZ dictionary too, which made the
+        // 12D smoke-test failure mode (a 5 GiB image_cache_bytes
+        // reading coming from the GLZ dict, not the image cache)
+        // impossible to triage from a bug report alone. The GLZ
+        // dictionary now has its own parallel snapshot fields.
+        snap.image_cache_entries = self.image_cache.len();
+        snap.image_cache_bytes = self.image_cache.bytes();
         snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self.image_cache.keys().copied().chain(glz_ids).collect();
+            let mut ids: Vec<u64> = self.image_cache.keys().copied().collect();
             ids.sort_unstable();
             ids
         };
         snap.image_cache_evictions_total = self.image_cache.evictions_total();
         snap.image_cache_evicted_bytes_total = self.image_cache.evicted_bytes_total();
         snap.image_cache_cap_bytes = self.image_cache.cap_bytes() as u64;
+        snap.glz_dictionary_entries = self.glz_dictionary.len();
+        snap.glz_dictionary_bytes = self.glz_dictionary.total_bytes();
+        snap.glz_dictionary_cap_bytes = self.glz_dictionary.cap_bytes() as u64;
+        snap.glz_dictionary_evictions_total = self.glz_dictionary.evictions_total();
+        snap.glz_dictionary_evicted_bytes_total = self.glz_dictionary.evicted_bytes_total();
         snap.recent_decodes = self.recent_decodes.clone();
 
         // Phase-01: cumulative decode counters and recent-window
