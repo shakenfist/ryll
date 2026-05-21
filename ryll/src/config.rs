@@ -16,7 +16,7 @@ pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskCo
 
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RYLL_GIT_SHA"), ")"), about, long_about = None)]
 pub struct Args {
     /// URL to fetch .vv configuration file from
     #[arg(long, group = "config_source")]
