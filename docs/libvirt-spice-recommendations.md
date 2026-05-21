@@ -11,10 +11,15 @@ The recommendations below are written against a **libvirt domain XML**
 because that is the most common deployment path; the equivalent direct
 `qemu` command-line flags are noted in parentheses where helpful.
 
-> **TL;DR.** Prefer `virtio-vga` over `qxl`. Set
-> `image-compression=auto_lz`, drop the `*-wan-compression=always`
-> overrides, and use `streaming-video=filter` rather than `all`. Install
-> `spice-vdagent` in the guest. The rest of this document explains why.
+> **TL;DR.** Prefer `virtio-vga` over `qxl`. On QXL, expect the
+> server's streaming heuristic to stop firing somewhere between
+> 1280 and 1600 pixels wide (test session 004) — bumping VRAM
+> does not help. Set `image-compression=auto_lz`, drop the
+> `*-wan-compression=always` overrides, and use
+> `streaming-video=filter` rather than `all`. Install
+> `spice-vdagent` in the guest, and `gstreamer1.0-plugins-bad` +
+> `gstreamer1.0-vaapi` on the hypervisor if you want H.264
+> streams to be available. The rest of this document explains why.
 
 ## Video device
 
@@ -55,10 +60,37 @@ The QXL display driver is in maintenance-only mode upstream — it still
 works but is no longer where SPICE engineering investment is going.
 We have seen QXL guests fall into pathological encoding patterns
 (full-screen `ZlibGlzRgb` blasts for terminal cursor blinks) that
-virtio-gpu does not exhibit. If you must use QXL (e.g. for the
-streaming-video path), allocate generous `ram`/`vram` (64 MiB each in
-the example above) and `vgamem` (16 MiB) so the driver does not page
-its surfaces out from under SPICE's encoder.
+virtio-gpu does not exhibit.
+
+**Resolution cliff.** Test session 004 (Debian 11 + QXL across four
+guest resolutions and three VRAM allocations) showed that the
+spice-server's streaming heuristic falls off a cliff between
+roughly 1280 and 1600 pixels wide. At 1024×768 and 1280×832 video
+playback creates a stable MJPEG/H.264 stream; at 1600×1200 the
+stream lives ~1.7 s before being destroyed; at 1920×1440 no stream
+is ever created. The likely mechanism (per
+`spice/server/display-channel.cpp:1057-1078`) is that the QXL guest
+driver issues qualitatively different draw ops at higher
+resolutions (tiled copies, alpha-blends, pre-compressed images)
+that fail the heuristic's `QXL_DRAW_COPY + QXL_EFFECT_OPAQUE +
+SPICE_ROPD_OP_PUT + SPICE_IMAGE_TYPE_BITMAP` filter. The result
+is that every video frame falls back to a full-frame ZlibGlzRgb
+update — heavy on both bandwidth and client-side decode.
+
+**VRAM is not the lever** for this cliff. We ran the same 1920×1440
+workload at 64 MiB, 128 MiB, and 256 MiB VRAM and got zero streams
+in all three runs. If your QXL guest doesn't stream video, raising
+VRAM will not help; the gating happens upstream of any memory
+constraint, in the heuristic's per-draw filter. Earlier guidance
+in this doc recommended generous VRAM as a streaming aid — that
+guidance is incorrect for this failure mode and should be
+disregarded. (Generous VRAM is still useful for static-UI cache
+hit rates, just not for video streaming.)
+
+For 1024×768 or 1280-class desktops on QXL, streaming works and
+the trade-off is fine. For 1600+ desktops on QXL, expect static
+fallback and use the client-side image-cache cap (`--image-cache-cap-mib`)
+to keep the resulting `CACHE_ME` pressure bounded.
 
 ### Cirrus, vmware-svga, bochs
 
@@ -147,6 +179,23 @@ As of ryll Phase 6, both MJPEG and H.264 streams are decoded client-side.
 For sustained video playback with `streaming-video=filter`, the server will
 prefer H.264 when available, which is typically more bandwidth-efficient than
 MJPEG and results in cheaper sustained-video transmission.
+
+**H.264 needs GStreamer plugins on the hypervisor.** spice-server's H.264
+encoder is implemented through GStreamer
+(`spice/server/gstreamer-encoder.c:1135`); without the GStreamer H.264
+plugin packages installed, the server can only encode MJPEG even when
+the client advertises `CODEC_H264`. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install gstreamer1.0-plugins-bad gstreamer1.0-vaapi
+```
+
+On Fedora/RHEL, the corresponding `gstreamer1-plugins-bad-free-extras`
+and `gstreamer1-vaapi` packages. This is a *necessary* condition for
+H.264, not a sufficient one — the streaming heuristic still has to fire
+in the first place (see the QXL resolution-cliff discussion above).
+If `streaming-video=filter` chooses not to stream a region at all, no
+codec — H.264 or MJPEG — gets exercised.
 
 The server's `CACHE_ME` flag on every video frame drives client-side image cache
 pressure — tuning `streaming-video` to `filter` (or away from `all`) reduces how
@@ -310,6 +359,63 @@ to fire a bug-report zip every 30 seconds into a rolling cap throughout the test
 This eliminates the risk of missing a transient lag spike or flap event that
 happens between manual report points. Compare metrics across snapshots before,
 during, and after the test to see the full timeline of changes.
+
+## Enabling server-side debug logging
+
+When something looks server-driven (no streams created, mystery
+fallback to `ZlibGlzRgb`, etc.) the spice-server's own
+`spice_debug` / `spice_info` lines in the qemu log are the
+canonical data source. Getting them to actually appear is
+trickier than it looks:
+
+- **`SPICE_DEBUG_LEVEL` is not a real env var.** Grepping
+  spice-server, spice-common, and spice-gtk turns up no
+  `g_getenv("SPICE_DEBUG_LEVEL")` anywhere. The spice log
+  macros at
+  `/srv/src-reference/spice/spice-common/common/log.h:62-72`
+  just call `g_log` with `G_LOG_DOMAIN="Spice"`. The actual
+  threshold knob is GLib's `G_MESSAGES_DEBUG`.
+
+- **Setting `G_MESSAGES_DEBUG` in libvirtd's systemd unit
+  doesn't reach qemu.** `virCommandAddEnvPassCommon` at
+  `/srv/src-reference/libvirt/libvirt/src/util/vircommand.c:1446`
+  whitelists exactly nine env vars (LC_ALL, LD_*, PATH, HOME,
+  USER, LOGNAME, TMPDIR). Anything else set in libvirtd's
+  environment is scrubbed before the qemu child fork.
+
+The canonical libvirt path: add the env var per-domain via
+`<qemu:env>` in the libvirt namespaced commandline extension:
+
+```xml
+<domain xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0' ...>
+  ...
+  <qemu:commandline>
+    <qemu:env name='G_MESSAGES_DEBUG' value='Spice'/>
+  </qemu:commandline>
+</domain>
+```
+
+After `virsh edit` and a VM restart,
+`/var/log/libvirt/qemu/<domain>.log` will gain `Spice-DEBUG:`
+and `Spice-INFO:` lines from spice-server (rather than only
+the `spice_warning` output that comes through under the
+default).
+
+Useful grep targets once the lines are flowing:
+
+- `stream_create` — when the server decides to start a stream.
+- `is_next_stream_frame` — frame-rate detector input/output.
+- `red_drawable` — the per-draw filtering decisions the QXL
+  resolution-cliff discussion above hinges on.
+- `mjpeg_encoder` / `gstreamer_encoder` — codec path selection
+  and per-frame encode behaviour.
+
+If you don't want to edit every domain's XML (e.g. a test
+harness that recreates VMs frequently), an alternative is to
+replace `/usr/bin/kvm` with a small wrapper that sets the env
+before exec'ing the real binary. dpkg-divert protects the
+rename from being clobbered by package updates. This is
+heavier-handed but applies to every VM the host runs.
 
 ## What ryll cannot fix from the client side
 
