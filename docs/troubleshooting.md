@@ -651,27 +651,6 @@ an LRU eviction policy: when the total cached bytes exceed the cap, the
 least-recently-used entries are evicted until the cap is satisfied. This
 is essential for long-running desktop sessions without risk of OOM.
 
-### Schema change (phase 12F)
-
-Prior to phase 12F, `image_cache_bytes`, `image_cache_entries`, and
-`image_cache_ids` summed the renderer's `BoundedImageCache` together
-with the SPICE `GlzDictionary` decompression cache. This made bug
-reports ambiguous: a 5 GiB `image_cache_bytes` reading against a
-256 MiB cap (as seen in session 003a) actually came from the GLZ
-dictionary, not the image cache, but nothing in the snapshot
-distinguished the two.
-
-After 12F, the `image_cache_*` fields reflect only the
-`BoundedImageCache` (CACHE_ME-flagged decoded RGBA frames). The GLZ
-dictionary's state is now reported separately as
-`glz_dictionary_bytes`, `glz_dictionary_entries`,
-`glz_dictionary_cap_bytes`, `glz_dictionary_evictions_total`, and
-`glz_dictionary_evicted_bytes_total`. As a result, `image_cache_bytes`
-in a bug report from a recent ryll build will be roughly an order of
-magnitude smaller than the same field from a pre-12F bug report under
-an equivalent workload; if you need the pre-12F sum, add
-`image_cache_bytes + glz_dictionary_bytes`.
-
 ### Interpreting cache statistics in a bug report
 
 When you file a Display bug report (F12), the `channel-state.json`
@@ -715,6 +694,114 @@ churning. Increase the cap (e.g. `--image-cache-cap-mib 512`) so more
 frames stay hot in cache, reducing the decode load on the next replay.
 This is a trade-off: larger cache = higher RAM cost but potentially
 fewer redecompressions of the same frame.
+
+## Glz dictionary pressure
+
+GLZ ("Generic LZ") is a dictionary-based compression variant SPICE uses
+on `Glz` and `ZlibGlz` image payloads. Decoding a GLZ-compressed frame
+can reference back-window entries from earlier frames the server told
+the client to remember (`IMAGE_FLAGS_CACHE_ME` on the originating
+Glz/ZlibGlz payload). The shared GLZ dictionary holds those decoded
+entries client-side so subsequent back-references resolve.
+
+Until phase 12E the GLZ dictionary was an unbounded
+`Mutex<HashMap<u64, Vec<u8>>>` — entries were appended on every
+`CACHE_ME` payload and removed only on explicit server-driven
+`inval_*` messages. Workloads where the server never sent `inval_*`
+(notably the full-frame ZlibGlzRgb video fallback observed in
+sessions 003a and 004d-g) leaked memory at roughly 30 MiB/s and drove
+the multi-GiB RSS runaway that originally motivated phase 12. This
+also produced one of the more confusing snapshot readings of the
+project: a 5 GiB `image_cache_bytes` value against a 256 MiB cap,
+because the pre-12F snapshot summed the two caches together (see the
+schema-change note below).
+
+The `--glz-dictionary-cap-mib` flag (default 256 MiB; see
+[configuration.md](configuration.md)) bounds the dictionary with the
+same byte-capped LRU as the image cache: when total entry bytes exceed
+the cap, oldest entries are evicted until the cap is satisfied.
+
+### Schema change (phase 12F)
+
+Prior to phase 12F, `image_cache_bytes`, `image_cache_entries`, and
+`image_cache_ids` summed the renderer's `BoundedImageCache` together
+with the SPICE `GlzDictionary` decompression cache. This made bug
+reports ambiguous: a 5 GiB `image_cache_bytes` reading against a
+256 MiB cap (as seen in session 003a) actually came from the GLZ
+dictionary, not the image cache, but nothing in the snapshot
+distinguished the two.
+
+After 12F, the `image_cache_*` fields reflect only the
+`BoundedImageCache` (CACHE_ME-flagged decoded RGBA frames). The GLZ
+dictionary's state is reported separately under the new
+`glz_dictionary_*` fields described below. As a result,
+`image_cache_bytes` in a bug report from a 12F-or-later ryll build
+will be roughly an order of magnitude smaller than the same field
+from a pre-12F bug report under an equivalent workload; if you need
+the pre-12F sum, add `image_cache_bytes + glz_dictionary_bytes`.
+
+### Interpreting GLZ dictionary statistics in a bug report
+
+When you file a Display bug report (F12), the `channel-state.json`
+includes five GLZ-related fields under the display channel entry:
+
+- **`glz_dictionary_bytes`** — current total bytes held by the GLZ
+  dictionary. Should always be at or below `glz_dictionary_cap_bytes`.
+  A reading well below the cap means the workload is not GLZ-heavy
+  (or `inval_*` traffic is keeping the dictionary trimmed); a reading
+  pegged at the cap means the LRU is actively recycling entries.
+
+- **`glz_dictionary_entries`** — current entry count. Read alongside
+  `glz_dictionary_bytes` to estimate average entry size (a 256 MiB
+  reading with ~25 entries implies ~10 MiB per entry, i.e.
+  full-frame RGBA payloads — the symptom of the QXL resolution-cliff
+  fallback path).
+
+- **`glz_dictionary_cap_bytes`** — the configured cap in bytes,
+  mirroring `--glz-dictionary-cap-mib`. Surfaced so a bug report
+  tells you what cap the session ran under without re-reading the
+  CLI invocation. Multiply MiB flags by 1,048,576 (e.g. `256 MiB =
+  268,435,456 bytes`).
+
+- **`glz_dictionary_evictions_total`** — cumulative count of LRU
+  evictions since the session started. High counts indicate the
+  workload is churning past the cap. Zero with `glz_dictionary_bytes`
+  pinned near the cap means the dictionary is at steady-state where
+  server-driven `inval_*` keeps it just at the boundary.
+
+- **`glz_dictionary_evicted_bytes_total`** — cumulative bytes freed
+  by LRU evictions. If this is much larger than `glz_dictionary_cap_bytes`,
+  the workload has churned through many cap-fulls of GLZ entries;
+  if it stays small while `glz_dictionary_bytes` is steady, the
+  dictionary is not under pressure.
+
+### Adjusting the GLZ dictionary cap
+
+**Lower the cap on small-RAM hosts.** As with the image cache, the
+default 256 MiB suits 8–16 GiB desktops. On embedded or low-RAM hosts,
+reduce both caps together (e.g. `--image-cache-cap-mib 64
+--glz-dictionary-cap-mib 64`). Monitor auto-snapshots to confirm
+`glz_dictionary_bytes` never exceeds the cap and that evictions are
+not so aggressive they break GLZ back-references (which would show up
+as decode failures or visual corruption in the rendered surface, not
+as a counter — file a bug report if you see that pattern).
+
+**Raise the cap for sustained GLZ-heavy workloads.** If
+`glz_dictionary_evictions_total` is rising fast across auto-snapshots
+with `glz_dictionary_bytes` constantly at the cap, the server is
+producing more GLZ back-references than the cap can hold hot.
+Raise the cap (e.g. `--glz-dictionary-cap-mib 512`) so more entries
+stay resident. The trade-off is exactly the same shape as the image
+cache: larger dictionary = higher RAM cost but potentially better
+decompression locality.
+
+**Reduce GLZ pressure server-side as well.** Many high-RSS sessions
+trace back to the QXL streaming-heuristic cliff at 1600+ pixel-wide
+guests, where every video frame falls back to a full-frame ZlibGlzRgb
+update. See [`libvirt-spice-recommendations.md`](libvirt-spice-recommendations.md)
+for the server-side recommendations (`auto_lz` instead of `auto_glz`,
+`streaming-video=filter` instead of `all`, `virtio-vga` instead of
+`qxl`) that reduce how often the GLZ path fires in the first place.
 
 ## Getting Help
 

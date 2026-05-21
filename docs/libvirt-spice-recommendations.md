@@ -89,8 +89,13 @@ hit rates, just not for video streaming.)
 
 For 1024×768 or 1280-class desktops on QXL, streaming works and
 the trade-off is fine. For 1600+ desktops on QXL, expect static
-fallback and use the client-side image-cache cap (`--image-cache-cap-mib`)
-to keep the resulting `CACHE_ME` pressure bounded.
+fallback and use both client-side caps — `--image-cache-cap-mib`
+for the renderer's decoded-RGBA cache and `--glz-dictionary-cap-mib`
+for the GLZ decompression dictionary — to keep the resulting
+`CACHE_ME` pressure bounded. The GLZ dictionary in particular was
+the dominant RSS contributor in this failure mode pre-phase-12E;
+see [Glz dictionary pressure](troubleshooting.md#glz-dictionary-pressure)
+in the troubleshooting guide.
 
 ### Cirrus, vmware-svga, bochs
 
@@ -197,11 +202,15 @@ in the first place (see the QXL resolution-cliff discussion above).
 If `streaming-video=filter` chooses not to stream a region at all, no
 codec — H.264 or MJPEG — gets exercised.
 
-The server's `CACHE_ME` flag on every video frame drives client-side image cache
-pressure — tuning `streaming-video` to `filter` (or away from `all`) reduces how
-often video frames hit the cache. See [Display image cache pressure](troubleshooting.md#display-image-cache-pressure)
-in the troubleshooting guide for client-side cache-cap tuning that complements
-these server-side settings.
+The server's `CACHE_ME` flag on every video frame drives client-side cache
+pressure on both the renderer's image cache and the GLZ decompression
+dictionary — tuning `streaming-video` to `filter` (or away from `all`)
+reduces how often video frames hit either cache. See
+[Display image cache pressure](troubleshooting.md#display-image-cache-pressure)
+(`--image-cache-cap-mib`) and
+[Glz dictionary pressure](troubleshooting.md#glz-dictionary-pressure)
+(`--glz-dictionary-cap-mib`) in the troubleshooting guide for the
+client-side cache-cap tuning that complements these server-side settings.
 
 ### TLS channels
 
