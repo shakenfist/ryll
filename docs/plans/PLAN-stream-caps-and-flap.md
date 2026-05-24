@@ -433,7 +433,7 @@ Per-phase intent:
 
 - **Phase 7 — Preference messages.** Add `display_client::PREFERRED_COMPRESSION`
   (opcode 103) and `display_client::PREFERRED_VIDEO_CODEC_TYPE`
-  (opcode 104). Advertise caps 6 and 12. Send the preference
+  (opcode 105 — 104 is GL_DRAW_DONE). Advertise caps 6 and 12. Send the preference
   messages once on link establishment. spice-gtk does this in
   `channel-display.c` near the init handler. Recommended
   planning effort: **medium** (mechanical once the cap plumbing

@@ -12,7 +12,7 @@ Mechanical follow-on to phase 6's `MULTI_CODEC` work.
 
 Reference behaviour: spice-gtk's `channel-display.c::display_init`
 sends `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` (opcode 103)
-and `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` (opcode 104)
+and `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` (opcode 105 — earlier draft of this doc said 104, which is actually `GL_DRAW_DONE`; 105 confirmed against `/srv/src-reference/spice/spice-protocol/spice/enums.h:523-530` during 7A implementation)
 right after the channel reaches the `STATE_LINKED` state.
 
 ## Scope
@@ -23,7 +23,7 @@ In scope:
   `SPICE_DISPLAY_CAP_PREF_COMPRESSION = 6`,
   `SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE = 12`,
   `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION = 103`,
-  `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE = 104` (confirm
+  `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE = 105` (confirm
   values against `spice-protocol/spice/messages.h`).
 - Add the two cap bits to the display channel's advertised cap
   set (same site that adds 8/9/11 from phase 6).
