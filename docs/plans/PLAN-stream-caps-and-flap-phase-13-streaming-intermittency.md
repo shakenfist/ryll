@@ -215,22 +215,22 @@ chrome. The video region's own trace entries either never
 accumulate enough consecutive within-200 ms hits or are
 displaced by other streamable evictions in the same OOM cycle.
 
-**Unresolved:** I have not measured how many drawables
-`RED_RELEASE_BUNCH_SIZE` resolves to in this build — grepping
-the source did not surface a definition in the spice-server
-tree under `server/`. The reasoning above assumes it is large
-enough to fully overwrite the 8-slot trace each OOM, which is
-likely but not proven. A quick `grep -rn
-RED_RELEASE_BUNCH_SIZE` against the wider spice tree would
-settle this.
+**Resolved:** `RED_RELEASE_BUNCH_SIZE = 64`
+(`server/image-encoders.h:221`). Each OOM-driven
+`display_channel_free_some` evicts up to 64 drawables from
+the tail of `current_list`, which is *eight times* the
+8-slot `items_trace` ring. A single OOM cycle can therefore
+fully overwrite the trace ring multiple times if enough of
+the evicted drawables are `streamable`. The trace-contention
+argument above is firmly grounded.
 
-**Unresolved:** I could not locate
-`red_stream_input_fps_timeout_callback` referenced in the 13A
-brief. The FPS estimate in this tree is computed inline in
-`attach_stream` (`server/video-stream.cpp:282-292`) using
-`RED_STREAM_INPUT_FPS_TIMEOUT = 5 s`; there is no separate
-timer callback. The brief may have been written against an
-older or downstream-patched spice-server.
+**Resolved:** `red_stream_input_fps_timeout_callback` does
+not exist in this spice tree — the 13A brief referenced a
+function from an older or downstream-patched spice. The FPS
+estimate is computed inline in `attach_stream`
+(`server/video-stream.cpp:282-292`) using
+`RED_STREAM_INPUT_FPS_TIMEOUT = 5 s`. No separate timer
+callback path to read.
 
 ### Implications for 13B
 
