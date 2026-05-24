@@ -35,6 +35,7 @@ use crate::notifications::{
     NotificationSource, NotificationStore, SharedNotifications,
 };
 use crate::settings;
+use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
 use shakenfist_spice_renderer::channels::VolumeControl;
@@ -821,6 +822,15 @@ pub struct RyllApp {
     auto_snapshot_interval: Option<u64>,
     auto_snapshot_cap: usize,
     auto_snapshot_spawned: bool,
+
+    /// Phase 8: most recent time the streaming-flap notification
+    /// fired. Used by `streaming_state::classify` to enforce the
+    /// 60 s cool-down between repeat warnings. `None` until the
+    /// first fire of the session; never cleared (reconnect resets
+    /// the snapshot data the heuristic reads from, so a stale
+    /// timestamp only suppresses the next legitimate flap during
+    /// its remaining cool-down — acceptable for v1).
+    last_flap_notification_ts: Option<Instant>,
 }
 
 /// Build the per-connection tokio runtime, honouring the
@@ -1173,6 +1183,7 @@ impl RyllApp {
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
             auto_snapshot_spawned: false,
+            last_flap_notification_ts: None,
         }
     }
 
@@ -2967,6 +2978,32 @@ impl eframe::App for RyllApp {
         let stats_frame = egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(4, 2))
             .fill(ctx.style().visuals.panel_fill);
+        // Phase 8: compute the live streaming-state classification
+        // once per frame. The result drives the status-bar
+        // indicator below; a fired notification (Flapping +
+        // cool-down elapsed) is pushed before we render so the
+        // bell can pick it up on the same frame.
+        let (streaming_state, streams_active_for_tooltip) = {
+            let snap = self.channel_snapshots.display.lock().unwrap();
+            let (state, notif) = streaming_state::classify(
+                &snap,
+                Instant::now(),
+                self.traffic.session_start(),
+                self.last_flap_notification_ts,
+            );
+            let active = snap.streams_active.clone();
+            drop(snap);
+            if let Some(notification) = notif {
+                self.last_flap_notification_ts = Some(Instant::now());
+                self.push_notification(
+                    NotifySeverity::Warn,
+                    NotificationSource::Internal,
+                    notification.message,
+                );
+            }
+            (state, active)
+        };
+
         egui::TopBottomPanel::bottom("stats")
             .frame(stats_frame)
             .show_animated(ctx, !is_maximized, |ui| {
@@ -3059,6 +3096,83 @@ impl eframe::App for RyllApp {
                         {
                             vol.set_volume(v as u8);
                         }
+
+                        // Phase 8: live streaming indicator. Sits to
+                        // the left of the volume controls (which stay
+                        // rightmost as the operator-action zone) and
+                        // to the right of the bandwidth sparkline.
+                        // Glyph: ▶ (U+25B6) — a Unicode triangle that
+                        // egui's default font renders cleanly on
+                        // every platform we ship to. 📹 is a colour
+                        // emoji and renders as a tofu box in egui's
+                        // monochrome font; ▶ keeps the visual cue
+                        // (something "playing") without the font
+                        // problem.
+                        let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
+                            match &streaming_state {
+                                StreamingState::Off => (
+                                    egui::Color32::from_rgb(120, 120, 120),
+                                    vec!["No streams active".to_string()],
+                                ),
+                                StreamingState::Active => {
+                                    let mut lines =
+                                        Vec::with_capacity(streams_active_for_tooltip.len() + 1);
+                                    lines.push(format!(
+                                        "{} active stream{}",
+                                        streams_active_for_tooltip.len(),
+                                        if streams_active_for_tooltip.len() == 1 {
+                                            ""
+                                        } else {
+                                            "s"
+                                        },
+                                    ));
+                                    let now_secs = self.traffic.elapsed().as_secs_f64();
+                                    for s in &streams_active_for_tooltip {
+                                        let codec = match s.codec_type {
+                                            1 => "MJPEG".to_string(),
+                                            2 => "VP8".to_string(),
+                                            3 => "H264".to_string(),
+                                            4 => "VP9".to_string(),
+                                            5 => "H265".to_string(),
+                                            other => format!("codec{}", other),
+                                        };
+                                        let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                        lines.push(format!(
+                                            "codec={} {}x{} frames={} lifetime={:.0}s",
+                                            codec,
+                                            s.stream_width,
+                                            s.stream_height,
+                                            s.frames_decoded_ok,
+                                            lifetime,
+                                        ));
+                                    }
+                                    (egui::Color32::from_rgb(60, 180, 60), lines)
+                                }
+                                StreamingState::RecentlyDestroyed { secs_since } => (
+                                    egui::Color32::from_rgb(220, 160, 60),
+                                    vec![format!("Last stream destroyed {:.1}s ago", secs_since)],
+                                ),
+                                StreamingState::Flapping {
+                                    destroys_in_window,
+                                    window_secs,
+                                    mean_lifetime_secs,
+                                } => (
+                                    egui::Color32::from_rgb(220, 60, 60),
+                                    vec![format!(
+                                        "Streams flapping: {} destroys in {:.0} s, \
+                                         mean lifetime {:.1} s",
+                                        destroys_in_window, window_secs, mean_lifetime_secs,
+                                    )],
+                                ),
+                            };
+                        let icon_text = egui::RichText::new("\u{25B6}").color(icon_colour);
+                        let icon_resp = ui.label(icon_text);
+                        icon_resp.on_hover_ui(|ui| {
+                            for line in &tooltip_lines {
+                                ui.label(line);
+                            }
+                        });
+
                         ui.separator();
 
                         ui.allocate_ui_with_layout(

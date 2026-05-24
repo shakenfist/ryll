@@ -325,6 +325,16 @@ impl TrafficBuffers {
         self.start.elapsed()
     }
 
+    /// Session-start `Instant`. Equal to the `Instant::now()`
+    /// captured at `TrafficBuffers::new`. Surfaced so callers
+    /// that need to convert renderer-side `*_at_secs: f64`
+    /// timestamps back into wall-clock `Instant`s (e.g. the
+    /// streaming-state classifier in `streaming_state.rs`) can
+    /// do so without duplicating the elapsed-vs-now arithmetic.
+    pub fn session_start(&self) -> Instant {
+        self.start
+    }
+
     /// Cheap deep-copy of the live ring state (Phase 10 / F2).
     ///
     /// Per-channel locks are held briefly to clone each ring;

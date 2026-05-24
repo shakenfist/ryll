@@ -213,6 +213,15 @@ None of these go into code until 13A confirms the mechanism.
 
 ## Cross-references
 
+- [docs/troubleshooting.md § Streaming indicator](../troubleshooting.md#streaming-indicator)
+  — the live status-bar indicator added in phase 8 is the
+  cheapest signal for the OOM-vs-survival investigation here.
+  Amber after every short workload run is the visual cue that
+  the 005-style "stream lives N seconds then never returns"
+  pattern is reproducing; red means the flap heuristic has
+  fired and a `Warn` notification with the destroy/lifetime
+  numbers is in the bell. Watch it during the 13A reproducer
+  rather than scraping snapshots after the fact.
 - `/srv/src-reference/spice/spice/server/red-worker.cpp:520-548`
   — `handle_dev_oom` (the OOM handler).
 - `/srv/src-reference/spice/spice/server/red-qxl.cpp:328`

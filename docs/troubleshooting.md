@@ -114,6 +114,39 @@ Error: invalid peer certificate: UnknownIssuer
    the screen — this is a known issue with the cross-frame
    reference handling
 
+### Streaming indicator
+
+The status bar at the bottom of the window has a small
+triangle (▶) glyph immediately to the left of the volume
+controls. Its colour reflects the live state of the SPICE
+display channel's video-stream path (MJPEG / H.264 / VP8 etc.,
+i.e. the `STREAM_CREATE` / `STREAM_DATA` / `STREAM_DESTROY`
+flow — not the per-frame draw_copy path).
+
+| Colour | State | Meaning |
+| --- | --- | --- |
+| Grey | Off | No stream is active and none was destroyed in the last 5 s. The guest is either painting through draw_copy or idle. |
+| Green | Active | One or more streams are open. Hover for the per-stream codec, dimensions, decoded-frame count, and lifetime. |
+| Amber | RecentlyDestroyed | No active stream, but the server tore one down within the last 5 s. Reverts to grey if no new stream replaces it. |
+| Red | Flapping | Three or more streams have been destroyed in the last 30 s with mean lifetime under 3 s. A `Warn` notification also fires once per 60 s while the pattern persists. |
+
+What to put in a bug report when the indicator is amber or red:
+
+1. The session pcap (start ryll with `--capture <dir>` so the
+   wire traffic is on disk before the symptom appears).
+2. A bug report filed from the notification panel while the
+   icon is in the relevant colour — the auto-attached display
+   snapshot includes `streams_recently_destroyed`, which is
+   what the classifier uses.
+3. The guest workload that was running (which application's
+   video region the server was promoting to a stream).
+
+The thresholds (3 destroys, 30 s window, 3 s mean lifetime,
+60 s notification cool-down) are not yet configurable; they
+live in `ryll/src/streaming_state.rs` and are tuned for the
+session-005 flap pattern. Open an issue if a different
+workload trips them too easily or not easily enough.
+
 ## Input Issues
 
 ### Keyboard input not working

@@ -4,6 +4,7 @@ mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
+mod streaming_state;
 mod web;
 #[cfg(not(feature = "capture"))]
 mod capture {
