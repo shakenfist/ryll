@@ -73,6 +73,216 @@ This is a hypothesis. It is consistent with what we see:
   this indirect OOM-frequency path; the original
   Did-VRAM-fix-streaming test asked the wrong question.
 
+## 13A findings (source read)
+
+**Verdict: refuted in its strong form, partial in a more interesting
+form.** OOM does *not* evict stream-detection state directly; in fact,
+the OOM eviction path *populates* the per-region trace buffer that
+re-engagement reads. The mechanism that prevents re-engagement is
+subtler, and the binding constraint is the trace ring's tiny size
+(8 entries) combined with the 200 ms detection window.
+
+### What `handle_dev_oom` actually does
+
+`server/red-worker.cpp:530-549`. Step by step:
+
+1. Asserts the QXL device is running (line 537).
+2. Emits `display_channel_debug_oom("OOM1")` (line 539) — the log
+   line we count in session 005.
+3. Drains pending QXL commands by looping
+   `red_process_display()` (line 540) and pushing each batch to
+   pipes via `display->push()` (line 541). This *consumes* fresh
+   draws from the guest — it does not evict anything.
+4. Calls `red_qxl_flush_resources(qxl)` (line 543), a thin
+   wrapper at `server/red-qxl.cpp:780-785` that calls into the
+   qemu QXL device's `flush_resources` callback. This is the
+   qemu-side release-ring drain; no spice-server state is
+   touched. If it returns non-zero (released >= 1 resource),
+   step 5 is skipped.
+5. Fallback only if flush released zero resources:
+   `display_channel_free_some(display)` (line 544) followed by a
+   second `red_qxl_flush_resources` (line 545).
+6. Emits `display_channel_debug_oom("OOM2")` (line 547) and
+   clears the worker's pending-OOM bit (line 548).
+
+`display_channel_free_some` (`server/display-channel.cpp:1481-1507`)
+does two things: (a) for each DCC, releases GLZ dictionary
+drawables held by the encoder (line 1494); (b) walks
+`display->priv->current_list` from the tail and calls
+`free_one_drawable(display, force_glz_free=TRUE)` up to
+`RED_RELEASE_BUNCH_SIZE` times (line 1498).
+`free_one_drawable` (line 1451-1471) renders the oldest pending
+drawable to the canvas via `drawable_draw`, then calls
+`current_remove_drawable` (line 1468).
+
+### Does it touch stream-tracking state?
+
+It touches stream state — but **constructively, not
+destructively**. `current_remove_drawable`
+(`server/display-channel.cpp:365-374`) calls
+`video_stream_trace_add_drawable` (line 368) on every evicted
+drawable. That function (`server/video-stream.cpp:1049-1068`)
+records the drawable's geometry, `frames_count`,
+`first_frame_time`, and `gradual_frames_count` into one slot of
+the ring buffer `display->priv->items_trace`, indexed by
+`next_item_trace++ & ITEMS_TRACE_MASK`. The eviction filter at
+line 1054 skips drawables that are already attached to a stream
+(`item->stream`) or are not streamable (`!item->streamable`),
+so OOM eviction can only ever *add* candidate frames to the
+trace — never overwrite live stream metadata.
+
+The trace ring is `std::array<ItemTrace, NUM_TRACE_ITEMS>` with
+`NUM_TRACE_ITEMS = 1 << 3 = 8`
+(`server/display-channel-private.h:23-25,115-116`). That is
+**the critical constant** — only the eight most recently evicted
+streamable drawables are remembered. The trace is reset to
+zero only in `stop_streams` (line 226-227), which is itself
+only called from `display_channel_surface_unref` when the
+primary surface is destroyed (line 230-241). OOM does not
+trigger surface destruction. Active `VideoStream` instances
+themselves live on `display->priv->streams` and are torn down
+by `video_stream_timeout` (`server/video-stream.cpp:1031-1047`)
+when their `last_time + RED_STREAM_TIMEOUT` (1 s) has passed —
+an inactivity timer, not an OOM-driven path.
+
+### What `display_channel_create_stream` actually requires
+
+Caller chain
+(`server/video-stream.cpp:419,585,559-590,628-666,668-707`):
+
+- `display_channel_process_draw` →
+  `display_channel_add_drawable` (line 1317-1364) sets
+  `drawable->streamable = drawable_can_stream(...)` (line 1353).
+  `drawable_can_stream` (line 1044-1080) requires: stream-video
+  mode enabled, primary surface, `QXL_EFFECT_OPAQUE`,
+  `QXL_DRAW_COPY` with `SPICE_ROPD_OP_PUT`, a
+  `SPICE_IMAGE_TYPE_BITMAP` source, and (in FILTER mode)
+  area ≥ `RED_STREAM_MIN_SIZE` (96×96).
+- `current_add` calls `video_stream_trace_update`
+  (`server/display-channel.cpp:1019`).
+- `video_stream_trace_update` (`server/video-stream.cpp:628-666`)
+  first scans active streams; if none match, it scans the
+  eight-slot `items_trace`. For each trace entry,
+  `is_next_stream_frame` (line 213-270) checks: same
+  src-width/height, identical bbox, and
+  `candidate->creation_time - trace.time` ≤
+  `RED_STREAM_DETECTION_MAX_DELTA` (NSEC_PER_SEC / 5 = **200 ms**,
+  `server/video-stream.h:32`). On match,
+  `video_stream_add_frame` increments `frame_drawable->frames_count`
+  from `trace.frames_count + 1` (line 568) and tests
+  `is_stream_start` (line 182-187), which needs
+  `frames_count ≥ RED_STREAM_FRAMES_START_CONDITION = 20` and
+  20 % gradual-quality coverage (`server/video-stream.h:35-36`).
+- `video_stream_maintenance` (line 668-707) is the other entry
+  point, fired when an opaque drawable replaces a previous one
+  at the same tree position (`current_add_equal`, line 488).
+
+So re-engagement of a torn-down stream requires twenty
+consecutive matching frames at the same bbox, with each
+successive draw arriving inside 200 ms of the previous, with
+the per-region history threaded through a ring buffer that
+holds only eight entries total *across all surfaces and
+regions*.
+
+### Verdict
+
+**Partial.** OOM eviction does not directly clobber stream
+state — `video_stream_stop` and `display_channel_free_some` are
+disjoint paths, and the trace ring is only zeroed on primary
+surface teardown. What kills re-engagement is the interaction
+between OOM eviction *of unrelated drawables* and the trace
+ring's 8-entry capacity. At 1.7 OOMs/sec each releasing up to
+`RED_RELEASE_BUNCH_SIZE` (commonly tens of) drawables from the
+tail of `current_list`, *every* streamable drawable that gets
+evicted writes to the same shared 8-slot ring. With a busy
+1920×1440 desktop (chrome, taskbar, cursor blink, every
+streamable bitmap blit anywhere) the video region's trace
+entries are flushed out of the ring before twenty consecutive
+matching draws can accumulate within the 200 ms window — and
+the video draws themselves, if they hit `current_list` during
+an OOM burst, end up *in the trace* rather than *attached to a
+stream* because there is no active stream to attach to. The
+heuristic is starved by trace contention, not by state
+eviction.
+
+The session 005 evidence is consistent: once the original
+1024×768 stream is torn down by `video_stream_timeout` (1 s
+gap from the encoder pipeline being throttled by OOM
+back-pressure is plausible), every subsequent video frame
+arrives into a tree where (a) no active stream matches it and
+(b) the trace ring is dominated by recently-evicted desktop
+chrome. The video region's own trace entries either never
+accumulate enough consecutive within-200 ms hits or are
+displaced by other streamable evictions in the same OOM cycle.
+
+**Unresolved:** I have not measured how many drawables
+`RED_RELEASE_BUNCH_SIZE` resolves to in this build — grepping
+the source did not surface a definition in the spice-server
+tree under `server/`. The reasoning above assumes it is large
+enough to fully overwrite the 8-slot trace each OOM, which is
+likely but not proven. A quick `grep -rn
+RED_RELEASE_BUNCH_SIZE` against the wider spice tree would
+settle this.
+
+**Unresolved:** I could not locate
+`red_stream_input_fps_timeout_callback` referenced in the 13A
+brief. The FPS estimate in this tree is computed inline in
+`attach_stream` (`server/video-stream.cpp:282-292`) using
+`RED_STREAM_INPUT_FPS_TIMEOUT = 5 s`; there is no separate
+timer callback. The brief may have been written against an
+older or downstream-patched spice-server.
+
+### Implications for 13B
+
+The hypothesis-as-written ("more VRAM lowers OOM rate, lower
+OOM rate lets the heuristic re-fire") is still correct in
+direction but the *mechanism* is trace-ring contention rather
+than state eviction. The 13B prediction is the same: at
+sufficiently high VRAM the guest QXL driver should stop
+issuing OOMs, the trace ring stops being repopulated by
+unrelated drawables, the video region's trace entries persist
+long enough for `video_stream_trace_update` to find a match,
+and stream re-engagement should follow within ~1 s of the
+first 20 video frames after teardown.
+
+Recommendation for 13B's session: run with 64 MiB / 128 MiB /
+256 MiB QXL `vram_size`, all on the same 1920×1440 workload as
+005b. Grep qemu logs for: `display_channel_debug_oom` counts
+per 60 s, `display_channel_create_stream` events, and
+`video_stream_stop`-adjacent destroy lines. The expected
+signature of confirmation is OOM count and stream-re-engagement
+count being inversely correlated. If 256 MiB still shows
+hundreds of OOMs/min, the guest driver is the source and 13C
+(read the QXL kernel driver) becomes the next step.
+
+### Implications for 16 / upstream
+
+If 13B confirms, this is a clean upstream bug-report against
+spice-server: "On hosts under sustained QXL OOM pressure, the
+8-entry `items_trace` ring buffer is fully overwritten faster
+than `RED_STREAM_FRAMES_START_CONDITION` consecutive frames
+can accumulate for a single region, preventing video stream
+re-engagement after `video_stream_timeout` tears the first
+stream down. Reproduction: 1920×1440 QXL guest, 64 MiB vram,
+windowed YouTube playback for >2 min; observe single
+`display_channel_create_stream` event followed by zero
+re-engagements over the remainder of the session despite
+continuous matching draws." A one-line server-side mitigation
+would be to grow `NUM_TRACE_ITEMS` from 8 to (say) 64 — the
+trace entries are tiny and the cost is a few hundred bytes per
+display channel.
+
+Client-side mitigation (phase 13E candidate): the trace ring
+is server-internal; the client cannot directly seed it. The
+phase 13E "more aggressive STREAM_REPORT" option only affects
+*surviving* streams (it feeds bit-rate / drop accounting in
+`mjpeg_encoder_handle_positive_client_stream_report`); it does
+nothing for a stream that has already been destroyed. A more
+useful client lever, if upstream won't move, is to *avoid the
+1 s teardown gap* by ensuring the client doesn't induce
+back-pressure — but that is speculation pending 13B's OOM-vs-
+VRAM curve.
+
 ## What to investigate (in order)
 
 ### 13A — Confirm the OOM-evicts-stream-state mechanism
