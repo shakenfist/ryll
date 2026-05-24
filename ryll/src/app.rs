@@ -3851,6 +3851,19 @@ impl eframe::App for RyllApp {
                                     }
                                 }
 
+                                // Gate button-press / scroll-wheel forwarding on
+                                // whether the pointer is over the SPICE surface,
+                                // so clicks on the status-bar widgets (volume,
+                                // mute, reconnect indicator, etc.) do not leak
+                                // phantom clicks into the guest at
+                                // `last_mouse_pos`. Button-release is forwarded
+                                // unconditionally when the corresponding bit is
+                                // set in `forwarded_buttons`, so a press inside
+                                // the image followed by a release outside it
+                                // does not leave a stuck button in the guest
+                                // (symmetric with the `input_suppressed` path
+                                // below).
+                                let pointer_on_surface = response.contains_pointer();
                                 ctx.input(|i| {
                                     let pos = self.last_mouse_pos.unwrap_or((0, 0));
                                     for button in [
@@ -3858,8 +3871,8 @@ impl eframe::App for RyllApp {
                                         egui::PointerButton::Secondary,
                                         egui::PointerButton::Middle,
                                     ] {
-                                        if i.pointer.button_pressed(button) {
-                                            let spice_btn = mouse_button_to_spice(button);
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        if pointer_on_surface && i.pointer.button_pressed(button) {
                                             self.forwarded_buttons |= spice_btn;
                                             let _ = tx.try_send(InputEvent::MouseDown {
                                                 button: spice_btn,
@@ -3867,8 +3880,9 @@ impl eframe::App for RyllApp {
                                                 y: pos.1,
                                             });
                                         }
-                                        if i.pointer.button_released(button) {
-                                            let spice_btn = mouse_button_to_spice(button);
+                                        if i.pointer.button_released(button)
+                                            && self.forwarded_buttons & spice_btn != 0
+                                        {
                                             self.forwarded_buttons &= !spice_btn;
                                             let _ = tx.try_send(InputEvent::MouseUp {
                                                 button: spice_btn,
@@ -3878,19 +3892,21 @@ impl eframe::App for RyllApp {
                                         }
                                     }
 
-                                    let scroll_y = i.smooth_scroll_delta.y;
-                                    if scroll_y.abs() > 0.5 {
-                                        let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
-                                        let _ = tx.try_send(InputEvent::MouseDown {
-                                            button: btn,
-                                            x: pos.0,
-                                            y: pos.1,
-                                        });
-                                        let _ = tx.try_send(InputEvent::MouseUp {
-                                            button: btn,
-                                            x: pos.0,
-                                            y: pos.1,
-                                        });
+                                    if pointer_on_surface {
+                                        let scroll_y = i.smooth_scroll_delta.y;
+                                        if scroll_y.abs() > 0.5 {
+                                            let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
+                                            let _ = tx.try_send(InputEvent::MouseDown {
+                                                button: btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                            let _ = tx.try_send(InputEvent::MouseUp {
+                                                button: btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                        }
                                     }
                                 });
                             }
