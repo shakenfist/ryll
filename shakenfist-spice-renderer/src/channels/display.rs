@@ -19,7 +19,7 @@ use shakenfist_spice_compression::{
     DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::ropd;
+use shakenfist_spice_protocol::constants::{image_compression, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -651,6 +651,17 @@ pub struct DisplayChannel {
     /// attempts that returned `Err` since session start.
     /// `Ok(None)` (needs more data) is not counted as a failure.
     h264_decode_failed_count: u64,
+    /// Phase-07: set to true after we have successfully sent the
+    /// link-up `PREFERRED_COMPRESSION` (opcode 103) message.
+    /// Mirrored into `DisplaySnapshot::pref_compression_sent` so
+    /// a bug report can confirm the preference actually went out.
+    /// One-shot per channel lifetime.
+    pref_compression_sent: bool,
+    /// Phase-07: set to true after we have successfully sent the
+    /// link-up `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message.
+    /// Mirrored into `DisplaySnapshot::pref_video_codec_type_sent`.
+    /// One-shot per channel lifetime.
+    pref_video_codec_type_sent: bool,
 }
 
 impl DisplayChannel {
@@ -722,6 +733,8 @@ impl DisplayChannel {
             h264_recent_durations: VecDeque::new(),
             h264_decode_total_count: 0,
             h264_decode_failed_count: 0,
+            pref_compression_sent: false,
+            pref_video_codec_type_sent: false,
         }
     }
 
@@ -827,6 +840,24 @@ impl DisplayChannel {
         // Send display init message
         self.send_init().await?;
 
+        // Phase-07: one-shot link-up preference messages. spice-gtk
+        // fires both right after the channel reaches STATE_LINKED
+        // (channel-display.c:984-995). In ryll the channel is
+        // already linked by the time run_loop starts (link/auth
+        // happened during session connect), so just after INIT is
+        // the equivalent point. Failures here are not fatal — the
+        // server falls back to its default codec / compression
+        // choice if the messages never arrive — but we propagate
+        // any IO error since it indicates the socket is unhealthy
+        // and the read loop is about to fail anyway.
+        self.send_preferred_compression(image_compression::AUTO_LZ)
+            .await?;
+        self.send_preferred_video_codec_type(&[
+            SPICE_VIDEO_CODEC_TYPE_H264,
+            SPICE_VIDEO_CODEC_TYPE_MJPEG,
+        ])
+        .await?;
+
         loop {
             // Read data into buffer
             let mut chunk = [0u8; 262144]; // 256KB chunks for images
@@ -902,6 +933,50 @@ impl DisplayChannel {
         }
 
         self.send_with_log(display_client::INIT, &msg).await
+    }
+
+    /// Send `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` (opcode
+    /// 103). Payload is a single u8 from the
+    /// `SPICE_IMAGE_COMPRESSION_*` enum (spice.proto:1028-1030).
+    /// Called once at link-up from `run_loop`. The server uses
+    /// this to pick how it encodes server-driven image fills
+    /// (LZ vs GLZ vs QUIC etc).
+    async fn send_preferred_compression(&mut self, scheme: u8) -> Result<()> {
+        let payload = [scheme];
+        let msg = make_message(display_client::PREFERRED_COMPRESSION, &payload);
+        if self.log_config.verbose {
+            logging::log_detail(&format!("image_compression={}", scheme));
+        }
+        self.send_with_log(display_client::PREFERRED_COMPRESSION, &msg)
+            .await?;
+        self.pref_compression_sent = true;
+        Ok(())
+    }
+
+    /// Send `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE`
+    /// (opcode 105). Payload is `u8 num_of_codecs` followed by
+    /// that many `video_codec_type` u8s in preference order
+    /// (spice.proto:1035-1037). spice-gtk's
+    /// `spice_display_send_client_preferred_video_codecs`
+    /// (channel-display.c:621-642) is the reference encoder.
+    /// Called once at link-up from `run_loop`.
+    async fn send_preferred_video_codec_type(&mut self, codecs: &[u8]) -> Result<()> {
+        let mut payload = Vec::with_capacity(1 + codecs.len());
+        let num = u8::try_from(codecs.len()).unwrap_or(u8::MAX);
+        payload.push(num);
+        payload.extend_from_slice(&codecs[..num as usize]);
+        let msg = make_message(display_client::PREFERRED_VIDEO_CODEC_TYPE, &payload);
+        if self.log_config.verbose {
+            logging::log_detail(&format!(
+                "num_of_codecs={}, codecs={:?}",
+                num,
+                &codecs[..num as usize]
+            ));
+        }
+        self.send_with_log(display_client::PREFERRED_VIDEO_CODEC_TYPE, &msg)
+            .await?;
+        self.pref_video_codec_type_sent = true;
+        Ok(())
     }
 
     async fn process_messages(&mut self) -> Result<()> {
@@ -2733,6 +2808,14 @@ impl DisplayChannel {
         snap.h264_decode_recent_mean_us = h264_mean;
         snap.h264_decode_total_count = self.h264_decode_total_count;
         snap.h264_decode_failed_count = self.h264_decode_failed_count;
+
+        // Phase-07: link-up preference-message send markers. Both
+        // flip from false to true once and never reset for the
+        // life of the channel — they let a bug report confirm the
+        // preferences actually went out without having to read
+        // the pcap.
+        snap.pref_compression_sent = self.pref_compression_sent;
+        snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
     }
 
     /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte

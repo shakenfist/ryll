@@ -322,6 +322,18 @@ pub struct DisplaySnapshot {
     /// start. Subset of `h264_decode_total_count`; `Ok(None)`
     /// is not counted as a failure.
     pub h264_decode_failed_count: u64,
+    /// Phase-07: true once the link-up
+    /// `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` (opcode 103)
+    /// message has been sent. One-shot per channel lifetime —
+    /// never flips back to false, since the client only sends
+    /// the preference at link-up. Lets a bug-report reader tell
+    /// at a glance whether the server received our preference.
+    pub pref_compression_sent: bool,
+    /// Phase-07: true once the link-up
+    /// `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` (opcode
+    /// 105) message has been sent. One-shot per channel lifetime
+    /// for the same reason as `pref_compression_sent`.
+    pub pref_video_codec_type_sent: bool,
 }
 
 /// A recorded input event for the inputs channel snapshot.

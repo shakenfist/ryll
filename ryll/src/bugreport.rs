@@ -2053,6 +2053,9 @@ mod tests {
             last_ack_send_ts_secs: Some(4.25),
             // Phase-02 pcap writer-queue drop counter.
             writer_dropped_count: 11,
+            // Phase-07 link-up preference-message send markers.
+            pref_compression_sent: true,
+            pref_video_codec_type_sent: true,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -2228,6 +2231,12 @@ mod tests {
         assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
         assert!(json.contains("\"h264_decode_total_count\": 120"));
         assert!(json.contains("\"h264_decode_failed_count\": 1"));
+        // Phase-07: link-up preference-message send markers must
+        // appear in channel-state.json so a bug-report reader can
+        // confirm the client asked for AUTO_LZ and the H264/MJPEG
+        // codec ordering without reading the pcap.
+        assert!(json.contains("\"pref_compression_sent\": true"));
+        assert!(json.contains("\"pref_video_codec_type_sent\": true"));
         // Phase-12B: bounded image-cache eviction and cap fields.
         // These must appear in bug reports so an operator can tell
         // how much eviction pressure the session experienced and

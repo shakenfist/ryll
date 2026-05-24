@@ -414,6 +414,9 @@ pub mod message_names {
         match msg_type {
             display_client::INIT => "init",
             display_client::STREAM_REPORT => "stream_report",
+            display_client::PREFERRED_COMPRESSION => "preferred_compression",
+            display_client::GL_DRAW_DONE => "gl_draw_done",
+            display_client::PREFERRED_VIDEO_CODEC_TYPE => "preferred_video_codec_type",
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
