@@ -478,16 +478,6 @@ pub struct MainSnapshot {
     /// a real EOF / RST when the disconnect-cause record is
     /// captured. Reset on reconnect by the app layer.
     pub keepalive_timeout_fired: bool,
-    /// Number of unsolicited PONG messages we've sent on main
-    /// as a client-driven idle keepalive (Phase 02 K1 fix).
-    /// SPICE has no client→server PING opcode, so we use a
-    /// PONG with synthesised id/timestamp; the server's PONG
-    /// handler reads any inbound bytes as "client is alive"
-    /// and resets its per-channel rcc connectivity timer.
-    pub client_keepalive_send_count: u32,
-    /// Session-relative seconds at the most recent keepalive
-    /// send. None until the first one fires.
-    pub last_client_keepalive_send_ts_secs: Option<f64>,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
     /// Per-opcode receive counts since session start.

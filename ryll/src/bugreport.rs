@@ -1075,8 +1075,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: s.client_keepalive_send_count,
-                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -3762,11 +3762,6 @@ mod tests {
             s.client_keepalive_send_count = 7;
             s.last_client_keepalive_send_ts_secs = Some(305.5);
         }
-        {
-            let mut s = snapshots.main.lock().unwrap();
-            s.client_keepalive_send_count = 11;
-            s.last_client_keepalive_send_ts_secs = Some(110.0);
-        }
 
         let per_channel = DisconnectCause::collect_per_channel(&snapshots);
 
@@ -3774,13 +3769,12 @@ mod tests {
         assert_eq!(inputs.client_keepalive_send_count, 7);
         assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
 
-        let main = per_channel.get("main").expect("main entry missing");
-        assert_eq!(main.client_keepalive_send_count, 11);
-        assert_eq!(main.last_client_keepalive_send_ts_secs, Some(110.0));
-
-        // The other channels do not yet implement keepalive, so the
-        // fields default to 0 / None.
-        for ch in ["display", "cursor", "playback", "usbredir", "webdav"] {
+        // Only the inputs channel implements a client-side keepalive;
+        // every other channel reports zero / None in the uniform
+        // PerChannelDiagnostics shape.
+        for ch in [
+            "main", "display", "cursor", "playback", "usbredir", "webdav",
+        ] {
             let entry = per_channel
                 .get(ch)
                 .unwrap_or_else(|| panic!("missing {}", ch));

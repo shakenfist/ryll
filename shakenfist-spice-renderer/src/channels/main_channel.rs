@@ -148,20 +148,6 @@ pub struct MainChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
-    /// Wall-clock time (tokio runtime) of the most recent
-    /// inbound *or* outbound activity on main. Drives the idle
-    /// keepalive (Phase 02 K1 fix): when this is older than
-    /// `KEEPALIVE_IDLE`, we send a spurious PONG to keep the
-    /// server's per-channel rcc connectivity timer alive.
-    /// Updated on every recv (in the select loop) and every
-    /// send (in `send()`).
-    last_activity: tokio::time::Instant,
-    /// Counter of idle keepalives we've fired on main. Surfaced
-    /// via `MainSnapshot` for disconnect-cause diagnostics.
-    client_keepalive_send_count: u32,
-    /// Session-relative seconds at the most recent keepalive
-    /// send.
-    last_client_keepalive_send_ts_secs: Option<f64>,
     /// True after `maybe_request_client_mouse_mode` sends a
     /// `MOUSE_MODE_REQUEST(CLIENT)` and until a MOUSE_MODE
     /// message confirms we're in CLIENT mode. Stops a flappy
@@ -198,14 +184,6 @@ pub struct MainChannel {
     /// `STREAM_REPORT` send time.
     mm_clock: Arc<MmClock>,
 }
-
-/// Idle window before the main-channel keepalive fires. The
-/// SPICE server's per-RCC connectivity check is 30 s
-/// (CLIENT_CONNECTIVITY_TIMEOUT, main-channel-client.cpp:38);
-/// 10 s leaves wide headroom against jitter and clock skew.
-/// Matches the inputs-channel keepalive cadence so the two
-/// channels' keepalive traffic interleaves predictably.
-const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl MainChannel {
     #[allow(clippy::too_many_arguments)]
@@ -255,9 +233,6 @@ impl MainChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
-            last_activity: tokio::time::Instant::now(),
-            client_keepalive_send_count: 0,
-            last_client_keepalive_send_ts_secs: None,
             mouse_mode_request_pending: false,
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
@@ -280,9 +255,7 @@ impl MainChannel {
     /// before the task ends. Without this, `?` propagations
     /// inside the loop end the task silently, which in
     /// session-001d hid the cause of main going dark mid-run
-    /// (`client_keepalive_send_count` plateaued at 31 well
-    /// before the session disconnect, with no log line
-    /// explaining why).
+    /// with no log line explaining why.
     ///
     /// `Box::pin` heap-allocates the inner state machine so
     /// the wrapper does not inline `run_loop`'s entire async
@@ -513,7 +486,6 @@ impl MainChannel {
                     }
 
                     last_data_received = tokio::time::Instant::now();
-                    self.last_activity = tokio::time::Instant::now();
                     self.byte_counter.add(n as u64);
                     if let Some(ref c) = self.capture {
                         if !c.packet_received("main", &chunk[..n]) {
@@ -580,18 +552,6 @@ impl MainChannel {
                     self.repaint_notify.notify_one();
                     break;
                 }
-                // Idle keepalive (Phase 02 K1 fix). When main has been
-                // silent in both directions for KEEPALIVE_IDLE, send a
-                // spurious PONG so the server's per-channel rcc 30 s
-                // connectivity timer never fires. Session-001c data
-                // showed the inputs-only keepalive was insufficient
-                // because main itself goes silent at T+465 in every
-                // reproduction; this branch closes that gap.
-                _ = tokio::time::sleep_until(self.last_activity + KEEPALIVE_IDLE) => {
-                    last_arm = "keepalive_idle";
-                    self.send_idle_keepalive().await?;
-                    last_arm = "keepalive_idle_done";
-                }
                 _ = heartbeat.tick() => {
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -600,13 +560,12 @@ impl MainChannel {
                     last_heartbeat_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
                     info!(
                         "main: heartbeat T+{:.1}s iter={} last_arm={} last_recv={:?} \
-                         last_send={:?} keepalives={} pongs={}",
+                         last_send={:?} pongs={}",
                         self.traffic.elapsed().as_secs_f64(),
                         iter_count,
                         last_arm,
                         self.last_recv_ts_secs,
                         self.last_send_ts_secs,
-                        self.client_keepalive_send_count,
                         self.pong_send_count,
                     );
                 }
@@ -1013,8 +972,6 @@ impl MainChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
-        snap.client_keepalive_send_count = self.client_keepalive_send_count;
-        snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
         // mm_time clock state. `now()` is informational —
         // computed at snapshot time so a bug report shows the
@@ -1452,52 +1409,6 @@ impl MainChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-        self.last_activity = tokio::time::Instant::now();
-        Ok(())
-    }
-
-    /// Send a spurious PONG with a synthesised id/timestamp to
-    /// keep the server's per-channel rcc connectivity timer
-    /// alive. Triggered by the idle-keepalive select branch in
-    /// `run()` after `KEEPALIVE_IDLE` of channel silence.
-    ///
-    /// The SPICE protocol does not define a client→server PING
-    /// (PING is server→client only, with no SPICE_MSGC_PING in
-    /// `spice-protocol/spice/enums.h`). PONG is the simplest
-    /// available client→server message: the server's PONG
-    /// handler looks up the id in its outstanding-PING table
-    /// and on a miss either silently discards or warning-logs.
-    /// Either way the server's `received_bytes` flag flips,
-    /// resetting the 30 s rcc timer
-    /// (`main-channel-client.cpp:38`,
-    /// `red-channel-client.cpp:656`).
-    ///
-    /// Hypothesis under test: the session-001c data shows the
-    /// inputs-channel keepalive correctly keeps inputs alive
-    /// (`client_keepalive_send_count` rises into the 40s) but
-    /// K1 still fires because main goes silent at T+465 across
-    /// runs. Adding a main-channel keepalive should close out
-    /// the K1 reproduction class — and if it doesn't,
-    /// session-002b's disconnect-cause.json will tell us via
-    /// the new `MainSnapshot::client_keepalive_send_count`
-    /// field whether the sends were happening.
-    async fn send_idle_keepalive(&mut self) -> Result<()> {
-        // id and timestamp deliberately zeroed. They have no
-        // semantic meaning to us (we never get the round-trip
-        // back as a latency sample because the server's
-        // outstanding-PING ledger has no entry for id 0). The
-        // server tolerates the unmatched PONG either way.
-        let mut payload = Vec::new();
-        Ping {
-            id: 0,
-            timestamp: 0,
-        }
-        .write_pong(&mut payload)?;
-        let response = make_message(main_client::PONG, &payload);
-        self.send_with_log(main_client::PONG, &response).await?;
-        self.client_keepalive_send_count = self.client_keepalive_send_count.saturating_add(1);
-        self.last_client_keepalive_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-        self.update_snapshot();
         Ok(())
     }
 }
