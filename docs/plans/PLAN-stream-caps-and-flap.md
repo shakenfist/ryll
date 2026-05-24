@@ -286,6 +286,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Hypothesis rewritten by session 005: server DOES create streams at 1920×1440 (the 004-era "zero streams" reading was an artefact of the SPICE debug not landing). Real bug is single-shot teardown without re-engagement, almost certainly driven by guest-QXL OOM events flushing stream state. Detailed plan file written; awaiting investigation work. |
 | 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Not started |
 | 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | Not started |
+| 16. Evaluate guest driver options for video streaming | PLAN-stream-caps-and-flap-phase-16-qxl-viability.md | Proposed (concept). Three test-session experiments measuring the QXL-vs-virtio trade-off for video; output is a guest-driver decision matrix in `docs/libvirt-spice-recommendations.md`. |
 
 Per-phase intent:
 
@@ -760,6 +761,31 @@ Per-phase intent:
   Recommended planning effort: **low** (one of two
   outcomes is "rebuild and done"; the other is a
   one-file fix once the caller is located).
+
+- **Phase 16 — Evaluate guest driver options for video
+  streaming.** Driven by accumulated 002-005 evidence
+  that the QXL guest driver is the substrate stream-flap
+  arises on, and that the current
+  `docs/libvirt-spice-recommendations.md` advice
+  ("virtio-vga preferred, qxl for streaming only") is
+  unmeasured for video workloads. Three test-session
+  experiments: (a) Debian 13 + QXL to test whether a
+  newer guest driver reduces OOM frequency; (b) Debian 11
+  + virtio-vga to confirm/refute "no streaming, just
+  bitmap blits"; (c) virtio-vga + accel3d='yes' to see
+  if virgl changes the picture. Output: a "Guest driver
+  decision matrix" section in
+  `docs/libvirt-spice-recommendations.md` with measured
+  numbers for each, plus operator-facing guidance for
+  four common workload shapes. Investigation-only — no
+  ryll code changes are expected to fall out directly.
+  Whether to run urgently depends on phase 13A: if 13A
+  shows the OOM/eviction mechanism is recoverable, phase
+  16 becomes confirmation; if OOMs are an unavoidable
+  side-effect of QXL's command-ring sizing, phase 16
+  becomes the main path. Recommended planning effort:
+  **medium** (the per-run work is small; the comparison
+  framework needs care).
 
 ## Agent guidance
 
