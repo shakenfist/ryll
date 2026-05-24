@@ -77,15 +77,40 @@ SPICE_ROPD_OP_PUT + SPICE_IMAGE_TYPE_BITMAP` filter. The result
 is that every video frame falls back to a full-frame ZlibGlzRgb
 update — heavy on both bandwidth and client-side decode.
 
-**VRAM is not the lever** for this cliff. We ran the same 1920×1440
-workload at 64 MiB, 128 MiB, and 256 MiB VRAM and got zero streams
-in all three runs. If your QXL guest doesn't stream video, raising
-VRAM will not help; the gating happens upstream of any memory
-constraint, in the heuristic's per-draw filter. Earlier guidance
-in this doc recommended generous VRAM as a streaming aid — that
-guidance is incorrect for this failure mode and should be
-disregarded. (Generous VRAM is still useful for static-UI cache
-hit rates, just not for video streaming.)
+**VRAM and streaming: a more nuanced picture.** Session 004 ran
+the same 1920×1440 workload at 64 MiB, 128 MiB, and 256 MiB VRAM
+and reported zero streams created in all three runs — concluding
+"VRAM is not the lever". Session 005 then revealed that
+conclusion was an instrumentation artefact (the spice-debug env
+var was being scrubbed before reaching qemu; once the libvirt
+template was patched to pass it through, the qemu log showed the
+server *does* create a 1024×768 stream within seconds of video
+start at 1920×1440 — it just tears it down ~8 seconds later and
+never recreates it).
+
+What 005 also revealed: the qemu log shows
+`display_channel_debug_oom` firing ~1.7 times per second
+throughout the run. That's qemu's QXL device emulation
+telling spice-server that the **guest QXL driver has run out of
+command-ring memory**; spice-server responds by dropping pending
+drawables via `display_channel_free_some` and flushing —
+which appears to evict the stream-tracking state and prevent
+re-engagement. So:
+
+- **VRAM does not directly unlock streaming.** Bumping `vram`
+  alone won't restore video performance; the heuristic fires
+  regardless.
+- **VRAM does affect the OOM rate**, which appears to affect
+  stream *survival* and *re-engagement* indirectly. We have
+  not yet measured whether bumping `vram` reduces OOM
+  frequency enough to keep streams alive (phase 13B of
+  `PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md`
+  will quantify this).
+
+Net: don't undersize `vram` on QXL guests intended for
+video workloads, but don't expect a `vram` bump alone to be
+a cure either. The static-UI cache-hit benefit of generous
+VRAM is real and unchanged.
 
 For 1024×768 or 1280-class desktops on QXL, streaming works and
 the trade-off is fine. For 1600+ desktops on QXL, expect static
