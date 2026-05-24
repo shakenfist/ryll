@@ -283,6 +283,171 @@ useful client lever, if upstream won't move, is to *avoid the
 back-pressure — but that is speculation pending 13B's OOM-vs-
 VRAM curve.
 
+## 13C findings (source read)
+
+**Verdict: this is fundamentally a guest-driver design constraint, not
+a tuning problem.** The OOM signal is not a "% free" threshold or a
+periodic check — it is a side-effect of any kernel sleep in
+`qxl_fence_wait`, and the underlying scarce resource is the **32-slot
+QXL command ring** plus the host-side release backlog feeding into the
+**8-slot release ring**. Higher `vram_size` will reduce some kinds of
+OOM (the TTM-eviction kind) but cannot make the command ring deeper.
+
+### What is the OOM trigger?
+
+There are only two call sites for `qxl_io_notify_oom` in the driver
+(`qxl_cmd.c:355-358`). One is `qxl_device_fini` shutdown
+(`qxl_kms.c:305`); irrelevant to runtime. The runtime trigger is
+inside `qxl_fence_wait` (`qxl_release.c:59-77`):
+
+```c
+if (!wait_event_timeout(qdev->release_event,
+            (dma_fence_is_signaled(fence) ||
+             (qxl_io_notify_oom(qdev), 0)),
+            timeout))
+    return 0;
+```
+
+The comma-expression hides the trick: every time `wait_event_timeout`
+re-evaluates its predicate (on each wake-up of `release_event`, which
+the IRQ handler fires on `QXL_INTERRUPT_DISPLAY`,
+`qxl_irq.c:46-50,55-58`, ultimately calling `wake_up_all` in
+`qxl_garbage_collect`, `qxl_cmd.c:250`), and the fence is still not
+signalled, the guest pokes the host via the `QXL_IO_NOTIFY_OOM` port.
+This is not a threshold check — it is a **liveness ping fired every
+time the guest blocks on a host-side release that hasn't come back
+yet**. The host receives it (`qemu/hw/display/qxl.c:1760` →
+`qxl_spice_oom` at line 210-214 → `spice_qxl_oom`) and forwards it
+to the spice-worker as `RedWorkerMessageOom`.
+
+What triggers a fence wait? Any TTM operation that needs to evict a
+BO carrying an unsignalled release fence: the most common path is
+`qxl_bo_create` (`qxl_object.c:104-154`) under VRAM pressure, called
+from `qxl_release_bo_alloc` (`qxl_release.c:162-168`) every
+`RELEASES_PER_BO = PAGE_SIZE/256 = 16` releases (line 41), and from
+`qxl_alloc_bo_reserved` (`qxl_cmd.c:256-278`) for every per-draw
+image/payload BO. Surface-ID exhaustion adds a second path:
+`qxl_reap_surf` does an explicit `dma_resv_wait_timeout(..., 15 * HZ)`
+(`qxl_cmd.c:591-593`), reached when `handle >= rom->n_surfaces`
+(`qxl_cmd.c:435-441`).
+
+### What's the relevant size constant?
+
+Three rings are statically sized in `qxl_dev.h:324-326`:
+
+- `QXL_COMMAND_RING_SIZE = 32` — the actual draw command pipeline.
+- `QXL_CURSOR_RING_SIZE = 32`.
+- `QXL_RELEASE_RING_SIZE = 8` — how many freed-resource ids the host
+  can hand back per round-trip.
+
+These are baked into the QXL device contract: they live in the
+`QXLRam` struct as fixed-size arrays (`qxl_dev.h:351-356`) shared
+between guest and host. **Neither the operator's `ram=` nor `vram=`
+nor `vgamem=` knob changes them**; only the qemu/spice-server source
+can (and the on-wire ABI would forbid it). Guest VRAM
+(`qdev->vram_size` from `rom->surface0_area_size`, `qxl_kms.c:54`)
+gates how many release-BOs and image-payload-BOs can coexist before
+TTM eviction starts; `num_surfaces` (qemu default 1024,
+`qemu/hw/display/qxl.c:2494`) gates the surface-ID pool. Larger
+`vram=` raises the TTM ceiling; larger `surfaces=` raises the
+surface-ID ceiling. **Neither raises the 32-slot command-ring or the
+8-slot release-ring ceiling.**
+
+### Does workload shape matter?
+
+Yes, strongly, and in exactly the direction 13A predicted. Each
+draw operation produces:
+
+- one `QXL_RELEASE_DRAWABLE` slot in the release-BO arena (consuming
+  1/16 of a page; a new BO is allocated every 16 draws,
+  `qxl_release.c:323-339`),
+- one or more per-draw `qxl_alloc_bo_reserved` image BOs
+  (`qxl_cmd.c:256-278`) sized to the image payload,
+- one slot in the 32-deep command ring (`qxl_cmd.c:105-150`).
+
+The command-ring slot count is **per draw**, not per pixel: a 4×4
+cursor blink and a 1920×1440 full-screen blit each consume one slot.
+A windowed video at 30 fps competing with chrome animations,
+taskbar clock, and cursor blink on a 1920×1440 desktop will fill 32
+slots far faster than a quiescent 1024×768 desktop showing the same
+video, even if the video's pixel rate is unchanged. When
+`qxl_ring_push` finds `prod - cons == num_items` it sleeps on
+`push_event` (`qxl_cmd.c:113-134`); that sleep doesn't *itself* fire
+OOM, but it back-pressures the X server, which in turn means the
+next allocation of a per-draw payload BO is more likely to hit a
+not-yet-recycled release-BO fence and trigger the
+`qxl_fence_wait` OOM ping. Workload **fragmentation**, not pixel
+volume, is the dominant input.
+
+This matches the session 005 observation: 1024×768 streams the same
+YouTube cleanly; 1920×1440 thrashes. At 1024×768 the video region
+is ~78% of the desktop, the surrounding chrome contributes a small
+relative fraction of draws, and the command ring is largely "the
+video region". At 1920×1440 the same video is ~22% of the desktop,
+and the chrome / cursor / browser-UI draws dominate the 32-slot ring
+contention.
+
+### Verdict on the 13A prediction
+
+Partial support. Larger `vram=` does reduce the TTM-eviction
+fence-wait path (more headroom for release-BO arenas before
+eviction), which should reduce OOM rate up to a point — but it
+**cannot remove** the back-pressure from a 32-slot command ring
+under a draw-heavy workload. We should expect 13B to show a
+diminishing-returns curve: 64→128 MiB likely helps measurably,
+128→256 MiB likely helps less, and beyond some `vram=` value OOMs
+will plateau at a workload-determined floor set by command-ring
+depth and draw rate. To go below that floor the operator would
+have to either (a) reduce the number of *distinct* draws per second
+(disable taskbar animations, cursor blink, browser smooth scroll,
+window compositor effects) or (b) replace the guest driver with
+one that doesn't share the QXL device's ring sizing.
+
+### Implications for 13B's test design
+
+Beyond the OOM counts and stream-create counts already in the 13B
+brief, 006 should capture:
+
+- **`/sys/kernel/debug/dri/<n>/qxl_release_info`** —
+  `qxl_debugfs.c:1-127` registers debugfs nodes. Need to confirm
+  exact names against the running Debian kernel; the file lists
+  outstanding releases per type, which directly measures the
+  release-arena pressure that drives the fence-wait path.
+  **Unresolved:** I have not verified the exact debugfs node name
+  in the Debian-shipped QXL build; check `ls /sys/kernel/debug/dri/0/`
+  on the guest before relying on it.
+- **`/proc/interrupts | grep qxl`** — IRQ rate per minute is a
+  direct proxy for release-ring round-trips; if larger `vram=`
+  reduces OOMs but the IRQ rate stays high, command-ring depth
+  is the floor.
+- **dmesg `DRM_DEBUG_DRIVER` lines** — `qxl_release_free` emits a
+  per-release debug line (`qxl_release.c:140`); enabling
+  `drm.debug=0x04` on the guest kernel cmdline turns these on and
+  makes the release rate measurable directly.
+- **Workload variant**: re-run 005b once with the desktop chrome
+  quiesced (close taskbar widgets, disable cursor blink, fullscreen
+  the browser). If OOMs drop substantially at the *same* `vram=`,
+  workload-shape is the dominant input and the 13A trace-contention
+  story is confirmed end-to-end.
+
+### Implications for phase 16 (guest driver alternatives)
+
+This is the strong-escalation case. `QXL_COMMAND_RING_SIZE = 32` is
+part of the QXL device ABI in `qxl_dev.h:324`; it is not a tunable
+in any released kernel and not a tunable in qemu either. Newer
+Linux kernels do not change it (the file's commit history shows the
+value has been 32 since the driver was upstreamed). The driver's
+OOM-on-fence-wait pattern is structural, not a recent regression.
+Therefore "QXL on Debian 13 might work; test that" is unlikely to
+help materially — Debian 13 ships the same upstream driver against
+the same device ABI. Phase 16 should plan around **replacing QXL**
+at high resolution, not tuning it: virtio-gpu (no command ring of
+this style; uses virtqueues with operator-controllable depth) or
+falling back to plain VGA + spice-vdagent for the cases where 3D
+acceleration isn't required. Ryll-side mitigations are out of
+scope for this section per the brief; the takeaway for phase 16 is
+that the substrate, not the configuration, is the limit.
+
 ## What to investigate (in order)
 
 ### 13A — Confirm the OOM-evicts-stream-state mechanism
