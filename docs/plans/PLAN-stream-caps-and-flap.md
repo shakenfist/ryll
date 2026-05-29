@@ -287,6 +287,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Not started |
 | 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | Not started |
 | 16. Evaluate guest driver options for video streaming | PLAN-stream-caps-and-flap-phase-16-qxl-viability.md | Proposed (concept). Three test-session experiments measuring the QXL-vs-virtio trade-off for video; output is a guest-driver decision matrix in `docs/libvirt-spice-recommendations.md`. |
+| 17. Patched libspice-server for hypothesis validation | PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md | Proposed. Build a Debian `.deb` of `libspice-server1` with `NUM_TRACE_ITEMS` bumped 8→128, install on one hypervisor, re-run the 006a workload, measure stream re-engagement. Gated on 006 confirming the trace-ring-contention model. |
 
 Per-phase intent:
 
@@ -786,6 +787,32 @@ Per-phase intent:
   becomes the main path. Recommended planning effort:
   **medium** (the per-run work is small; the comparison
   framework needs care).
+
+- **Phase 17 — Patched libspice-server for hypothesis
+  validation.** Phase 13A's source-read identified
+  `NUM_TRACE_ITEMS = 8` (`server/display-channel-private.h:23`)
+  as the binding constraint on stream re-engagement under
+  OOM pressure. The natural sanity check is to rebuild
+  Debian's `libspice-server1` package with that constant
+  bumped to 128 (next power of two above
+  `RED_RELEASE_BUNCH_SIZE = 64`, so a single OOM cycle no
+  longer fully overwrites the trace ring) and measure
+  whether stream re-engagement actually improves. Three
+  steps: 17A — automate the patched .deb build via a
+  shell script in `ryll-test-sessions/bin/`; 17B —
+  operator install on one hypervisor and re-run the 006a
+  workload, capture comparable bundle (tag
+  `007a-patched`), measure; 17C — file the upstream issue
+  with the result, draft a phase 18 stub iff 17B is
+  positive AND operator decides cluster-wide rollout is
+  worth the maintenance tail. Gated on session 006
+  confirming the trace-ring-contention model first — if
+  006d (fullscreen 64 MiB) doesn't beat 006c (windowed
+  256 MiB), the workload-driven command-ring is the real
+  floor and `NUM_TRACE_ITEMS` alone won't help; this phase
+  pivots or is cancelled. Recommended planning effort:
+  **medium** (the package build is reasonable but
+  unfamiliar; the test recipe is small).
 
 ## Agent guidance
 
