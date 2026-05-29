@@ -277,17 +277,51 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Complete (4G verified in session 002g: `data_packets_received == data_packets_decoded`, no decode failures, underruns visible — instrumentation distinguishes the four failure modes as designed) |
 | 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Code landed (5A-5B); 5C operator smoke test pending |
 | 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Code landed (6A-6E); 6F operator smoke test pending (needs an H.264-capable spice-server build to actually exercise the new path) |
-| 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Not started |
-| 8. Live streaming indicator + flap notification | PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md | Not started |
+| 7. Preference messages | PLAN-stream-caps-and-flap-phase-07-pref-messages.md | Code landed (7A-7C); session 006 measurement drove AUTO_LZ → AUTO_GLZ revert (server stopped using GLZ entirely under AUTO_LZ; +25% bytes_in). 7D smoke folded into the next 005-style run. |
+| 8. Live streaming indicator + flap notification | PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md | Code landed. |
 | 9. Vdagent responsiveness probe | PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md | Not started |
 | 10. Documentation | PLAN-stream-caps-and-flap-phase-10-docs.md | Not started |
-| 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | Not started |
+| 11. Remove spurious-PONG keepalive | PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md | 11A landed (main channel); 11B inputs-channel decision still open; 11C long-idle soak pending. |
 | 12. Bounded image cache | PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md | **Complete.** 12A-12C landed; 12D smoke FAILED (revealed GlzDictionary was a second unbounded cache the snapshot was summing in); 12E (bound GLZ), 12F (split snapshot fields), 12G (docs) all landed; 12H verified in session 005b — `glz_dictionary_bytes` held at 247 MiB / 256 cap across 67 snapshots over 670 s with eviction firing, `image_cache_bytes` stayed at 0, no RSS drift. |
-| 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | Hypothesis rewritten by session 005: server DOES create streams at 1920×1440 (the 004-era "zero streams" reading was an artefact of the SPICE debug not landing). Real bug is single-shot teardown without re-engagement, almost certainly driven by guest-QXL OOM events flushing stream state. Detailed plan file written; awaiting investigation work. |
-| 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Not started |
-| 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | Not started |
-| 16. Evaluate guest driver options for video streaming | PLAN-stream-caps-and-flap-phase-16-qxl-viability.md | Proposed (concept). Three test-session experiments measuring the QXL-vs-virtio trade-off for video; output is a guest-driver decision matrix in `docs/libvirt-spice-recommendations.md`. |
-| 17. Patched libspice-server for hypothesis validation | PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md | Proposed. Build a Debian `.deb` of `libspice-server1` with `NUM_TRACE_ITEMS` bumped 8→128, install on one hypervisor, re-run the 006a workload, measure stream re-engagement. Gated on 006 confirming the trace-ring-contention model. |
+| 13. Investigate intermittent server-side streaming | PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md | **Parked.** Session 006 confirmed the trace-ring/VRAM diminishing-returns curve (165→85→77 OOMs/min at 64/128/256 MiB) but uncovered a bigger blocker: the 1024×768 YouTube video almost never crosses `is_stream_start` (1–2 video stream creates per 10 min vs ~100 cursor / scrollbar creates). All four 006 bundles show `streams_created_total = 0` client-side. Findings folded into the phase 13 plan's "Session 006 findings" section. Resume after non-video phases close. |
+| 14. Stop status-bar pointer events leaking into the guest | PLAN-stream-caps-and-flap-phase-14-statusbar-pointer-leak.md | Code landed. |
+| 15. Track down `build_tcp_frame: payload too large` warns | PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md | 15B (one-shot backtrace) landed; no fires across 006 bundles. Awaiting fresh reproduction. |
+| 16. Evaluate guest driver options for video streaming | PLAN-stream-caps-and-flap-phase-16-qxl-viability.md | **Parked.** Concept stub. Resume alongside phase 13 after non-video phases close. |
+| 17. Patched libspice-server for hypothesis validation | PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md | **Parked.** Value uncertain after 006: bumping `NUM_TRACE_ITEMS` 8→128 helps cursor / scrollbar flap, but does not address why the YouTube video itself isn't a stream. Hold off on the .deb build until the predicate question is answered. |
+
+### Closeout — non-video work remaining
+
+Per session 006 we are parking the video-bottleneck phases
+(13 / 16 / 17) and closing out the rest of the master plan
+before re-assessing. The remaining open items are:
+
+- **Phase 2 / 3** — code landed; 2C smoke folded into 3H,
+  the per-platform JPEG-decode smoke test. Operator-side
+  work.
+- **Phase 5C** — auto-snapshot operator smoke test.
+  Functionally validated by every 005-onwards session
+  (auto-snapshots ARE the bundle source). Likely just
+  marking complete; verify and close.
+- **Phase 6F** — H.264 wire-smoke. Needs an H.264-capable
+  spice-server build. Operator-side; gated on the spice-
+  server side rather than ryll. Mark blocked-on-external
+  rather than open.
+- **Phase 9** — vdagent responsiveness probe. Independent
+  of video work. Worth picking up.
+- **Phase 10** — documentation catch-all. Last.
+- **Phase 11B / 11C** — inputs-channel keepalive decision
+  + long-idle soak.
+- **Phase 14 / 15** — landed / instrumented; nothing for
+  the management session to chase until / unless
+  reproductions come back.
+
+Suggested ordering for closeout: 5C/2C/3H closures first
+(mostly bookkeeping against existing sessions), then 11B
++ 11C, then phase 9, then phase 10 to roll up the new
+caps + the phase-13 / 16 / 17 parking into the docs. After
+that, re-open phase 13 with the "why isn't the video a
+stream" question and decide whether to chase the
+predicate read or the client-side instrumentation first.
 
 Per-phase intent:
 

@@ -626,3 +626,78 @@ is characterised well enough that:
 
 "We shipped code" is not the success criterion. "We
 understand the failure mode" is.
+
+## Session 006 findings — phase 13B data set
+
+Sessions 006a/b/c ran the prediction matrix at 64/128/256 MiB
+VRAM (006d, the fullscreen workload-shape test, was skipped).
+Steady-state OOMs/min over 9 minutes of YouTube playback:
+
+| Tag | VRAM | OOMs/min | free_some/run | Δ vs prev |
+|-----|------|----------|----------------|-----------|
+| 006a | 64 MiB  | **165** | 45 | baseline |
+| 006b | 128 MiB | **85**  | 19 | **−48%** |
+| 006c | 256 MiB | **77**  | 7  | **−9%** (plateau) |
+
+The diminishing-returns curve predicted by the trace-ring-
+contention model held: VRAM helps until ~128 MiB, then
+plateaus. `free_some` (work per OOM cycle) dropped sharply
+even where OOM count plateaued — the per-OOM eviction depth
+is shallower with more VRAM, but the cycle count stops
+decreasing.
+
+**Bigger finding from 006:** the YouTube video almost never
+crosses `is_stream_start`. Per-tag stream-create breakdown
+(server-side `display_channel_create_stream` log lines):
+
+| Tag | 32×10 widget streams | 1024×768 video streams |
+|-----|----------------------|------------------------|
+| 006a | 99 | **2** |
+| 006b | 96 | **1** |
+| 006c | 100 | **1** |
+
+So the ~100 stream creates per run are all cursor / scrollbar
+flicker; the actual 1024×768 YouTube video gets `STREAM_CREATE`
+only 1–2 times in 10 minutes. The video is being delivered as
+a bitmap flood: `decode_total_count` is 1500–1600 per run with
+bandwidth 2.8–3.5 GB/run, and `streams_created_total = 0`
+client-side across all four bundles (006a/b/c/e). The
+trace-ring patch (phase 17) would help cursor / scrollbar
+flap re-engagement; it does **not** address why the video
+itself isn't a stream.
+
+That's a different bottleneck than the one this phase set
+out to characterise. Two paths forward, neither cheap, both
+parked until the rest of the master plan closes:
+
+1. **Server-side stream-create predicate is hostile to QXL's
+   draw shape.** `is_stream_start` requires 20 consecutive
+   frames within 200 ms in the same per-region trace slot.
+   QXL's batched surface blits may not surface as per-region
+   updates at the per-frame cadence the predicate expects.
+   Test: read `red_get_streamable_drawable` + the per-frame
+   trace-update path; correlate with the QXL command-ring
+   walk on a non-streaming run.
+2. **Client-side message drop.** Server's
+   `display_channel_create_stream` log is at the internal
+   stream-create site, before the per-client send decision.
+   Would explain why `streams_created_total = 0` despite
+   ~100 server-side creates. Test: instrument ryll's
+   `MSG_DISPLAY_STREAM_CREATE` handler with a one-shot
+   warn-if-not-received-after-T-seconds. Cheap.
+
+Phase 17 (patched libspice) value is now uncertain:
+bumping `NUM_TRACE_ITEMS` from 8 to 128 lets more of the
+cursor / scrollbar flicker stay engaged, but does not change
+whether the YouTube video qualifies as a stream in the first
+place. Hold off on building the .deb until the upstream
+question is whether the predicate itself is the problem.
+
+## Status — parked
+
+This phase, plus phase 16 (QXL viability) and phase 17
+(patched libspice) sit on the video bottleneck. The
+non-video work in the master plan should land before any of
+the three resumes. The findings above are the snapshot of
+what we know at park time; resume by re-reading them and
+the open-question-1/2 tests above.
