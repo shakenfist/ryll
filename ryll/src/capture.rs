@@ -162,6 +162,17 @@ pub(crate) fn segment_payload(
 }
 
 /// Build a fake Ethernet + IPv4 + TCP frame wrapping `payload`.
+///
+/// All current callers should route through `segment_payload`,
+/// which chunks at `MAX_PAYLOAD = 65495` so the IPv4 ceiling is
+/// never exceeded. The `> 65515` defensive check below is
+/// therefore expected to be unreachable; if it fires, an
+/// unsegmented caller has snuck in. Phase 15B instruments the
+/// first hit per process with a `Backtrace::force_capture()` so
+/// the offending call site can be identified — subsequent hits
+/// log the bare warn without a backtrace to keep a busy session
+/// from spamming thousands of stacks. Grep `payload too large
+/// (FIRST HIT, backtrace follows)` to find the diagnostic line.
 pub(crate) fn build_tcp_frame(
     src_ip: [u8; 4],
     src_port: u16,
@@ -181,10 +192,27 @@ pub(crate) fn build_tcp_frame(
 
     let ip_payload_len = tcp.header_len() + tcp_payload_len;
     if ip_payload_len > 65515 {
-        warn!(
-            "build_tcp_frame: payload too large for IPv4 ({} bytes), dropping",
-            ip_payload_len
-        );
+        // One-shot backtrace: AtomicBool guard so the first
+        // firing per process captures a stack (via
+        // force_capture, which ignores RUST_BACKTRACE — we want
+        // the trace regardless of how the binary was launched),
+        // and every subsequent firing emits only the bare warn.
+        // See PLAN-stream-caps-and-flap-phase-15 step 15B.
+        static BACKTRACE_CAPTURED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !BACKTRACE_CAPTURED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let bt = std::backtrace::Backtrace::force_capture();
+            warn!(
+                "build_tcp_frame: payload too large for IPv4 ({} bytes), \
+                 dropping (FIRST HIT, backtrace follows)\n{:?}",
+                ip_payload_len, bt
+            );
+        } else {
+            warn!(
+                "build_tcp_frame: payload too large for IPv4 ({} bytes), dropping",
+                ip_payload_len
+            );
+        }
         return Vec::new();
     }
     let mut ipv4 =
@@ -987,6 +1015,26 @@ mod tests {
         assert_eq!(frames.len(), 2, "one byte past MAX_PAYLOAD must split");
         assert_eq!(frames[0].len(), 14 + 20 + 20 + 65_495);
         assert_eq!(frames[1].len(), 14 + 20 + 20 + 1);
+    }
+
+    #[test]
+    fn build_tcp_frame_oversized_payload_returns_empty_vec() {
+        // Regression guard for the defensive branch in
+        // build_tcp_frame: an over-65515-byte tcp_payload_len
+        // must return Vec::new() (and warn), not panic. The
+        // warn itself is instrumented with a one-shot backtrace
+        // (Phase 15B); this test just pins the return contract
+        // so a future refactor doesn't silently turn the warn
+        // into a panic or a partial frame. We use 100 000 bytes
+        // — comfortably past the 65515 ceiling and matching the
+        // live observation range that motivated Phase 15.
+        let payload = vec![0u8; 100_000];
+        let frame = build_tcp_frame(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &payload);
+        assert!(
+            frame.is_empty(),
+            "oversized payload must return empty Vec, got {} bytes",
+            frame.len()
+        );
     }
 
     // ── Phase-02 pcap writer-task tests ──────────────────
