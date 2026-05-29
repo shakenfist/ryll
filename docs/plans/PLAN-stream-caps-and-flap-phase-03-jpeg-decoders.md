@@ -437,3 +437,47 @@ Before executing any step of this phase, the implementing
 sub-agent should back-brief the operator with their
 understanding of the step, the files they intend to touch,
 and any deviations from the brief.
+
+## Session 006 follow-up — still-image JPEG wiring gap
+
+Walking 3H against the existing 006 bundles revealed a gap in
+the original phase 3 wiring: only the **MJPEG stream-data**
+path was switched to `self.jpeg_decoder` (display.rs:1362).
+The **still-image JPEG** path at `display.rs:2160` still
+called `image::load_from_memory_with_format(...)`, which uses
+the pure-Rust `jpeg-decoder` crate underneath.
+
+The 006a-c bundles measured this directly: ~160 still-image
+JPEG decodes per 10-minute session at **~263 ms median per
+1920×1472 frame on a Mac that has ImageIO available** — 8×
+slower than the per-platform target. The "drag is laggy"
+symptom phase 3 set out to fix is still present for any
+workload that triggers still-image JPEG sends (which is what
+happens on a guest where MJPEG streams don't engage — i.e.
+every guest we currently test against).
+
+Fix landed: `ImageType::Jpeg` now routes through
+`self.jpeg_decoder.decode(...)`, sharing the same
+`Arc<dyn JpegDecoder>` the MJPEG stream-data path uses.
+
+This invalidates the original 3H smoke (which assumed MJPEG
+streams would be the verification vector) and replaces it
+with a still-image JPEG smoke session, documented in
+`ryll-test-sessions/manual-test-instructions/007.md`:
+
+- One shared guest (Debian 11 QXL, 1920×1440, 64 MiB VRAM)
+- Three client OSes connect in turn (macOS, Linux/Kasm,
+  Windows/Surface Go)
+- Workload: scroll a JPEG-heavy Wikipedia page in Firefox
+  for ~2 minutes per run
+- Bundles tagged `007a` / `007b` / `007c`
+
+Baseline reference from 006a (pre-fix, macOS):
+median 263 ms, p95 266 ms. Per-platform post-fix targets:
+
+| Tag | Backend (expected) | Median target | p95 target |
+|-----|--------------------|---------------|------------|
+| 007a | ImageIO  | ≤30 ms | ≤50 ms |
+| 007b | mozjpeg  | ≤40 ms | ≤80 ms |
+| 007b | VA-API   | ≤20 ms | ≤40 ms |
+| 007c | WIC      | platform-dep — Surface Go is slow hardware, "better than pure-Rust" is the bar |

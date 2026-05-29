@@ -273,7 +273,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 |-------|------|--------|
 | 1. STREAM_REPORT | PLAN-stream-caps-and-flap-phase-01-stream-report.md | Complete |
 | 2. LZ4 compression | PLAN-stream-caps-and-flap-phase-02-lz4.md | Code landed; smoke test (2C) folded into phase 3 step 3H |
-| 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G); 3H per-platform smoke test pending |
+| 3. Fast JPEG decode | PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md | Code landed (3A-3G). Session 006 follow-up revealed still-image JPEG path missed the wiring (was on pure-Rust at ~263 ms/frame); fix landed. 3H replaced with the 007 still-image JPEG smoke matrix (one shared guest, three client OSes) — pending operator runs. |
 | 4. Channel diagnostics audit + playback observability | PLAN-stream-caps-and-flap-phase-04-channel-diagnostics.md | Complete (4G verified in session 002g: `data_packets_received == data_packets_decoded`, no decode failures, underruns visible — instrumentation distinguishes the four failure modes as designed) |
 | 5. Auto-snapshot bug-report mode | PLAN-stream-caps-and-flap-phase-05-auto-snapshot.md | Code landed (5A-5B); 5C operator smoke test pending |
 | 6. Multi-codec + H.264 | PLAN-stream-caps-and-flap-phase-06-h264.md | Code landed (6A-6E); 6F operator smoke test pending (needs an H.264-capable spice-server build to actually exercise the new path) |

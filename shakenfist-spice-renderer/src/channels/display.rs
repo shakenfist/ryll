@@ -2147,7 +2147,14 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Jpeg) => {
-                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream).
+                // Route through the per-platform `JpegDecoder` selected in
+                // `best_for_platform()` (ImageIO / WIC / mozjpeg / pure-Rust)
+                // rather than the `image` crate's pure-Rust path. Session
+                // 006 measured the old path at ~263 ms / frame at 1920×1472
+                // on a Mac that has ImageIO available — phase 3 wired the
+                // selector for the MJPEG stream path but missed this
+                // still-image site.
                 if image_data.len() < 4 {
                     warn_once!(
                         "display:decode_failure:jpeg:short_data",
@@ -2157,21 +2164,18 @@ impl DisplayChannel {
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
                     let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
-                    match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
-                        Ok(img) => {
-                            let rgba = img.to_rgba8();
-                            Some(DecompressedImage::new(
-                                rgba.width(),
-                                rgba.height(),
-                                rgba.into_raw(),
-                                img_desc.image_id,
-                            ))
-                        }
-                        Err(e) => {
+                    match self.jpeg_decoder.decode(jpeg_data) {
+                        Some(dec) => Some(DecompressedImage::new(
+                            dec.width,
+                            dec.height,
+                            dec.rgba,
+                            img_desc.image_id,
+                        )),
+                        None => {
                             warn_once!(
                                 "display:decode_failure:jpeg:decode_failed",
-                                "display: JPEG decode failed: {}",
-                                e
+                                "display: JPEG decode failed (backend {})",
+                                self.jpeg_decoder.name()
                             );
                             None
                         }
