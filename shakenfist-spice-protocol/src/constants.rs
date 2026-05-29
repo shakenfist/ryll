@@ -569,13 +569,16 @@ mod tests {
     }
 
     #[test]
-    fn image_compression_auto_lz_value_pinned() {
-        // Phase 07 guard. AUTO_LZ is the value the link-up
-        // PREFERRED_COMPRESSION message sends; if this drifts
-        // we'd be asking the server for the wrong scheme without
-        // any wire-level error. Value from
-        // spice-protocol/spice/enums.h:196-203 (INVALID=0, OFF=1,
-        // AUTO_GLZ=2, AUTO_LZ=3, QUIC=4, GLZ=5, LZ=6, LZ4=7).
-        assert_eq!(image_compression::AUTO_LZ, 3);
+    fn image_compression_auto_glz_value_pinned() {
+        // Phase 07 guard. AUTO_GLZ is the value the link-up
+        // PREFERRED_COMPRESSION message sends (changed from
+        // AUTO_LZ after session 006 showed AUTO_LZ disabled
+        // server-side GLZ entirely, costing 25% bandwidth on a
+        // UI-heavy workload). If this drifts we'd be asking the
+        // server for the wrong scheme without any wire-level
+        // error. Value from spice-protocol/spice/enums.h:196-203
+        // (INVALID=0, OFF=1, AUTO_GLZ=2, AUTO_LZ=3, QUIC=4,
+        // GLZ=5, LZ=6, LZ4=7).
+        assert_eq!(image_compression::AUTO_GLZ, 2);
     }
 }

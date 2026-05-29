@@ -850,7 +850,14 @@ impl DisplayChannel {
         // choice if the messages never arrive — but we propagate
         // any IO error since it indicates the socket is unhealthy
         // and the read loop is about to fail anyway.
-        self.send_preferred_compression(image_compression::AUTO_LZ)
+        // Session 006 measurement: advertising AUTO_LZ here caused
+        // the server to stop using GLZ entirely (006c vs 006a:
+        // glz_dictionary_entries 23 → 0, evictions 1345 → 0,
+        // bytes_in 2.78 GB → 3.51 GB = +25%). For our UI-heavy
+        // workload the GLZ shared dictionary is the win; AUTO_GLZ
+        // lets the server still pick QUIC for photographic content
+        // but keep the dictionary for repeating UI elements.
+        self.send_preferred_compression(image_compression::AUTO_GLZ)
             .await?;
         self.send_preferred_video_codec_type(&[
             SPICE_VIDEO_CODEC_TYPE_H264,

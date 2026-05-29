@@ -37,12 +37,37 @@ In scope:
 Out of scope:
 
 - Configuring which preferences. Hardcode for v1:
-  `PREFERRED_COMPRESSION = SPICE_IMAGE_COMPRESSION_AUTO_LZ`
-  (matches the libvirt-spice-recommendations.md guidance) and
+  `PREFERRED_COMPRESSION = SPICE_IMAGE_COMPRESSION_AUTO_GLZ`
+  (see "Session 006 follow-up" below) and
   `PREFERRED_VIDEO_CODEC_TYPE = [SPICE_VIDEO_CODEC_TYPE_H264,
   SPICE_VIDEO_CODEC_TYPE_MJPEG]` (H.264 preferred, MJPEG
   fallback — matches phase 6's intent). A CLI flag for these is
   a phase-10 nicety, not v1.
+
+## Session 006 follow-up — AUTO_LZ → AUTO_GLZ
+
+Initial v1 advertised `AUTO_LZ`. Session 006 measurement (006a
+pre-phase-7 vs 006c post-phase-7, same UI-heavy workload):
+
+| Tag | glz_dict_entries | glz_evictions | bytes_in (10 min) |
+|-----|------------------|---------------|--------------------|
+| 006a (pre-phase-7, server default) | 23 | 1345 | 2.78 GB |
+| 006c (post-phase-7, AUTO_LZ)       | **0**  | **0**    | **3.51 GB** (+25%) |
+
+Advertising `AUTO_LZ` made the server stop using GLZ entirely.
+For a UI-heavy workload (desktop chrome, taskbar) repeats
+across frames are common and GLZ's shared dictionary is the
+right encoder. `AUTO_GLZ` still lets the server pick QUIC for
+photographic content but keeps the dictionary for repeating
+UI elements.
+
+Switched to `image_compression::AUTO_GLZ` (value 2) at
+`shakenfist-spice-renderer/src/channels/display.rs:853`.
+Pinning test renamed
+`image_compression_auto_lz_value_pinned` →
+`image_compression_auto_glz_value_pinned`. Re-measure on the
+next 006-style run to confirm GLZ dictionary use returns and
+bytes_in approaches 006a's baseline.
 - Negotiating dynamically with the server. The preferences are
   one-shot link-up messages; no retry or re-send.
 - Adding equivalent caps/messages for non-display channels.
