@@ -816,12 +816,25 @@ pub struct RyllApp {
     glz_dictionary_cap_bytes: usize,
 
     // Phase 5 auto-snapshot config. `None` means the mode is
-    // disabled. `auto_snapshot_spawned` is latched to `true`
-    // after the interval task is spawned on `SessionInitialized`
-    // so reconnect does not spawn a second task.
+    // disabled. A fresh task is spawned per session: on each
+    // `SessionInitialized` the previous task (if any) is signalled
+    // via `auto_snapshot_cancel` to retire, then a new task is
+    // spawned with fresh `traffic` / `channel_snapshots` Arcs. The
+    // retire-and-respawn pattern is needed because `reconnect()`
+    // replaces those Arcs wholesale; a long-lived task would
+    // capture clones of the old Arcs and write zips full of stale
+    // / empty data after the first reconnect.
     auto_snapshot_interval: Option<u64>,
     auto_snapshot_cap: usize,
-    auto_snapshot_spawned: bool,
+    /// Cancel handle for the currently-running auto-snapshot task,
+    /// if any. `None` before the first spawn and between retire
+    /// and respawn. Setting to `true` causes the loop to exit at
+    /// the next 500 ms poll.
+    auto_snapshot_cancel: Option<Arc<AtomicBool>>,
+    /// Whether the one-shot "Auto-snapshot mode enabled" startup
+    /// notification has been pushed. Latched on the first spawn
+    /// so per-reconnect respawns don't repeat the notification.
+    auto_snapshot_startup_notified: bool,
 
     /// Phase 8: most recent time the streaming-flap notification
     /// fired. Used by `streaming_state::classify` to enforce the
@@ -1182,7 +1195,8 @@ impl RyllApp {
             auto_snapshot_interval,
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
-            auto_snapshot_spawned: false,
+            auto_snapshot_cancel: None,
+            auto_snapshot_startup_notified: false,
             last_flap_notification_ts: None,
         }
     }
@@ -1523,18 +1537,26 @@ impl RyllApp {
                         format!("Connected to {}:{}", self.target_host, self.target_port),
                     );
 
-                    // Phase 5: spawn the auto-snapshot interval task
-                    // on the first SessionInitialized event. The latch
-                    // prevents a second task on reconnect (the first
-                    // task's tokio runtime continues across reconnects
-                    // since it is independent of the connection thread).
+                    // Phase 5: spawn the auto-snapshot interval task.
+                    // Retire-and-respawn per session: `reconnect()`
+                    // replaces `self.traffic` and `self.channel_snapshots`
+                    // with fresh instances, so any task spawned for the
+                    // previous session is holding stale Arcs. Signal it
+                    // to retire (it will exit within ~500 ms), then
+                    // spawn a fresh task with the current Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
-                        if !self.auto_snapshot_spawned {
-                            self.auto_snapshot_spawned = true;
-                            let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
-                            let cap = self.auto_snapshot_cap;
+                        if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
+                            prev_cancel.store(true, Ordering::Relaxed);
+                        }
+                        let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
+                        let cap = self.auto_snapshot_cap;
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        self.auto_snapshot_cancel = Some(cancel.clone());
 
-                            // One-shot startup notification.
+                        // One-shot startup notification — fire only on
+                        // the first session so reconnects don't spam.
+                        if !self.auto_snapshot_startup_notified {
+                            self.auto_snapshot_startup_notified = true;
                             self.push_notification(
                                 NotifySeverity::Info,
                                 NotificationSource::Internal,
@@ -1547,26 +1569,27 @@ impl RyllApp {
                                     output_dir.display(),
                                 ),
                             );
-
-                            let state = AutoSnapshotState {
-                                traffic: self.traffic.clone(),
-                                channel_snapshots: self.channel_snapshots.clone(),
-                                app_snapshot: self.app_snapshot.clone(),
-                                notifications: self.notifications.clone(),
-                                target_host: self.target_host.clone(),
-                                target_port: self.target_port,
-                                output_dir,
-                                interval: Duration::from_secs(interval_secs),
-                                cap,
-                            };
-                            std::thread::spawn(move || {
-                                let rt = tokio::runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                    .expect("auto-snapshot: failed to build tokio runtime");
-                                rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
-                            });
                         }
+
+                        let state = AutoSnapshotState {
+                            traffic: self.traffic.clone(),
+                            channel_snapshots: self.channel_snapshots.clone(),
+                            app_snapshot: self.app_snapshot.clone(),
+                            notifications: self.notifications.clone(),
+                            target_host: self.target_host.clone(),
+                            target_port: self.target_port,
+                            output_dir,
+                            interval: Duration::from_secs(interval_secs),
+                            cap,
+                            cancel,
+                        };
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("auto-snapshot: failed to build tokio runtime");
+                            rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
+                        });
                     }
                 }
 

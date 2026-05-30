@@ -18,10 +18,11 @@
 ///     knows something is wrong without being spammed.
 ///   - prune failures: `warn!` only; the interval loop continues.
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::bugreport::{AppSnapshot, BugReport, BugReportType, ChannelSnapshots, TrafficBuffers};
 use crate::notifications::{NotificationEntry, NotificationSource, SharedNotifications};
@@ -36,9 +37,19 @@ const FAILURE_NOTIFY_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 /// State bundle for the auto-snapshot interval task.
 ///
-/// Constructed once at session bring-up (after `SessionInitialized`)
+/// Constructed at each session bring-up (after `SessionInitialized`)
 /// and moved into the background thread. All handles are cheap to
 /// clone (Arc) so no extra locking is required at construction time.
+///
+/// The `cancel` flag is owned by the spawning `RyllApp` and used to
+/// retire this task on reconnect — the app stores the same `Arc`
+/// alongside its `AutoSnapshotState`, sets it to `true` before
+/// constructing a fresh state with new `traffic` / `channel_snapshots`
+/// Arcs on reconnect, then re-spawns. Without the retire-and-respawn
+/// pattern the first task would continue holding Arcs to the previous
+/// session's TrafficBuffers and ChannelSnapshots (which `reconnect()`
+/// replaces with fresh instances), so every subsequent zip would
+/// capture empty / stale data from a session that no longer exists.
 pub struct AutoSnapshotState {
     pub traffic: Arc<TrafficBuffers>,
     pub channel_snapshots: ChannelSnapshots,
@@ -50,6 +61,12 @@ pub struct AutoSnapshotState {
     pub output_dir: PathBuf,
     pub interval: Duration,
     pub cap: usize,
+    /// Shutdown signal. Polled between snapshot ticks; when set to
+    /// `true`, the loop exits cleanly at the next interval boundary
+    /// (or sooner — see `wait_with_cancel`). Set by `RyllApp` on
+    /// reconnect to retire this task before respawning a fresh one
+    /// with new state Arcs.
+    pub cancel: Arc<AtomicBool>,
 }
 
 /// Generate a filesystem-safe filename for an auto-snapshot zip.
@@ -170,6 +187,16 @@ pub fn prune_to_cap(dir: &std::path::Path, cap: usize) -> usize {
 ///
 /// On write failure: `warn!` always; push a `NotifySeverity::Warn`
 /// notification at most once per `FAILURE_NOTIFY_COOLDOWN`.
+/// Yield until `cancel` becomes `true`. Polls every 500 ms so a
+/// retire signal is acted on quickly even when `interval` is much
+/// longer (the default auto-snapshot cadence is 30 s but operators
+/// may use longer values for long-running sessions).
+async fn wait_for_cancel(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
     let mut interval = tokio::time::interval(state.interval);
     // Skip the first immediate tick so the operator gets the first
@@ -180,7 +207,20 @@ pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
     let mut last_failure_notified_at: Option<Instant> = None;
 
     loop {
-        interval.tick().await;
+        // Race the interval tick against a cancel poll so retire
+        // latency is bounded by the polling interval rather than
+        // by `state.interval` (which can be 30 s or more).
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = wait_for_cancel(&state.cancel) => {
+                info!("auto-snapshot: cancel signalled — exiting loop");
+                return;
+            }
+        }
+        if state.cancel.load(Ordering::Relaxed) {
+            info!("auto-snapshot: cancel signalled — exiting loop");
+            return;
+        }
 
         // Derive uptime from the traffic buffer's elapsed() clock
         // (same baseline used by the rest of the bug-report
@@ -383,5 +423,38 @@ mod tests {
         // Non-matching files must still exist.
         assert!(dir.join("other-file.zip").exists());
         assert!(dir.join("ryll-bugreport-something.zip").exists());
+    }
+
+    // ── retire-and-respawn helper ───────────────────────────
+
+    /// Bookkeeping check: `wait_for_cancel` is the polling primitive
+    /// the auto-snapshot loop uses to bound retire latency below
+    /// `state.interval` (which can be 30 s+). Verify it returns
+    /// promptly when the flag is already set, and that it waits
+    /// when the flag is unset (with a short timeout so the test
+    /// doesn't hang on regression).
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_cancel_returns_when_already_set() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        tokio::time::timeout(Duration::from_millis(100), wait_for_cancel(&cancel))
+            .await
+            .expect("wait_for_cancel must return promptly when flag already set");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wait_for_cancel_returns_within_one_poll_after_set() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        let waiter = tokio::spawn(async move { wait_for_cancel(&c).await });
+        // Let one poll cycle start, set the flag, then assert the
+        // waiter completes within the next poll interval + slack.
+        // The 500 ms poll interval is hard-coded in wait_for_cancel;
+        // 750 ms total gives one full poll + buffer for scheduling.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        cancel.store(true, Ordering::Relaxed);
+        tokio::time::timeout(Duration::from_millis(750), waiter)
+            .await
+            .expect("waiter task must complete within one poll after cancel set")
+            .expect("waiter task must not panic");
     }
 }
