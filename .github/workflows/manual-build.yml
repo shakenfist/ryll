@@ -1,0 +1,158 @@
+name: Manual build
+
+# On-demand binary build for testing arbitrary branches without
+# cutting a release tag. Mirrors the build matrix from release.yml
+# but skips version checks, packaging, GitHub Release creation,
+# crates.io publish, and the Homebrew tap update — just builds the
+# binary on each requested platform and uploads it as an artifact.
+#
+# Fire from Actions → Manual build → Run workflow → pick branch +
+# platforms. Download the resulting artifact from the run's
+# summary page; for Windows it's a zip containing ryll.exe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Comma-separated subset of: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64 (default: all)'
+        required: false
+        default: 'linux-x86_64,linux-aarch64,macos-aarch64,windows-x86_64,windows-aarch64'
+
+permissions: {}
+
+jobs:
+  resolve-matrix:
+    name: Resolve platforms to build
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.build-matrix.outputs.include }}
+    steps:
+      - id: build-matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          # Build a JSON array of matrix entries from the requested
+          # platform list. Each entry needs: name, os runner, target
+          # triple, features flags. Keep these definitions in sync
+          # with release.yml's matrix.
+          python3 - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json, os
+          all_platforms = {
+              'linux-x86_64': {
+                  'name': 'Linux (x86_64)',
+                  'os': 'ubuntu-latest',
+                  'target': 'x86_64-unknown-linux-gnu',
+                  'features': '',
+              },
+              'linux-aarch64': {
+                  'name': 'Linux (aarch64)',
+                  'os': 'ubuntu-24.04-arm',
+                  'target': 'aarch64-unknown-linux-gnu',
+                  'features': '',
+              },
+              'macos-aarch64': {
+                  'name': 'macOS (aarch64)',
+                  'os': 'macos-latest',
+                  'target': 'aarch64-apple-darwin',
+                  'features': '',
+              },
+              'windows-x86_64': {
+                  'name': 'Windows (x86_64)',
+                  'os': 'windows-latest',
+                  'target': 'x86_64-pc-windows-msvc',
+                  # Matches release.yml: ryll's `capture` feature
+                  # (pcap-file / etherparse / mp4) is Linux/macOS
+                  # only; building it on Windows fails. The
+                  # per-platform JPEG decoder (WIC) is target-gated
+                  # not feature-gated, so this does not affect 3H.
+                  'features': '--no-default-features',
+              },
+              'windows-aarch64': {
+                  'name': 'Windows (aarch64)',
+                  'os': 'windows-11-arm',
+                  'target': 'aarch64-pc-windows-msvc',
+                  'features': '--no-default-features',
+              },
+          }
+          wanted = [p.strip() for p in os.environ['PLATFORMS'].split(',') if p.strip()]
+          unknown = [p for p in wanted if p not in all_platforms]
+          if unknown:
+              raise SystemExit(f'unknown platforms requested: {unknown}; valid: {list(all_platforms)}')
+          include = [all_platforms[p] for p in wanted]
+          print('include=' + json.dumps(include))
+          EOF
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: resolve-matrix
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve-matrix.outputs.include) }}
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
+      # Matches release.yml: CMake 4.x rejects libopus's bundled
+      # cmake_minimum_required(VERSION <3.5); this policy override
+      # lets the audiopus_sys source-build path keep working on
+      # macOS and Windows.
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: manual-build-${{ matrix.target }}
+
+      - name: Get short sha
+        shell: bash
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      # Same Linux dependency set as release.yml's build job.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config cmake \
+            libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb1-dev \
+            libx11-dev libxkbcommon-dev \
+            libgl1-mesa-dev libegl1-mesa-dev \
+            libwayland-dev libssl-dev \
+            libasound2-dev \
+            libopus-dev
+
+      - name: Build
+        run: cargo build --release -p ryll ${{ matrix.features }}
+
+      # Linux/macOS: upload the raw binary. Operator can scp / curl
+      # it to wherever they need.
+      - name: Upload binary (Linux/macOS)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ryll-${{ matrix.target }}-${{ env.SHORT_SHA }}
+          path: target/release/ryll
+
+      # Windows: zip the .exe so the artifact unpacks to a single
+      # runnable file. Matches release.yml's Windows packaging
+      # shape minus the version tag.
+      - name: Package Windows zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path target\release\ryll.exe `
+            -DestinationPath "target\release\ryll-${{ matrix.target }}-${{ env.SHORT_SHA }}.zip"
+
+      - name: Upload binary (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ryll-${{ matrix.target }}-${{ env.SHORT_SHA }}
+          path: target/release/ryll-*.zip
