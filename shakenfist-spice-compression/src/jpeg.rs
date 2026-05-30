@@ -568,9 +568,10 @@ impl JpegDecoder for WicDecoder {
 
         // Create a WIC stream and initialise it from our in-memory
         // byte slice. CreateStream returns an IWICStream which is
-        // an ISequentialStream; InitializeFromMemory copies our
-        // buffer (it does NOT borrow), so the slice does not need
-        // to outlive the stream.
+        // an ISequentialStream; InitializeFromMemory does NOT copy
+        // the buffer — the caller (us) must keep `data` alive for
+        // the stream's lifetime. See the SAFETY note on the
+        // InitializeFromMemory call below.
         let stream = match unsafe { factory.CreateStream() } {
             Ok(s) => s,
             Err(e) => {
