@@ -864,11 +864,14 @@ impl PlaybackChannel {
                     self.opus_decoder = None;
                 }
                 playback_server::VOLUME => {
-                    // SPICE_MSG_PLAYBACK_VOLUME: u8 nchannels, u16 volumes[nchannels].
-                    // TODO: confirm field order against spice-protocol headers
-                    // — the libspice-client-glib reader treats volumes as
-                    // little-endian u16 per channel, which is what we
-                    // assume here.
+                    // SPICE_MSG_PLAYBACK_VOLUME wraps a SpiceMsgAudioVolume
+                    // payload. Per spice-common/spice.proto:
+                    //   message AudioVolume {
+                    //       uint8 nchannels;
+                    //       uint16 volume[nchannels] @end;
+                    //   }
+                    // SPICE wire format is little-endian, so each u16
+                    // volume is decoded as u16::from_le_bytes.
                     if !payload.is_empty() {
                         let nch = payload[0] as usize;
                         let needed = 1 + nch * 2;
