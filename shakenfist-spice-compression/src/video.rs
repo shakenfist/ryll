@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::jpeg::{DecodedJpeg, JpegDecoder};
 
@@ -244,6 +244,16 @@ pub struct H264VideoDecoder {
     /// any non-error return (including the "not enough data yet"
     /// `Ok(None)` case).
     consecutive_failures: u32,
+    /// Phase 6 follow-up: the SPICE wire convention we assume is
+    /// Annex B framing (NALU start codes), but the assumption has
+    /// not been validated against a real H.264-capable spice-server
+    /// (the 6F operator smoke test is still pending). On the first
+    /// decode call per decoder instance, log the leading-byte
+    /// pattern at INFO so a bug-report reader can tell whether the
+    /// server is actually sending Annex B (`00 00 00 01` /
+    /// `00 00 01`) or something else (AVCC length-prefixed, raw
+    /// NALU, etc.). One log line per stream, then quiet.
+    framing_logged: bool,
 }
 
 /// Number of consecutive H.264 decode errors before we escalate
@@ -267,6 +277,7 @@ impl H264VideoDecoder {
             decoder,
             rgba_scratch: Vec::new(),
             consecutive_failures: 0,
+            framing_logged: false,
         })
     }
 }
@@ -281,6 +292,26 @@ impl VideoDecoder for H264VideoDecoder {
         // (shakenfist-spice-renderer/src/encoder/h264.rs) also
         // emits Annex B, so the round-trip unit test below
         // exercises the same framing the real SPICE server uses.
+        //
+        // Phase 6 follow-up: log the leading-byte pattern of the
+        // first packet so a bug-report reader can see whether the
+        // server's wire framing matches the assumption. Quiet
+        // after the first hit per decoder instance.
+        if !self.framing_logged {
+            self.framing_logged = true;
+            let prefix: Vec<u8> = packet.iter().take(4).copied().collect();
+            let kind = match prefix.as_slice() {
+                [0x00, 0x00, 0x00, 0x01] => "Annex B (4-byte start code)",
+                [0x00, 0x00, 0x01, _] => "Annex B (3-byte start code)",
+                _ => "non-Annex-B (possibly AVCC length-prefixed or raw NALU — decode will likely fail)",
+            };
+            info!(
+                "H264VideoDecoder: first packet ({} bytes) prefix={:02x?} — assumed framing: {}",
+                packet.len(),
+                prefix,
+                kind,
+            );
+        }
         match self.decoder.decode(packet) {
             Ok(None) => {
                 // Decoder consumed the packet but has not yet
