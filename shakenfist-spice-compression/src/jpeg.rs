@@ -1177,15 +1177,25 @@ impl VaapiDecoder {
 }
 
 // SAFETY: VaapiDecoder holds a `VADisplay` (raw `*mut c_void`)
-// which is `!Send + !Sync` by default. The libva ABI permits
-// concurrent calls on the same display from multiple threads —
-// the driver implements internal locking. The wider channel
-// pattern wraps the decoder in `Arc<dyn JpegDecoder>` and uses
-// it from a single tokio task today, but the trait contract is
-// `Send + Sync` so we must promise both. The captured function
-// pointer (`va_terminate`) is also a raw pointer; same
-// reasoning. The other fields (`drm_fd`, `libloading::Library`,
-// `MozJpegDecoder`) are all already `Send + Sync`.
+// which is `!Send + !Sync` by default, plus a captured function
+// pointer (`va_terminate`). The `JpegDecoder` trait requires
+// `Send + Sync` so we must promise both.
+//
+// What makes the promise sound TODAY: `decode(&self, ...)`
+// delegates to `self.fallback.decode(...)` (the embedded
+// `MozJpegDecoder`, which is `Send + Sync`) and never touches
+// the libva fields. The libva fields are read only in `Drop`,
+// where exclusive `&mut self` access is statically guaranteed.
+//
+// When the real VA-API decode path lands (the deferred follow-
+// up acknowledged in the struct docstring), this comment is no
+// longer accurate: libva thread-safety is driver-dependent
+// (Intel iHD, Mesa, etc. each implement their own locking
+// policy) and there is no portable guarantee that `VADisplay`
+// tolerates concurrent calls. At that point the libva calls
+// must be wrapped in an internal `Mutex<VADisplay>` so we own
+// the synchronisation rather than trusting whichever driver
+// happens to be loaded.
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
 unsafe impl Send for VaapiDecoder {}
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
@@ -1230,13 +1240,17 @@ impl JpegDecoder for VaapiDecoder {
     }
 
     fn name(&self) -> &'static str {
-        // Returns "VA-API" even though the decode currently
-        // delegates to mozjpeg — the backend name reflects
-        // which path was selected by best_for_platform(), not
-        // which library does the bit-pushing today. The
-        // follow-up step that wires up real VA-API decode
-        // doesn't need to change this string.
-        "VA-API"
+        // The probe succeeded (libva loaded, JPEG-baseline
+        // profile + VLD entrypoint advertised) so
+        // best_for_platform() chose this backend; the actual
+        // decode currently delegates to mozjpeg. Surfaced name
+        // includes the qualifier so a bug-report reader can tell
+        // which library is doing the bit-pushing today vs which
+        // path was selected. When the real VA-API decode path
+        // lands, drop the parenthetical and the backend name
+        // reflects truth without any reader needing to remember
+        // the deferred-decode caveat.
+        "VA-API (probed, mozjpeg fallback)"
     }
 }
 
