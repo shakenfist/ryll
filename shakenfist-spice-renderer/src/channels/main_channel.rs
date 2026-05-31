@@ -725,10 +725,12 @@ impl MainChannel {
                                 last_arm = "stuck_agent_check+notify";
                                 let elapsed_secs =
                                     sent_at.elapsed().as_secs_f64();
+                                let count = self.outstanding_agent_request_count;
+                                let noun = if count == 1 { "request" } else { "requests" };
                                 let message = format!(
                                     "Guest agent is not replying — last probe sent {:.1}s ago, \
-                                     {} request(s) outstanding",
-                                    elapsed_secs, self.outstanding_agent_request_count
+                                     {} {} outstanding",
+                                    elapsed_secs, count, noun
                                 );
                                 let entry = NotificationEntry::new(
                                     NotifySeverity::Warn,

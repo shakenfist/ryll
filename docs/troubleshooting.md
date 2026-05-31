@@ -649,11 +649,12 @@ helps diagnose guest agent freezes without log parsing.
 
 When `outstanding_agent_request_count > 0` continuously for more than 5
 seconds after a probe, a Warn notification fires every 60 seconds (to keep
-the notification panel quiet during sustained stalls). The message reads:
-`"Guest agent is not replying — last probe sent {elapsed}s ago, {count}
-request(s) outstanding"`. This indicates the guest agent has stopped
-responding to configuration requests and may require a reboot or diagnosis
-on the server side.
+the notification panel quiet during sustained stalls). The message reads
+like `"Guest agent is not replying — last probe sent 5.3s ago, 1 request
+outstanding"` (elapsed time is formatted to one decimal place; `request`
+vs `requests` is pluralised by count). This indicates the guest agent has
+stopped responding to configuration requests and may require a reboot or
+diagnosis on the server side.
 
 ## Auto-snapshot mode for intermittent issues
 
