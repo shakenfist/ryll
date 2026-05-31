@@ -90,6 +90,25 @@ fn build_mouse_mode_request_payload(mode: u32) -> Vec<u8> {
     payload
 }
 
+/// Decode the body of a `VD_AGENT_REPLY`.
+///
+/// `vd_agent.h` declares `VDAgentReply` as a packed struct of
+/// two little-endian `u32`s: `{ type, error }`. `type` echoes
+/// the opcode of the request being acknowledged; `error` is
+/// `VD_AGENT_SUCCESS` (0) on success or a failure code.
+///
+/// Returns `None` if `payload` is shorter than 8 bytes —
+/// caller logs and skips. Pure function so the parse logic is
+/// unit-testable without standing up a `MainChannel`.
+fn parse_vd_agent_reply(payload: &[u8]) -> Option<(u32, u32)> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let reply_type = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let error = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    Some((reply_type, error))
+}
+
 const VD_AGENT_PROTOCOL: u32 = 1;
 
 // VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
@@ -1079,6 +1098,26 @@ impl MainChannel {
                 self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
+                // Per PR #105 review item 1: drop phase-09 probe
+                // bookkeeping tied to the previous agent instance.
+                // Without this, after the next agent reconnect:
+                //   - outstanding_agent_request_count would still
+                //     count requests the old agent will never reply
+                //     to (spurious stuck-agent Warn notification),
+                //   - a stale entry in agent_request_send_ts would
+                //     match the next REPLY and yield a multi-minute
+                //     lag measurement that pollutes recent_*_lag_us,
+                //   - the cool-down timer would suppress a real
+                //     new-agent stuck notification.
+                // `last_monitors_config` is intentionally NOT
+                // cleared — the cached payload is still the most
+                // recent thing we tried to send and the probe will
+                // re-use it if the same agent (or a new one)
+                // reconnects.
+                self.agent_request_send_ts.clear();
+                self.outstanding_agent_request_count = 0;
+                self.last_monitors_config_sent_at = None;
+                self.last_stuck_agent_notification_at = None;
             }
 
             main_server::AGENT_DATA => {
@@ -1479,31 +1518,22 @@ impl MainChannel {
                     }
                 }
             }
-            VD_AGENT_REPLY => {
-                // VDAgentReply { uint32 type, uint32 error } (LE).
-                // `type` echoes the request opcode; `error` is
-                // VD_AGENT_SUCCESS (0) or a failure code.
-                if payload.len() >= 8 {
-                    let reply_type =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    let error =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+            VD_AGENT_REPLY => match parse_vd_agent_reply(payload) {
+                Some((reply_type, error)) => {
                     debug!("main: VD_AGENT_REPLY type={} error={}", reply_type, error);
                     self.agent_reply_count = self.agent_reply_count.saturating_add(1);
                     if error != 0 {
                         self.agent_reply_error_count =
                             self.agent_reply_error_count.saturating_add(1);
                     }
-                    // Decrement outstanding count regardless of whether we
-                    // find a matching send timestamp (saturating to prevent
-                    // underflow on server-side bugs).
-                    self.outstanding_agent_request_count =
-                        self.outstanding_agent_request_count.saturating_sub(1);
                     self.last_agent_reply_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-                    // Correlate by request type to compute lag. If there is
-                    // no matching entry (server-side bug, or our map was
-                    // cleared), skip lag update — don't record a spurious
-                    // zero or MAX.
+                    // Correlate by request type to compute lag. Only
+                    // decrement outstanding_agent_request_count when we
+                    // find a matching send — a REPLY for a type we did
+                    // NOT send (server bug, or our map was cleared on
+                    // agent disconnect) would otherwise mask a real
+                    // stuck-agent symptom by dropping the outstanding
+                    // count to zero. Per PR #105 review item 2.
                     if let Some(sent) = self.agent_request_send_ts.remove(&reply_type) {
                         let lag_us = sent.elapsed().as_micros().try_into().unwrap_or(u32::MAX);
                         self.last_agent_reply_lag_us = Some(lag_us);
@@ -1511,14 +1541,23 @@ impl MainChannel {
                         if self.recent_agent_reply_lag_us.len() > MAX_RECENT_AGENT_REPLIES {
                             self.recent_agent_reply_lag_us.pop_front();
                         }
+                        self.outstanding_agent_request_count =
+                            self.outstanding_agent_request_count.saturating_sub(1);
+                    } else {
+                        debug!(
+                            "main: VD_AGENT_REPLY type={} has no matching send entry — \
+                             skipping lag update and outstanding decrement",
+                            reply_type
+                        );
                     }
-                } else {
+                }
+                None => {
                     debug!(
                         "main: VD_AGENT_REPLY payload too short ({} bytes)",
                         payload.len()
                     );
                 }
-            }
+            },
             _ => {
                 debug!("main: unhandled agent message type={}", agent_type);
             }
@@ -1649,9 +1688,10 @@ impl MainChannel {
 mod tests {
     use super::{
         build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
-        should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD,
-        VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
-        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        parse_vd_agent_reply, should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES,
+        VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE,
+        VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG,
+        VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1781,5 +1821,49 @@ mod tests {
         // user actually copies something different.
         assert_ne!(hash_clipboard("foo"), hash_clipboard("bar"));
         assert_ne!(hash_clipboard("foo\nbar"), hash_clipboard("foo\nbaz"));
+    }
+
+    // ── VD_AGENT_REPLY parser ───────────────────────────────
+
+    #[test]
+    fn parse_vd_agent_reply_decodes_valid_payload() {
+        // VD_AGENT_MONITORS_CONFIG (type=2), VD_AGENT_SUCCESS (error=0).
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_decodes_error_bit() {
+        // type=2 (MONITORS_CONFIG), error=42 (anything non-zero is failure).
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 42)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_handles_max_values() {
+        // u32::MAX in both fields — confirms little-endian decode width.
+        let payload = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((u32::MAX, u32::MAX)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_rejects_short_payload() {
+        // 7 bytes — one short of the required 8.
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), None);
+        // Empty payload.
+        assert_eq!(parse_vd_agent_reply(&[]), None);
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_ignores_trailing_bytes() {
+        // Server is permitted to send additional bytes after the
+        // documented 8 — we should decode the first 8 and ignore the
+        // rest rather than reject.
+        let payload = [
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // valid {2, 0}
+            0xff, 0xff, // trailing garbage
+        ];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
     }
 }
