@@ -240,6 +240,13 @@ pub struct MainChannel {
     /// `send_agent_data_message` for types in
     /// `REPLY_ELIGIBLE_AGENT_REQUEST_TYPES`; consumed on REPLY
     /// receipt in `handle_agent_message`.
+    ///
+    /// `HashMap` (rather than `Option<(u32, Instant)>`) because
+    /// `REPLY_ELIGIBLE_AGENT_REQUEST_TYPES` is sized to grow:
+    /// today it has one entry (MONITORS_CONFIG), DISPLAY_CONFIG
+    /// is the documented next addition for Windows agents. One
+    /// allocation per channel + one lookup per send is a fine
+    /// price for a fixed API surface as types are added.
     agent_request_send_ts: HashMap<u32, Instant>,
     /// Cumulative count of REPLY-eligible agent requests sent.
     agent_request_count: u32,
@@ -1405,6 +1412,17 @@ impl MainChannel {
 
         // Track send time for REPLY-eligible request types so we
         // can compute reply lag when VD_AGENT_REPLY arrives.
+        //
+        // Overwriting any prior entry for `ty` is intentional —
+        // VD_AGENT_REPLY has no request id, only a request type,
+        // so two sends within a probe interval cannot be
+        // distinguished individually. We measure lag against the
+        // most recent send and accept that the in-flight earlier
+        // REPLY (if any) will skip the lag-update branch when it
+        // arrives (no matching map entry by then). The trade-off
+        // is documented in the phase 09 plan's *Background* and
+        // surfaces as a "no matching send entry" debug log in
+        // handle_agent_message.
         if REPLY_ELIGIBLE_AGENT_REQUEST_TYPES.contains(&ty) {
             self.agent_request_send_ts.insert(ty, Instant::now());
             self.agent_request_count = self.agent_request_count.saturating_add(1);
