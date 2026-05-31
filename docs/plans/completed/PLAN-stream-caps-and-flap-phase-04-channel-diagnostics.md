@@ -1,6 +1,6 @@
 # Phase 4 — Channel diagnostics audit + playback observability
 
-Phase 4 of [PLAN-stream-caps-and-flap.md](PLAN-stream-caps-and-flap.md).
+Phase 4 of [PLAN-stream-caps-and-flap.md](../PLAN-stream-caps-and-flap.md).
 
 ## Prompt
 

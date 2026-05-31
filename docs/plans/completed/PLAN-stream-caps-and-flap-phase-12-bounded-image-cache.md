@@ -1,6 +1,6 @@
 # Phase 12 — Bounded image cache
 
-Phase 12 of [PLAN-stream-caps-and-flap.md](PLAN-stream-caps-and-flap.md).
+Phase 12 of [PLAN-stream-caps-and-flap.md](../PLAN-stream-caps-and-flap.md).
 
 ## Prompt
 

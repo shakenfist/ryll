@@ -10,7 +10,7 @@ The repository is a Cargo workspace with **6 crates**:
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
-| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
