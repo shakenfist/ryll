@@ -8,15 +8,18 @@ use std::time::Instant;
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::image_cache::BoundedImageCache;
+use crate::mm_clock::MmClock;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 use shakenfist_spice_compression::{
-    decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, DecompressedImage,
-    GlzDictionary,
+    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, video,
+    DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
+    SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::ropd;
+use shakenfist_spice_protocol::constants::{image_compression, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -32,107 +35,6 @@ use shakenfist_spice_protocol::{
 
 use super::ChannelEvent;
 
-const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
-
-pub(crate) fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
-    let mut dht = Vec::new();
-    let mut i = 0;
-    while i + 3 < jpeg.len() {
-        if jpeg[i] != 0xFF {
-            i += 1;
-            continue;
-        }
-        let marker = jpeg[i + 1];
-        if marker == 0xC4 {
-            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
-            if i + seg_len <= jpeg.len() {
-                dht.extend_from_slice(&jpeg[i..i + seg_len]);
-            }
-            i += seg_len;
-        } else if marker == 0xD8 || marker == 0x00 || (0xD0..=0xD7).contains(&marker) {
-            i += 2;
-        } else if marker == 0xD9 || marker == 0xDA {
-            break;
-        } else if i + 3 < jpeg.len() {
-            let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
-            i += seg_len;
-        } else {
-            break;
-        }
-    }
-    dht
-}
-
-pub(crate) fn inject_dht(jpeg: &[u8], dht: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(jpeg.len() + dht.len());
-    let mut i = 0;
-    // SOI marker
-    if jpeg.len() >= 2 && jpeg[0] == 0xFF && jpeg[1] == 0xD8 {
-        out.extend_from_slice(&jpeg[..2]);
-        i = 2;
-    }
-    // skip APP0/APP1 if present (bounds check matches extract_dht_segments)
-    while i + 3 < jpeg.len() && jpeg[i] == 0xFF && (jpeg[i + 1] == 0xE0 || jpeg[i + 1] == 0xE1) {
-        let seg_len = (u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize).saturating_add(2);
-        if i + seg_len > jpeg.len() {
-            break;
-        }
-        out.extend_from_slice(&jpeg[i..i + seg_len]);
-        i += seg_len;
-    }
-    out.extend_from_slice(dht);
-    out.extend_from_slice(&jpeg[i..]);
-    out
-}
-
-pub(crate) fn decode_mjpeg_frame(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let mut decoder = jpeg_decoder::Decoder::new(data);
-    let pixels = match decoder.decode() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(
-                "MJPEG decode error: {}, data_len={}, header={:02x?}",
-                e,
-                data.len(),
-                &data[..data.len().min(16)]
-            );
-            return None;
-        }
-    };
-    let info = decoder.info()?;
-    let w = info.width as u32;
-    let h = info.height as u32;
-
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::RGB24 => {
-            let mut out = Vec::with_capacity(pixels.len() * 4 / 3);
-            for chunk in pixels.chunks(3) {
-                out.push(chunk[0]);
-                out.push(chunk[1]);
-                out.push(chunk[2]);
-                out.push(255);
-            }
-            out
-        }
-        jpeg_decoder::PixelFormat::L8 => {
-            let mut out = Vec::with_capacity(pixels.len() * 4);
-            for &gray in &pixels {
-                out.push(gray);
-                out.push(gray);
-                out.push(gray);
-                out.push(255);
-            }
-            out
-        }
-        other => {
-            warn!("MJPEG decode: unsupported pixel format {:?}", other);
-            return None;
-        }
-    };
-
-    Some((rgba, w, h))
-}
-
 struct StreamState {
     surface_id: u32,
     codec_type: u8,
@@ -142,7 +44,12 @@ struct StreamState {
     dest_left: u32,
     dest_bottom: u32,
     dest_right: u32,
-    cached_dht: Option<Vec<u8>>,
+    /// Per-stream video decoder, selected at `STREAM_CREATE` by
+    /// [`shakenfist_spice_compression::video::for_stream`]. Holds any
+    /// codec-specific state (e.g. the MJPEG DHT cache, or H.264
+    /// reference frames in phase 6B). The boxed trait object is
+    /// moved when the stream is retired.
+    video_decoder: Box<dyn VideoDecoder>,
     /// Session-relative seconds at `STREAM_CREATE`.
     created_at_secs: f64,
     /// Counters mirrored into `StreamSnapshot` by `update_snapshot`.
@@ -153,10 +60,62 @@ struct StreamState {
     last_frame_ts_secs: Option<f64>,
     last_decode_ok_ts_secs: Option<f64>,
     last_decode_duration_us: u32,
+    // Report state — populated by STREAM_ACTIVATE_REPORT; reset
+    // to defaults at STREAM_CREATE. See spice.proto's
+    // SpiceMsgDisplayStreamActivateReport and
+    // SpiceMsgcDisplayStreamReport.
+    report_is_active: bool,
+    report_unique_id: u32,
+    report_max_window_size: u32,
+    report_timeout_ms: u32,
+    // Rolling window counters; reset on each send. Phase 1E
+    // updates these per frame; phase 1F resets them.
+    report_num_frames: u32,
+    report_num_drops: u32,
+    report_drops_seq_len: u32,
+    report_start_frame_mm_time: u32,
+    report_end_frame_mm_time: u32,
+    report_start_now_mm_time: u32,
+    // Cumulative — don't reset.
+    report_send_count: u32,
+    last_report_sent_ts_secs: Option<f64>,
+    // Mirrors of the last sent report's values (for snapshots).
+    last_report_num_frames: u32,
+    last_report_num_drops: u32,
+    last_report_last_frame_delay: i32,
 }
 
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
+
+/// Maximum number of recently-destroyed streams retained for
+/// post-mortem diagnostics. Streams flap fast enough on a misbehaving
+/// spice-server (observed: stream every ~15 s with ~2 s lifetime)
+/// that 16 entries comfortably covers a few minutes of session
+/// time without bloating channel-state.json.
+const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
+
+/// Sliding-window threshold for triggering a STREAM_REPORT
+/// early due to consecutive frame drops. Matches spice-gtk's
+/// `STREAM_REPORT_DROP_SEQ_LEN_LIMIT` at
+/// channel-display.c:1532.
+const STREAM_REPORT_DROP_SEQ_LEN_LIMIT: u32 = 3;
+
+/// Trigger predicate for STREAM_REPORT, extracted to a
+/// free function so each OR branch is unit-testable in
+/// isolation. Mirrors spice-gtk's check at
+/// channel-display.c:1559-1561.
+fn stream_report_should_send(
+    num_frames: u32,
+    max_window_size: u32,
+    elapsed_since_window_start: i32,
+    timeout_ms: u32,
+    drops_seq_len: u32,
+) -> bool {
+    num_frames >= max_window_size
+        || elapsed_since_window_start >= timeout_ms as i32
+        || drops_seq_len >= STREAM_REPORT_DROP_SEQ_LEN_LIMIT
+}
 
 /// Maximum number of consecutive ACK-send intervals retained in
 /// the snapshot for "video not keeping up" diagnostics. With a
@@ -206,6 +165,28 @@ fn recent_decode_duration_stats(decodes: &VecDeque<DecodeResult>) -> (u32, u32, 
             (min, max, mean)
         }
     }
+}
+
+/// Min / max / mean of a ring of raw microsecond durations.
+/// Returns `(0, 0, 0)` when the ring is empty.
+fn mjpeg_duration_stats(ring: &VecDeque<u32>) -> (u32, u32, u32) {
+    if ring.is_empty() {
+        return (0, 0, 0);
+    }
+    let mut min = u32::MAX;
+    let mut max = 0u32;
+    let mut sum = 0u64;
+    for &us in ring {
+        if us < min {
+            min = us;
+        }
+        if us > max {
+            max = us;
+        }
+        sum += u64::from(us);
+    }
+    let mean = u32::try_from(sum / ring.len() as u64).unwrap_or(u32::MAX);
+    (min, max, mean)
 }
 
 /// What we decided to do with a DRAW_FILL after classifying its
@@ -580,7 +561,13 @@ pub struct DisplayChannel {
     repaint_notify: Arc<Notify>,
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
-    image_cache: HashMap<u64, Vec<u8>>,
+    /// MJPEG decoder backend selected once at construction via
+    /// `best_for_platform()`. Shared as `Arc<dyn JpegDecoder>`
+    /// so future steps can swap in faster backends (ImageIO,
+    /// WIC, VA-API) without changing call sites. See
+    /// `PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
+    jpeg_decoder: Arc<dyn JpegDecoder>,
+    image_cache: BoundedImageCache,
     streams: HashMap<u32, StreamState>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
@@ -623,11 +610,63 @@ pub struct DisplayChannel {
     streams_created_total: u64,
     streams_destroyed_total: u64,
     stream_data_orphan_count: u64,
+    /// Cumulative count of STREAM_REPORT messages sent to the
+    /// server since session start. Mirrored into
+    /// `DisplaySnapshot::stream_reports_sent_total` by step 1G.
+    stream_reports_sent_total: u64,
+    /// Bounded ring of recently-destroyed `StreamState`s captured
+    /// at teardown so per-stream counters survive `STREAM_DESTROY`.
+    /// Without this, a bug report filed between flap cycles loses
+    /// the diagnostic data we just added.
+    recently_destroyed_streams: VecDeque<StreamSnapshot>,
+    /// Shared mm_time clock — reader side. Phase 1E reads
+    /// `mm_clock.now()` to evaluate the STREAM_REPORT trigger
+    /// predicate; phase 1F also uses it to compute
+    /// `last_frame_delay` at send time.
+    mm_clock: Arc<MmClock>,
+    /// Phase-03 step 3F: bounded ring of the most recent MJPEG
+    /// decode durations in microseconds, newest at the back.
+    /// Capped at `MAX_RECENT_DECODES` to match the non-stream
+    /// recent-decode ring. Used by `update_snapshot` to compute
+    /// `mjpeg_decode_recent_min/max/mean_us`.
+    mjpeg_recent_durations: VecDeque<u32>,
+    /// Phase-03 step 3F: cumulative count of MJPEG decode
+    /// attempts (success + failure) since session start.
+    mjpeg_decode_total_count: u64,
+    /// Phase-03 step 3F: cumulative count of MJPEG decode
+    /// attempts that returned `None` since session start.
+    mjpeg_decode_failed_count: u64,
+    /// Phase-06 step 6B: bounded ring of the most recent H.264
+    /// decode durations in microseconds, newest at the back.
+    /// Capped at `MAX_RECENT_DECODES`. Used by `update_snapshot`
+    /// to compute `h264_decode_recent_min/max/mean_us`. Parallel
+    /// to `mjpeg_recent_durations`; the dispatch site selects
+    /// which ring receives the sample based on
+    /// `stream.codec_type`.
+    h264_recent_durations: VecDeque<u32>,
+    /// Phase-06 step 6B: cumulative count of H.264 decode
+    /// attempts (success + failure) since session start.
+    h264_decode_total_count: u64,
+    /// Phase-06 step 6B: cumulative count of H.264 decode
+    /// attempts that returned `Err` since session start.
+    /// `Ok(None)` (needs more data) is not counted as a failure.
+    h264_decode_failed_count: u64,
+    /// Phase-07: set to true after we have successfully sent the
+    /// link-up `PREFERRED_COMPRESSION` (opcode 103) message.
+    /// Mirrored into `DisplaySnapshot::pref_compression_sent` so
+    /// a bug report can confirm the preference actually went out.
+    /// One-shot per channel lifetime.
+    pref_compression_sent: bool,
+    /// Phase-07: set to true after we have successfully sent the
+    /// link-up `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message.
+    /// Mirrored into `DisplaySnapshot::pref_video_codec_type_sent`.
+    /// One-shot per channel lifetime.
+    pref_video_codec_type_sent: bool,
 }
 
 impl DisplayChannel {
-    pub fn new_shared_glz_dictionary() -> SharedGlzDictionary {
-        Arc::new(GlzDictionary::new())
+    pub fn new_shared_glz_dictionary(cap_bytes: usize) -> SharedGlzDictionary {
+        Arc::new(GlzDictionary::with_cap(cap_bytes))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -642,6 +681,8 @@ impl DisplayChannel {
         snapshot: Arc<Mutex<DisplaySnapshot>>,
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
+        mm_clock: Arc<MmClock>,
+        image_cache_cap_bytes: usize,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -650,7 +691,8 @@ impl DisplayChannel {
             repaint_notify,
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
-            image_cache: HashMap::new(),
+            jpeg_decoder: best_for_platform(),
+            image_cache: BoundedImageCache::new(image_cache_cap_bytes),
             streams: HashMap::new(),
             capture,
             byte_counter,
@@ -682,6 +724,100 @@ impl DisplayChannel {
             streams_created_total: 0,
             streams_destroyed_total: 0,
             stream_data_orphan_count: 0,
+            stream_reports_sent_total: 0,
+            recently_destroyed_streams: VecDeque::new(),
+            mm_clock,
+            mjpeg_recent_durations: VecDeque::new(),
+            mjpeg_decode_total_count: 0,
+            mjpeg_decode_failed_count: 0,
+            h264_recent_durations: VecDeque::new(),
+            h264_decode_total_count: 0,
+            h264_decode_failed_count: 0,
+            pref_compression_sent: false,
+            pref_video_codec_type_sent: false,
+        }
+    }
+
+    /// Build a `StreamSnapshot` from a live `StreamState`.
+    /// `destroyed_at` is `None` for active streams (entries in
+    /// `streams_active`) and `Some(now)` for entries being
+    /// moved into `recently_destroyed_streams`.
+    fn stream_state_to_snapshot(
+        id: u32,
+        s: &StreamState,
+        destroyed_at: Option<f64>,
+    ) -> StreamSnapshot {
+        StreamSnapshot {
+            stream_id: id,
+            surface_id: s.surface_id,
+            codec_type: s.codec_type,
+            stream_width: s.stream_width,
+            stream_height: s.stream_height,
+            dest_top: s.dest_top,
+            dest_left: s.dest_left,
+            dest_bottom: s.dest_bottom,
+            dest_right: s.dest_right,
+            created_at_secs: s.created_at_secs,
+            frames_received: s.frames_received,
+            frames_decoded_ok: s.frames_decoded_ok,
+            frames_decode_failed: s.frames_decode_failed,
+            last_frame_ts_secs: s.last_frame_ts_secs,
+            last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
+            last_decode_duration_us: s.last_decode_duration_us,
+            destroyed_at_secs: destroyed_at,
+            report_is_active: s.report_is_active,
+            report_unique_id: s.report_unique_id,
+            report_max_window_size: s.report_max_window_size,
+            report_timeout_ms: s.report_timeout_ms,
+            report_send_count: s.report_send_count,
+            last_report_sent_ts_secs: s.last_report_sent_ts_secs,
+            last_report_num_frames: s.last_report_num_frames,
+            last_report_num_drops: s.last_report_num_drops,
+            last_report_last_frame_delay: s.last_report_last_frame_delay,
+            // video_decoder_backend is the general field: always the
+            // active decoder's name regardless of codec (e.g.
+            // "libjpeg-turbo", "ImageIO", "H264 (openh264)").
+            video_decoder_backend: s.video_decoder.name().to_string(),
+            // mjpeg_decoder_backend is the backwards-compat field for
+            // existing bug-report consumers. Populated only for MJPEG
+            // streams; empty string for H.264 and any other codec so
+            // consumers can distinguish "MJPEG with a named backend"
+            // from "this field doesn't apply to this stream's codec".
+            mjpeg_decoder_backend: if s.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
+                s.video_decoder.name().to_string()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// Snapshot a dying stream into the recently-destroyed ring,
+    /// evicting the oldest entry when the cap is exceeded, and
+    /// log the final per-stream counters at INFO so the console
+    /// is useful even without a bug report.
+    fn retire_stream(&mut self, stream_id: u32, state: &StreamState, destroyed_at: f64) {
+        let lifetime = destroyed_at - state.created_at_secs;
+        info!(
+            "display: stream_destroy id={} (lifetime={:.2}s, received={}, \
+             decoded_ok={}, decode_failed={}, last_frame_age={})",
+            stream_id,
+            lifetime,
+            state.frames_received,
+            state.frames_decoded_ok,
+            state.frames_decode_failed,
+            state
+                .last_frame_ts_secs
+                .map(|t| format!("{:.2}s", destroyed_at - t))
+                .unwrap_or_else(|| "never".to_string()),
+        );
+        self.recently_destroyed_streams
+            .push_back(Self::stream_state_to_snapshot(
+                stream_id,
+                state,
+                Some(destroyed_at),
+            ));
+        if self.recently_destroyed_streams.len() > MAX_RECENT_DESTROYED_STREAMS {
+            self.recently_destroyed_streams.pop_front();
         }
     }
 
@@ -703,6 +839,31 @@ impl DisplayChannel {
 
         // Send display init message
         self.send_init().await?;
+
+        // Phase-07: one-shot link-up preference messages. spice-gtk
+        // fires both right after the channel reaches STATE_LINKED
+        // (channel-display.c:984-995). In ryll the channel is
+        // already linked by the time run_loop starts (link/auth
+        // happened during session connect), so just after INIT is
+        // the equivalent point. Failures here are not fatal — the
+        // server falls back to its default codec / compression
+        // choice if the messages never arrive — but we propagate
+        // any IO error since it indicates the socket is unhealthy
+        // and the read loop is about to fail anyway.
+        // Session 006 measurement: advertising AUTO_LZ here caused
+        // the server to stop using GLZ entirely (006c vs 006a:
+        // glz_dictionary_entries 23 → 0, evictions 1345 → 0,
+        // bytes_in 2.78 GB → 3.51 GB = +25%). For our UI-heavy
+        // workload the GLZ shared dictionary is the win; AUTO_GLZ
+        // lets the server still pick QUIC for photographic content
+        // but keep the dictionary for repeating UI elements.
+        self.send_preferred_compression(image_compression::AUTO_GLZ)
+            .await?;
+        self.send_preferred_video_codec_type(&[
+            SPICE_VIDEO_CODEC_TYPE_H264,
+            SPICE_VIDEO_CODEC_TYPE_MJPEG,
+        ])
+        .await?;
 
         loop {
             // Read data into buffer
@@ -779,6 +940,50 @@ impl DisplayChannel {
         }
 
         self.send_with_log(display_client::INIT, &msg).await
+    }
+
+    /// Send `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` (opcode
+    /// 103). Payload is a single u8 from the
+    /// `SPICE_IMAGE_COMPRESSION_*` enum (spice.proto:1028-1030).
+    /// Called once at link-up from `run_loop`. The server uses
+    /// this to pick how it encodes server-driven image fills
+    /// (LZ vs GLZ vs QUIC etc).
+    async fn send_preferred_compression(&mut self, scheme: u8) -> Result<()> {
+        let payload = [scheme];
+        let msg = make_message(display_client::PREFERRED_COMPRESSION, &payload);
+        if self.log_config.verbose {
+            logging::log_detail(&format!("image_compression={}", scheme));
+        }
+        self.send_with_log(display_client::PREFERRED_COMPRESSION, &msg)
+            .await?;
+        self.pref_compression_sent = true;
+        Ok(())
+    }
+
+    /// Send `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE`
+    /// (opcode 105). Payload is `u8 num_of_codecs` followed by
+    /// that many `video_codec_type` u8s in preference order
+    /// (spice.proto:1035-1037). spice-gtk's
+    /// `spice_display_send_client_preferred_video_codecs`
+    /// (channel-display.c:621-642) is the reference encoder.
+    /// Called once at link-up from `run_loop`.
+    async fn send_preferred_video_codec_type(&mut self, codecs: &[u8]) -> Result<()> {
+        let mut payload = Vec::with_capacity(1 + codecs.len());
+        let num = u8::try_from(codecs.len()).unwrap_or(u8::MAX);
+        payload.push(num);
+        payload.extend_from_slice(&codecs[..num as usize]);
+        let msg = make_message(display_client::PREFERRED_VIDEO_CODEC_TYPE, &payload);
+        if self.log_config.verbose {
+            logging::log_detail(&format!(
+                "num_of_codecs={}, codecs={:?}",
+                num,
+                &codecs[..num as usize]
+            ));
+        }
+        self.send_with_log(display_client::PREFERRED_VIDEO_CODEC_TYPE, &msg)
+            .await?;
+        self.pref_video_codec_type_sent = true;
+        Ok(())
     }
 
     async fn process_messages(&mut self) -> Result<()> {
@@ -1085,7 +1290,7 @@ impl DisplayChannel {
                             break;
                         }
                         let id = read_u64_le(payload, offset);
-                        if self.image_cache.remove(&id).is_some() {
+                        if self.image_cache.remove(&id) {
                             removed += 1;
                         }
                         if self.glz_dictionary.remove(&id) {
@@ -1149,6 +1354,31 @@ impl DisplayChannel {
                         dest_bottom
                     );
 
+                    // Select the video decoder for this stream's codec.
+                    // If the codec is unsupported, log and skip the stream
+                    // (preserving the pre-refactor behaviour where
+                    // unsupported codecs were ignored).
+                    let video_decoder =
+                        match video::for_stream(codec_type, self.jpeg_decoder.clone()) {
+                            Ok(dec) => dec,
+                            Err(VideoDecoderError::UnsupportedCodec(ct)) => {
+                                warn!(
+                                    "display: stream_create: unsupported codec {} \
+                                     for stream {} — skipping",
+                                    ct, stream_id
+                                );
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "display: stream_create: failed to create decoder \
+                                     for stream {}: {}",
+                                    stream_id, e
+                                );
+                                return Ok(());
+                            }
+                        };
+
                     self.streams.insert(
                         stream_id,
                         StreamState {
@@ -1160,7 +1390,7 @@ impl DisplayChannel {
                             dest_left,
                             dest_bottom,
                             dest_right,
-                            cached_dht: None,
+                            video_decoder,
                             created_at_secs: self.traffic.elapsed().as_secs_f64(),
                             frames_received: 0,
                             frames_decoded_ok: 0,
@@ -1168,6 +1398,21 @@ impl DisplayChannel {
                             last_frame_ts_secs: None,
                             last_decode_ok_ts_secs: None,
                             last_decode_duration_us: 0,
+                            report_is_active: false,
+                            report_unique_id: 0,
+                            report_max_window_size: 0,
+                            report_timeout_ms: 0,
+                            report_num_frames: 0,
+                            report_num_drops: 0,
+                            report_drops_seq_len: 0,
+                            report_start_frame_mm_time: 0,
+                            report_end_frame_mm_time: 0,
+                            report_start_now_mm_time: 0,
+                            report_send_count: 0,
+                            last_report_sent_ts_secs: None,
+                            last_report_num_frames: 0,
+                            last_report_num_drops: 0,
+                            last_report_last_frame_delay: 0,
                         },
                     );
                     self.streams_created_total = self.streams_created_total.saturating_add(1);
@@ -1175,104 +1420,223 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED
-                {
-                    if payload.len() < 36 {
-                        return Ok(());
-                    }
-                    let id = read_u32_le(payload, 0);
-                    let dest_top = read_u32_le(payload, 16);
-                    let dest_left = read_u32_le(payload, 20);
-                    let dest_bottom = read_u32_le(payload, 24);
-                    let dest_right = read_u32_le(payload, 28);
-                    let data_size = read_u32_le(payload, 32) as usize;
-                    let data = &payload[36..36 + data_size.min(payload.len() - 36)];
-                    (
-                        id,
-                        Some((dest_top, dest_left, dest_bottom, dest_right)),
-                        data,
-                    )
-                } else {
-                    if payload.len() < 12 {
-                        return Ok(());
-                    }
-                    let id = read_u32_le(payload, 0);
-                    let data_size = read_u32_le(payload, 8) as usize;
-                    let data = &payload[12..12 + data_size.min(payload.len() - 12)];
-                    (id, None, data)
-                };
+                let (stream_id, frame_mm_time, dest, jpeg_data) =
+                    if msg_type == display_server::STREAM_DATA_SIZED {
+                        // SpiceMsgDisplayStreamDataSized layout (spice.proto):
+                        //   offset  0: stream_id (u32)
+                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  8: width (u32)
+                        //   offset 12: height (u32)
+                        //   offset 16: dest_top (u32)
+                        //   offset 20: dest_left (u32)
+                        //   offset 24: dest_bottom (u32)
+                        //   offset 28: dest_right (u32)
+                        //   offset 32: data_size (u32)
+                        //   offset 36: data
+                        if payload.len() < 36 {
+                            return Ok(());
+                        }
+                        let id = read_u32_le(payload, 0);
+                        let mm_time = read_u32_le(payload, 4);
+                        let dest_top = read_u32_le(payload, 16);
+                        let dest_left = read_u32_le(payload, 20);
+                        let dest_bottom = read_u32_le(payload, 24);
+                        let dest_right = read_u32_le(payload, 28);
+                        let data_size = read_u32_le(payload, 32) as usize;
+                        let data = &payload[36..36 + data_size.min(payload.len() - 36)];
+                        (
+                            id,
+                            mm_time,
+                            Some((dest_top, dest_left, dest_bottom, dest_right)),
+                            data,
+                        )
+                    } else {
+                        // SpiceMsgDisplayStreamData layout (spice.proto):
+                        //   offset  0: stream_id (u32)
+                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  8: data_size (u32)
+                        //   offset 12: data
+                        if payload.len() < 12 {
+                            return Ok(());
+                        }
+                        let id = read_u32_le(payload, 0);
+                        let mm_time = read_u32_le(payload, 4);
+                        let data_size = read_u32_le(payload, 8) as usize;
+                        let data = &payload[12..12 + data_size.min(payload.len() - 12)];
+                        (id, mm_time, None, data)
+                    };
+
+                // Evaluate STREAM_REPORT bookkeeping BEFORE the MJPEG
+                // decode dispatch — `report_num_frames` counts every
+                // STREAM_DATA for an active stream, irrespective of
+                // decode outcome. The borrow on `self.streams` is
+                // released at the end of the `if let Some(stream)`
+                // scope so we can call `self.send_stream_report`
+                // afterwards without a borrow conflict.
+                let now_mm_time = self.mm_clock.now();
+                let report_action: Option<u32> =
+                    if let Some(stream) = self.streams.get_mut(&stream_id) {
+                        let now_secs = self.traffic.elapsed().as_secs_f64();
+                        stream.frames_received = stream.frames_received.saturating_add(1);
+                        stream.last_frame_ts_secs = Some(now_secs);
+
+                        let mut send: Option<u32> = None;
+                        if stream.report_is_active {
+                            if stream.report_num_frames == 0 {
+                                stream.report_start_frame_mm_time = frame_mm_time;
+                                stream.report_start_now_mm_time = now_mm_time;
+                            }
+                            stream.report_num_frames = stream.report_num_frames.saturating_add(1);
+                            stream.report_end_frame_mm_time = frame_mm_time;
+
+                            // Modular i32 subtraction; mm_time wraps at
+                            // 2^32 ms so we cast through i64 and narrow.
+                            // Matches spice-gtk's spice_mmtime_diff
+                            // helper at channel-display.c:1482. Used
+                            // here only for the drop-counter check;
+                            // STREAM_REPORT's `last_frame_delay` field
+                            // is recomputed at send time inside
+                            // `send_stream_report`.
+                            let last_frame_delay: i32 =
+                                (frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
+
+                            if last_frame_delay < 0 {
+                                stream.report_num_drops = stream.report_num_drops.saturating_add(1);
+                                stream.report_drops_seq_len =
+                                    stream.report_drops_seq_len.saturating_add(1);
+                            } else {
+                                stream.report_drops_seq_len = 0;
+                            }
+
+                            let elapsed_since_window_start: i32 = (now_mm_time as i64)
+                                .wrapping_sub(stream.report_start_now_mm_time as i64)
+                                as i32;
+
+                            if stream_report_should_send(
+                                stream.report_num_frames,
+                                stream.report_max_window_size,
+                                elapsed_since_window_start,
+                                stream.report_timeout_ms,
+                                stream.report_drops_seq_len,
+                            ) {
+                                send = Some(stream_id);
+                            }
+                        }
+                        send
+                    } else {
+                        None
+                    };
+
+                if let Some(sid) = report_action {
+                    self.send_stream_report(sid).await?;
+                }
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     let now_secs = self.traffic.elapsed().as_secs_f64();
-                    stream.frames_received = stream.frames_received.saturating_add(1);
-                    stream.last_frame_ts_secs = Some(now_secs);
 
+                    let (top, left, bottom, right) = dest.unwrap_or((
+                        stream.dest_top,
+                        stream.dest_left,
+                        stream.dest_bottom,
+                        stream.dest_right,
+                    ));
+                    let w = right.saturating_sub(left);
+                    let h = bottom.saturating_sub(top);
+
+                    // Codec-agnostic decode dispatch. Pre-refactor
+                    // per-codec logic (DHT extract/inject for MJPEG)
+                    // has been absorbed into `MJpegVideoDecoder`.
+                    let decode_start = std::time::Instant::now();
+                    let decode_result = stream.video_decoder.decode(jpeg_data);
+                    let decode_duration_us =
+                        u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
+
+                    // Phase-03 step 3F + phase-06 step 6B: aggregate
+                    // decode duration tracking per codec. Gate on
+                    // codec_type so each ring receives only its own
+                    // samples — keeping the two streams separate lets
+                    // bug reports tell MJPEG and H.264 cost apart.
+                    // `Ok(None)` (H.264 "needs more data") counts
+                    // toward total but not toward failures.
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
-                        let (top, left, bottom, right) = dest.unwrap_or((
-                            stream.dest_top,
-                            stream.dest_left,
-                            stream.dest_bottom,
-                            stream.dest_right,
-                        ));
-                        let w = right.saturating_sub(left);
-                        let h = bottom.saturating_sub(top);
-
-                        let dht = extract_dht_segments(jpeg_data);
-                        let decode_data;
-                        let frame_data = if !dht.is_empty() {
-                            stream.cached_dht = Some(dht);
-                            jpeg_data
-                        } else if let Some(ref cached) = stream.cached_dht {
-                            decode_data = inject_dht(jpeg_data, cached);
-                            &decode_data
-                        } else {
-                            jpeg_data
-                        };
-
-                        let decode_start = std::time::Instant::now();
-                        let decoded = decode_mjpeg_frame(frame_data);
-                        let decode_duration_us =
-                            u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
-
-                        match decoded {
-                            Some((rgba, fw, fh)) => {
-                                debug!(
-                                    "display: stream {} MJPEG frame {}x{} → ({},{})",
-                                    stream_id, fw, fh, left, top
-                                );
-                                stream.frames_decoded_ok =
-                                    stream.frames_decoded_ok.saturating_add(1);
-                                stream.last_decode_ok_ts_secs = Some(now_secs);
-                                stream.last_decode_duration_us = decode_duration_us;
-                                let surface_id = stream.surface_id;
-                                self.event_tx
-                                    .send(ChannelEvent::ImageReady {
-                                        display_channel_id: self.channel_id,
-                                        surface_id,
-                                        left,
-                                        top,
-                                        width: fw.min(w),
-                                        height: fh.min(h),
-                                        pixels: rgba,
-                                        image_id: 0,
-                                        produced_at_secs: now_secs,
-                                    })
-                                    .await
-                                    .ok();
-                                self.repaint_notify.notify_one();
-                            }
-                            None => {
-                                debug!("display: stream {} MJPEG decode failed", stream_id);
-                                stream.frames_decode_failed =
-                                    stream.frames_decode_failed.saturating_add(1);
-                            }
+                        self.mjpeg_decode_total_count =
+                            self.mjpeg_decode_total_count.saturating_add(1);
+                        self.mjpeg_recent_durations.push_back(decode_duration_us);
+                        if self.mjpeg_recent_durations.len() > MAX_RECENT_DECODES {
+                            self.mjpeg_recent_durations.pop_front();
                         }
-                    } else {
-                        debug!(
-                            "display: stream {} unsupported codec {}",
-                            stream_id, stream.codec_type
-                        );
-                        stream.frames_decode_failed = stream.frames_decode_failed.saturating_add(1);
+                        if decode_result.is_err() {
+                            self.mjpeg_decode_failed_count =
+                                self.mjpeg_decode_failed_count.saturating_add(1);
+                        }
+                    } else if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_H264 {
+                        self.h264_decode_total_count =
+                            self.h264_decode_total_count.saturating_add(1);
+                        self.h264_recent_durations.push_back(decode_duration_us);
+                        if self.h264_recent_durations.len() > MAX_RECENT_DECODES {
+                            self.h264_recent_durations.pop_front();
+                        }
+                        if decode_result.is_err() {
+                            self.h264_decode_failed_count =
+                                self.h264_decode_failed_count.saturating_add(1);
+                        }
+                    }
+
+                    match decode_result {
+                        Ok(Some(frame)) => {
+                            debug!(
+                                "display: stream {} {} frame {}x{} → ({},{})",
+                                stream_id,
+                                stream.video_decoder.name(),
+                                frame.width,
+                                frame.height,
+                                left,
+                                top
+                            );
+                            stream.frames_decoded_ok = stream.frames_decoded_ok.saturating_add(1);
+                            stream.last_decode_ok_ts_secs = Some(now_secs);
+                            stream.last_decode_duration_us = decode_duration_us;
+                            let surface_id = stream.surface_id;
+                            self.event_tx
+                                .send(ChannelEvent::ImageReady {
+                                    display_channel_id: self.channel_id,
+                                    surface_id,
+                                    left,
+                                    top,
+                                    width: frame.width.min(w),
+                                    height: frame.height.min(h),
+                                    pixels: frame.rgba,
+                                    image_id: 0,
+                                    produced_at_secs: now_secs,
+                                })
+                                .await
+                                .ok();
+                            self.repaint_notify.notify_one();
+                        }
+                        Ok(None) => {
+                            // No complete frame assembled yet — this is
+                            // normal for H.264 (needs multiple packets
+                            // per frame) and should not occur for MJPEG.
+                            debug!(
+                                "display: stream {} decoder returned no frame \
+                                 (codec={})",
+                                stream_id, stream.codec_type
+                            );
+                        }
+                        Err(VideoDecoderError::Decode(ref msg)) => {
+                            debug!("display: stream {} decode failed: {}", stream_id, msg);
+                            stream.frames_decode_failed =
+                                stream.frames_decode_failed.saturating_add(1);
+                        }
+                        Err(VideoDecoderError::UnsupportedCodec(_)) => {
+                            // Cannot happen: `for_stream` only constructs
+                            // a decoder for supported codecs; STREAM_CREATE
+                            // skips unsupported ones, so this stream would
+                            // not exist.
+                            unreachable!(
+                                "video_decoder set at STREAM_CREATE only for supported codecs"
+                            );
+                        }
                     }
                 } else {
                     self.stream_data_orphan_count = self.stream_data_orphan_count.saturating_add(1);
@@ -1294,10 +1658,16 @@ impl DisplayChannel {
             display_server::STREAM_DESTROY => {
                 if payload.len() >= 4 {
                     let stream_id = read_u32_le(payload, 0);
-                    info!("display: stream_destroy id={}", stream_id);
-                    if self.streams.remove(&stream_id).is_some() {
+                    let now = self.traffic.elapsed().as_secs_f64();
+                    if let Some(state) = self.streams.remove(&stream_id) {
+                        self.retire_stream(stream_id, &state, now);
                         self.streams_destroyed_total =
                             self.streams_destroyed_total.saturating_add(1);
+                    } else {
+                        // Server destroyed a stream we never saw
+                        // created — log and move on. Not counted as
+                        // a real destruction.
+                        info!("display: stream_destroy id={} (unknown stream)", stream_id);
                     }
                 }
             }
@@ -1310,12 +1680,60 @@ impl DisplayChannel {
                 // channel-display.c:1855.
                 let cleared = self.streams.len() as u64;
                 info!("display: stream_destroy_all (clearing {} streams)", cleared);
-                self.streams.clear();
+                let now = self.traffic.elapsed().as_secs_f64();
+                // Drain the map into the recently-destroyed ring so
+                // each stream's final counters survive teardown.
+                // Sort by id for stable retire order in the log.
+                let mut drained: Vec<(u32, StreamState)> = self.streams.drain().collect();
+                drained.sort_by_key(|(id, _)| *id);
+                for (id, state) in drained {
+                    self.retire_stream(id, &state, now);
+                }
                 self.streams_destroyed_total = self.streams_destroyed_total.saturating_add(cleared);
             }
 
             display_server::STREAM_ACTIVATE_REPORT => {
-                debug!("display: stream_activate_report");
+                // 16-byte payload per spice.proto's
+                // SpiceMsgDisplayStreamActivateReport:
+                //   offset  0: stream_id (u32)
+                //   offset  4: unique_id (u32)
+                //   offset  8: max_window_size (u32)
+                //   offset 12: timeout_ms (u32)
+                if payload.len() < 16 {
+                    warn!(
+                        "display: short stream_activate_report payload ({} bytes)",
+                        payload.len()
+                    );
+                    return Ok(());
+                }
+                let stream_id = read_u32_le(payload, 0);
+                let unique_id = read_u32_le(payload, 4);
+                let max_window_size = read_u32_le(payload, 8);
+                let timeout_ms = read_u32_le(payload, 12);
+
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    info!(
+                        "display: stream_activate_report: id={} unique_id={} window={} timeout_ms={}",
+                        stream_id, unique_id, max_window_size, timeout_ms
+                    );
+                    stream.report_is_active = true;
+                    stream.report_unique_id = unique_id;
+                    stream.report_max_window_size = max_window_size;
+                    stream.report_timeout_ms = timeout_ms;
+                    // Reset rolling counters so the first frame starts a
+                    // fresh window. Cumulative counters left alone.
+                    stream.report_num_frames = 0;
+                    stream.report_num_drops = 0;
+                    stream.report_drops_seq_len = 0;
+                    stream.report_start_frame_mm_time = 0;
+                    stream.report_end_frame_mm_time = 0;
+                    stream.report_start_now_mm_time = 0;
+                } else {
+                    warn!(
+                        "display: stream_activate_report for unknown stream id={}",
+                        stream_id
+                    );
+                }
             }
 
             _ => {
@@ -1729,7 +2147,14 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Jpeg) => {
-                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream)
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream).
+                // Route through the per-platform `JpegDecoder` selected in
+                // `best_for_platform()` (ImageIO / WIC / mozjpeg / pure-Rust)
+                // rather than the `image` crate's pure-Rust path. Session
+                // 006 measured the old path at ~263 ms / frame at 1920×1472
+                // on a Mac that has ImageIO available — phase 3 wired the
+                // selector for the MJPEG stream path but missed this
+                // still-image site.
                 if image_data.len() < 4 {
                     warn_once!(
                         "display:decode_failure:jpeg:short_data",
@@ -1739,21 +2164,18 @@ impl DisplayChannel {
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
                     let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
-                    match image::load_from_memory_with_format(jpeg_data, image::ImageFormat::Jpeg) {
-                        Ok(img) => {
-                            let rgba = img.to_rgba8();
-                            Some(DecompressedImage::new(
-                                rgba.width(),
-                                rgba.height(),
-                                rgba.into_raw(),
-                                img_desc.image_id,
-                            ))
-                        }
-                        Err(e) => {
+                    match self.jpeg_decoder.decode(jpeg_data) {
+                        Some(dec) => Some(DecompressedImage::new(
+                            dec.width,
+                            dec.height,
+                            dec.rgba,
+                            img_desc.image_id,
+                        )),
+                        None => {
                             warn_once!(
                                 "display:decode_failure:jpeg:decode_failed",
-                                "display: JPEG decode failed: {}",
-                                e
+                                "display: JPEG decode failed (backend {})",
+                                self.jpeg_decoder.name()
                             );
                             None
                         }
@@ -1887,7 +2309,7 @@ impl DisplayChannel {
                 }
             } else if (img_desc.flags & IMAGE_FLAGS_CACHE_ME) != 0 {
                 // Only cache non-GLZ images when the server requests it.
-                self.image_cache.insert(img.image_id, img.pixels.clone());
+                let _ = self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 
             let mut out_width = img.width;
@@ -2310,17 +2732,28 @@ impl DisplayChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
-        let glz_len = self.glz_dictionary.len();
-        let glz_bytes = self.glz_dictionary.total_bytes();
-        let glz_ids = self.glz_dictionary.image_ids();
-        snap.image_cache_entries = self.image_cache.len() + glz_len;
-        snap.image_cache_bytes =
-            self.image_cache.values().map(|v| v.len()).sum::<usize>() + glz_bytes;
+        // Phase 12F: keep the image_cache_* snapshot fields
+        // scoped to the renderer's BoundedImageCache only. Until
+        // 12F these summed the GLZ dictionary too, which made the
+        // 12D smoke-test failure mode (a 5 GiB image_cache_bytes
+        // reading coming from the GLZ dict, not the image cache)
+        // impossible to triage from a bug report alone. The GLZ
+        // dictionary now has its own parallel snapshot fields.
+        snap.image_cache_entries = self.image_cache.len();
+        snap.image_cache_bytes = self.image_cache.bytes();
         snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self.image_cache.keys().copied().chain(glz_ids).collect();
+            let mut ids: Vec<u64> = self.image_cache.keys().copied().collect();
             ids.sort_unstable();
             ids
         };
+        snap.image_cache_evictions_total = self.image_cache.evictions_total();
+        snap.image_cache_evicted_bytes_total = self.image_cache.evicted_bytes_total();
+        snap.image_cache_cap_bytes = self.image_cache.cap_bytes() as u64;
+        snap.glz_dictionary_entries = self.glz_dictionary.len();
+        snap.glz_dictionary_bytes = self.glz_dictionary.total_bytes();
+        snap.glz_dictionary_cap_bytes = self.glz_dictionary.cap_bytes() as u64;
+        snap.glz_dictionary_evictions_total = self.glz_dictionary.evictions_total();
+        snap.glz_dictionary_evicted_bytes_total = self.glz_dictionary.evicted_bytes_total();
         snap.recent_decodes = self.recent_decodes.clone();
 
         // Phase-01: cumulative decode counters and recent-window
@@ -2348,37 +2781,114 @@ impl DisplayChannel {
 
         // Stream diagnostics: copy per-stream counters and the
         // aggregate totals so a bug report can answer "did MJPEG
-        // frames arrive / decode / paint?" directly. Streams are
-        // listed in stream_id order for stable JSON output.
+        // frames arrive / decode / paint?" directly. Active
+        // streams are listed in stream_id order for stable JSON
+        // output; recently-destroyed entries retain insertion
+        // (chronological) order from the ring.
         let mut stream_ids: Vec<u32> = self.streams.keys().copied().collect();
         stream_ids.sort_unstable();
         snap.streams_active = stream_ids
             .into_iter()
-            .map(|id| {
-                let s = &self.streams[&id];
-                StreamSnapshot {
-                    stream_id: id,
-                    surface_id: s.surface_id,
-                    codec_type: s.codec_type,
-                    stream_width: s.stream_width,
-                    stream_height: s.stream_height,
-                    dest_top: s.dest_top,
-                    dest_left: s.dest_left,
-                    dest_bottom: s.dest_bottom,
-                    dest_right: s.dest_right,
-                    created_at_secs: s.created_at_secs,
-                    frames_received: s.frames_received,
-                    frames_decoded_ok: s.frames_decoded_ok,
-                    frames_decode_failed: s.frames_decode_failed,
-                    last_frame_ts_secs: s.last_frame_ts_secs,
-                    last_decode_ok_ts_secs: s.last_decode_ok_ts_secs,
-                    last_decode_duration_us: s.last_decode_duration_us,
-                }
-            })
+            .map(|id| Self::stream_state_to_snapshot(id, &self.streams[&id], None))
             .collect();
         snap.streams_created_total = self.streams_created_total;
         snap.streams_destroyed_total = self.streams_destroyed_total;
         snap.stream_data_orphan_count = self.stream_data_orphan_count;
+        snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
+        snap.stream_reports_sent_total = self.stream_reports_sent_total;
+        snap.stream_reports_unsupported_signals_sent = 0; // phase 4 writes this
+
+        // Phase-03 step 3F: aggregate MJPEG decode duration stats.
+        // Mirrors the non-stream decode_recent_* pattern but draws
+        // from the MJPEG-only duration ring rather than the
+        // per-image decode ring.
+        let (mjpeg_min, mjpeg_max, mjpeg_mean) = mjpeg_duration_stats(&self.mjpeg_recent_durations);
+        snap.mjpeg_decode_recent_min_us = mjpeg_min;
+        snap.mjpeg_decode_recent_max_us = mjpeg_max;
+        snap.mjpeg_decode_recent_mean_us = mjpeg_mean;
+        snap.mjpeg_decode_total_count = self.mjpeg_decode_total_count;
+        snap.mjpeg_decode_failed_count = self.mjpeg_decode_failed_count;
+
+        // Phase-06 step 6B: aggregate H.264 decode duration stats.
+        // Parallel to the MJPEG block above. Reuses the same
+        // `mjpeg_duration_stats` helper (renaming would just add
+        // churn; the function is codec-agnostic).
+        let (h264_min, h264_max, h264_mean) = mjpeg_duration_stats(&self.h264_recent_durations);
+        snap.h264_decode_recent_min_us = h264_min;
+        snap.h264_decode_recent_max_us = h264_max;
+        snap.h264_decode_recent_mean_us = h264_mean;
+        snap.h264_decode_total_count = self.h264_decode_total_count;
+        snap.h264_decode_failed_count = self.h264_decode_failed_count;
+
+        // Phase-07: link-up preference-message send markers. Both
+        // flip from false to true once and never reset for the
+        // life of the channel — they let a bug report confirm the
+        // preferences actually went out without having to read
+        // the pcap.
+        snap.pref_compression_sent = self.pref_compression_sent;
+        snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
+    }
+
+    /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte
+    /// LE payload per `SpiceMsgcDisplayStreamReport`
+    /// (spice.proto:1004-1026), updates the per-stream mirrors,
+    /// resets the rolling-window counters, and bumps the
+    /// cumulative `stream_reports_sent_total` counter.
+    ///
+    /// `last_frame_delay` is recomputed here at send time as
+    /// `report_end_frame_mm_time - mm_clock.now()` to match
+    /// spice-gtk's "margin from the most recent frame, relative
+    /// to now" semantic (channel-display.c:1572).
+    async fn send_stream_report(&mut self, stream_id: u32) -> Result<()> {
+        // Snapshot the values we need into locals so the mutable
+        // borrow on `self.streams` ends before we call
+        // `send_with_log` (which takes `&mut self`).
+        let now_mm_time = self.mm_clock.now();
+        let now_secs = self.traffic.elapsed().as_secs_f64();
+
+        let payload = if let Some(stream) = self.streams.get_mut(&stream_id) {
+            let last_frame_delay: i32 =
+                (stream.report_end_frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
+
+            let mut buf = Vec::with_capacity(32);
+            buf.extend_from_slice(&stream_id.to_le_bytes());
+            buf.extend_from_slice(&stream.report_unique_id.to_le_bytes());
+            buf.extend_from_slice(&stream.report_start_frame_mm_time.to_le_bytes());
+            buf.extend_from_slice(&stream.report_end_frame_mm_time.to_le_bytes());
+            buf.extend_from_slice(&stream.report_num_frames.to_le_bytes());
+            buf.extend_from_slice(&stream.report_num_drops.to_le_bytes());
+            buf.extend_from_slice(&last_frame_delay.to_le_bytes());
+            // audio_delay = UINT32_MAX (no audio latency surfaced
+            // yet — see phase plan "Scope > Out of scope").
+            buf.extend_from_slice(&u32::MAX.to_le_bytes());
+
+            // Mirror counters into last_report_* and reset rolling.
+            stream.last_report_num_frames = stream.report_num_frames;
+            stream.last_report_num_drops = stream.report_num_drops;
+            stream.last_report_last_frame_delay = last_frame_delay;
+            stream.report_send_count = stream.report_send_count.saturating_add(1);
+            stream.last_report_sent_ts_secs = Some(now_secs);
+            stream.report_num_frames = 0;
+            stream.report_num_drops = 0;
+            stream.report_drops_seq_len = 0;
+            stream.report_start_frame_mm_time = 0;
+            stream.report_end_frame_mm_time = 0;
+            stream.report_start_now_mm_time = 0;
+
+            debug_assert_eq!(buf.len(), 32, "STREAM_REPORT payload must be 32 bytes");
+            Some(buf)
+        } else {
+            None
+        };
+
+        if let Some(payload) = payload {
+            let msg = make_message(display_client::STREAM_REPORT, &payload);
+            self.send_with_log(display_client::STREAM_REPORT, &msg)
+                .await?;
+            self.stream_reports_sent_total = self.stream_reports_sent_total.saturating_add(1);
+        }
+
+        Ok(())
     }
 
     async fn send_ack(&mut self) -> Result<()> {
@@ -2430,137 +2940,20 @@ mod tests {
     use super::*;
 
     // -------------------------------------------------------------------------
-    // extract_dht_segments tests
+    // Note: extract_dht_segments / inject_dht tests have moved to
+    // shakenfist_spice_compression::video (video.rs) alongside the
+    // functions themselves (phase 6A refactor).
     // -------------------------------------------------------------------------
 
-    /// Build a minimal JPEG byte sequence:
-    ///   SOI (FF D8) + one segment (marker + 2-byte BE length + payload) + EOI (FF D9)
-    ///
-    /// `length` in the JPEG encoding is `payload.len() + 2` (includes the 2 length bytes).
-    fn make_jpeg_with_marker(marker: u8, payload: &[u8]) -> Vec<u8> {
-        let seg_len = (payload.len() + 2) as u16;
-        let mut jpeg = vec![0xFF, 0xD8]; // SOI
-        jpeg.push(0xFF);
-        jpeg.push(marker);
-        jpeg.extend_from_slice(&seg_len.to_be_bytes());
-        jpeg.extend_from_slice(payload);
-        jpeg.extend_from_slice(&[0xFF, 0xD9]); // EOI
-        jpeg
-    }
-
-    #[test]
-    fn extract_dht_segments_finds_dht_marker() {
-        // Build a JPEG with a DHT segment (marker 0xC4).
-        let payload = vec![0x01, 0x02, 0x03, 0x04];
-        let jpeg = make_jpeg_with_marker(0xC4, &payload);
-
-        let dht = extract_dht_segments(&jpeg);
-
-        // The returned data should start with the FF C4 marker.
-        assert!(!dht.is_empty(), "expected non-empty DHT output");
-        assert_eq!(dht[0], 0xFF);
-        assert_eq!(dht[1], 0xC4);
-        // Length field (big-endian) = payload.len() + 2
-        let encoded_len = u16::from_be_bytes([dht[2], dht[3]]) as usize;
-        assert_eq!(encoded_len, payload.len() + 2);
-        // Payload bytes are present.
-        assert_eq!(&dht[4..], payload.as_slice());
-    }
-
-    #[test]
-    fn extract_dht_segments_no_dht_returns_empty() {
-        // Build a JPEG with a comment segment (0xFE) — not a DHT.
-        let jpeg = make_jpeg_with_marker(0xFE, b"hello");
-        let dht = extract_dht_segments(&jpeg);
-        assert!(dht.is_empty(), "expected empty Vec when no DHT present");
-    }
-
-    #[test]
-    fn extract_dht_segments_empty_input_returns_empty() {
-        let dht = extract_dht_segments(&[]);
-        assert!(dht.is_empty());
-    }
-
     // -------------------------------------------------------------------------
-    // inject_dht tests
+    // JpegDecoderRsDecoder tests (replaces old decode_mjpeg_frame tests;
+    // the function moved to shakenfist-spice-compression::jpeg in step 3A).
     // -------------------------------------------------------------------------
 
     #[test]
-    fn inject_dht_inserts_after_soi_when_no_app_markers() {
-        // Plain JPEG: SOI + some non-APP data + EOI
-        let jpeg = vec![0xFF, 0xD8, 0xAA, 0xBB, 0xCC, 0xFF, 0xD9];
-        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // Output should start with SOI.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-        // Immediately followed by the injected DHT.
-        assert_eq!(&out[2..2 + dht.len()], dht.as_slice());
-        // Then the remaining data (everything after SOI in the original).
-        assert_eq!(&out[2 + dht.len()..], &jpeg[2..]);
-    }
-
-    #[test]
-    fn inject_dht_inserts_after_app0_segment() {
-        // Build a JPEG: SOI + APP0 (0xE0) segment + remaining data.
-        let app0_payload = vec![0x4A, 0x46, 0x49, 0x46, 0x00]; // "JFIF\0"
-        let app0_seg_len = (app0_payload.len() + 2) as u16;
-        let mut jpeg = vec![0xFF, 0xD8]; // SOI
-        jpeg.push(0xFF);
-        jpeg.push(0xE0); // APP0
-        jpeg.extend_from_slice(&app0_seg_len.to_be_bytes());
-        jpeg.extend_from_slice(&app0_payload);
-        // Some remaining data
-        jpeg.extend_from_slice(&[0xDE, 0xAD]);
-
-        let dht = vec![0xFF, 0xC4, 0x00, 0x04, 0x01, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // Output should start with SOI.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-
-        // Next: APP0 segment (marker + length bytes + payload).
-        let app0_total = 2 + 2 + app0_payload.len(); // FF E0 + len_bytes + payload
-        let app0_in_out = &out[2..2 + app0_total];
-        assert_eq!(app0_in_out[0], 0xFF);
-        assert_eq!(app0_in_out[1], 0xE0);
-
-        // After APP0: injected DHT.
-        let dht_start = 2 + app0_total;
-        assert_eq!(&out[dht_start..dht_start + dht.len()], dht.as_slice());
-
-        // After DHT: the remaining bytes from the original JPEG.
-        let remaining_start = dht_start + dht.len();
-        assert_eq!(&out[remaining_start..], &[0xDE, 0xAD]);
-    }
-
-    #[test]
-    fn inject_dht_output_structure_soi_app_dht_rest() {
-        // Quick structural check: SOI, then optional APP markers, then DHT, then rest.
-        let jpeg = vec![0xFF, 0xD8, 0x01, 0x02, 0x03];
-        let dht = vec![0xFF, 0xC4, 0x00, 0x02];
-
-        let out = inject_dht(&jpeg, &dht);
-
-        // SOI must be first.
-        assert_eq!(&out[..2], &[0xFF, 0xD8]);
-        // DHT must appear before the original trailing bytes.
-        let dht_pos = out.windows(dht.len()).position(|w| w == dht.as_slice());
-        assert!(dht_pos.is_some(), "DHT not found in output");
-        let dht_end = dht_pos.unwrap() + dht.len();
-        // The remaining original data (after SOI) should follow the DHT.
-        assert_eq!(&out[dht_end..], &jpeg[2..]);
-    }
-
-    // -------------------------------------------------------------------------
-    // decode_mjpeg_frame tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn decode_mjpeg_frame_valid_jpeg_returns_rgba() {
+    fn jpeg_decoder_rs_valid_jpeg_returns_rgba() {
         use image::{DynamicImage, RgbImage};
+        use shakenfist_spice_compression::{DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
         use std::io::Cursor;
 
         // Create a tiny 2×2 solid-red image and encode it as JPEG.
@@ -2570,26 +2963,35 @@ mod tests {
         img.write_to(&mut Cursor::new(&mut jpeg_data), image::ImageFormat::Jpeg)
             .expect("failed to encode test JPEG");
 
-        let result = decode_mjpeg_frame(&jpeg_data);
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&jpeg_data);
         assert!(result.is_some(), "expected Some for valid JPEG");
 
-        let (rgba, w, h) = result.unwrap();
-        assert_eq!(w, 2, "width should be 2");
-        assert_eq!(h, 2, "height should be 2");
+        let DecodedJpeg {
+            rgba,
+            width,
+            height,
+        } = result.unwrap();
+        assert_eq!(width, 2, "width should be 2");
+        assert_eq!(height, 2, "height should be 2");
         // RGBA: 4 bytes per pixel.
         assert_eq!(rgba.len(), 2 * 2 * 4, "expected 16 bytes of RGBA data");
     }
 
     #[test]
-    fn decode_mjpeg_frame_empty_input_returns_none() {
-        let result = decode_mjpeg_frame(&[]);
+    fn jpeg_decoder_rs_empty_input_returns_none() {
+        use shakenfist_spice_compression::{JpegDecoder, JpegDecoderRsDecoder};
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&[]);
         assert!(result.is_none(), "expected None for empty input");
     }
 
     #[test]
-    fn decode_mjpeg_frame_truncated_input_returns_none() {
+    fn jpeg_decoder_rs_truncated_input_returns_none() {
+        use shakenfist_spice_compression::{JpegDecoder, JpegDecoderRsDecoder};
         // A few bytes that look like a JPEG start but are truncated.
-        let result = decode_mjpeg_frame(&[0xFF, 0xD8, 0xFF, 0xE0]);
+        let decoder = JpegDecoderRsDecoder::new();
+        let result = decoder.decode(&[0xFF, 0xD8, 0xFF, 0xE0]);
         assert!(result.is_none(), "expected None for truncated JPEG");
     }
 
@@ -3198,5 +3600,86 @@ mod tests {
         assert_eq!(ring.len(), 5);
         assert_eq!(ring.front().copied(), Some(0.0));
         assert_eq!(ring.back().copied(), Some(4.0));
+    }
+
+    // -------------------------------------------------------------------------
+    // stream_report_should_send tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn stream_report_predicate_fires_on_frame_window() {
+        assert!(stream_report_should_send(5, 5, 100, 1000, 0));
+        assert!(!stream_report_should_send(4, 5, 100, 1000, 0));
+    }
+
+    #[test]
+    fn stream_report_predicate_fires_on_timeout() {
+        assert!(stream_report_should_send(1, 5, 1000, 1000, 0));
+        assert!(!stream_report_should_send(1, 5, 999, 1000, 0));
+    }
+
+    #[test]
+    fn stream_report_predicate_fires_on_drop_sequence() {
+        assert!(stream_report_should_send(
+            1,
+            5,
+            100,
+            1000,
+            STREAM_REPORT_DROP_SEQ_LEN_LIMIT
+        ));
+        assert!(!stream_report_should_send(
+            1,
+            5,
+            100,
+            1000,
+            STREAM_REPORT_DROP_SEQ_LEN_LIMIT - 1
+        ));
+    }
+
+    #[test]
+    fn stream_report_predicate_does_not_fire_idle() {
+        assert!(!stream_report_should_send(0, 5, 0, 1000, 0));
+    }
+
+    // -------------------------------------------------------------------------
+    // STREAM_REPORT wire-format round-trip
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn stream_report_payload_round_trip() {
+        // Hand-built payload using known values; assert each
+        // offset decodes back to the input. Layout per
+        // spice.proto's SpiceMsgcDisplayStreamReport
+        // (spice-common spice.proto:1004-1026).
+        let stream_id: u32 = 0x1111_2222;
+        let unique_id: u32 = 0xDEAD_BEEF;
+        let start_mm: u32 = 100;
+        let end_mm: u32 = 200;
+        let num_frames: u32 = 5;
+        let num_drops: u32 = 1;
+        let last_frame_delay: i32 = -42;
+        let audio_delay: u32 = u32::MAX;
+
+        let mut buf = Vec::with_capacity(32);
+        buf.extend_from_slice(&stream_id.to_le_bytes());
+        buf.extend_from_slice(&unique_id.to_le_bytes());
+        buf.extend_from_slice(&start_mm.to_le_bytes());
+        buf.extend_from_slice(&end_mm.to_le_bytes());
+        buf.extend_from_slice(&num_frames.to_le_bytes());
+        buf.extend_from_slice(&num_drops.to_le_bytes());
+        buf.extend_from_slice(&last_frame_delay.to_le_bytes());
+        buf.extend_from_slice(&audio_delay.to_le_bytes());
+
+        assert_eq!(buf.len(), 32);
+        assert_eq!(read_u32_le(&buf, 0), stream_id);
+        assert_eq!(read_u32_le(&buf, 4), unique_id);
+        assert_eq!(read_u32_le(&buf, 8), start_mm);
+        assert_eq!(read_u32_le(&buf, 12), end_mm);
+        assert_eq!(read_u32_le(&buf, 16), num_frames);
+        assert_eq!(read_u32_le(&buf, 20), num_drops);
+        // i32 round-trip via u32 reinterpretation — the same 4
+        // bytes; signedness is purely interpretation.
+        assert_eq!(read_u32_le(&buf, 24) as i32, last_frame_delay);
+        assert_eq!(read_u32_le(&buf, 28), audio_delay);
     }
 }

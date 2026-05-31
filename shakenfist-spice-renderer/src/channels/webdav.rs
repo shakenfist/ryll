@@ -78,6 +78,19 @@ pub struct WebdavChannel {
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
 
+    // Per-opcode counters (baseline additions, 4B pattern).
+    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    last_unknown_opcode: Option<u16>,
+    unknown_opcode_count: u64,
+
+    // HTTP / WebDAV specifics.
+    http_requests_received: u64,
+    http_response_bytes_sent: u64,
+    last_request_ts_secs: Option<f64>,
+    last_response_ts_secs: Option<f64>,
+    decompressed_size_limit_exceeded_count: u64,
+
     // Sharing state
     shared_dir: Option<ShareDirConfig>,
 
@@ -139,6 +152,15 @@ impl WebdavChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
+            messages_recv_by_opcode: std::collections::BTreeMap::new(),
+            messages_send_by_opcode: std::collections::BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
+            http_requests_received: 0,
+            http_response_bytes_sent: 0,
+            last_request_ts_secs: None,
+            last_response_ts_secs: None,
+            decompressed_size_limit_exceeded_count: 0,
             shared_dir: auto_share_dir,
             demuxer: MuxDemuxer::new(),
             clients: HashMap::new(),
@@ -302,6 +324,10 @@ impl WebdavChannel {
             );
         }
 
+        // Increment per-opcode recv counter before dispatch so
+        // both known and unknown opcodes are counted uniformly.
+        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+
         match msg_type {
             spicevmc_server::DATA => {
                 self.handle_vmc_data(payload).await?;
@@ -379,8 +405,10 @@ impl WebdavChannel {
                     .ok();
                 self.repaint_notify.notify_one();
             }
-            _ => {
-                logging::log_unknown_once("webdav", msg_type, payload);
+            unknown => {
+                logging::log_unknown_once("webdav", unknown, payload);
+                self.unknown_opcode_count += 1;
+                self.last_unknown_opcode = Some(unknown);
             }
         }
 
@@ -521,6 +549,12 @@ impl WebdavChannel {
                     reader_handle,
                 },
             );
+
+            // Count this new connection as an HTTP request received
+            // and record when it arrived.
+            self.http_requests_received = self.http_requests_received.saturating_add(1);
+            self.last_request_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+            self.update_snapshot();
         }
 
         Ok(())
@@ -536,8 +570,13 @@ impl WebdavChannel {
                 client.server_handle.abort();
                 client.reader_handle.abort();
             }
+            // active_session_count decreased; flush snapshot.
+            self.update_snapshot();
         } else {
+            let n = resp.data.len() as u64;
             self.send_mux_frame(resp.client_id, &resp.data).await?;
+            self.http_response_bytes_sent = self.http_response_bytes_sent.saturating_add(n);
+            self.last_response_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
         }
         Ok(())
     }
@@ -558,6 +597,10 @@ impl WebdavChannel {
                 "webdav: decompressed size {} exceeds limit, dropping",
                 uncompressed_size
             );
+            self.decompressed_size_limit_exceeded_count = self
+                .decompressed_size_limit_exceeded_count
+                .saturating_add(1);
+            self.update_snapshot();
             return Ok(());
         }
 
@@ -707,6 +750,8 @@ impl WebdavChannel {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "webdav", msg_type, msg_type_str, payload_size);
         }
+        // Increment per-opcode send counter here — single send path.
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         self.send(data).await
     }
 
@@ -727,6 +772,7 @@ impl WebdavChannel {
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
         if let Ok(mut snap) = self.snapshot.lock() {
+            // Transport common.
             snap.bytes_in = self.bytes_in;
             snap.bytes_out = self.bytes_out;
             snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -735,6 +781,19 @@ impl WebdavChannel {
             snap.pong_send_count = self.pong_send_count;
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
             snap.writer_dropped_count = self.capture_dropped_count;
+            // Baseline additions (4B pattern).
+            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+            snap.last_unknown_opcode = self.last_unknown_opcode;
+            snap.unknown_opcode_count = self.unknown_opcode_count;
+            // HTTP / WebDAV specifics.
+            snap.http_requests_received = self.http_requests_received;
+            snap.http_response_bytes_sent = self.http_response_bytes_sent;
+            snap.active_session_count = self.clients.len() as u32;
+            snap.last_request_ts_secs = self.last_request_ts_secs;
+            snap.last_response_ts_secs = self.last_response_ts_secs;
+            snap.decompressed_size_limit_exceeded_count =
+                self.decompressed_size_limit_exceeded_count;
         }
     }
 }

@@ -8,7 +8,7 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 
 - **Immediate mode rendering** - Uses egui for efficient display rendering without accumulating objects
 - **Full draw-op coverage** - Handles `DRAW_FILL`, `DRAW_OPAQUE`, `DRAW_COPY`, `DRAW_BLEND`, `DRAW_BLACKNESS`, `DRAW_WHITENESS`, `DRAW_INVERS`, `DRAW_TRANSPARENT`, `DRAW_ALPHA_BLEND`, and `COPY_BITS`. BIOS, GRUB, and kernel-console rendering now paints correctly (solid backgrounds, clean scroll regions). Deferred ops (`DRAW_ROP3`, `DRAW_STROKE`, `DRAW_TEXT`, `DRAW_COMPOSITE`) warn once per session with a first-occurrence hex dump so gaps are visible without flooding the log
-- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming
+- **Image decompression** - LZ, GLZ, ZLIB_GLZ_RGB, LZ4, JPEG, QUIC, and Pixmap image types; MJPEG via SPICE streaming with hardware-accelerated decoding where available (ImageIO on macOS, WIC on Windows, VA-API on Linux) and automatic fallback to software decoders
 - **Audio playback** - SPICE playback channel with raw PCM and Opus codec support; lock-free ring buffer to dedicated audio thread via cpal
 - **Multi-monitor support** - Connect multiple display channels with `--monitors N` for multi-head configurations
 - **Window auto-fit** - The ryll window tracks the guest's display surface size: every primary `SURFACE_CREATE`
@@ -35,6 +35,7 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **Screenshot capture** - Press F8 or use Menu → Screenshot to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
 - **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
+- **Streaming indicator** - Small triangle (▶) glyph in the status bar reflects the live SPICE display-stream state: grey (off), green (active), amber (a stream was destroyed in the last 5 s), red (≥3 destroys in 30 s with mean lifetime <3 s — fires a `Warn` notification once per minute). Hover for per-stream codec, dimensions, and decoded-frame counts. See [docs/troubleshooting.md § Streaming indicator](docs/troubleshooting.md#streaming-indicator).
 - **Protocol-gap counter** - `Gaps: N` button in the status bar tracks the number of distinct protocol edge cases seen this session (unknown opcodes, deferred ops, recoverable decode failures). Highlights red when N > 0; click to open a floating window listing the keys. Complements `--pedantic` mode.
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
@@ -271,6 +272,40 @@ ICE failures with 1 s/2 s/4 s/8 s/16 s backoff. A reference
 systemd unit is at `examples/ryll-web.service`. See
 `docs/web-frontend.md` for the full operator guide.
 
+### Auto-snapshot mode (`--auto-snapshot-interval`)
+
+When `--auto-snapshot-interval N` is set, ryll fires a complete
+bug-report zip every N seconds into a rolling subdirectory
+`<bug-report-dir>/auto-snapshots/`. This "flight-data-recorder"
+mode captures full session state regardless of whether the
+operator notices a symptom — useful for intermittent issues like
+audio silences that last only 30 seconds mid-session.
+
+A startup `Info` notification confirms the mode is active. The
+status bar shows `Auto-snapshot: {saved}/{cap}` while the mode
+is enabled. The default rolling cap is 20 zips; oldest are pruned
+when the cap is exceeded.
+
+Each zip is a full bug-report artefact (channel-state.json with
+all channels merged, traffic.pcap covering all channels, metadata,
+runtime-metrics, notifications) equivalent to a manual F12 report.
+
+```bash
+# Fire every 30 s, keep last 20 zips
+ryll --file connection.vv --auto-snapshot-interval 30
+
+# Custom cap and output directory
+ryll --file connection.vv --auto-snapshot-interval 60 \
+     --auto-snapshot-cap 10 --bug-report-dir /tmp/session
+
+# Minimum recommended interval is 10 s (assembly blocks ~2 s
+# for runtime-metrics sampling; shorter intervals cause
+# overlapping samples, which is harmless but wasteful).
+```
+
+The zip filename encodes the UTC timestamp and session uptime:
+`ryll-auto-snapshot-2026-05-18T20-37-42Z-T+47.3s.zip`
+
 ### `--pedantic` mode
 
 When enabled with `--pedantic`, ryll writes a bug-report
@@ -329,7 +364,7 @@ native TLS) have landed. Quick-start: `docs/web-frontend.md`.
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
-| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel), per-platform MJPEG decoders (ImageIO/WIC/VA-API with fallback to libjpeg-turbo and pure-Rust decoder); see `docs/plans/PLAN-stream-caps-and-flap.md` for platform decoder details |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |

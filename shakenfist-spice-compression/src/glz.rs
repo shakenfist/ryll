@@ -5,10 +5,10 @@
 /// 2. Pixels from previously decompressed images (cross-frame references)
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
-use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::Mutex;
 
+use crate::byte_bounded_lru::ByteBoundedLru;
 use crate::DecompressedImage;
 
 const GLZ_MAGIC: &[u8; 4] = b"  ZL";
@@ -16,43 +16,87 @@ const LZ_MAX_COPY: u8 = 32;
 /// Total timeout for a cross-frame reference miss (ms).
 const CROSS_REF_TIMEOUT_MS: u64 = 100;
 
+/// Default byte cap for [`GlzDictionary`] when constructed via
+/// [`GlzDictionary::new`] / [`Default`].  The CLI wiring in
+/// `ryll` passes an explicit cap via [`GlzDictionary::with_cap`];
+/// this default exists for tests and other callers that don't
+/// need a specific bound.
+pub const DEFAULT_GLZ_DICT_CAP_BYTES: usize = 256 * 1024 * 1024;
+
 /// Shared GLZ image dictionary with a notification mechanism
 /// so cross-frame references can wake immediately when a
 /// referenced image is inserted by another channel.
+///
+/// Backed by a byte-bounded LRU ([`ByteBoundedLru`]) so the
+/// dictionary cannot grow without bound on workloads where the
+/// server never sends a sliding-window `inval_*`.  See
+/// `PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md`
+/// step 12E for the motivating session traces.
 pub struct GlzDictionary {
-    images: Mutex<HashMap<u64, Vec<u8>>>,
+    images: Mutex<ByteBoundedLru>,
     notify: tokio::sync::Notify,
+    /// Whether the first cap-driven eviction has been logged at
+    /// info level this session.  Subsequent evictions log at debug
+    /// to avoid spamming on high-rate workloads.
+    first_eviction_logged: Mutex<bool>,
 }
 
 impl GlzDictionary {
-    /// Create a new empty dictionary.
+    /// Create a new empty dictionary with the default byte cap
+    /// ([`DEFAULT_GLZ_DICT_CAP_BYTES`]).
     pub fn new() -> Self {
+        Self::with_cap(DEFAULT_GLZ_DICT_CAP_BYTES)
+    }
+
+    /// Create a new empty dictionary with an explicit byte cap.
+    pub fn with_cap(cap_bytes: usize) -> Self {
         Self {
-            images: Mutex::new(HashMap::new()),
+            images: Mutex::new(ByteBoundedLru::new(cap_bytes)),
             notify: tokio::sync::Notify::new(),
+            first_eviction_logged: Mutex::new(false),
         }
     }
 
     /// Insert an image into the dictionary and wake any
     /// waiters blocked on a cross-frame reference.
+    ///
+    /// May evict the least-recently-used entries to keep total
+    /// bytes within the configured cap.
     pub fn insert(&self, image_id: u64, pixels: Vec<u8>) {
-        self.images.lock().unwrap().insert(image_id, pixels);
+        let outcome = self.images.lock().unwrap().insert(image_id, pixels);
+        if let crate::byte_bounded_lru::InsertOutcome::InsertedAfterEviction {
+            evicted,
+            freed_bytes,
+        } = outcome
+        {
+            let mut logged = self.first_eviction_logged.lock().unwrap();
+            if !*logged {
+                *logged = true;
+                let cap_mib = self.images.lock().unwrap().cap_bytes() / (1024 * 1024);
+                tracing::info!(
+                    "glz_dictionary: cap {} MiB reached; oldest entries will be evicted",
+                    cap_mib,
+                );
+            } else {
+                tracing::debug!(evicted, freed_bytes, "glz_dictionary: evicted LRU entries",);
+            }
+        }
         self.notify.notify_waiters();
     }
 
     /// Remove a specific image from the dictionary.
     /// Returns true if the image was present.
     pub fn remove(&self, image_id: &u64) -> bool {
-        self.images.lock().unwrap().remove(image_id).is_some()
+        self.images.lock().unwrap().remove(image_id)
     }
 
     /// Evict images with IDs below `oldest_valid`.
     /// Returns the number of entries removed.
     pub fn evict_older_than(&self, oldest_valid: u64) -> usize {
-        let mut dict = self.images.lock().unwrap();
-        let before = dict.len();
-        dict.retain(|&id, _| id >= oldest_valid);
-        before - dict.len()
+        self.images
+            .lock()
+            .unwrap()
+            .retain_keys(|&id| id >= oldest_valid)
     }
 
     /// Clear all entries.
@@ -72,7 +116,25 @@ impl GlzDictionary {
 
     /// Total bytes of pixel data stored.
     pub fn total_bytes(&self) -> usize {
-        self.images.lock().unwrap().values().map(|v| v.len()).sum()
+        self.images.lock().unwrap().bytes()
+    }
+
+    /// Configured byte cap.
+    pub fn cap_bytes(&self) -> usize {
+        self.images.lock().unwrap().cap_bytes()
+    }
+
+    /// Cumulative count of entries evicted by the byte cap since
+    /// the dictionary was constructed.  Server-driven `remove` /
+    /// `clear` / `evict_older_than` calls are not counted.
+    pub fn evictions_total(&self) -> u64 {
+        self.images.lock().unwrap().evictions_total()
+    }
+
+    /// Cumulative bytes freed by cap-driven evictions since the
+    /// dictionary was constructed.
+    pub fn evicted_bytes_total(&self) -> u64 {
+        self.images.lock().unwrap().evicted_bytes_total()
     }
 
     /// Snapshot all image IDs (sorted) for diagnostics.
@@ -285,7 +347,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 
                 // Try an immediate lookup first (common case).
                 let prev_pixels = {
-                    let dict = dictionary.images.lock().unwrap();
+                    let mut dict = dictionary.images.lock().unwrap();
                     dict.get(&source_id).cloned()
                 };
 
@@ -312,7 +374,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                                 .await
                             {
                                 Ok(()) => {
-                                    let dict = dictionary.images.lock().unwrap();
+                                    let mut dict = dictionary.images.lock().unwrap();
                                     if let Some(pixels) = dict.get(&source_id) {
                                         resolved = Some(pixels.clone());
                                         break;
@@ -420,5 +482,65 @@ mod tests {
         assert_eq!(img.width, 2);
         assert_eq!(img.height, 2);
         assert_eq!(img.pixels.len(), 16); // 2x2x4 RGBA
+    }
+
+    #[test]
+    fn dict_insert_under_cap_no_eviction() {
+        let dict = GlzDictionary::with_cap(1024);
+        dict.insert(1, vec![0u8; 256]);
+        dict.insert(2, vec![0u8; 256]);
+        assert_eq!(dict.len(), 2);
+        assert_eq!(dict.total_bytes(), 512);
+        assert_eq!(dict.evictions_total(), 0);
+        assert_eq!(dict.evicted_bytes_total(), 0);
+    }
+
+    #[test]
+    fn dict_insert_over_cap_evicts_oldest() {
+        let dict = GlzDictionary::with_cap(300);
+        dict.insert(1, vec![0u8; 100]);
+        dict.insert(2, vec![0u8; 100]);
+        dict.insert(3, vec![0u8; 100]);
+        assert_eq!(dict.total_bytes(), 300);
+        assert_eq!(dict.evictions_total(), 0);
+
+        // Push past the cap — key=1 (LRU) must go.
+        dict.insert(4, vec![0u8; 100]);
+        assert_eq!(dict.len(), 3);
+        assert_eq!(dict.total_bytes(), 300);
+        assert_eq!(dict.evictions_total(), 1);
+        assert_eq!(dict.evicted_bytes_total(), 100);
+
+        let ids = dict.image_ids();
+        assert_eq!(ids, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn dict_remove_does_not_count_as_eviction() {
+        let dict = GlzDictionary::with_cap(1024);
+        dict.insert(1, vec![0u8; 100]);
+        dict.insert(2, vec![0u8; 100]);
+        assert!(dict.remove(&1));
+        assert_eq!(dict.len(), 1);
+        assert_eq!(dict.total_bytes(), 100);
+        assert_eq!(dict.evictions_total(), 0);
+    }
+
+    #[test]
+    fn dict_evict_older_than_does_not_count_as_eviction() {
+        let dict = GlzDictionary::with_cap(1024);
+        dict.insert(1, vec![0u8; 100]);
+        dict.insert(2, vec![0u8; 100]);
+        dict.insert(3, vec![0u8; 100]);
+        let removed = dict.evict_older_than(2);
+        assert_eq!(removed, 1);
+        assert_eq!(dict.len(), 2);
+        assert_eq!(dict.evictions_total(), 0);
+    }
+
+    #[test]
+    fn dict_cap_bytes_surface() {
+        let dict = GlzDictionary::with_cap(123_456);
+        assert_eq!(dict.cap_bytes(), 123_456);
     }
 }

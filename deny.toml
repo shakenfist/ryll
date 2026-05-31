@@ -54,6 +54,26 @@ ignore = [
     # Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2025-0134
     "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0150: audiopus_sys unmaintained.
+    # Cargo build with CMake 4.0 fails on the bundled libopus
+    # `cmake_minimum_required(VERSION <3.5)`. We work around this
+    # in CI (ci.yml + release.yml + manual-build.yml all set
+    # CMAKE_POLICY_VERSION_MINIMUM=3.5). Upstream maintainer
+    # unresponsive for >5 years and a third-party PR is open with
+    # no reply. Replacement requires migrating off audiopus
+    # entirely (or vendoring/forking).
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0150
+    "RUSTSEC-2026-0150",
+
+    # Yanked: aes 0.8.4.
+    # Transitive via webrtc -> aes-gcm 0.10.3 -> aes 0.8.4 (and
+    # webrtc-srtp 0.17.1). aes-gcm 0.10.3 pins to aes 0.8.x and
+    # 0.8.4 is the latest in that range, so unblocking requires a
+    # webrtc/aes-gcm major bump. Not introduced by this PR.
+    # Tracked in PLAN-supply-chain-followups.md.
+    "aes@0.8.4",
 ]
 
 [licenses]
@@ -86,8 +106,18 @@ confidence-threshold = 0.93
 # SPDX identifier `Ubuntu-font-1.0` in epaint 0.34. UFL-1.0 is a
 # permissive font licence; we accept it under the SPDX id the crate
 # actually emits.
+#
+# `mozjpeg` (Cisco's libjpeg-turbo wrapper, pulled in by phase 03's
+# `MozJpegDecoder`) declares IJG (Independent JPEG Group) — the
+# canonical libjpeg licence. `mozjpeg-sys` declares
+# `IJG AND Zlib AND BSD-3-Clause` (Zlib + BSD-3-Clause already in
+# `allow`; IJG needs the per-crate exception). IJG is FSF-Free and
+# OSI-recognised; widely accepted for redistribution, including in
+# Debian/Ubuntu where libjpeg-turbo ships under it.
 exceptions = [
     { allow = ["Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
+    { allow = ["IJG"], crate = "mozjpeg" },
+    { allow = ["IJG"], crate = "mozjpeg-sys" },
 ]
 
 [bans]

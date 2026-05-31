@@ -16,7 +16,7 @@ pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskCo
 
 /// Ryll - A Rust SPICE VDI test client
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RYLL_GIT_SHA"), ")"), about, long_about = None)]
 pub struct Args {
     /// URL to fetch .vv configuration file from
     #[arg(long, group = "config_source")]
@@ -97,6 +97,25 @@ pub struct Args {
     #[arg(long)]
     pub bug_report_dir: Option<std::path::PathBuf>,
 
+    /// Automatically save a complete bug-report zip every N seconds
+    /// into <bug-report-dir>/auto-snapshots/. Use this as a
+    /// "flight-data-recorder" for intermittent issues: set it before
+    /// the session, walk away, and the evidence is captured by
+    /// construction even if the symptom is transient.
+    ///
+    /// Minimum recommended interval: 10 s (BugReport::new blocks for
+    /// ~2 s sampling runtime metrics; shorter intervals cause overlapping
+    /// samples which is harmless but wasteful). Values below 10 s log
+    /// a warning at startup.
+    #[arg(long)]
+    pub auto_snapshot_interval: Option<u64>,
+
+    /// Maximum number of auto-snapshot zips to keep on disk
+    /// (default: 20). Oldest zips are pruned when the cap is
+    /// exceeded. Only meaningful when --auto-snapshot-interval is set.
+    #[arg(long)]
+    pub auto_snapshot_cap: Option<usize>,
+
     /// Diagnostic flag for the K1 hang investigation
     /// (PLAN-session-001-feedback Phase 02). When set, ryll's
     /// per-connection tokio runtime is built with
@@ -153,6 +172,23 @@ pub struct Args {
     /// --web-tls-cert is supplied.
     #[arg(long, requires = "web_tls_cert")]
     pub web_tls_key: Option<PathBuf>,
+
+    /// Maximum total bytes for the SPICE display image cache,
+    /// in MiB. Defaults to 256. The cache holds decoded RGBA
+    /// for images the server flagged with CACHE_ME; without a
+    /// cap, video workloads can consume gigabytes (see
+    /// session-002g).
+    #[arg(long, default_value_t = 256)]
+    pub image_cache_cap_mib: u64,
+
+    /// Maximum total bytes for the shared SPICE GLZ dictionary,
+    /// in MiB. Defaults to 256. The dictionary holds decoded
+    /// RGBA for GLZ images so cross-frame references resolve;
+    /// without a cap, full-screen ZlibGlzRgb workloads observed
+    /// in sessions 003a / 004d-g consumed gigabytes (~30 MiB/s
+    /// of growth). Phase 12E.
+    #[arg(long, default_value_t = 256)]
+    pub glz_dictionary_cap_mib: u64,
 }
 
 /// SPICE connection configuration

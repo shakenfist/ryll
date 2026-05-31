@@ -33,6 +33,8 @@ use shakenfist_spice_usbredir::messages::{
 };
 use shakenfist_spice_usbredir::parser::UsbredirParser;
 
+use crate::snapshots::RedirectedDevice;
+
 use super::{ChannelEvent, UsbCommand};
 
 pub struct UsbredirChannel {
@@ -71,8 +73,23 @@ pub struct UsbredirChannel {
 
     // usbredir protocol state
     parser: UsbredirParser,
+    /// Capability bitmask received from the server Hello.
     server_caps: u32,
+    /// Capability bitmask we sent in our Hello (RYLL_CAPS).
+    client_caps: u32,
     backend: Option<DeviceBackend>,
+
+    // Per-opcode counters (baseline additions, 4B pattern).
+    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    last_unknown_opcode: Option<u16>,
+    unknown_opcode_count: u64,
+
+    // USB device tracking.
+    redirected_devices: Vec<RedirectedDevice>,
+    device_connect_total: u64,
+    device_disconnect_total: u64,
+    last_device_event_ts_secs: Option<f64>,
 
     // Virtual disks to auto-connect after hello exchange
     auto_connect_disks: Vec<VirtualDiskConfig>,
@@ -125,7 +142,16 @@ impl UsbredirChannel {
             last_ping_recv_ts_secs: None,
             parser: UsbredirParser::new(),
             server_caps: 0,
+            client_caps: 0,
             backend: None,
+            messages_recv_by_opcode: std::collections::BTreeMap::new(),
+            messages_send_by_opcode: std::collections::BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
+            redirected_devices: Vec::new(),
+            device_connect_total: 0,
+            device_disconnect_total: 0,
+            last_device_event_ts_secs: None,
             auto_connect_disks,
             interrupt_tx,
             interrupt_rx,
@@ -254,6 +280,10 @@ impl UsbredirChannel {
             );
         }
 
+        // Increment per-opcode recv counter before dispatch so
+        // both known and unknown opcodes are counted uniformly.
+        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+
         match msg_type {
             spicevmc_server::DATA => {
                 self.handle_vmc_data(payload).await?;
@@ -331,8 +361,10 @@ impl UsbredirChannel {
                     .ok();
                 self.repaint_notify.notify_one();
             }
-            _ => {
-                logging::log_unknown_once("usbredir", msg_type, payload);
+            unknown => {
+                logging::log_unknown_once("usbredir", unknown, payload);
+                self.unknown_opcode_count += 1;
+                self.last_unknown_opcode = Some(unknown);
             }
         }
 
@@ -834,16 +866,31 @@ impl UsbredirChannel {
         self.send_usbredir(msg_type::INTERFACE_INFO, 0, &buf)
             .await?;
 
-        // Send device_connect
+        // Send device_connect and capture device metadata for tracking.
         let dev = backend.device_info();
+        let attached_at_secs = self.traffic.elapsed().as_secs_f64();
         buf.clear();
         dev.write(&mut buf)?;
         self.send_usbredir(msg_type::DEVICE_CONNECT, 0, &buf)
             .await?;
 
+        // Track the device in our active set.
+        self.redirected_devices.push(RedirectedDevice {
+            vendor_id: dev.vendor_id,
+            product_id: dev.product_id,
+            device_class: dev.device_class,
+            attached_at_secs,
+            // TODO: track per-device byte counts.
+            bytes_to_guest: 0,
+            bytes_from_guest: 0,
+        });
+        self.device_connect_total += 1;
+        self.last_device_event_ts_secs = Some(attached_at_secs);
+
         let desc = backend.description();
         self.backend = Some(backend);
         info!("usbredir: device connected: {}", desc);
+        self.update_snapshot();
         self.event_tx
             .send(ChannelEvent::UsbDeviceConnected(desc))
             .await
@@ -859,6 +906,13 @@ impl UsbredirChannel {
             self.send_usbredir(msg_type::DEVICE_DISCONNECT, 0, &[])
                 .await?;
             self.backend = None;
+            // Remove all tracked devices on disconnect (we send a
+            // single DEVICE_DISCONNECT that covers the one backend
+            // connection we maintain).
+            self.redirected_devices.clear();
+            self.device_disconnect_total += 1;
+            self.last_device_event_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+            self.update_snapshot();
             self.event_tx
                 .send(ChannelEvent::UsbDeviceDisconnected)
                 .await
@@ -946,6 +1000,8 @@ impl UsbredirChannel {
             "usbredir: sending hello: version='{}' caps=0x{:08x}",
             hello.version, hello.capabilities,
         );
+        // Capture our caps so the snapshot can surface them.
+        self.client_caps = hello.capabilities;
         let mut buf = Vec::new();
         hello.write(&mut buf)?;
         self.send_usbredir(msg_type::HELLO, 0, &buf).await
@@ -987,6 +1043,8 @@ impl UsbredirChannel {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "usbredir", msg_type, msg_type_str, payload_size);
         }
+        // Increment per-opcode send counter here — single send path.
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         self.send(data).await
     }
 
@@ -1007,6 +1065,7 @@ impl UsbredirChannel {
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
         if let Ok(mut snap) = self.snapshot.lock() {
+            // Transport common.
             snap.bytes_in = self.bytes_in;
             snap.bytes_out = self.bytes_out;
             snap.last_recv_ts_secs = self.last_recv_ts_secs;
@@ -1015,6 +1074,19 @@ impl UsbredirChannel {
             snap.pong_send_count = self.pong_send_count;
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
             snap.writer_dropped_count = self.capture_dropped_count;
+            // Baseline additions (4B pattern).
+            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+            snap.last_unknown_opcode = self.last_unknown_opcode;
+            snap.unknown_opcode_count = self.unknown_opcode_count;
+            // USB-redirection specifics.
+            snap.redirected_devices = self.redirected_devices.clone();
+            snap.device_connect_total = self.device_connect_total;
+            snap.device_disconnect_total = self.device_disconnect_total;
+            snap.last_device_event_ts_secs = self.last_device_event_ts_secs;
+            // Protocol caps.
+            snap.server_caps = self.server_caps;
+            snap.client_caps = self.client_caps;
         }
     }
 }

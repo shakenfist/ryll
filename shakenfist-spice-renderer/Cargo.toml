@@ -70,8 +70,10 @@ libc = "0.2"
 # the display channel
 flate2 = "1"
 
-# JPEG decoding for SPICE JPEG image type, used in the display channel
-jpeg-decoder = "0.3"
+# JPEG decoding for SPICE JPEG image type. The `jpeg-decoder` crate
+# has moved to `shakenfist-spice-compression` (phase 3 step 3A) where
+# it backs `JpegDecoderRsDecoder`. The `image` crate is still needed
+# for its own JPEG-adjacent uses elsewhere in the renderer.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 # H.264 encoding for the web frontend encoder pipeline (Phase 2+)

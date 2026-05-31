@@ -25,7 +25,8 @@ use shakenfist_spice_renderer::traffic::TrafficSink;
 #[allow(unused_imports)]
 pub use shakenfist_spice_renderer::snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
-    InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
+    InputEventRecord, InputsSnapshot, MainSnapshot, PlaybackCodec, PlaybackSessionInfo,
+    PlaybackSnapshot, RedirectedDevice, StreamSnapshot, UsbredirSnapshot, WebdavSnapshot,
 };
 
 /// Direction of a protocol message.
@@ -324,6 +325,16 @@ impl TrafficBuffers {
         self.start.elapsed()
     }
 
+    /// Session-start `Instant`. Equal to the `Instant::now()`
+    /// captured at `TrafficBuffers::new`. Surfaced so callers
+    /// that need to convert renderer-side `*_at_secs: f64`
+    /// timestamps back into wall-clock `Instant`s (e.g. the
+    /// streaming-state classifier in `streaming_state.rs`) can
+    /// do so without duplicating the elapsed-vs-now arithmetic.
+    pub fn session_start(&self) -> Instant {
+        self.start
+    }
+
     /// Cheap deep-copy of the live ring state (Phase 10 / F2).
     ///
     /// Per-channel locks are held briefly to clone each ring;
@@ -535,6 +546,55 @@ impl TrafficBuffers {
         }
     }
 
+    /// Drain pcap bytes from ALL channels, merged into a single pcap
+    /// stream. Used by `BugReportType::AutoSnapshot` so the zip's
+    /// `traffic.pcap` carries the full session picture rather than
+    /// a single channel's traffic.
+    ///
+    /// Entries from all six channels are interleaved in timestamp order.
+    /// Returns `None` when the `capture` feature is disabled.
+    pub fn drain_all_pcap_bytes(&self) -> Option<Vec<u8>> {
+        #[cfg(feature = "capture")]
+        {
+            use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
+            use pcap_file::DataLink;
+
+            // Collect every entry from every channel.
+            let mut entries: Vec<(std::time::Duration, Vec<std::sync::Arc<[u8]>>)> = Vec::new();
+            for name in &CHANNELS {
+                if let Some(buf) = self.buffer_for(name) {
+                    let guard = buf.lock().unwrap();
+                    for entry in guard.entries().iter() {
+                        let mut segs: Vec<std::sync::Arc<[u8]>> = vec![entry.pcap_frame.clone()];
+                        segs.extend(entry.additional_segments.iter().cloned());
+                        entries.push((entry.timestamp, segs));
+                    }
+                }
+            }
+
+            // Sort by timestamp so the merged pcap is chronological.
+            entries.sort_by_key(|(ts, _)| *ts);
+
+            let header = PcapHeader {
+                datalink: DataLink::ETHERNET,
+                ..Default::default()
+            };
+            let mut output = Vec::new();
+            let mut pcap = PcapWriter::with_header(&mut output, header).ok()?;
+            for (ts, segs) in &entries {
+                for seg in segs {
+                    let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
+                    pcap.write_packet(&packet).ok();
+                }
+            }
+            Some(output)
+        }
+        #[cfg(not(feature = "capture"))]
+        {
+            None
+        }
+    }
+
     /// Collect recent entries from all channels for the traffic
     /// viewer.  Returns at most `max` entries sorted by timestamp
     /// (oldest first).  Does not copy pcap frame data.
@@ -660,6 +720,12 @@ pub struct AppSnapshot {
     pub display_mark_lag_recent_min_us: u32,
     pub display_mark_lag_recent_max_us: u32,
     pub display_mark_lag_recent_mean_us: u32,
+    /// Phase 5 auto-snapshot counters. Both are 0 when
+    /// `--auto-snapshot-interval` is not set. The stats panel
+    /// renders `"Auto-snapshot: {saved}/{cap}"` when the mode
+    /// is active; the line is hidden when mode is disabled.
+    pub auto_snapshots_saved: u64,
+    pub auto_snapshots_pruned: u64,
 }
 
 impl Default for AppSnapshot {
@@ -684,6 +750,8 @@ impl Default for AppSnapshot {
             display_mark_lag_recent_min_us: 0,
             display_mark_lag_recent_max_us: 0,
             display_mark_lag_recent_mean_us: 0,
+            auto_snapshots_saved: 0,
+            auto_snapshots_pruned: 0,
         }
     }
 }
@@ -881,11 +949,22 @@ pub enum BugReportType {
         notification_id: u64,
         snapshot_state: NotificationSnapshotState,
     },
+    /// Auto-generated periodically by `--auto-snapshot-interval`
+    /// (Phase 5). Captures full session state across all channels
+    /// so a single zip carries everything needed to diagnose any
+    /// channel's behaviour at the moment of the snapshot.
+    /// `channel_name()` returns `"all"` to trigger the merged
+    /// all-channel embedding in `channel-state.json`.
+    AutoSnapshot,
 }
 
 impl BugReportType {
     /// SPICE channel name used for ring buffer drain and snapshot
     /// selection.
+    ///
+    /// The special value `"all"` (returned by `AutoSnapshot`) causes
+    /// `BugReport::assemble` to embed a merged JSON object containing
+    /// every channel's snapshot rather than a single channel's state.
     pub fn channel_name(&self) -> &'static str {
         match self {
             BugReportType::Display => "display",
@@ -916,6 +995,11 @@ impl BugReportType {
             // channel-state.json defaults to main as a
             // sensible session anchor.
             BugReportType::Notification { .. } => "main",
+            // Phase 5: auto-snapshots embed every channel so a single
+            // zip tells the full story.  The "all" arm in
+            // ChannelSnapshots::snapshot_json_for merges all channels
+            // into one JSON object.
+            BugReportType::AutoSnapshot => "all",
         }
     }
 }
@@ -1001,8 +1085,8 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: s.client_keepalive_send_count,
-                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
+                    client_keepalive_send_count: 0,
+                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1259,11 +1343,19 @@ impl BugReport {
         // 2. Channel state snapshot — pick the channel from
         // report_type.channel_name() and delegate the
         // lock/clone/serialise to ChannelSnapshots'
-        // snapshot_json_for helper. The Usb variant is the
-        // only special case: it has no dedicated snapshot
-        // (its pcap traffic is captured via channel_name()
-        // → "usbredir" further below), so emit an empty
-        // object.
+        // snapshot_json_for helper. Special cases:
+        //   - Usb: no dedicated snapshot (pcap only); emit "{}".
+        //   - AutoSnapshot: channel_name() returns "all", which
+        //     snapshot_json_for handles by merging every channel's
+        //     state into a single JSON object — gives the full
+        //     session picture in one zip.
+        // TODO: Connection reports (BugReportType::Connection) today only
+        // include MainSnapshot. Now that PlaybackSnapshot, UsbredirSnapshot,
+        // and WebdavSnapshot have diagnostic fields, consider whether a
+        // Connection report should also surface those if a record/playback/
+        // usbredir/webdav channel disconnect was implicated. This is a UI
+        // decision best deferred to the operator (Phase 4F: Haiku via Sonnet
+        // review).
         let channel_state_json = match &report_type {
             BugReportType::Usb => "{}".to_string(),
             _ => {
@@ -1291,9 +1383,15 @@ impl BugReport {
             .unwrap_or_default();
         let notifications_json = serde_json::to_string_pretty(&notifications_snapshot)?;
 
-        // 4. Pcap traffic for the affected channel
+        // 4. Pcap traffic for the affected channel.
+        //    AutoSnapshot uses channel_name "all" → drain all six
+        //    channels merged into one pcap stream.
         let channel_name = report_type.channel_name();
-        let pcap_bytes = traffic.drain_channel_pcap_bytes(channel_name);
+        let pcap_bytes = if channel_name == "all" {
+            traffic.drain_all_pcap_bytes()
+        } else {
+            traffic.drain_channel_pcap_bytes(channel_name)
+        };
 
         // 5. PNG screenshot (display reports only). Prefer a
         //    precomputed PNG from the trigger-time encoder thread
@@ -1386,6 +1484,65 @@ impl BugReport {
 
         let filename = format!("ryll-bugreport-{}.zip", filename_timestamp());
         let path = dir.join(&filename);
+        let file = std::fs::File::create(&path)?;
+        let mut zip = ZipWriter::new(file);
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+        zip.start_file("metadata.json", opts)?;
+        zip.write_all(self.metadata_json.as_bytes())?;
+
+        zip.start_file("session.json", opts)?;
+        zip.write_all(self.session_json.as_bytes())?;
+
+        zip.start_file("channel-state.json", opts)?;
+        zip.write_all(self.channel_state_json.as_bytes())?;
+
+        if let Some(ref pcap) = self.pcap_bytes {
+            zip.start_file("traffic.pcap", opts)?;
+            zip.write_all(pcap)?;
+        }
+
+        if let Some(ref png) = self.screenshot_png {
+            zip.start_file("screenshot.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        if let Some(ref png) = self.screenshot_region_png {
+            zip.start_file("screenshot-region.png", opts)?;
+            zip.write_all(png)?;
+        }
+
+        zip.start_file("notifications.json", opts)?;
+        zip.write_all(self.notifications_json.as_bytes())?;
+
+        let metrics_json = serde_json::to_string_pretty(&self.runtime_metrics)?;
+        zip.start_file("runtime-metrics.json", opts)?;
+        zip.write_all(metrics_json.as_bytes())?;
+
+        zip.finish()?;
+        Ok(path)
+    }
+
+    /// Write the bug report as a zip file to `dir` using a caller-
+    /// supplied `filename` instead of the default timestamp-based name.
+    ///
+    /// Creates `dir` if it does not exist.
+    /// Returns the path of the written file.
+    ///
+    /// Used by the auto-snapshot task so it can embed the session
+    /// uptime in the filename (see `auto_snapshot_filename()`).
+    pub fn write_zip_named(
+        &self,
+        dir: &std::path::Path,
+        filename: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        std::fs::create_dir_all(dir)?;
+
+        let path = dir.join(filename);
         let file = std::fs::File::create(&path)?;
         let mut zip = ZipWriter::new(file);
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
@@ -1906,6 +2063,9 @@ mod tests {
             last_ack_send_ts_secs: Some(4.25),
             // Phase-02 pcap writer-queue drop counter.
             writer_dropped_count: 11,
+            // Phase-07 link-up preference-message send markers.
+            pref_compression_sent: true,
+            pref_video_codec_type_sent: true,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -1940,10 +2100,69 @@ mod tests {
             last_frame_ts_secs: Some(45.5),
             last_decode_ok_ts_secs: Some(45.4),
             last_decode_duration_us: 18_321,
+            destroyed_at_secs: None,
+            report_is_active: true,
+            report_unique_id: 0xDEAD_BEEF,
+            report_max_window_size: 5,
+            report_timeout_ms: 1000,
+            report_send_count: 3,
+            last_report_sent_ts_secs: Some(12.5),
+            last_report_num_frames: 5,
+            last_report_num_drops: 1,
+            last_report_last_frame_delay: -42,
+            mjpeg_decoder_backend: "jpeg-decoder".to_string(),
+            video_decoder_backend: "jpeg-decoder".to_string(),
         });
         snap.streams_created_total = 2;
         snap.streams_destroyed_total = 1;
         snap.stream_data_orphan_count = 3;
+        snap.stream_reports_sent_total = 17;
+        snap.stream_reports_unsupported_signals_sent = 2;
+        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        snap.mjpeg_decode_recent_min_us = 1_200;
+        snap.mjpeg_decode_recent_max_us = 45_000;
+        snap.mjpeg_decode_recent_mean_us = 8_500;
+        snap.mjpeg_decode_total_count = 350;
+        snap.mjpeg_decode_failed_count = 2;
+        // Phase-06 step 6B: aggregate H.264 decode duration fields
+        // (same shape as MJPEG aggregates).
+        snap.h264_decode_recent_min_us = 5_000;
+        snap.h264_decode_recent_max_us = 28_000;
+        snap.h264_decode_recent_mean_us = 12_500;
+        snap.h264_decode_total_count = 120;
+        snap.h264_decode_failed_count = 1;
+        // Previously-active stream now in the recently-destroyed
+        // ring: destroyed_at_secs is Some, counters are frozen.
+        snap.streams_recently_destroyed.push_back(StreamSnapshot {
+            stream_id: 37,
+            surface_id: 0,
+            codec_type: 1,
+            stream_width: 1600,
+            stream_height: 1200,
+            dest_top: 0,
+            dest_left: 0,
+            dest_bottom: 1200,
+            dest_right: 1600,
+            created_at_secs: 4.0,
+            frames_received: 30,
+            frames_decoded_ok: 28,
+            frames_decode_failed: 2,
+            last_frame_ts_secs: Some(6.0),
+            last_decode_ok_ts_secs: Some(6.0),
+            last_decode_duration_us: 17_500,
+            destroyed_at_secs: Some(6.25),
+            report_is_active: false,
+            report_unique_id: 0,
+            report_max_window_size: 0,
+            report_timeout_ms: 0,
+            report_send_count: 0,
+            last_report_sent_ts_secs: None,
+            last_report_num_frames: 0,
+            last_report_num_drops: 0,
+            last_report_last_frame_delay: 0,
+            mjpeg_decoder_backend: "jpeg-decoder".to_string(),
+            video_decoder_backend: "jpeg-decoder".to_string(),
+        });
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
@@ -1980,6 +2199,81 @@ mod tests {
         assert!(json.contains("\"streams_created_total\": 2"));
         assert!(json.contains("\"streams_destroyed_total\": 1"));
         assert!(json.contains("\"stream_data_orphan_count\": 3"));
+        // Recently-destroyed ring: counters survive teardown so a
+        // bug report between flap cycles still answers "did MJPEG
+        // decode during stream X's life?". destroyed_at_secs is
+        // always Some for entries in the ring.
+        assert!(json.contains("\"streams_recently_destroyed\""));
+        assert!(json.contains("\"stream_id\": 37"));
+        assert!(json.contains("\"destroyed_at_secs\": 6.25"));
+        // STREAM_ACTIVATE_REPORT fields (step 1D): verify that
+        // activation state and last-sent-report mirrors are
+        // visible in channel-state.json.
+        assert!(json.contains("\"report_is_active\": true"));
+        assert!(json.contains("\"report_unique_id\": 3735928559"));
+        assert!(json.contains("\"report_max_window_size\": 5"));
+        assert!(json.contains("\"report_timeout_ms\": 1000"));
+        assert!(json.contains("\"report_send_count\": 3"));
+        assert!(json.contains("\"last_report_sent_ts_secs\": 12.5"));
+        assert!(json.contains("\"last_report_num_frames\": 5"));
+        assert!(json.contains("\"last_report_num_drops\": 1"));
+        assert!(json.contains("\"last_report_last_frame_delay\": -42"));
+        assert!(json.contains("\"stream_reports_sent_total\": 17"));
+        assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
+        // Phase-03 step 3A: MJPEG decoder backend name visible in
+        // bug reports so a report identifies which path ran.
+        assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
+        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        assert!(json.contains("\"mjpeg_decode_recent_min_us\": 1200"));
+        assert!(json.contains("\"mjpeg_decode_recent_max_us\": 45000"));
+        assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
+        assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
+        assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
+        // Phase-06 step 6D: general-purpose video_decoder_backend field
+        // visible for every stream regardless of codec. For MJPEG streams
+        // this matches mjpeg_decoder_backend; for H.264 it would show
+        // "H264 (openh264)" while mjpeg_decoder_backend is empty.
+        assert!(json.contains("\"video_decoder_backend\": \"jpeg-decoder\""));
+        // Phase-06 step 6B: aggregate H.264 decode duration fields
+        // (same shape and naming convention as the MJPEG aggregates).
+        assert!(json.contains("\"h264_decode_recent_min_us\": 5000"));
+        assert!(json.contains("\"h264_decode_recent_max_us\": 28000"));
+        assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
+        assert!(json.contains("\"h264_decode_total_count\": 120"));
+        assert!(json.contains("\"h264_decode_failed_count\": 1"));
+        // Phase-07: link-up preference-message send markers must
+        // appear in channel-state.json so a bug-report reader can
+        // confirm the client asked for AUTO_LZ and the H264/MJPEG
+        // codec ordering without reading the pcap.
+        assert!(json.contains("\"pref_compression_sent\": true"));
+        assert!(json.contains("\"pref_video_codec_type_sent\": true"));
+        // Phase-12B: bounded image-cache eviction and cap fields.
+        // These must appear in bug reports so an operator can tell
+        // how much eviction pressure the session experienced and
+        // what cap was in effect.
+        snap.image_cache_evictions_total = 42;
+        snap.image_cache_evicted_bytes_total = 441_450_496;
+        // 256 MiB default cap.
+        snap.image_cache_cap_bytes = 268_435_456;
+        // Phase-12F: GLZ-dictionary cache stats now live in their
+        // own snapshot fields rather than being summed into
+        // image_cache_*. A bug report must surface both sets so an
+        // operator can tell which cache is under pressure.
+        snap.glz_dictionary_entries = 17;
+        snap.glz_dictionary_bytes = 4_194_304;
+        // 256 MiB default cap (matches the image-cache default).
+        snap.glz_dictionary_cap_bytes = 268_435_456;
+        snap.glz_dictionary_evictions_total = 5;
+        snap.glz_dictionary_evicted_bytes_total = 1_048_576;
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        assert!(json.contains("\"image_cache_evictions_total\": 42"));
+        assert!(json.contains("\"image_cache_evicted_bytes_total\": 441450496"));
+        assert!(json.contains("\"image_cache_cap_bytes\": 268435456"));
+        assert!(json.contains("\"glz_dictionary_entries\": 17"));
+        assert!(json.contains("\"glz_dictionary_bytes\": 4194304"));
+        assert!(json.contains("\"glz_dictionary_cap_bytes\": 268435456"));
+        assert!(json.contains("\"glz_dictionary_evictions_total\": 5"));
+        assert!(json.contains("\"glz_dictionary_evicted_bytes_total\": 1048576"));
     }
 
     #[test]
@@ -1987,6 +2281,8 @@ mod tests {
         let mut snap = InputsSnapshot {
             button_state: 1,
             writer_dropped_count: 4,
+            unknown_opcode_count: 3,
+            last_unknown_opcode: Some(0xBEEF),
             ..Default::default()
         };
         snap.recent_events.push_back(InputEventRecord {
@@ -1997,10 +2293,20 @@ mod tests {
             button_mask: 0,
             timestamp_secs: 2.0,
         });
+        snap.messages_recv_by_opcode.insert(101, 5);
+        snap.messages_recv_by_opcode.insert(102, 2);
+        snap.messages_send_by_opcode.insert(1, 10);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"button_state\": 1"));
         assert!(json.contains("\"event_type\": \"KeyDown\""));
         assert!(json.contains("\"writer_dropped_count\": 4"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"101\": 5"));
+        assert!(json.contains("\"102\": 2"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"1\": 10"));
+        assert!(json.contains("\"last_unknown_opcode\": 48879"));
+        assert!(json.contains("\"unknown_opcode_count\": 3"));
     }
 
     #[test]
@@ -2008,6 +2314,8 @@ mod tests {
         let mut snap = CursorSnapshot {
             cache_entries: 1,
             writer_dropped_count: 9,
+            unknown_opcode_count: 1,
+            last_unknown_opcode: Some(0xFF),
             ..Default::default()
         };
         snap.cache_contents.push(CursorCacheEntry {
@@ -2017,23 +2325,254 @@ mod tests {
             hot_spot_x: 0,
             hot_spot_y: 0,
         });
+        snap.messages_recv_by_opcode.insert(200, 7);
+        snap.messages_send_by_opcode.insert(3, 4);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"cursor_id\": 99"));
         assert!(json.contains("\"writer_dropped_count\": 9"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"200\": 7"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 4"));
+        assert!(json.contains("\"last_unknown_opcode\": 255"));
+        assert!(json.contains("\"unknown_opcode_count\": 1"));
     }
 
     #[test]
     fn test_main_snapshot_serialises() {
-        let snap = MainSnapshot {
+        let mut snap = MainSnapshot {
             session_id: Some(42),
             bytes_in: 500,
             bytes_out: 100,
             writer_dropped_count: 2,
+            // Phase-01 STREAM_REPORT mm_time visibility.
+            mm_time_now: 123_456,
+            mm_time_set_count: 7,
+            last_mm_time_set_ts_secs: Some(12.5),
+            unknown_opcode_count: 2,
+            last_unknown_opcode: Some(0x1234),
             ..Default::default()
         };
+        snap.messages_recv_by_opcode.insert(10, 3);
+        snap.messages_recv_by_opcode.insert(20, 1);
+        snap.messages_send_by_opcode.insert(5, 8);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
         assert!(json.contains("\"writer_dropped_count\": 2"));
+        assert!(json.contains("\"mm_time_now\": 123456"));
+        assert!(json.contains("\"mm_time_set_count\": 7"));
+        assert!(json.contains("\"last_mm_time_set_ts_secs\": 12.5"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"10\": 3"));
+        assert!(json.contains("\"20\": 1"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"5\": 8"));
+        assert!(json.contains("\"last_unknown_opcode\": 4660"));
+        assert!(json.contains("\"unknown_opcode_count\": 2"));
+    }
+
+    #[test]
+    fn test_playback_snapshot_serialises() {
+        let mut snap = PlaybackSnapshot {
+            bytes_in: 4096,
+            bytes_out: 256,
+            ping_recv_count: 2,
+            pong_send_count: 2,
+            writer_dropped_count: 1,
+            unknown_opcode_count: 4,
+            last_unknown_opcode: Some(0xC0DE),
+            current_session: Some(PlaybackSessionInfo {
+                started_at_secs: 3.5,
+                mm_time_at_start: 0xAB_CD_EF_12,
+                sample_rate_hz: 48000,
+                channels: 2,
+                codec: PlaybackCodec::Opus,
+            }),
+            start_count: 2,
+            stop_count: 1,
+            data_packets_received: 100,
+            data_packets_decoded: 98,
+            data_packets_decode_failed: 2,
+            data_bytes_received: 65536,
+            pcm_bytes_produced: 1_048_576,
+            device_callbacks_total: 500,
+            device_underrun_count: 7,
+            ring_overflow_count: 3,
+            samples_consumed_total: 96_000,
+            last_volume_per_channel: vec![32768, 32768],
+            last_mute: Some(false),
+            last_latency_ms: Some(40),
+            ..Default::default()
+        };
+        snap.recent_decode_durations_us.push_back(180);
+        snap.recent_decode_durations_us.push_back(220);
+        snap.messages_recv_by_opcode.insert(101, 100);
+        snap.messages_recv_by_opcode.insert(103, 2);
+        snap.messages_send_by_opcode.insert(3, 2);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common + baseline.
+        assert!(json.contains("\"bytes_in\": 4096"));
+        assert!(json.contains("\"writer_dropped_count\": 1"));
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"101\": 100"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 2"));
+        assert!(json.contains("\"last_unknown_opcode\": 49374"));
+        assert!(json.contains("\"unknown_opcode_count\": 4"));
+
+        // Per-session.
+        assert!(json.contains("\"current_session\""));
+        assert!(json.contains("\"started_at_secs\": 3.5"));
+        assert!(json.contains("\"mm_time_at_start\": 2882400018"));
+        assert!(json.contains("\"sample_rate_hz\": 48000"));
+        assert!(json.contains("\"channels\": 2"));
+        assert!(json.contains("\"kind\": \"opus\""));
+        assert!(json.contains("\"start_count\": 2"));
+        assert!(json.contains("\"stop_count\": 1"));
+
+        // Data plumbing.
+        assert!(json.contains("\"data_packets_received\": 100"));
+        assert!(json.contains("\"data_packets_decoded\": 98"));
+        assert!(json.contains("\"data_packets_decode_failed\": 2"));
+        assert!(json.contains("\"data_bytes_received\": 65536"));
+        assert!(json.contains("\"pcm_bytes_produced\": 1048576"));
+        assert!(json.contains("\"recent_decode_durations_us\""));
+        assert!(json.contains("180"));
+        assert!(json.contains("220"));
+
+        // Device-side.
+        assert!(json.contains("\"device_callbacks_total\": 500"));
+        assert!(json.contains("\"device_underrun_count\": 7"));
+        assert!(json.contains("\"ring_overflow_count\": 3"));
+        assert!(json.contains("\"samples_consumed_total\": 96000"));
+
+        // Server-controlled params.
+        assert!(json.contains("\"last_volume_per_channel\""));
+        assert!(json.contains("32768"));
+        assert!(json.contains("\"last_mute\": false"));
+        assert!(json.contains("\"last_latency_ms\": 40"));
+    }
+
+    #[test]
+    fn test_playback_codec_round_trips() {
+        // Tuple-variant Other is the failure-prone case; check it
+        // serialises with `kind` + `value` as expected.
+        let raw = serde_json::to_string(&PlaybackCodec::Raw).unwrap();
+        assert!(raw.contains("\"kind\":\"raw\""), "got {}", raw);
+        let opus = serde_json::to_string(&PlaybackCodec::Opus).unwrap();
+        assert!(opus.contains("\"kind\":\"opus\""), "got {}", opus);
+        let other = serde_json::to_string(&PlaybackCodec::Other(42)).unwrap();
+        assert!(other.contains("\"kind\":\"other\""), "got {}", other);
+        assert!(other.contains("\"value\":42"), "got {}", other);
+    }
+
+    #[test]
+    fn test_usbredir_snapshot_serialises() {
+        let mut snap = UsbredirSnapshot {
+            bytes_in: 8192,
+            bytes_out: 512,
+            ping_recv_count: 1,
+            pong_send_count: 1,
+            writer_dropped_count: 0,
+            unknown_opcode_count: 2,
+            last_unknown_opcode: Some(0xDEAD),
+            device_connect_total: 1,
+            device_disconnect_total: 0,
+            last_device_event_ts_secs: Some(1.5),
+            server_caps: 0x0000_00ff,
+            client_caps: 0x0000_001a,
+            ..Default::default()
+        };
+        snap.messages_recv_by_opcode.insert(1, 50);
+        snap.messages_recv_by_opcode.insert(2, 10);
+        snap.messages_send_by_opcode.insert(1, 1);
+        snap.redirected_devices.push(RedirectedDevice {
+            vendor_id: 0x1d6b,
+            product_id: 0x0104,
+            device_class: 0x08,
+            attached_at_secs: 1.5,
+            bytes_to_guest: 0,
+            bytes_from_guest: 0,
+        });
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common.
+        assert!(json.contains("\"bytes_in\": 8192"));
+        assert!(json.contains("\"bytes_out\": 512"));
+        assert!(json.contains("\"ping_recv_count\": 1"));
+        assert!(json.contains("\"writer_dropped_count\": 0"));
+
+        // Baseline additions.
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"1\": 50"));
+        assert!(json.contains("\"2\": 10"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"last_unknown_opcode\": 57005"));
+        assert!(json.contains("\"unknown_opcode_count\": 2"));
+
+        // USB-redirection specifics.
+        assert!(json.contains("\"redirected_devices\""));
+        assert!(json.contains("\"vendor_id\": 7531"));
+        assert!(json.contains("\"product_id\": 260"));
+        assert!(json.contains("\"device_class\": 8"));
+        assert!(json.contains("\"attached_at_secs\": 1.5"));
+        assert!(json.contains("\"bytes_to_guest\": 0"));
+        assert!(json.contains("\"bytes_from_guest\": 0"));
+        assert!(json.contains("\"device_connect_total\": 1"));
+        assert!(json.contains("\"device_disconnect_total\": 0"));
+        assert!(json.contains("\"last_device_event_ts_secs\": 1.5"));
+
+        // Protocol caps.
+        assert!(json.contains("\"server_caps\": 255"));
+        assert!(json.contains("\"client_caps\": 26"));
+    }
+
+    #[test]
+    fn test_webdav_snapshot_serialises() {
+        let mut snap = WebdavSnapshot {
+            bytes_in: 4096,
+            bytes_out: 2048,
+            ping_recv_count: 2,
+            pong_send_count: 2,
+            writer_dropped_count: 0,
+            unknown_opcode_count: 1,
+            last_unknown_opcode: Some(0xBEEF),
+            http_requests_received: 3,
+            http_response_bytes_sent: 65536,
+            active_session_count: 1,
+            last_request_ts_secs: Some(0.5),
+            last_response_ts_secs: Some(0.9),
+            decompressed_size_limit_exceeded_count: 1,
+            ..Default::default()
+        };
+        snap.messages_recv_by_opcode.insert(1, 10);
+        snap.messages_recv_by_opcode.insert(5, 2);
+        snap.messages_send_by_opcode.insert(3, 7);
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+
+        // Transport common.
+        assert!(json.contains("\"bytes_in\": 4096"));
+        assert!(json.contains("\"bytes_out\": 2048"));
+        assert!(json.contains("\"ping_recv_count\": 2"));
+        assert!(json.contains("\"writer_dropped_count\": 0"));
+
+        // Baseline additions.
+        assert!(json.contains("\"messages_recv_by_opcode\""));
+        assert!(json.contains("\"1\": 10"));
+        assert!(json.contains("\"5\": 2"));
+        assert!(json.contains("\"messages_send_by_opcode\""));
+        assert!(json.contains("\"3\": 7"));
+        assert!(json.contains("\"last_unknown_opcode\": 48879"));
+        assert!(json.contains("\"unknown_opcode_count\": 1"));
+
+        // HTTP / WebDAV specifics.
+        assert!(json.contains("\"http_requests_received\": 3"));
+        assert!(json.contains("\"http_response_bytes_sent\": 65536"));
+        assert!(json.contains("\"active_session_count\": 1"));
+        assert!(json.contains("\"last_request_ts_secs\": 0.5"));
+        assert!(json.contains("\"last_response_ts_secs\": 0.9"));
+        assert!(json.contains("\"decompressed_size_limit_exceeded_count\": 1"));
     }
 
     #[test]
@@ -3242,11 +3781,6 @@ mod tests {
             s.client_keepalive_send_count = 7;
             s.last_client_keepalive_send_ts_secs = Some(305.5);
         }
-        {
-            let mut s = snapshots.main.lock().unwrap();
-            s.client_keepalive_send_count = 11;
-            s.last_client_keepalive_send_ts_secs = Some(110.0);
-        }
 
         let per_channel = DisconnectCause::collect_per_channel(&snapshots);
 
@@ -3254,13 +3788,12 @@ mod tests {
         assert_eq!(inputs.client_keepalive_send_count, 7);
         assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
 
-        let main = per_channel.get("main").expect("main entry missing");
-        assert_eq!(main.client_keepalive_send_count, 11);
-        assert_eq!(main.last_client_keepalive_send_ts_secs, Some(110.0));
-
-        // The other channels do not yet implement keepalive, so the
-        // fields default to 0 / None.
-        for ch in ["display", "cursor", "playback", "usbredir", "webdav"] {
+        // Only the inputs channel implements a client-side keepalive;
+        // every other channel reports zero / None in the uniform
+        // PerChannelDiagnostics shape.
+        for ch in [
+            "main", "display", "cursor", "playback", "usbredir", "webdav",
+        ] {
             let entry = per_channel
                 .get(ch)
                 .unwrap_or_else(|| panic!("missing {}", ch));

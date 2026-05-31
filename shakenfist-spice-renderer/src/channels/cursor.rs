@@ -45,6 +45,16 @@ pub struct CursorChannel {
     last_ping_recv_ts_secs: Option<f64>,
     /// Phase-02: see `MainChannel::capture_dropped_count`.
     capture_dropped_count: u64,
+    /// Per-opcode receive counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts; flushed to snapshot by
+    /// `update_snapshot`.
+    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent unrecognised receive opcode.
+    last_unknown_opcode: Option<u16>,
+    /// Count of unrecognised receive opcodes.
+    unknown_opcode_count: u64,
 }
 
 impl CursorChannel {
@@ -82,6 +92,10 @@ impl CursorChannel {
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
             capture_dropped_count: 0,
+            messages_recv_by_opcode: std::collections::BTreeMap::new(),
+            messages_send_by_opcode: std::collections::BTreeMap::new(),
+            last_unknown_opcode: None,
+            unknown_opcode_count: 0,
         }
     }
 
@@ -189,6 +203,10 @@ impl CursorChannel {
                 payload.len() as u32,
             );
         }
+
+        // Increment per-opcode recv counter before dispatch so
+        // both known and unknown opcodes are counted uniformly.
+        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
 
         match msg_type {
             cursor_server::INIT => {
@@ -381,9 +399,11 @@ impl CursorChannel {
                 self.repaint_notify.notify_one();
             }
 
-            _ => {
+            unknown => {
                 // Unknown message — log hex once, silent on repeat.
-                logging::log_unknown_once("cursor", msg_type, payload);
+                logging::log_unknown_once("cursor", unknown, payload);
+                self.unknown_opcode_count += 1;
+                self.last_unknown_opcode = Some(unknown);
             }
         }
 
@@ -485,6 +505,10 @@ impl CursorChannel {
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
+        snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
+        snap.last_unknown_opcode = self.last_unknown_opcode;
+        snap.unknown_opcode_count = self.unknown_opcode_count;
     }
 
     async fn send_ack(&mut self) -> Result<()> {
@@ -501,6 +525,8 @@ impl CursorChannel {
             logging::log_message("sent", "cursor", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("cursor", msg_type, msg_name, data);
+        // Increment per-opcode send counter here — single send path.
+        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
         let result = self.send(data).await;
         self.update_snapshot();
         result

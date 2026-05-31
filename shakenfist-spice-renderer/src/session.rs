@@ -38,6 +38,7 @@ use crate::channels::{
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
 use crate::log_config::LogConfig;
+use crate::mm_clock::MmClock;
 use crate::notification_sink::NotificationSink;
 use crate::snapshots::ChannelSnapshots;
 use crate::traffic::TrafficSink;
@@ -90,8 +91,19 @@ pub async fn run_connection(
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    image_cache_cap_bytes: usize,
+    glz_dictionary_cap_bytes: usize,
 ) -> Result<()> {
     let client = SpiceClient::new(config)?;
+
+    // Shared mm_time clock. The main channel writes to it from
+    // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel
+    // reads from it when building `STREAM_REPORT` payloads
+    // (phase 1F). Constructed here so both channels share the
+    // same `Arc<MmClock>`; not exposed through `run_connection`'s
+    // public signature because it is purely internal plumbing
+    // — host callers never see it.
+    let mm_clock = Arc::new(MmClock::new());
 
     // Connect main channel and run it. The main channel sends
     // ChannelEvents directly into the caller-provided `event_tx`
@@ -121,6 +133,7 @@ pub async fn run_connection(
         clipboard,
         session_init_tx,
         channels_avail_tx,
+        mm_clock.clone(),
     );
 
     // Spawn main channel task
@@ -146,7 +159,7 @@ pub async fn run_connection(
     )> = vec![(ChannelType::Main, main_handle)];
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
-    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary();
+    let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary(glz_dictionary_cap_bytes);
 
     let main_only = std::env::var("RYLL_K1_MAIN_ONLY").is_ok();
     if main_only {
@@ -173,6 +186,8 @@ pub async fn run_connection(
                     snapshots.display.clone(),
                     shared_glz_dictionary.clone(),
                     log_config,
+                    mm_clock.clone(),
+                    image_cache_cap_bytes,
                 );
                 handles.push((
                     ChannelType::Display,
@@ -403,6 +418,8 @@ pub async fn run_headless(
     notifications: Arc<dyn NotificationSink>,
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
+    image_cache_cap_bytes: usize,
+    glz_dictionary_cap_bytes: usize,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -444,6 +461,8 @@ pub async fn run_headless(
             cancel_for_conn,
             None, // headless mode: no clipboard
             None, // headless mode: no opus sink (cpal output only)
+            image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
         )
         .await
     });

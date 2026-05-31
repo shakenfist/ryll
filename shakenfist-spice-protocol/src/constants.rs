@@ -118,13 +118,51 @@ pub mod capabilities {
     pub const DISPLAY_MONITORS_CONFIG: u32 = 1 << 1;
     pub const DISPLAY_COMPOSITE: u32 = 1 << 2;
     pub const DISPLAY_A8_SURFACE: u32 = 1 << 3;
+    // Bit 4: enables server to send STREAM_ACTIVATE_REPORT; we reply
+    // with STREAM_REPORT (opcode 102).  spice-gtk advertises this
+    // unconditionally (channel-display.c:976).
+    pub const DISPLAY_STREAM_REPORT: u32 = 1 << 4;
     pub const DISPLAY_LZ4_COMPRESSION: u32 = 1 << 5;
+    /// Client requests a specific image-compression scheme via
+    /// `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` at link-up
+    /// (SPICE_DISPLAY_CAP_PREF_COMPRESSION = bit 6).
+    pub const DISPLAY_PREF_COMPRESSION: u32 = 1 << 6;
+    /// Client supports multiple codecs in a single session;
+    /// required alongside DISPLAY_CODEC_* to enable codec
+    /// negotiation (SPICE_DISPLAY_CAP_MULTI_CODEC).
+    pub const DISPLAY_MULTI_CODEC: u32 = 1 << 8;
+    /// Client can decode MJPEG video streams
+    /// (SPICE_DISPLAY_CAP_CODEC_MJPEG).
+    pub const DISPLAY_CODEC_MJPEG: u32 = 1 << 9;
+    /// Client can decode H.264 video streams via openh264
+    /// (SPICE_DISPLAY_CAP_CODEC_H264).
+    pub const DISPLAY_CODEC_H264: u32 = 1 << 11;
+    /// Client sends a preferred video-codec list via
+    /// `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` at link-up
+    /// (SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE = bit 12).
+    pub const DISPLAY_PREF_VIDEO_CODEC_TYPE: u32 = 1 << 12;
 
     // Advertise the caps that affect how the guest QXL driver
     // renders.  Without COMPOSITE the guest falls back to a
     // software path that produces far fewer display updates.
-    pub const DEFAULT_DISPLAY: u32 =
-        DISPLAY_SIZED_STREAM | DISPLAY_MONITORS_CONFIG | DISPLAY_COMPOSITE | DISPLAY_A8_SURFACE;
+    // LZ4_COMPRESSION allows the server to choose LZ4 over Zlib
+    // for static-UI regions, improving bandwidth efficiency.
+    // MULTI_CODEC + CODEC_MJPEG + CODEC_H264 tell the server it
+    // may use H.264 for video streams (smaller on the wire than
+    // MJPEG for sustained playback). PREF_COMPRESSION and
+    // PREF_VIDEO_CODEC_TYPE let us actively steer the server's
+    // choice via the matching MSGC opcodes at link-up.
+    pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
+        | DISPLAY_MONITORS_CONFIG
+        | DISPLAY_COMPOSITE
+        | DISPLAY_A8_SURFACE
+        | DISPLAY_STREAM_REPORT
+        | DISPLAY_LZ4_COMPRESSION
+        | DISPLAY_PREF_COMPRESSION
+        | DISPLAY_MULTI_CODEC
+        | DISPLAY_CODEC_MJPEG
+        | DISPLAY_CODEC_H264
+        | DISPLAY_PREF_VIDEO_CODEC_TYPE;
 
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
@@ -222,9 +260,37 @@ pub mod display_server {
 /// Display channel message types (client -> server)
 pub mod display_client {
     pub const INIT: u16 = 101;
+    pub const STREAM_REPORT: u16 = 102;
+    /// SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION (enums.h: INIT=101
+    /// then STREAM_REPORT, PREFERRED_COMPRESSION, GL_DRAW_DONE,
+    /// PREFERRED_VIDEO_CODEC_TYPE). Payload is a single
+    /// `image_compression` u8.
+    pub const PREFERRED_COMPRESSION: u16 = 103;
+    /// SPICE_MSGC_DISPLAY_GL_DRAW_DONE. Not sent by ryll today
+    /// (we don't advertise GL_SCANOUT); listed for opcode
+    /// completeness so the gap to 105 is visible.
+    pub const GL_DRAW_DONE: u16 = 104;
+    /// SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE. Payload is
+    /// a u8 length followed by that many `video_codec_type` u8s
+    /// in preference order (spice.proto:1035-1037).
+    pub const PREFERRED_VIDEO_CODEC_TYPE: u16 = 105;
     pub const ACK_SYNC: u16 = 1;
     pub const ACK: u16 = 2;
     pub const PONG: u16 = 3;
+}
+
+/// SPICE image-compression enum values
+/// (`SPICE_IMAGE_COMPRESSION_*` in enums.h). Used as the payload
+/// of `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION`.
+pub mod image_compression {
+    pub const INVALID: u8 = 0;
+    pub const OFF: u8 = 1;
+    pub const AUTO_GLZ: u8 = 2;
+    pub const AUTO_LZ: u8 = 3;
+    pub const QUIC: u8 = 4;
+    pub const GLZ: u8 = 5;
+    pub const LZ: u8 = 6;
+    pub const LZ4: u8 = 7;
 }
 
 /// Input channel message types (client -> server)
@@ -463,5 +529,56 @@ mod tests {
         // exercised end-to-end via display.rs's match arm —
         // this assertion is just the constant-value backstop.
         assert_eq!(display_server::STREAM_DESTROY_ALL, 126);
+    }
+
+    #[test]
+    fn display_pref_message_opcodes_pinned() {
+        // Phase 07 guard. PREFERRED_COMPRESSION is the third
+        // entry in the SPICE_MSGC_DISPLAY_* enum starting at
+        // INIT=101; PREFERRED_VIDEO_CODEC_TYPE is the fifth.
+        // Counted from spice-protocol/spice/enums.h:523-530:
+        // 101=INIT, 102=STREAM_REPORT, 103=PREFERRED_COMPRESSION,
+        // 104=GL_DRAW_DONE, 105=PREFERRED_VIDEO_CODEC_TYPE. Any
+        // drift here silently breaks server-side preference
+        // handling — the server would reject the message and we
+        // would log nothing client-side.
+        assert_eq!(display_client::PREFERRED_COMPRESSION, 103);
+        assert_eq!(display_client::GL_DRAW_DONE, 104);
+        assert_eq!(display_client::PREFERRED_VIDEO_CODEC_TYPE, 105);
+    }
+
+    #[test]
+    fn display_pref_capabilities_pinned() {
+        // Phase 07 guard. SPICE_DISPLAY_CAP_PREF_COMPRESSION is
+        // bit 6 and SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE is
+        // bit 12 in spice-protocol/spice/protocol.h:137-153
+        // (zero-indexed list: SIZED_STREAM=0 ... PREF_COMPRESSION=6
+        // ... PREF_VIDEO_CODEC_TYPE=12). Drift here would cause
+        // the server to silently ignore our preference messages
+        // because the cap negotiation would have rejected them.
+        assert_eq!(capabilities::DISPLAY_PREF_COMPRESSION, 1 << 6);
+        assert_eq!(capabilities::DISPLAY_PREF_VIDEO_CODEC_TYPE, 1 << 12);
+        assert_eq!(
+            capabilities::DEFAULT_DISPLAY & capabilities::DISPLAY_PREF_COMPRESSION,
+            capabilities::DISPLAY_PREF_COMPRESSION,
+        );
+        assert_eq!(
+            capabilities::DEFAULT_DISPLAY & capabilities::DISPLAY_PREF_VIDEO_CODEC_TYPE,
+            capabilities::DISPLAY_PREF_VIDEO_CODEC_TYPE,
+        );
+    }
+
+    #[test]
+    fn image_compression_auto_glz_value_pinned() {
+        // Phase 07 guard. AUTO_GLZ is the value the link-up
+        // PREFERRED_COMPRESSION message sends (changed from
+        // AUTO_LZ after session 006 showed AUTO_LZ disabled
+        // server-side GLZ entirely, costing 25% bandwidth on a
+        // UI-heavy workload). If this drifts we'd be asking the
+        // server for the wrong scheme without any wire-level
+        // error. Value from spice-protocol/spice/enums.h:196-203
+        // (INVALID=0, OFF=1, AUTO_GLZ=2, AUTO_LZ=3, QUIC=4,
+        // GLZ=5, LZ=6, LZ4=7).
+        assert_eq!(image_compression::AUTO_GLZ, 2);
     }
 }

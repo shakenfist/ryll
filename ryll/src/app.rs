@@ -20,6 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
+use crate::auto_snapshot::AutoSnapshotState;
 use crate::bugreport::{
     chrono_now, encode_png, format_size, AppSnapshot, BugReport, BugReportType, ChannelSnapshots,
     NotificationSnapshotState, PedanticConfig, ReportRegion, SurfaceInfo, TrafficBuffers,
@@ -34,6 +35,7 @@ use crate::notifications::{
     NotificationSource, NotificationStore, SharedNotifications,
 };
 use crate::settings;
+use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
 use shakenfist_spice_renderer::channels::VolumeControl;
@@ -802,6 +804,46 @@ pub struct RyllApp {
     /// flag so reconnect can build a runtime of the same
     /// shape as the initial connect. Diagnostic-only.
     debug_single_thread_runtime: bool,
+
+    /// Byte cap for the display-channel image cache, converted
+    /// from `--image-cache-cap-mib` at startup. Persisted here
+    /// so reconnect passes the same value each time.
+    image_cache_cap_bytes: usize,
+
+    /// Byte cap for the shared GLZ dictionary, converted from
+    /// `--glz-dictionary-cap-mib` at startup. Persisted here so
+    /// reconnect passes the same value each time. Phase 12E.
+    glz_dictionary_cap_bytes: usize,
+
+    // Phase 5 auto-snapshot config. `None` means the mode is
+    // disabled. A fresh task is spawned per session: on each
+    // `SessionInitialized` the previous task (if any) is signalled
+    // via `auto_snapshot_cancel` to retire, then a new task is
+    // spawned with fresh `traffic` / `channel_snapshots` Arcs. The
+    // retire-and-respawn pattern is needed because `reconnect()`
+    // replaces those Arcs wholesale; a long-lived task would
+    // capture clones of the old Arcs and write zips full of stale
+    // / empty data after the first reconnect.
+    auto_snapshot_interval: Option<u64>,
+    auto_snapshot_cap: usize,
+    /// Cancel handle for the currently-running auto-snapshot task,
+    /// if any. `None` before the first spawn and between retire
+    /// and respawn. Setting to `true` causes the loop to exit at
+    /// the next 500 ms poll.
+    auto_snapshot_cancel: Option<Arc<AtomicBool>>,
+    /// Whether the one-shot "Auto-snapshot mode enabled" startup
+    /// notification has been pushed. Latched on the first spawn
+    /// so per-reconnect respawns don't repeat the notification.
+    auto_snapshot_startup_notified: bool,
+
+    /// Phase 8: most recent time the streaming-flap notification
+    /// fired. Used by `streaming_state::classify` to enforce the
+    /// 60 s cool-down between repeat warnings. `None` until the
+    /// first fire of the session; never cleared (reconnect resets
+    /// the snapshot data the heuristic reads from, so a stale
+    /// timestamp only suppresses the next legitimate flap during
+    /// its remaining cool-down — acceptable for v1).
+    last_flap_notification_ts: Option<Instant>,
 }
 
 /// Build the per-connection tokio runtime, honouring the
@@ -907,6 +949,10 @@ impl RyllApp {
         bug_report_dir: Option<PathBuf>,
         obey_guest_size: bool,
         debug_single_thread_runtime: bool,
+        auto_snapshot_interval: Option<u64>,
+        auto_snapshot_cap: Option<usize>,
+        image_cache_cap_bytes: usize,
+        glz_dictionary_cap_bytes: usize,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -1027,6 +1073,8 @@ impl RyllApp {
                     cancel_for_conn,
                     clipboard,
                     /* opus_sink */ None,
+                    image_cache_cap_bytes,
+                    glz_dictionary_cap_bytes,
                 )
                 .await
                 {
@@ -1142,6 +1190,14 @@ impl RyllApp {
             connection_cancel: Some(connection_cancel),
             app_focused,
             debug_single_thread_runtime,
+            image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
+            auto_snapshot_interval,
+            auto_snapshot_cap: auto_snapshot_cap
+                .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
+            auto_snapshot_cancel: None,
+            auto_snapshot_startup_notified: false,
+            last_flap_notification_ts: None,
         }
     }
 
@@ -1245,6 +1301,8 @@ impl RyllApp {
         self.connection_cancel = Some(connection_cancel);
         let focused_for_conn = self.app_focused.clone();
         let single_thread_for_conn = self.debug_single_thread_runtime;
+        let image_cache_cap_bytes = self.image_cache_cap_bytes;
+        let glz_dictionary_cap_bytes = self.glz_dictionary_cap_bytes;
 
         std::thread::spawn(move || {
             let runtime = build_connection_runtime(single_thread_for_conn);
@@ -1285,6 +1343,8 @@ impl RyllApp {
                     cancel_for_conn,
                     clipboard,
                     /* opus_sink */ None,
+                    image_cache_cap_bytes,
+                    glz_dictionary_cap_bytes,
                 )
                 .await
                 {
@@ -1476,6 +1536,61 @@ impl RyllApp {
                         NotifySeverity::Info,
                         format!("Connected to {}:{}", self.target_host, self.target_port),
                     );
+
+                    // Phase 5: spawn the auto-snapshot interval task.
+                    // Retire-and-respawn per session: `reconnect()`
+                    // replaces `self.traffic` and `self.channel_snapshots`
+                    // with fresh instances, so any task spawned for the
+                    // previous session is holding stale Arcs. Signal it
+                    // to retire (it will exit within ~500 ms), then
+                    // spawn a fresh task with the current Arcs.
+                    if let Some(interval_secs) = self.auto_snapshot_interval {
+                        if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
+                            prev_cancel.store(true, Ordering::Relaxed);
+                        }
+                        let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
+                        let cap = self.auto_snapshot_cap;
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        self.auto_snapshot_cancel = Some(cancel.clone());
+
+                        // One-shot startup notification — fire only on
+                        // the first session so reconnects don't spam.
+                        if !self.auto_snapshot_startup_notified {
+                            self.auto_snapshot_startup_notified = true;
+                            self.push_notification(
+                                NotifySeverity::Info,
+                                NotificationSource::Internal,
+                                format!(
+                                    "Auto-snapshot mode enabled \
+                                     — every {}s, max {} snapshots, \
+                                     saving to {}",
+                                    interval_secs,
+                                    cap,
+                                    output_dir.display(),
+                                ),
+                            );
+                        }
+
+                        let state = AutoSnapshotState {
+                            traffic: self.traffic.clone(),
+                            channel_snapshots: self.channel_snapshots.clone(),
+                            app_snapshot: self.app_snapshot.clone(),
+                            notifications: self.notifications.clone(),
+                            target_host: self.target_host.clone(),
+                            target_port: self.target_port,
+                            output_dir,
+                            interval: Duration::from_secs(interval_secs),
+                            cap,
+                            cancel,
+                        };
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("auto-snapshot: failed to build tokio runtime");
+                            rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
+                        });
+                    }
                 }
 
                 ChannelEvent::SurfaceCreated {
@@ -2886,6 +3001,32 @@ impl eframe::App for RyllApp {
         let stats_frame = egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(4, 2))
             .fill(ctx.style().visuals.panel_fill);
+        // Phase 8: compute the live streaming-state classification
+        // once per frame. The result drives the status-bar
+        // indicator below; a fired notification (Flapping +
+        // cool-down elapsed) is pushed before we render so the
+        // bell can pick it up on the same frame.
+        let (streaming_state, streams_active_for_tooltip) = {
+            let snap = self.channel_snapshots.display.lock().unwrap();
+            let (state, notif) = streaming_state::classify(
+                &snap,
+                Instant::now(),
+                self.traffic.session_start(),
+                self.last_flap_notification_ts,
+            );
+            let active = snap.streams_active.clone();
+            drop(snap);
+            if let Some(notification) = notif {
+                self.last_flap_notification_ts = Some(Instant::now());
+                self.push_notification(
+                    NotifySeverity::Warn,
+                    NotificationSource::Internal,
+                    notification.message,
+                );
+            }
+            (state, active)
+        };
+
         egui::TopBottomPanel::bottom("stats")
             .frame(stats_frame)
             .show_animated(ctx, !is_maximized, |ui| {
@@ -2934,6 +3075,22 @@ impl eframe::App for RyllApp {
                         ui.label("Cadence: ON");
                     }
 
+                    // Phase 5: show auto-snapshot counter only when the mode
+                    // is active (hiding the line avoids visual noise in normal
+                    // sessions).
+                    if let Some(_interval_secs) = self.auto_snapshot_interval {
+                        let (saved, _pruned) = self
+                            .app_snapshot
+                            .lock()
+                            .map(|s| (s.auto_snapshots_saved, s.auto_snapshots_pruned))
+                            .unwrap_or((0, 0));
+                        ui.separator();
+                        ui.label(format!(
+                            "Auto-snapshot: {}/{}",
+                            saved, self.auto_snapshot_cap
+                        ));
+                    }
+
                     if let ReconnectState::Pending { attempt, .. } = &self.reconnect_state {
                         ui.separator();
                         ui.colored_label(
@@ -2962,6 +3119,83 @@ impl eframe::App for RyllApp {
                         {
                             vol.set_volume(v as u8);
                         }
+
+                        // Phase 8: live streaming indicator. Sits to
+                        // the left of the volume controls (which stay
+                        // rightmost as the operator-action zone) and
+                        // to the right of the bandwidth sparkline.
+                        // Glyph: ▶ (U+25B6) — a Unicode triangle that
+                        // egui's default font renders cleanly on
+                        // every platform we ship to. 📹 is a colour
+                        // emoji and renders as a tofu box in egui's
+                        // monochrome font; ▶ keeps the visual cue
+                        // (something "playing") without the font
+                        // problem.
+                        let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
+                            match &streaming_state {
+                                StreamingState::Off => (
+                                    egui::Color32::from_rgb(120, 120, 120),
+                                    vec!["No streams active".to_string()],
+                                ),
+                                StreamingState::Active => {
+                                    let mut lines =
+                                        Vec::with_capacity(streams_active_for_tooltip.len() + 1);
+                                    lines.push(format!(
+                                        "{} active stream{}",
+                                        streams_active_for_tooltip.len(),
+                                        if streams_active_for_tooltip.len() == 1 {
+                                            ""
+                                        } else {
+                                            "s"
+                                        },
+                                    ));
+                                    let now_secs = self.traffic.elapsed().as_secs_f64();
+                                    for s in &streams_active_for_tooltip {
+                                        let codec = match s.codec_type {
+                                            1 => "MJPEG".to_string(),
+                                            2 => "VP8".to_string(),
+                                            3 => "H264".to_string(),
+                                            4 => "VP9".to_string(),
+                                            5 => "H265".to_string(),
+                                            other => format!("codec{}", other),
+                                        };
+                                        let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                        lines.push(format!(
+                                            "codec={} {}x{} frames={} lifetime={:.0}s",
+                                            codec,
+                                            s.stream_width,
+                                            s.stream_height,
+                                            s.frames_decoded_ok,
+                                            lifetime,
+                                        ));
+                                    }
+                                    (egui::Color32::from_rgb(60, 180, 60), lines)
+                                }
+                                StreamingState::RecentlyDestroyed { secs_since } => (
+                                    egui::Color32::from_rgb(220, 160, 60),
+                                    vec![format!("Last stream destroyed {:.1}s ago", secs_since)],
+                                ),
+                                StreamingState::Flapping {
+                                    destroys_in_window,
+                                    window_secs,
+                                    mean_lifetime_secs,
+                                } => (
+                                    egui::Color32::from_rgb(220, 60, 60),
+                                    vec![format!(
+                                        "Streams flapping: {} destroys in {:.0} s, \
+                                         mean lifetime {:.1} s",
+                                        destroys_in_window, window_secs, mean_lifetime_secs,
+                                    )],
+                                ),
+                            };
+                        let icon_text = egui::RichText::new("\u{25B6}").color(icon_colour);
+                        let icon_resp = ui.label(icon_text);
+                        icon_resp.on_hover_ui(|ui| {
+                            for line in &tooltip_lines {
+                                ui.label(line);
+                            }
+                        });
+
                         ui.separator();
 
                         ui.allocate_ui_with_layout(
@@ -3754,6 +3988,19 @@ impl eframe::App for RyllApp {
                                     }
                                 }
 
+                                // Gate button-press / scroll-wheel forwarding on
+                                // whether the pointer is over the SPICE surface,
+                                // so clicks on the status-bar widgets (volume,
+                                // mute, reconnect indicator, etc.) do not leak
+                                // phantom clicks into the guest at
+                                // `last_mouse_pos`. Button-release is forwarded
+                                // unconditionally when the corresponding bit is
+                                // set in `forwarded_buttons`, so a press inside
+                                // the image followed by a release outside it
+                                // does not leave a stuck button in the guest
+                                // (symmetric with the `input_suppressed` path
+                                // below).
+                                let pointer_on_surface = response.contains_pointer();
                                 ctx.input(|i| {
                                     let pos = self.last_mouse_pos.unwrap_or((0, 0));
                                     for button in [
@@ -3761,8 +4008,8 @@ impl eframe::App for RyllApp {
                                         egui::PointerButton::Secondary,
                                         egui::PointerButton::Middle,
                                     ] {
-                                        if i.pointer.button_pressed(button) {
-                                            let spice_btn = mouse_button_to_spice(button);
+                                        let spice_btn = mouse_button_to_spice(button);
+                                        if pointer_on_surface && i.pointer.button_pressed(button) {
                                             self.forwarded_buttons |= spice_btn;
                                             let _ = tx.try_send(InputEvent::MouseDown {
                                                 button: spice_btn,
@@ -3770,8 +4017,9 @@ impl eframe::App for RyllApp {
                                                 y: pos.1,
                                             });
                                         }
-                                        if i.pointer.button_released(button) {
-                                            let spice_btn = mouse_button_to_spice(button);
+                                        if i.pointer.button_released(button)
+                                            && self.forwarded_buttons & spice_btn != 0
+                                        {
                                             self.forwarded_buttons &= !spice_btn;
                                             let _ = tx.try_send(InputEvent::MouseUp {
                                                 button: spice_btn,
@@ -3781,19 +4029,21 @@ impl eframe::App for RyllApp {
                                         }
                                     }
 
-                                    let scroll_y = i.smooth_scroll_delta.y;
-                                    if scroll_y.abs() > 0.5 {
-                                        let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
-                                        let _ = tx.try_send(InputEvent::MouseDown {
-                                            button: btn,
-                                            x: pos.0,
-                                            y: pos.1,
-                                        });
-                                        let _ = tx.try_send(InputEvent::MouseUp {
-                                            button: btn,
-                                            x: pos.0,
-                                            y: pos.1,
-                                        });
+                                    if pointer_on_surface {
+                                        let scroll_y = i.smooth_scroll_delta.y;
+                                        if scroll_y.abs() > 0.5 {
+                                            let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
+                                            let _ = tx.try_send(InputEvent::MouseDown {
+                                                button: btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                            let _ = tx.try_send(InputEvent::MouseUp {
+                                                button: btn,
+                                                x: pos.0,
+                                                y: pos.1,
+                                            });
+                                        }
                                     }
                                 });
                             }

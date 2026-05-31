@@ -1,8 +1,10 @@
 mod app;
+mod auto_snapshot;
 mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
+mod streaming_state;
 mod web;
 #[cfg(not(feature = "capture"))]
 mod capture {
@@ -72,6 +74,16 @@ use crate::notifications::{
 /// itself has no business knowing about a process-global signal
 /// flag, so this lives strictly host-side.
 pub static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Convert a MiB cap (parsed as u64) into a byte count usable as
+/// `usize`. Uses saturating arithmetic so that on 32-bit platforms
+/// a large user input is clamped to `usize::MAX` rather than
+/// silently truncated by the `as usize` cast.
+fn mib_to_usize_bytes(mib: u64) -> usize {
+    mib.saturating_mul(1024 * 1024)
+        .try_into()
+        .unwrap_or(usize::MAX)
+}
 
 fn main() -> Result<()> {
     // Baseline the runtime-metrics uptime clock at process
@@ -303,6 +315,8 @@ fn run_headless(
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let cadence = args.cadence;
     let monitors = args.monitors;
+    let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
+    let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
 
     // Build the host-side scaffolding the renderer's `run_headless`
     // expects. Notifications, traffic, snapshots, and the byte
@@ -389,6 +403,8 @@ fn run_headless(
             notifications_sink,
             log_config,
             cancel,
+            image_cache_cap_bytes,
+            glz_dictionary_cap_bytes,
         )
         .await;
 
@@ -445,6 +461,8 @@ fn run_web(
     let web_tls_cert = args.web_tls_cert.clone();
     let web_tls_key = args.web_tls_key.clone();
     let monitors = args.monitors;
+    let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
+    let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
 
     let runtime = tokio::runtime::Runtime::new()
         .with_context(|| "failed to construct tokio runtime for --web")?;
@@ -599,6 +617,8 @@ fn run_web(
                 connection_cancel,
                 /* clipboard */ None,
                 /* opus_sink */ Some(opus_sink_dyn),
+                image_cache_cap_bytes,
+                glz_dictionary_cap_bytes,
             )
             .await
         });
@@ -771,6 +791,22 @@ fn run_gui(
     let paste_char_delay_ms = args.paste_char_delay_ms;
     let bug_report_dir = args.bug_report_dir.clone();
     let debug_single_thread_runtime = args.debug_single_thread_runtime;
+    let auto_snapshot_interval = args.auto_snapshot_interval;
+    let auto_snapshot_cap = args.auto_snapshot_cap;
+    let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
+    let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
+
+    if let Some(interval) = auto_snapshot_interval {
+        if interval < 10 {
+            tracing::warn!(
+                "auto-snapshot: --auto-snapshot-interval {} is below the recommended \
+                 minimum of 10 s (BugReport::new samples metrics for ~2 s; \
+                 shorter intervals cause overlapping samples)",
+                interval
+            );
+        }
+    }
+
     eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
@@ -789,6 +825,10 @@ fn run_gui(
                 bug_report_dir,
                 obey_guest_size,
                 debug_single_thread_runtime,
+                auto_snapshot_interval,
+                auto_snapshot_cap,
+                image_cache_cap_bytes,
+                glz_dictionary_cap_bytes,
             )))
         }),
     )

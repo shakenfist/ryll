@@ -751,10 +751,36 @@ Values from `spice-protocol/spice/enums.h`:
 |  108 | JpegAlpha        | Not implemented |
 |  109 | LZ4              | Supported (per-row compressed) |
 
-MJPEG is handled separately: it is not an `ImageType` but a streaming video
-codec delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages. The codec
-type byte in the stream header selects MJPEG (value 1). Frames are decoded
-inline in `display.rs` using the same JPEG path as `ImageType::Jpeg`.
+Streaming video codecs (MJPEG and H.264) are handled separately: they are not
+`ImageType`s but delivered via `STREAM_DATA` / `STREAM_DATA_SIZED` messages.
+The codec type byte in the stream header selects the decoder. At `STREAM_CREATE`,
+`shakenfist_spice_compression::video::for_stream(codec_type, jpeg_decoder)`
+constructs a boxed `VideoDecoder` stored on `StreamState`. Each `STREAM_DATA`
+packet is dispatched through `stream.video_decoder.decode(packet)` regardless
+of codec — the per-codec logic lives in the impl, not the dispatch.
+
+Currently supported codec types:
+- `1` (MJPEG): decoded by `MJpegVideoDecoder`, which wraps the
+  platform-optimised JPEG backend and maintains a DHT cache for frames
+  that omit the Huffman tables after the first. JPEG decoder selection
+  and architecture details are in `docs/plans/PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
+- `3` (H.264): decoded via `H264VideoDecoder` using the openh264 software
+  decoder; H.264 is typically more bandwidth-efficient than MJPEG for
+  sustained video playback.
+
+**JPEG decoder selection** (used by `MJpegVideoDecoder`) runs once per
+display channel at startup and selects the fastest available backend:
+- **macOS**: ImageIO (uses Apple Silicon's dedicated media block when available)
+- **Windows**: WIC (uses hardware codec support where available)
+- **Linux**: VA-API (hardware-accelerated JPEG via libva, probed at runtime
+  via dlopen; gracefully unavailable on systems without VA-API drivers)
+- **Fallback**: libjpeg-turbo via the `mozjpeg` crate (vendored, no runtime
+  dependency), then pure-Rust `jpeg-decoder` crate as a last resort
+
+The active decoder backend name is exposed in the channel snapshot as
+`mjpeg_decoder_backend` (from `video_decoder.name()`) so bug reports identify
+which path was used. Aggregate decode-duration statistics (min/max/mean) are
+tracked per display channel and included in bug reports for performance analysis.
 
 ### Wire format differences
 
@@ -992,6 +1018,51 @@ When the user clicks the button:
   report uses the current `TrafficBuffers` and tags
   `PostEventOnly` / `postevent`. Useful, but without the
   run-up to the event.
+
+### Auto-snapshot mode (`--auto-snapshot-interval`)
+
+Phase 5 of the stream-caps-and-flap plan adds a
+flight-data-recorder mode. When `--auto-snapshot-interval N`
+is set, a background tokio task fires a complete bug report
+every N seconds into `<bug-report-dir>/auto-snapshots/`. This
+captures full session state regardless of whether the operator
+notices a symptom in real time — useful for intermittent issues
+like audio silences that last only 30 seconds.
+
+Key design points:
+
+- `BugReportType::AutoSnapshot` — a new variant whose
+  `channel_name()` returns `"all"`. This causes `BugReport::
+  assemble` to embed a merged JSON object in `channel-state.json`
+  containing every channel's snapshot (display, inputs, cursor,
+  main, playback, usbredir, webdav). The traffic pcap also covers
+  all channels via `TrafficBuffers::drain_all_pcap_bytes()`.
+- `AutoSnapshotState` in `ryll/src/auto_snapshot.rs` bundles the
+  Arc handles the task needs (traffic, channel snapshots, app
+  snapshot, notifications, target host/port, output dir, cap,
+  interval). All are already Arc-backed on `RyllApp`.
+- The task runs in its own std::thread with a dedicated
+  `tokio::runtime::Builder::new_current_thread` runtime, spawned
+  once on the first `ChannelEvent::SessionInitialized` (a latch
+  prevents a second spawn on reconnect).
+- A startup `NotifySeverity::Info` notification confirms the mode
+  is active: `"Auto-snapshot mode enabled — every {N}s, max {cap}
+  snapshots, saving to {path}"`.
+- The stats panel renders `"Auto-snapshot: {saved}/{cap}"` when
+  the mode is active; the line is hidden when disabled.
+- Rolling cap: after each successful write, `prune_to_cap` lists
+  `ryll-auto-snapshot-*.zip` in the output dir, sorts
+  lexicographically (= chronologically by filename construction),
+  and deletes the oldest beyond cap. `auto_snapshots_pruned`
+  in `AppSnapshot` tracks the total deleted.
+- Write failures: `warn!` always; a `NotifySeverity::Warn`
+  notification is pushed at most once per 5-minute cool-down so a
+  persistent disk error does not spam the panel. The interval task
+  continues regardless.
+- Filename scheme:
+  `ryll-auto-snapshot-2026-05-18T20-37-42Z-T+47.3s.zip` —
+  UTC ISO timestamp (colons replaced with hyphens for Windows
+  filesystem portability) plus session uptime suffix.
 
 The button's visual state reflects which path a click would
 take: weak/dimmed text + a "snapshot expired" hover tooltip
@@ -1832,11 +1903,23 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter (phase 2), ACK state, bytes in/out |
-| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), pcap writer-queue drop counter, bytes in/out |
-| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, pcap writer-queue drop counter, bytes in/out |
-| `MainSnapshot` | Main | Session ID, pcap writer-queue drop counter, bytes in/out |
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter (phase 2), ACK state, bytes in/out, image cache statistics (cap in bytes, LRU eviction count, bytes evicted) from `BoundedImageCache` (phase 12) |
+| `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `MainSnapshot` | Main | Session ID, mm_time, keepalive, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
+| `PlaybackSnapshot` | Playback | Per-session audio metadata (`PlaybackSessionInfo`), start/stop counts, data-packet and decode counters, PCM byte counts, recent decode-duration ring (cap 64), device-side atomics (callbacks, underruns, ring overflows, samples consumed), volume/mute/latency params, per-opcode recv/send maps |
+| `UsbredirSnapshot` | Usbredir | Redirected device list (`RedirectedDevice`), device connect/disconnect totals with timestamps, server/client capability bitmasks from hello handshake, per-opcode recv/send maps, unknown-opcode counter, bytes in/out |
+| `WebdavSnapshot` | Webdav | Transport common + per-opcode recv/send maps (phase 4E, pending) |
 | `AppSnapshot` | App (UI) | FPS, bandwidth, surfaces, cursor position, uptime, video encoder-queue drop counter (phase 3), render-side mpsc-queue lag aggregates for `ImageReady*` and `DisplayMark` events (phase 4) |
+
+All channel snapshots share an eight-field transport common baseline
+(`bytes_in`, `bytes_out`, `last_recv_ts_secs`, `last_send_ts_secs`,
+`ping_recv_count`, `pong_send_count`, `last_ping_recv_ts_secs`,
+`writer_dropped_count`) plus four baseline additions
+(`messages_recv_by_opcode`, `messages_send_by_opcode`,
+`last_unknown_opcode`, `unknown_opcode_count`). See
+`docs/channel-diagnostics-audit.md` for the full audit matrix and
+minimum-baseline rationale.
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside

@@ -18,8 +18,13 @@
 //! Extracted from the
 //! [ryll](https://github.com/shakenfist/ryll) SPICE client.
 
+pub mod byte_bounded_lru;
+
 #[cfg(feature = "glz")]
 pub mod glz;
+
+#[cfg(feature = "jpeg")]
+pub mod jpeg;
 
 #[cfg(feature = "lz")]
 pub mod lz;
@@ -30,8 +35,40 @@ pub mod lz4;
 #[cfg(feature = "quic")]
 pub mod quic;
 
+/// Video decoder abstraction for SPICE video streams.
+///
+/// The `video` module is gated on the `jpeg` feature because
+/// [`video::MJpegVideoDecoder`] depends on [`jpeg::JpegDecoder`].
+/// Enabling the default feature set (which includes `jpeg`)
+/// makes the entire module available.
+#[cfg(feature = "jpeg")]
+pub mod video;
+
+pub use byte_bounded_lru::{ByteBoundedLru, InsertOutcome, RefusedReason};
+
 #[cfg(feature = "glz")]
 pub use glz::{decompress_glz, GlzDictionary};
+
+#[cfg(feature = "jpeg")]
+pub use jpeg::{best_for_platform, DecodedJpeg, JpegDecoder, JpegDecoderRsDecoder};
+
+#[cfg(feature = "jpeg")]
+pub use video::{
+    for_stream, DecodedFrame, MJpegVideoDecoder, VideoDecoder, VideoDecoderError,
+    SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
+};
+
+#[cfg(feature = "mozjpeg")]
+pub use jpeg::MozJpegDecoder;
+
+#[cfg(all(feature = "jpeg", target_os = "macos"))]
+pub use jpeg::ImageIoDecoder;
+
+#[cfg(all(feature = "jpeg", target_os = "windows"))]
+pub use jpeg::WicDecoder;
+
+#[cfg(all(feature = "jpeg", feature = "mozjpeg", target_os = "linux"))]
+pub use jpeg::VaapiDecoder;
 
 #[cfg(feature = "lz")]
 pub use lz::decompress_lz;
