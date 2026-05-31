@@ -713,6 +713,17 @@ impl MainChannel {
                     last_arm = "stuck_agent_check";
                     // Phase 9C: Check if agent requests are stuck and emit
                     // Warn notification if conditions are met.
+                    //
+                    // NOTE for future maintainers: this check anchors on
+                    // `last_monitors_config_sent_at`, which is only refreshed
+                    // for VD_AGENT_MONITORS_CONFIG sends. When DISPLAY_CONFIG
+                    // (or any further type) is added to
+                    // REPLY_ELIGIBLE_AGENT_REQUEST_TYPES, this anchor must be
+                    // generalised — e.g. replaced with a
+                    // `last_reply_eligible_request_sent_at` field updated in
+                    // `send_agent_data_message` whenever the type matches.
+                    // Otherwise stuck-DISPLAY_CONFIG requests will never trip
+                    // this notification.
                     if self.outstanding_agent_request_count == 0 {
                         // No outstanding requests; healthy state.
                         last_arm = "stuck_agent_check+no_outstanding";
