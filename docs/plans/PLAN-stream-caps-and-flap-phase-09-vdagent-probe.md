@@ -184,7 +184,7 @@ the agent is connected and we have actually sent a probe.
 - `/srv/src-reference/spice/spice-protocol/spice/vd_agent.h`
   for `VDAgentReply` layout and the list of REPLY-eligible
   request types.
-- Phase 1 (`PLAN-stream-caps-and-flap-phase-01-stream-report.md`)
+- Phase 1 (`completed/PLAN-stream-caps-and-flap-phase-01-stream-report.md`)
   for the "per-channel state + snapshot write" pattern.
 - Phase 8 (`PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md`)
   for the cool-down notification pattern (the streaming flap
