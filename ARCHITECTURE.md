@@ -871,6 +871,13 @@ important:
 | MONITORS_CONFIG | 1 | Multi-monitor configuration |
 | COMPOSITE | 2 | Compositing operations (DRAW_COMPOSITE opcode 318) |
 | A8_SURFACE | 3 | Alpha-only surface support |
+| STREAM_REPORT | 4 | Streaming video diagnostics (stream lifecycle notifications) |
+| LZ4_COMPRESSION | 5 | LZ4-compressed image payloads (fallback from Zlib) |
+| PREF_COMPRESSION | 6 | Client preference messaging for image compression algorithm |
+| MULTI_CODEC | 8 | Multiple video codec support in streaming |
+| CODEC_MJPEG | 9 | MJPEG video codec for streaming |
+| CODEC_H264 | 11 | H.264 video codec for streaming |
+| PREF_VIDEO_CODEC_TYPE | 12 | Client preference messaging for video codec selection |
 
 Without **COMPOSITE**, the guest QXL driver falls back to a slow
 software rendering path that produces only `draw_copy` messages with
