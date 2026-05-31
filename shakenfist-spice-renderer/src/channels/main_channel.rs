@@ -115,7 +115,6 @@ const VD_AGENT_PROTOCOL: u32 = 1;
 #[allow(dead_code)]
 const VD_AGENT_MOUSE_STATE: u32 = 1;
 const VD_AGENT_MONITORS_CONFIG: u32 = 2;
-#[allow(dead_code)]
 const VD_AGENT_REPLY: u32 = 3;
 const VD_AGENT_CLIPBOARD: u32 = 4;
 #[allow(dead_code)]
@@ -1116,9 +1115,10 @@ impl MainChannel {
                 self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
-                // Per PR #105 review item 1: drop phase-09 probe
-                // bookkeeping tied to the previous agent instance.
-                // Without this, after the next agent reconnect:
+                // Per PR #105 review items 1 + 8: drop phase-09
+                // probe bookkeeping tied to the previous agent
+                // instance. Without this, after the next agent
+                // reconnect:
                 //   - outstanding_agent_request_count would still
                 //     count requests the old agent will never reply
                 //     to (spurious stuck-agent Warn notification),
@@ -1126,14 +1126,16 @@ impl MainChannel {
                 //     match the next REPLY and yield a multi-minute
                 //     lag measurement that pollutes recent_*_lag_us,
                 //   - the cool-down timer would suppress a real
-                //     new-agent stuck notification.
-                // `last_monitors_config` is intentionally NOT
-                // cleared — the cached payload is still the most
-                // recent thing we tried to send and the probe will
-                // re-use it if the same agent (or a new one)
-                // reconnects.
+                //     new-agent stuck notification,
+                //   - a cached monitors-config from the prior
+                //     session could be re-sent by the probe to the
+                //     new agent, potentially with stale geometry.
+                // Clear all of them; the new session's first real
+                // monitors-config send (on resize or session bring-
+                // up) will re-populate the cache from current state.
                 self.agent_request_send_ts.clear();
                 self.outstanding_agent_request_count = 0;
+                self.last_monitors_config = None;
                 self.last_monitors_config_sent_at = None;
                 self.last_stuck_agent_notification_at = None;
             }
