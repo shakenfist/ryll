@@ -2385,8 +2385,17 @@ mod tests {
         assert!(json.contains("\"last_agent_reply_ts_secs\": 30.5"));
         assert!(json.contains("\"last_agent_reply_lag_us\": 850"));
         assert!(json.contains("\"recent_agent_reply_lag_us\""));
-        assert!(json.contains("820"));
         assert!(json.contains("\"outstanding_agent_request_count\": 1"));
+        // Stronger check on the ring: deserialise and assert the
+        // exact array contents. The substring check this replaces
+        // ("820" anywhere in the JSON) would have matched a stray
+        // 820 in any other numeric field — fine today, brittle as
+        // the snapshot grows. Per PR #105 review #2 item 9.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed["recent_agent_reply_lag_us"],
+            serde_json::json!([820, 850])
+        );
     }
 
     #[test]
