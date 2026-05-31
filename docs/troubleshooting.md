@@ -599,6 +599,39 @@ IDs and per-device byte counts) and `device_connect_total` /
 the `webdav` section includes `http_requests_received` (HTTP request count)
 and `active_session_count` (currently-open connections).
 
+## Guest agent diagnostics
+
+The main channel tracks the responsiveness of the guest agent (vdagent) by
+sending periodic liveness probes and measuring the round-trip time of replies.
+Every 30 seconds, ryll sends the guest agent a `VD_AGENT_MONITORS_CONFIG`
+message (the display layout); the agent acknowledges with `VD_AGENT_REPLY`.
+The lag between send and reply (in microseconds) measures how quickly the
+agent can respond to requests. If the agent fails to reply for more than
+5 seconds, a Warn notification appears in the status panel. This mechanism
+helps diagnose guest agent freezes without log parsing.
+
+**Agent reply-lag fields in `MainSnapshot` (visible in Connection bug reports):**
+
+| Field | Meaning |
+|-------|---------|
+| `agent_request_count` | Cumulative liveness probes sent (increments every ~30s when connected). |
+| `agent_reply_count` | Cumulative `VD_AGENT_REPLY` messages received. Should equal `agent_request_count` on a healthy agent (off by at most one in flight). |
+| `agent_reply_error_count` | Replies with non-zero error code. Should be zero on a healthy agent. |
+| `last_agent_reply_ts_secs` | Session-relative seconds of the most recent REPLY. |
+| `last_agent_reply_lag_us` | Microseconds between most recent probe send and matched REPLY. Healthy agents reply in well under 100 ms. |
+| `recent_agent_reply_lag_us` | Ring of the last 16 reply-lag measurements (in microseconds) for detecting trends. Use min/max/mean to spot when responsiveness degrades. |
+| `outstanding_agent_request_count` | Number of probes sent without a matched REPLY yet. Zero on healthy agents; persistently > 0 indicates a stuck or unresponsive agent. |
+
+**Interpreting Warn notifications:**
+
+When `outstanding_agent_request_count > 0` continuously for more than 5
+seconds after a probe, a Warn notification fires every 60 seconds (to keep
+the notification panel quiet during sustained stalls). The message reads:
+`"Guest agent is not replying — last probe sent {elapsed}s ago, {count}
+request(s) outstanding"`. This indicates the guest agent has stopped
+responding to configuration requests and may require a reboot or diagnosis
+on the server side.
+
 ## Auto-snapshot mode for intermittent issues
 
 When you're hunting for an intermittent issue (audio that drops silent for 30

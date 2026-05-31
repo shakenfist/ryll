@@ -730,6 +730,16 @@ byte-shape assertion respectively — so a regression in
 either the negotiation logic or the wire format fails
 loudly during `cargo test`.
 
+#### Agent reply-lag tracking
+
+The main channel tracks guest agent responsiveness by measuring the round-trip
+time of `VD_AGENT_REPLY` messages to periodic `VD_AGENT_MONITORS_CONFIG`
+probes. Reply-lag fields (`agent_request_count`, `agent_reply_count`,
+`last_agent_reply_lag_us`, `recent_agent_reply_lag_us`, and
+`outstanding_agent_request_count`) are exposed on `MainSnapshot` for
+bug reports and diagnostics. See the "Guest agent diagnostics" section
+in [troubleshooting.md](docs/troubleshooting.md) for interpretation.
+
 ## Image Types and Compression
 
 SPICE uses several image types for display updates. The type is
