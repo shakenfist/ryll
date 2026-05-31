@@ -508,6 +508,28 @@ pub struct MainSnapshot {
     /// Total count of unrecognised opcodes received since
     /// session start.
     pub unknown_opcode_count: u64,
+    /// Number of vdagent-mediated requests sent that expect a
+    /// REPLY (today: VD_AGENT_MONITORS_CONFIG). Cumulative.
+    pub agent_request_count: u32,
+    /// Number of VD_AGENT_REPLY messages received. Cumulative.
+    pub agent_reply_count: u32,
+    /// Number of REPLY messages with non-zero `error` field
+    /// (anything other than VD_AGENT_SUCCESS = 0).
+    pub agent_reply_error_count: u32,
+    /// Session-relative seconds at the most recent REPLY
+    /// receipt. None until the first REPLY arrives.
+    pub last_agent_reply_ts_secs: Option<f64>,
+    /// Microseconds between the most recent matched request
+    /// send and its REPLY. None until the first REPLY arrives.
+    pub last_agent_reply_lag_us: Option<u32>,
+    /// Bounded ring of recent reply lags (µs), oldest first.
+    /// Cap = 16 (same shape as `mjpeg_decode_recent_*`).
+    pub recent_agent_reply_lag_us: VecDeque<u32>,
+    /// Number of REPLY-eligible requests sent without a matching
+    /// REPLY yet. Increments on send; decrements (saturating)
+    /// on REPLY receipt. Persistently > 0 means the agent is
+    /// wedged.
+    pub outstanding_agent_request_count: u32,
 }
 
 /// SPICE playback audio codec, as inferred from the most

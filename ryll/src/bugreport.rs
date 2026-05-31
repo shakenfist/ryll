@@ -2351,11 +2351,20 @@ mod tests {
             last_mm_time_set_ts_secs: Some(12.5),
             unknown_opcode_count: 2,
             last_unknown_opcode: Some(0x1234),
+            // Phase-09A vdagent reply-lag tracking.
+            agent_request_count: 5,
+            agent_reply_count: 4,
+            agent_reply_error_count: 1,
+            last_agent_reply_ts_secs: Some(30.5),
+            last_agent_reply_lag_us: Some(850),
+            outstanding_agent_request_count: 1,
             ..Default::default()
         };
         snap.messages_recv_by_opcode.insert(10, 3);
         snap.messages_recv_by_opcode.insert(20, 1);
         snap.messages_send_by_opcode.insert(5, 8);
+        snap.recent_agent_reply_lag_us.push_back(820);
+        snap.recent_agent_reply_lag_us.push_back(850);
         let json = serde_json::to_string_pretty(&snap).unwrap();
         assert!(json.contains("\"session_id\": 42"));
         assert!(json.contains("\"writer_dropped_count\": 2"));
@@ -2369,6 +2378,15 @@ mod tests {
         assert!(json.contains("\"5\": 8"));
         assert!(json.contains("\"last_unknown_opcode\": 4660"));
         assert!(json.contains("\"unknown_opcode_count\": 2"));
+        // Phase-09A: vdagent reply-lag fields.
+        assert!(json.contains("\"agent_request_count\": 5"));
+        assert!(json.contains("\"agent_reply_count\": 4"));
+        assert!(json.contains("\"agent_reply_error_count\": 1"));
+        assert!(json.contains("\"last_agent_reply_ts_secs\": 30.5"));
+        assert!(json.contains("\"last_agent_reply_lag_us\": 850"));
+        assert!(json.contains("\"recent_agent_reply_lag_us\""));
+        assert!(json.contains("820"));
+        assert!(json.contains("\"outstanding_agent_request_count\": 1"));
     }
 
     #[test]

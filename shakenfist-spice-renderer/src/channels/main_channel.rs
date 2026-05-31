@@ -1,6 +1,7 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::Notify as RepaintNotify;
@@ -115,6 +116,17 @@ const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5;
 const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6;
 const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 
+/// Request opcodes that the guest agent acknowledges with a
+/// `VD_AGENT_REPLY` message. To add another type, append its
+/// constant here — that is the only change needed on the send
+/// side.
+const REPLY_ELIGIBLE_AGENT_REQUEST_TYPES: &[u32] = &[VD_AGENT_MONITORS_CONFIG];
+
+/// Maximum entries retained in the recent-reply-lag ring.
+/// 16 entries at the 30 s probe cadence (phase 9B) covers
+/// 8 minutes of agent history in a bug report.
+const MAX_RECENT_AGENT_REPLIES: usize = 16;
+
 pub struct MainChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -183,6 +195,32 @@ pub struct MainChannel {
     /// the same `Arc` to compute "now in mm_time" at
     /// `STREAM_REPORT` send time.
     mm_clock: Arc<MmClock>,
+    /// Per-request-type send timestamps for REPLY-eligible
+    /// agent requests. Keyed by VD_AGENT_* opcode. Populated in
+    /// `send_agent_data_message` for types in
+    /// `REPLY_ELIGIBLE_AGENT_REQUEST_TYPES`; consumed on REPLY
+    /// receipt in `handle_agent_message`.
+    agent_request_send_ts: HashMap<u32, Instant>,
+    /// Cumulative count of REPLY-eligible agent requests sent.
+    agent_request_count: u32,
+    /// Cumulative count of VD_AGENT_REPLY messages received.
+    agent_reply_count: u32,
+    /// Cumulative count of REPLY messages with non-zero `error`
+    /// (anything other than VD_AGENT_SUCCESS = 0).
+    agent_reply_error_count: u32,
+    /// Session-relative seconds at the most recent REPLY
+    /// receipt.
+    last_agent_reply_ts_secs: Option<f64>,
+    /// Microseconds between the most recent matched request
+    /// send and its REPLY. None until the first matched REPLY.
+    last_agent_reply_lag_us: Option<u32>,
+    /// Bounded ring of recent reply lags (µs), oldest first.
+    /// Capped at `MAX_RECENT_AGENT_REPLIES` (16).
+    recent_agent_reply_lag_us: VecDeque<u32>,
+    /// Count of REPLY-eligible requests sent without a matching
+    /// REPLY yet. Increments on send; decrements (saturating)
+    /// on every REPLY received.
+    outstanding_agent_request_count: u32,
 }
 
 impl MainChannel {
@@ -242,6 +280,14 @@ impl MainChannel {
             last_unknown_opcode: None,
             unknown_opcode_count: 0,
             mm_clock,
+            agent_request_send_ts: HashMap::new(),
+            agent_request_count: 0,
+            agent_reply_count: 0,
+            agent_reply_error_count: 0,
+            last_agent_reply_ts_secs: None,
+            last_agent_reply_lag_us: None,
+            recent_agent_reply_lag_us: VecDeque::new(),
+            outstanding_agent_request_count: 0,
         }
     }
 
@@ -983,6 +1029,13 @@ impl MainChannel {
         snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
         snap.last_unknown_opcode = self.last_unknown_opcode;
         snap.unknown_opcode_count = self.unknown_opcode_count;
+        snap.agent_request_count = self.agent_request_count;
+        snap.agent_reply_count = self.agent_reply_count;
+        snap.agent_reply_error_count = self.agent_reply_error_count;
+        snap.last_agent_reply_ts_secs = self.last_agent_reply_ts_secs;
+        snap.last_agent_reply_lag_us = self.last_agent_reply_lag_us;
+        snap.recent_agent_reply_lag_us = self.recent_agent_reply_lag_us.clone();
+        snap.outstanding_agent_request_count = self.outstanding_agent_request_count;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1181,6 +1234,15 @@ impl MainChannel {
             offset = end;
         }
 
+        // Track send time for REPLY-eligible request types so we
+        // can compute reply lag when VD_AGENT_REPLY arrives.
+        if REPLY_ELIGIBLE_AGENT_REQUEST_TYPES.contains(&ty) {
+            self.agent_request_send_ts.insert(ty, Instant::now());
+            self.agent_request_count = self.agent_request_count.saturating_add(1);
+            self.outstanding_agent_request_count =
+                self.outstanding_agent_request_count.saturating_add(1);
+        }
+
         Ok(true)
     }
 
@@ -1285,6 +1347,46 @@ impl MainChannel {
                         self.agent_caps_announced = false;
                         self.maybe_send_announce_capabilities().await?;
                     }
+                }
+            }
+            VD_AGENT_REPLY => {
+                // VDAgentReply { uint32 type, uint32 error } (LE).
+                // `type` echoes the request opcode; `error` is
+                // VD_AGENT_SUCCESS (0) or a failure code.
+                if payload.len() >= 8 {
+                    let reply_type =
+                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                    let error =
+                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+                    debug!("main: VD_AGENT_REPLY type={} error={}", reply_type, error);
+                    self.agent_reply_count = self.agent_reply_count.saturating_add(1);
+                    if error != 0 {
+                        self.agent_reply_error_count =
+                            self.agent_reply_error_count.saturating_add(1);
+                    }
+                    // Decrement outstanding count regardless of whether we
+                    // find a matching send timestamp (saturating to prevent
+                    // underflow on server-side bugs).
+                    self.outstanding_agent_request_count =
+                        self.outstanding_agent_request_count.saturating_sub(1);
+                    self.last_agent_reply_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+                    // Correlate by request type to compute lag. If there is
+                    // no matching entry (server-side bug, or our map was
+                    // cleared), skip lag update — don't record a spurious
+                    // zero or MAX.
+                    if let Some(sent) = self.agent_request_send_ts.remove(&reply_type) {
+                        let lag_us = sent.elapsed().as_micros().try_into().unwrap_or(u32::MAX);
+                        self.last_agent_reply_lag_us = Some(lag_us);
+                        self.recent_agent_reply_lag_us.push_back(lag_us);
+                        if self.recent_agent_reply_lag_us.len() > MAX_RECENT_AGENT_REPLIES {
+                            self.recent_agent_reply_lag_us.pop_front();
+                        }
+                    }
+                } else {
+                    debug!(
+                        "main: VD_AGENT_REPLY payload too short ({} bytes)",
+                        payload.len()
+                    );
                 }
             }
             _ => {
