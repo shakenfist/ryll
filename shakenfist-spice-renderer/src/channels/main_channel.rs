@@ -127,6 +127,16 @@ const REPLY_ELIGIBLE_AGENT_REQUEST_TYPES: &[u32] = &[VD_AGENT_MONITORS_CONFIG];
 /// 8 minutes of agent history in a bug report.
 const MAX_RECENT_AGENT_REPLIES: usize = 16;
 
+/// Cadence for the vdagent liveness probe (phase 9B). 30 s is
+/// chosen so the snapshot ring (cap 16) covers ~8 minutes of
+/// agent history in a bug report — long enough to characterise
+/// an intermittent stall without burning bandwidth on a working
+/// agent. The probe re-sends the most recent monitors config
+/// (treated by the guest agent as a no-op when unchanged), so
+/// the lag of the resulting VD_AGENT_REPLY is a clean liveness
+/// measurement.
+const VDAGENT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct MainChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -221,6 +231,16 @@ pub struct MainChannel {
     /// REPLY yet. Increments on send; decrements (saturating)
     /// on every REPLY received.
     outstanding_agent_request_count: u32,
+    /// Most recent monitors config payload sent to the agent.
+    /// Cached in `send_agent_monitors_config` so the probe
+    /// can re-send without recomputing. None if we haven't sent
+    /// a config yet.
+    last_monitors_config: Option<Vec<u8>>,
+    /// Timestamp of the most recent monitors config send (for
+    /// real or probe). Updated in `send_agent_monitors_config`.
+    /// Used to suppress probes if a real send happened within the
+    /// probe interval.
+    last_monitors_config_sent_at: Option<Instant>,
 }
 
 impl MainChannel {
@@ -288,6 +308,8 @@ impl MainChannel {
             last_agent_reply_lag_us: None,
             recent_agent_reply_lag_us: VecDeque::new(),
             outstanding_agent_request_count: 0,
+            last_monitors_config: None,
+            last_monitors_config_sent_at: None,
         }
     }
 
@@ -475,6 +497,11 @@ impl MainChannel {
         // path. Removing this when K1 is closed.
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
         heartbeat.tick().await;
+        // Phase 9B: vdagent liveness probe. Fires every 30 s (VDAGENT_PROBE_INTERVAL).
+        // Skip the first immediate tick so we don't probe before the agent
+        // even attaches.
+        let mut vdagent_probe = tokio::time::interval(VDAGENT_PROBE_INTERVAL);
+        vdagent_probe.tick().await;
         let mut last_arm: &'static str = "startup";
         // Iteration counter for K1 hang investigation. Incremented at
         // the top of every loop body. Logged from the heartbeat arm
@@ -597,6 +624,38 @@ impl MainChannel {
                         .await;
                     self.repaint_notify.notify_one();
                     break;
+                }
+                _ = vdagent_probe.tick() => {
+                    last_arm = "vdagent_probe";
+                    // Phase 9B: Send a liveness probe if conditions are met.
+                    // Skip if agent not connected or no agent caps received yet.
+                    if self.guest_caps_received {
+                        // Check suppression: if a real monitors-config send
+                        // happened recently, skip the probe — that send is its
+                        // own liveness signal.
+                        let should_probe = match self.last_monitors_config_sent_at {
+                            None => false,
+                            Some(sent_at) => {
+                                sent_at.elapsed() >= VDAGENT_PROBE_INTERVAL
+                            }
+                        };
+                        if should_probe {
+                            if let Some(payload) = self.last_monitors_config.clone() {
+                                // Re-send the cached payload. The guest treats
+                                // an unchanged config as a no-op, so this is safe.
+                                last_arm = "vdagent_probe+send";
+                                if self.send_agent_data_message(
+                                    VD_AGENT_MONITORS_CONFIG,
+                                    &payload,
+                                ).await.is_ok() {
+                                    // Update send timestamp to suppress the next
+                                    // probe.
+                                    self.last_monitors_config_sent_at = Some(Instant::now());
+                                }
+                                last_arm = "vdagent_probe+send_done";
+                            }
+                        }
+                    }
                 }
                 _ = heartbeat.tick() => {
                     let now_ms = std::time::SystemTime::now()
@@ -1204,6 +1263,12 @@ impl MainChannel {
             "main: agent monitors config: num_mon={}, flags={}",
             active, flags
         );
+
+        // Cache the payload for the liveness probe (phase 9B).
+        self.last_monitors_config = Some(payload.clone());
+        // Record the send time so the probe can skip if a fresh
+        // send happened within the probe interval.
+        self.last_monitors_config_sent_at = Some(Instant::now());
 
         self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await
