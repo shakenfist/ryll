@@ -626,12 +626,19 @@ and `active_session_count` (currently-open connections).
 
 The main channel tracks the responsiveness of the guest agent (vdagent) by
 sending periodic liveness probes and measuring the round-trip time of replies.
-Every 30 seconds, ryll sends the guest agent a `VD_AGENT_MONITORS_CONFIG`
+Every 30 seconds, ryll re-sends the guest agent a `VD_AGENT_MONITORS_CONFIG`
 message (the display layout); the agent acknowledges with `VD_AGENT_REPLY`.
 The lag between send and reply (in microseconds) measures how quickly the
 agent can respond to requests. If the agent fails to reply for more than
 5 seconds, a Warn notification appears in the status panel. This mechanism
 helps diagnose guest agent freezes without log parsing.
+
+**The probe is dormant until the first `VD_AGENT_MONITORS_CONFIG` send.** That
+first send happens on session bring-up once display geometry is known, or on
+any window resize. In a freshly-connected session with no resize activity (or
+in headless mode where geometry is fixed), `agent_request_count` may stay at
+zero for a while before the probe starts firing — that does not indicate an
+unhealthy agent.
 
 **Agent reply-lag fields in `MainSnapshot` (visible in Connection bug reports):**
 
@@ -650,11 +657,13 @@ helps diagnose guest agent freezes without log parsing.
 When `outstanding_agent_request_count > 0` continuously for more than 5
 seconds after a probe, a Warn notification fires every 60 seconds (to keep
 the notification panel quiet during sustained stalls). The message reads
-like `"Guest agent is not replying — last probe sent 5.3s ago, 1 request
+like `"Guest agent is not replying — last send was 5.3s ago, 1 request
 outstanding"` (elapsed time is formatted to one decimal place; `request`
-vs `requests` is pluralised by count). This indicates the guest agent has
-stopped responding to configuration requests and may require a reboot or
-diagnosis on the server side.
+vs `requests` is pluralised by count). The elapsed time is measured against
+the most recent send, not the oldest outstanding request, so the actual
+silence may be longer than the number reports. This indicates the guest
+agent has stopped responding to configuration requests and may require a
+reboot or diagnosis on the server side.
 
 ## Auto-snapshot mode for intermittent issues
 

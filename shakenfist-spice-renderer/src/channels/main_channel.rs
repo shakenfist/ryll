@@ -735,8 +735,15 @@ impl MainChannel {
                                     sent_at.elapsed().as_secs_f64();
                                 let count = self.outstanding_agent_request_count;
                                 let noun = if count == 1 { "request" } else { "requests" };
+                                // "last send was Xs ago" rather than "last
+                                // probe sent Xs ago" — outstanding may
+                                // include requests older than the most
+                                // recent send (we only track the most
+                                // recent send_at), so the anchor is the
+                                // most recent send, not the oldest
+                                // unanswered one.
                                 let message = format!(
-                                    "Guest agent is not replying — last probe sent {:.1}s ago, \
+                                    "Guest agent is not replying — last send was {:.1}s ago, \
                                      {} {} outstanding",
                                     elapsed_secs, count, noun
                                 );
