@@ -688,13 +688,22 @@ impl MainChannel {
                                 // Re-send the cached payload. The guest treats
                                 // an unchanged config as a no-op, so this is safe.
                                 last_arm = "vdagent_probe+send";
-                                if self.send_agent_data_message(
+                                // Propagate IO errors via `?` so a socket
+                                // failure during the probe surfaces
+                                // immediately (matches every other send-site
+                                // in this file); `Ok(false)` means we ran out
+                                // of agent tokens, which is a transient and
+                                // expected condition — log and try the next
+                                // tick. Only refresh the send timestamp on a
+                                // confirmed Ok(true) send.
+                                let sent = self.send_agent_data_message(
                                     VD_AGENT_MONITORS_CONFIG,
                                     &payload,
-                                ).await.is_ok() {
-                                    // Update send timestamp to suppress the next
-                                    // probe.
+                                ).await?;
+                                if sent {
                                     self.last_monitors_config_sent_at = Some(Instant::now());
+                                } else {
+                                    debug!("main: vdagent probe skipped, no agent tokens");
                                 }
                                 last_arm = "vdagent_probe+send_done";
                             }
@@ -1377,14 +1386,19 @@ impl MainChannel {
             active, flags
         );
 
-        // Cache the payload for the liveness probe (phase 9B).
-        self.last_monitors_config = Some(payload.clone());
-        // Record the send time so the probe can skip if a fresh
-        // send happened within the probe interval.
-        self.last_monitors_config_sent_at = Some(Instant::now());
-
-        self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
-            .await
+        // Send first; only refresh the phase-9B probe cache if the
+        // send actually went on the wire (Ok(true)). Caching before
+        // the send would defer the next probe by one interval after
+        // an Ok(false) "no tokens" outcome, suppressing the probe
+        // even though no message left the client.
+        let sent = self
+            .send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
+            .await?;
+        if sent {
+            self.last_monitors_config = Some(payload);
+            self.last_monitors_config_sent_at = Some(Instant::now());
+        }
+        Ok(sent)
     }
 
     async fn send_agent_data_message(&mut self, ty: u32, payload: &[u8]) -> Result<bool> {
