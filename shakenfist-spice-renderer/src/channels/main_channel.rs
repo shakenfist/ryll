@@ -137,6 +137,17 @@ const MAX_RECENT_AGENT_REPLIES: usize = 16;
 /// measurement.
 const VDAGENT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long `outstanding_agent_request_count` may stay > 0
+/// before we consider the agent stuck and push a Warn
+/// notification. Conservative; healthy replies arrive in
+/// well under 100 ms.
+const STUCK_AGENT_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Minimum interval between consecutive stuck-agent
+/// notifications, to keep the notification panel quiet during
+/// a sustained stall.
+const STUCK_AGENT_NOTIFY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub struct MainChannel {
     stream: SpiceStream,
     event_tx: mpsc::Sender<ChannelEvent>,
@@ -241,6 +252,8 @@ pub struct MainChannel {
     /// Used to suppress probes if a real send happened within the
     /// probe interval.
     last_monitors_config_sent_at: Option<Instant>,
+    /// Most recent stuck-agent notification time, for 60 s cool-down.
+    last_stuck_agent_notification_at: Option<Instant>,
 }
 
 impl MainChannel {
@@ -310,6 +323,7 @@ impl MainChannel {
             outstanding_agent_request_count: 0,
             last_monitors_config: None,
             last_monitors_config_sent_at: None,
+            last_stuck_agent_notification_at: None,
         }
     }
 
@@ -502,6 +516,10 @@ impl MainChannel {
         // even attaches.
         let mut vdagent_probe = tokio::time::interval(VDAGENT_PROBE_INTERVAL);
         vdagent_probe.tick().await;
+        // Phase 9C: stuck-agent warning. Polls every 5 s to detect
+        // stalled agent requests and emit notifications with cool-down.
+        let mut stuck_agent_check = tokio::time::interval(std::time::Duration::from_secs(5));
+        stuck_agent_check.tick().await;
         let mut last_arm: &'static str = "startup";
         // Iteration counter for K1 hang investigation. Incremented at
         // the top of every loop body. Logged from the heartbeat arm
@@ -655,6 +673,53 @@ impl MainChannel {
                                 last_arm = "vdagent_probe+send_done";
                             }
                         }
+                    }
+                }
+                _ = stuck_agent_check.tick() => {
+                    last_arm = "stuck_agent_check";
+                    // Phase 9C: Check if agent requests are stuck and emit
+                    // Warn notification if conditions are met.
+                    if self.outstanding_agent_request_count == 0 {
+                        // No outstanding requests; healthy state.
+                        last_arm = "stuck_agent_check+no_outstanding";
+                    } else if let Some(sent_at) = self.last_monitors_config_sent_at {
+                        // Check if enough time has passed since the last send
+                        // to consider this a stuck state.
+                        if sent_at.elapsed() < STUCK_AGENT_THRESHOLD {
+                            // Too soon since the last send; not yet considered stuck.
+                            last_arm = "stuck_agent_check+too_soon";
+                        } else {
+                            // outstanding > 0 and the threshold has been exceeded.
+                            // Check the notification cool-down.
+                            let should_notify = self
+                                .last_stuck_agent_notification_at
+                                .map(|t| t.elapsed() >= STUCK_AGENT_NOTIFY_COOLDOWN)
+                                .unwrap_or(true);
+                            if should_notify {
+                                last_arm = "stuck_agent_check+notify";
+                                let elapsed_secs =
+                                    sent_at.elapsed().as_secs_f64();
+                                let message = format!(
+                                    "Guest agent is not replying — last probe sent {:.1}s ago, \
+                                     {} request(s) outstanding",
+                                    elapsed_secs, self.outstanding_agent_request_count
+                                );
+                                let entry = NotificationEntry::new(
+                                    NotifySeverity::Warn,
+                                    NotificationSource::Internal,
+                                    message,
+                                );
+                                self.send_event(ChannelEvent::Notification(entry)).await;
+                                self.repaint_notify.notify_one();
+                                self.last_stuck_agent_notification_at = Some(Instant::now());
+                                last_arm = "stuck_agent_check+notify_done";
+                            } else {
+                                last_arm = "stuck_agent_check+cooldown";
+                            }
+                        }
+                    } else {
+                        // No send timestamp yet, so can't determine if stuck.
+                        last_arm = "stuck_agent_check+no_timestamp";
                     }
                 }
                 _ = heartbeat.tick() => {
