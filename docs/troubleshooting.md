@@ -147,6 +147,29 @@ live in `ryll/src/streaming_state.rs` and are tuned for the
 session-005 flap pattern. Open an issue if a different
 workload trips them too easily or not easily enough.
 
+### JPEG decoder backend selection
+
+MJPEG video streams are decoded by a per-platform JPEG decoder
+selected at display-channel startup. The active backend is
+exposed in bug reports as `mjpeg_decoder_backend` in the
+`channel-state.json` display-channel snapshot. Selection priority:
+
+- **macOS**: ImageIO (Apple Silicon's dedicated media block
+  when available)
+- **Windows**: WIC (hardware codec support where available)
+- **Linux**: VA-API (hardware-accelerated JPEG via libva,
+  probed at runtime if installed)
+- **Fallback**: libjpeg-turbo via the vendored `mozjpeg` crate
+- **Last resort**: Pure-Rust `jpeg-decoder` crate
+
+If MJPEG video is decoding slowly or using excessive CPU,
+check the `mjpeg_decoder_backend` field in a bug report (F12,
+Display category). If the backend is `jpeg-decoder` (pure Rust)
+on a platform that normally supports hardware acceleration, it
+indicates the hardware codec was unavailable at startup. On
+Linux, install `libva-dev` and ensure a render node exists at
+`/dev/dri/renderD128` for VA-API support.
+
 ## Input Issues
 
 ### Keyboard input not working
