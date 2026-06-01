@@ -60,6 +60,10 @@
     // ---------------------------------------------------------------
     const RECONNECT_BACKOFFS_MS = [1000, 2000, 4000, 8000, 16000];
     let reconnectAttempt = 0;
+    // Set when the user clicks the Disconnect button, so the
+    // ICE/PC state-change handlers don't reopen the connection
+    // we just intentionally tore down.
+    let manuallyDisconnected = false;
 
     // Module-level pc / dc references updated by connect().
     let pc = null;
@@ -329,8 +333,24 @@
     });
 
     // ---------------------------------------------------------------
+    // Disconnect button — revealed on successful connection. Closes
+    // the peer connection and suppresses auto-reconnect so test
+    // harnesses (e.g. ./bin/runtest.sh) can drive a clean session
+    // teardown from the browser side.
+    // ---------------------------------------------------------------
+    const disconnectBtn = document.getElementById('disconnect-btn');
+    disconnectBtn.addEventListener('click', () => {
+        manuallyDisconnected = true;
+        disconnectBtn.hidden = true;
+        enableAudioBtn.hidden = true;
+        setStatus('Disconnected');
+        resetPeerConnection();
+        showReconnectButton();
+    });
+
+    // ---------------------------------------------------------------
     // Manual reconnect button — revealed when max backoff attempts
-    // are exhausted.
+    // are exhausted, or after the user clicks Disconnect.
     // ---------------------------------------------------------------
     const reconnectBtn = document.getElementById('reconnect-btn');
     const showReconnectButton = () => {
@@ -340,6 +360,7 @@
     reconnectBtn.addEventListener('click', () => {
         reconnectBtn.style.display = 'none';
         reconnectAttempt = 0;
+        manuallyDisconnected = false;
         scheduleReconnect();
     });
 
@@ -348,6 +369,9 @@
     // After max attempts the manual reconnect button is revealed.
     // ---------------------------------------------------------------
     function scheduleReconnect() {
+        if (manuallyDisconnected) {
+            return;
+        }
         if (reconnectAttempt >= RECONNECT_BACKOFFS_MS.length) {
             setStatus('Disconnected. Click to reconnect.');
             showReconnectButton();
@@ -492,8 +516,10 @@
             if (event.track.kind === 'video' && event.streams[0]) {
                 videoEl.srcObject = event.streams[0];
                 setStatus('Connected');
-                // Reveal the audio-toggle button now that we have a stream.
+                // Reveal the audio-toggle and disconnect buttons now
+                // that we have a stream.
                 enableAudioBtn.hidden = false;
+                disconnectBtn.hidden = false;
             }
             // Audio plays via the browser's default sink; the
             // <video> element with the same MediaStream object

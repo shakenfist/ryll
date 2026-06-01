@@ -77,6 +77,14 @@ After 5 failed attempts the status overlay shows
 "Disconnected. Click to reconnect." and a button lets the
 operator trigger a manual retry.
 
+A Disconnect button is rendered alongside the audio-enable
+button in the top-right corner once the connection is
+established. Clicking it closes the `RTCPeerConnection`,
+suppresses auto-reconnect, and reveals the manual reconnect
+button — useful for test harnesses (e.g. `./bin/runtest.sh`)
+that need a deterministic exit from the browser session
+before tearing down the wider scenario.
+
 Each attempt constructs a brand-new `RTCPeerConnection` (no
 stale SDP cache), resets the backoff counter on a successful
 `Connected` transition, and retriggers the viewport-resize

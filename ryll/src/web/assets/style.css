@@ -1,8 +1,9 @@
 body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-serif; }
 #status { position: absolute; top: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0,0,0,0.5); border-radius: 4px; font-size: 0.85rem; }
-#enable-audio { position: absolute; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
-#enable-audio:hover { background: rgba(255, 255, 255, 0.25); }
-#enable-audio[hidden] { display: none; }
+#controls { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.5rem; }
+#controls button { padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
+#controls button:hover { background: rgba(255, 255, 255, 0.25); }
+#controls button[hidden] { display: none; }
 #video { display: block; width: 100vw; height: 100vh; object-fit: contain; cursor: none; }
 /* SPICE cursor overlay rendered above the <video> element. The
    server forwards CursorShape (PNG-encoded, base64'd) and

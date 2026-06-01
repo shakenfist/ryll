@@ -261,7 +261,10 @@ Firefox or Chrome. The desktop is visible and audible;
 keyboard and mouse work; the cursor is rendered as an overlay.
 Audio requires the SPICE server to negotiate Opus (xspice and
 QEMU defaults). Click the volume button on the page to enable
-audio after it loads (browser autoplay policy).
+audio after it loads (browser autoplay policy). A Disconnect
+button alongside it tears down the session cleanly (useful for
+scripted runs like `./bin/runtest.sh`); the reconnect button
+reappears so the same tab can re-establish the session.
 
 Optional flags:
 - `--web-host 0.0.0.0` — bind address (defaults to loopback)
