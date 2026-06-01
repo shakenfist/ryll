@@ -173,6 +173,18 @@ pub struct Args {
     #[arg(long, requires = "web_tls_cert")]
     pub web_tls_key: Option<PathBuf>,
 
+    /// Exit `--web` after the first viewer disconnects. Aimed at
+    /// test harnesses (e.g. `./bin/runtest.sh`) that want a
+    /// deterministic, single-shot session: the browser clicks the
+    /// Disconnect button, the bridge reaper tears down the
+    /// WebRTC layer, and ryll then raises its shutdown flag so
+    /// the SPICE session, encoder, and HTTP server all drain
+    /// before the process exits. Without this flag the SPICE
+    /// session stays live and the HTTP server keeps listening
+    /// for the next viewer, which is the production default.
+    #[arg(long, default_value_t = false)]
+    pub web_exit_on_disconnect: bool,
+
     /// Maximum total bytes for the SPICE display image cache,
     /// in MiB. Defaults to 256. The cache holds decoded RGBA
     /// for images the server flagged with CACHE_ME; without a

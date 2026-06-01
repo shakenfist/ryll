@@ -85,6 +85,32 @@ button — useful for test harnesses (e.g. `./bin/runtest.sh`)
 that need a deterministic exit from the browser session
 before tearing down the wider scenario.
 
+### `--web-exit-on-disconnect` (single-shot mode)
+
+By default, the bridge reaper tears down only the WebRTC
+layer when the viewer disconnects: the SPICE session stays
+live and the HTTP server keeps listening, so a subsequent
+browser visit picks up where the previous one left off.
+That's the right default for production but unhelpful for
+scripted tests that need ryll to exit so their session
+logger can do its work.
+
+Pass `--web-exit-on-disconnect` to flip the behaviour:
+after the first viewer disconnects, the reaper raises the
+process-wide `SHUTDOWN_REQUESTED` flag, the axum watcher
+drains the HTTP server, and `run_web`'s post-server
+cleanup tears down the bridge, encoder, and SPICE
+session before the process exits. Typical use:
+
+```bash
+ryll --web --web-exit-on-disconnect session.vv
+```
+
+This pairs naturally with the in-page Disconnect button:
+the test driver navigates to the URL, performs its
+checks, clicks Disconnect (or scripts a click via WebDriver
+etc.), and ryll exits without further intervention.
+
 Each attempt constructs a brand-new `RTCPeerConnection` (no
 stale SDP cache), resets the backoff counter on a successful
 `Connected` transition, and retriggers the viewport-resize

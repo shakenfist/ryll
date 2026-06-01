@@ -384,8 +384,8 @@ Public API:
 
 ### Server-side reaper (`ryll/src/web/lifecycle.rs`)
 
-`run_bridge_reaper(state: Arc<WebState>)` is a long-lived
-task spawned from `run_web`. Its loop:
+`run_bridge_reaper(state: Arc<WebState>, exit_on_disconnect: bool)`
+is a long-lived task spawned from `run_web`. Its loop:
 
 1. Peeks at the active bridge's `dead_handle()` without
    holding the slot lock for long.
@@ -400,6 +400,14 @@ task spawned from `run_web`. Its loop:
 The SPICE session (`run_connection`) is left completely
 untouched. A subsequent `/offer` from the browser rebuilds
 a fresh bridge and encoder from the same live SPICE state.
+
+When `exit_on_disconnect` is `true` (CLI flag
+`--web-exit-on-disconnect`, single-shot test-harness mode),
+the reaper raises `crate::SHUTDOWN_REQUESTED` after step 6
+and returns. The same axum watcher task that handles Ctrl+C
+sees the flag, drains the HTTP server, and `run_web`'s
+post-server cleanup tears down the SPICE session before
+the process exits.
 
 Race condition: a new `/offer` and the reaper both race to
 take the bridge via `bridge_slot.lock()`. Both serialise on

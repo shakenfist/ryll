@@ -270,6 +270,7 @@ Optional flags:
 - `--web-host 0.0.0.0` — bind address (defaults to loopback)
 - `--web-port 8080` — port (defaults to ephemeral)
 - `--web-tls-cert /path/cert.pem` + `--web-tls-key /path/key.pem` — serve over HTTPS with native TLS (both required together; see `docs/web-frontend.md` for cert recipes)
+- `--web-exit-on-disconnect` — single-shot mode: exit ryll after the first viewer disconnects (intended for test harnesses like `./bin/runtest.sh`)
 
 All 8 phases of the web-frontend plan are complete. Closing
 the browser tab reaps the bridge and encoder within ~1 second

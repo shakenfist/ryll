@@ -40,7 +40,7 @@
 //! back. This prevents the reaper from closing a healthy new
 //! bridge when the old bridge's dead signal fires late.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,6 +57,17 @@ use super::server::WebState;
 /// aborted in the shutdown path of `run_web` after
 /// `axum::serve` returns.
 ///
+/// # `exit_on_disconnect`
+///
+/// When set (via `--web-exit-on-disconnect`), the reaper raises
+/// the process-wide `SHUTDOWN_REQUESTED` flag after a successful
+/// reap and returns. The axum watcher task in
+/// `web::server::run_inner` polls the same flag at 100 ms and
+/// drains the HTTP server, after which `run_web` runs its normal
+/// post-server cleanup and the process exits. Aimed at test
+/// harnesses that want single-shot semantics; the production
+/// default keeps the SPICE session alive across viewer churn.
+///
 /// # Race: reaper vs. `/offer`
 ///
 /// The reaper snapshots `bridge_generation` before awaiting the
@@ -65,7 +76,20 @@ use super::server::WebState;
 /// the reaper was waiting), the reaper skips the reap and loops
 /// back. This prevents closing a healthy new bridge when the old
 /// bridge's dead signal fires late.
-pub async fn run_bridge_reaper(state: Arc<WebState>) {
+pub async fn run_bridge_reaper(state: Arc<WebState>, exit_on_disconnect: bool) {
+    run_bridge_reaper_inner(state, exit_on_disconnect, &crate::SHUTDOWN_REQUESTED).await
+}
+
+/// Shared implementation behind [`run_bridge_reaper`]. The
+/// `shutdown_flag` parameter is the SHUTDOWN_REQUESTED-shaped
+/// flag the reaper raises on exit-on-disconnect; passing it
+/// explicitly lets tests inject a private `AtomicBool` rather
+/// than mutating process-global state.
+async fn run_bridge_reaper_inner(
+    state: Arc<WebState>,
+    exit_on_disconnect: bool,
+    shutdown_flag: &'static AtomicBool,
+) {
     loop {
         // Snapshot the generation counter and the dead-signal
         // handles from the active bridge — all without holding
@@ -151,6 +175,15 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             }
         }
 
+        if exit_on_disconnect {
+            tracing::info!(
+                "bridge reaper: reaped; --web-exit-on-disconnect set, \
+                 raising SHUTDOWN_REQUESTED so ryll exits cleanly"
+            );
+            shutdown_flag.store(true, Ordering::SeqCst);
+            return;
+        }
+
         tracing::info!("bridge reaper: reaped; awaiting next viewer");
     }
 }
@@ -177,7 +210,7 @@ mod tests {
         assert_eq!(state.bridge_generation.load(Ordering::SeqCst), 0);
 
         // Spawn the reaper — it will immediately sleep (no bridge).
-        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
+        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state), false));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !reaper.is_finished(),
@@ -199,6 +232,35 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
     }
 
+    /// `exit_on_disconnect` only fires on the reap path. With no
+    /// bridge to reap, the reaper must keep looping and the
+    /// shutdown flag must stay clear, otherwise a plain
+    /// `--web-exit-on-disconnect` launch would race the first
+    /// `/offer` and exit before the viewer ever attached.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reaper_with_exit_flag_does_not_exit_without_a_reap() {
+        // Private flag so the test does not mutate the process-
+        // global SHUTDOWN_REQUESTED. The `'static` requirement is
+        // satisfied by leaking a fresh AtomicBool.
+        let flag: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let state = Arc::new(WebState::new());
+
+        let reaper = tokio::spawn(run_bridge_reaper_inner(Arc::clone(&state), true, flag));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        assert!(
+            !reaper.is_finished(),
+            "reaper should keep looping while no bridge has died"
+        );
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "shutdown flag must stay clear until a real reap fires"
+        );
+
+        reaper.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+    }
+
     // NOTE: A unit test that exercises the race path (generation
     // mismatch causes reaper to skip a reap) requires constructing
     // a real `WebrtcBridge` (which needs a running ICE/DTLS stack).
@@ -208,5 +270,8 @@ mod tests {
     // `signalling.rs` (the bridge is closed at the end of that
     // test, which transitions the PC to Closed state). The
     // generation-counter skip path is exercised by code inspection
-    // and the logic above.
+    // and the logic above. The same reasoning applies to the
+    // `exit_on_disconnect=true` reap-and-exit path: it needs a
+    // real bridge to drive the dead signal, so the test above
+    // only covers the no-bridge guard.
 }

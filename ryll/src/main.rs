@@ -460,6 +460,7 @@ fn run_web(
     let web_port = args.web_port;
     let web_tls_cert = args.web_tls_cert.clone();
     let web_tls_key = args.web_tls_key.clone();
+    let web_exit_on_disconnect = args.web_exit_on_disconnect;
     let monitors = args.monitors;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
@@ -699,7 +700,10 @@ fn run_web(
         // The SPICE session is left untouched. The handle is
         // retained so the reaper can be aborted in the shutdown
         // path after axum::serve returns.
-        let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(state.clone()));
+        let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(
+            state.clone(),
+            web_exit_on_disconnect,
+        ));
 
         // Phase 8a: load the optional TLS config before binding.
         // Clap's `requires =` enforces both-or-neither, so seeing
