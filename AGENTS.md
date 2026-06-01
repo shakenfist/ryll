@@ -589,6 +589,21 @@ established structure.
   "How to resume" entry point for picking the work back
   up after a pause. Never committed.
 
+## Open questions watch-list
+
+`docs/plans/OPEN-QUESTIONS.md` is a thin, single-page
+review surface for symptoms we have seen in bug reports
+but cannot yet characterise — entries link out to the
+phase plans that would action them. Check it at the
+start of each session closeout (after landing the work
+from a new test-session bundle) and ask whether the
+bundle moves any open question. If it does, move the
+evidence into the linked phase plan and either close
+the entry or sharpen it. Add a new entry when a fresh
+symptom doesn't fit anywhere actionable; read the
+"When to add a new entry" guidance at the foot of the
+file first.
+
 ## WebRTC Conventions
 
 The following convention was discovered during Phase 3 and
