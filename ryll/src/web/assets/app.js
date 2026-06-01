@@ -254,10 +254,24 @@
     // shortcuts (Ctrl+W, Ctrl+T, etc.) don't intercept the
     // input destined for the guest. F11 is allowed through so
     // browser fullscreen still works.
+    //
+    // Browser-generated OS auto-repeat (`KeyboardEvent.repeat`)
+    // is intentionally dropped: the guest's input layer
+    // already does its own auto-repeat with its own initial
+    // delay + rate, and forwarding the host's repeat stream as
+    // a flood of make-codes (without intervening break-codes)
+    // makes the guest interpret keys unpredictably — either
+    // lost, or massively duplicated. Match the GUI frontend's
+    // behaviour (`ryll/src/app.rs:2592` filters egui events
+    // with `repeat: false`) so the wire carries exactly one
+    // press + one release per physical keystroke.
     // ---------------------------------------------------------------
     const KEY_PASSTHROUGH = new Set(['F11']);
 
     document.addEventListener('keydown', (e) => {
+        if (e.repeat) {
+            return;
+        }
         const sc = SCANCODE_TABLE[e.code];
         if (sc === undefined) {
             return;
