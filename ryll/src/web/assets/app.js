@@ -457,6 +457,18 @@
         cursorEl.style.top = `${renderedY + yNorm * renderedH - cursorHotY}px`;
     };
 
+    // The host browser cursor is hidden over the video only
+    // when the SPICE overlay is actually showing a sprite —
+    // some guest stacks (virtio-gpu + Wayland GDM) never push
+    // a CursorShape over the SPICE cursor channel because they
+    // render the cursor into the video stream itself, and
+    // hiding the host cursor blindly would leave the user with
+    // nothing to point with. Toggle `videoEl.style.cursor`
+    // alongside the overlay's visibility so the host cursor
+    // takes over whenever the SPICE overlay is not in play.
+    const hideHostCursor = () => { videoEl.style.cursor = 'none'; };
+    const showHostCursor = () => { videoEl.style.cursor = ''; };
+
     const handleControlMessage = (msg) => {
         switch (msg && msg.type) {
             case 'cursor-shape':
@@ -464,6 +476,7 @@
                 cursorHotX = msg.hot_x ?? 0;
                 cursorHotY = msg.hot_y ?? 0;
                 cursorEl.hidden = false;
+                hideHostCursor();
                 if (cursorLastNorm) {
                     positionCursor(cursorLastNorm.x, cursorLastNorm.y);
                 }
@@ -474,10 +487,12 @@
                 break;
             case 'cursor-hide':
                 cursorEl.hidden = true;
+                showHostCursor();
                 break;
             case 'cursor-show':
                 if (cursorEl.src) {
                     cursorEl.hidden = false;
+                    hideHostCursor();
                 }
                 break;
             default:
