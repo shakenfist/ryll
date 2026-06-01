@@ -70,14 +70,28 @@
     let dc = null;
 
     // ---------------------------------------------------------------
-    // KeyboardEvent.code → AT scancode wire value.
+    // KeyboardEvent.code → AT scancode wire value (the PRESS form).
     //
     // Ported from `scancode_for_logical_key` in
-    // shakenfist-spice-renderer/src/channels/inputs.rs. Extended
-    // keys (navigation cluster, arrows, right-side modifiers) use
-    // the SPICE wire format produced by `make_scancode()`:
-    //   wire = (scancode << 8) | 0xE0
-    // i.e. Up arrow's base 0x48 becomes 0xE048 on the wire.
+    // shakenfist-spice-renderer/src/channels/inputs.rs. Each value
+    // is the spice-gtk-compatible wire u32 that goes straight into
+    // the SPICE KEY_DOWN message's `code` field. The SPICE server
+    // iterates the bytes of this u32 starting at the low byte and
+    // feeds them to the guest's PS/2 controller, so the BYTE ORDER
+    // matters:
+    //
+    //   * Non-extended keys: single-byte scancode in the low byte
+    //     (e.g. 'a' = 0x1E).
+    //   * Extended keys (E0-prefixed on the AT keyboard, i.e. arrows,
+    //     navigation cluster, right-side modifiers): two bytes —
+    //     0xE0 prefix in the LOW byte, scancode in the next byte.
+    //     This matches `make_scancode()` on the Rust side:
+    //       wire = (scancode << 8) | 0xE0
+    //     i.e. Up arrow's base 0x48 becomes 0x48E0 on the wire.
+    //     (Bytes: E0 48 00 00 little-endian.)
+    //
+    // The KEY_UP form sets bit 0x80 on the byte that carries the
+    // scancode — see `releaseScancode` below for the transform.
     //
     // Modifier keys aren't in the LogicalKey table (the GUI
     // path lets egui's modifier state ride along on the
@@ -127,30 +141,31 @@
         IntlBackslash: 0x56,
 
         // Modifiers — left-side keys are non-extended, right-side
-        // keys are E0-prefixed extended scancodes.
+        // keys are E0-prefixed extended scancodes (low-byte 0xE0,
+        // next byte is the scancode).
         ShiftLeft: 0x2A,
         ShiftRight: 0x36,
         ControlLeft: 0x1D,
-        ControlRight: 0xE01D,
+        ControlRight: 0x1DE0,
         AltLeft: 0x38,
-        AltRight: 0xE038,
-        MetaLeft: 0xE05B,
-        MetaRight: 0xE05C,
-        ContextMenu: 0xE05D,
+        AltRight: 0x38E0,
+        MetaLeft: 0x5BE0,
+        MetaRight: 0x5CE0,
+        ContextMenu: 0x5DE0,
 
         // Navigation cluster (all E0-prefixed)
-        Insert: 0xE052,
-        Delete: 0xE053,
-        Home: 0xE047,
-        End: 0xE04F,
-        PageUp: 0xE049,
-        PageDown: 0xE051,
+        Insert: 0x52E0,
+        Delete: 0x53E0,
+        Home: 0x47E0,
+        End: 0x4FE0,
+        PageUp: 0x49E0,
+        PageDown: 0x51E0,
 
         // Arrow keys (all E0-prefixed)
-        ArrowUp: 0xE048,
-        ArrowDown: 0xE050,
-        ArrowLeft: 0xE04B,
-        ArrowRight: 0xE04D,
+        ArrowUp: 0x48E0,
+        ArrowDown: 0x50E0,
+        ArrowLeft: 0x4BE0,
+        ArrowRight: 0x4DE0,
 
         // Numpad — covers the common subset; the SPICE side
         // accepts these as either NumLock'd or unshifted
@@ -163,13 +178,63 @@
         NumpadAdd: 0x4E,
         NumpadSubtract: 0x4A,
         NumpadMultiply: 0x37,
-        NumpadDivide: 0xE035,
-        NumpadEnter: 0xE01C,
+        NumpadDivide: 0x35E0,
+        NumpadEnter: 0x1CE0,
         NumLock: 0x45,
         ScrollLock: 0x46,
         Pause: 0x45,  // approximate; full Pause is multi-byte
-        PrintScreen: 0xE037,
+        PrintScreen: 0x37E0,
     };
+
+    // Derive the KEY_UP wire scancode from the KEY_DOWN value. The
+    // AT keyboard's break code is the make code with bit 0x80 set
+    // on the byte that carries the scancode; the SPICE server
+    // passes the bytes through to the guest's PS/2 controller
+    // unchanged, so KEY_UP MUST carry the release-form scancode or
+    // the guest sees two consecutive make codes and either floods
+    // the input layer with auto-repeats or treats the second press
+    // as a no-op (Linux atkbd handles consecutive makes
+    // inconsistently). Matches `make_scancode(base, true)` in
+    // shakenfist-spice-renderer/src/channels/inputs.rs:
+    //   * Non-extended:           sc | 0x80
+    //   * Extended (E0 in byte 0): sc | 0x8000  (high bit on byte 1)
+    const releaseScancode = (press) => {
+        if (press < 0x100) {
+            return press | 0x80;
+        }
+        // Extended: byte 0 is 0xE0, byte 1 is the scancode. Set
+        // bit 0x80 on byte 1.
+        return press | 0x8000;
+    };
+
+    // Self-check the scancode transforms at startup so a regression
+    // in the table or the release helper fails loudly in the
+    // browser console rather than silently flooding the guest with
+    // bad keystrokes. The expected values come from running
+    // `make_scancode(base, release)` in
+    // shakenfist-spice-renderer/src/channels/inputs.rs by hand for
+    // a few canonical keys:
+    //   * KeyA       (base 0x1E):  press 0x1E,   release 0x9E
+    //   * ArrowUp    (base 0x148): press 0x48E0, release 0xC8E0
+    //   * NumpadEnter(base 0x11C): press 0x1CE0, release 0x9CE0
+    (() => {
+        const cases = [
+            ['KeyA', 0x1E, 0x9E],
+            ['ArrowUp', 0x48E0, 0xC8E0],
+            ['NumpadEnter', 0x1CE0, 0x9CE0],
+        ];
+        for (const [code, expectPress, expectRelease] of cases) {
+            const press = SCANCODE_TABLE[code];
+            const release = releaseScancode(press);
+            if (press !== expectPress || release !== expectRelease) {
+                console.error(
+                    `[ryll] scancode self-check FAILED for ${code}: ` +
+                    `press=0x${press.toString(16)} (want 0x${expectPress.toString(16)}), ` +
+                    `release=0x${release.toString(16)} (want 0x${expectRelease.toString(16)})`,
+                );
+            }
+        }
+    })();
 
     // SPICE button bitmask values (from
     // shakenfist-spice-protocol/src/constants.rs::mouse_buttons).
@@ -290,7 +355,7 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
-        sendCtrl({ type: 'key', scancode: sc, down: false });
+        sendCtrl({ type: 'key', scancode: releaseScancode(sc), down: false });
     });
 
     // ---------------------------------------------------------------
