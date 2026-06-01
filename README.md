@@ -210,6 +210,10 @@ Options:
   --enable-paste-as-keystrokes  Enable paste-as-keystrokes fallback
   --paste-text <TEXT>    Type TEXT as keystrokes in headless mode
   --paste-char-delay-ms <N>  Inter-character delay in ms (default 16)
+  --auto-snapshot-interval <N>  Fire a bug-report snapshot every N seconds
+  --auto-snapshot-cap <N>  Rolling cap for auto-snapshots (default 20)
+  --image-cache-cap-mib <N>  Max bytes for decoded image cache (default 256)
+  --glz-dictionary-cap-mib <N>  Max bytes for GLZ dictionary (default 256)
   -h, --help             Print help
   -V, --version          Print version
 ```

@@ -1,6 +1,6 @@
 # Phase 1 — STREAM_REPORT
 
-Phase 1 of [PLAN-stream-caps-and-flap.md](PLAN-stream-caps-and-flap.md).
+Phase 1 of [PLAN-stream-caps-and-flap.md](../PLAN-stream-caps-and-flap.md).
 
 ## Prompt
 

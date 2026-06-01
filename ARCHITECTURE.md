@@ -10,7 +10,7 @@ The repository is a Cargo workspace with **6 crates**:
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
 | `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
-| `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel) |
+| `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
@@ -730,6 +730,16 @@ byte-shape assertion respectively — so a regression in
 either the negotiation logic or the wire format fails
 loudly during `cargo test`.
 
+#### Agent reply-lag tracking
+
+The main channel tracks guest agent responsiveness by measuring the round-trip
+time of `VD_AGENT_REPLY` messages to periodic `VD_AGENT_MONITORS_CONFIG`
+probes. Reply-lag fields (`agent_request_count`, `agent_reply_count`,
+`last_agent_reply_lag_us`, `recent_agent_reply_lag_us`, and
+`outstanding_agent_request_count`) are exposed on `MainSnapshot` for
+bug reports and diagnostics. See the "Guest agent diagnostics" section
+in [troubleshooting.md](docs/troubleshooting.md) for interpretation.
+
 ## Image Types and Compression
 
 SPICE uses several image types for display updates. The type is
@@ -861,6 +871,13 @@ important:
 | MONITORS_CONFIG | 1 | Multi-monitor configuration |
 | COMPOSITE | 2 | Compositing operations (DRAW_COMPOSITE opcode 318) |
 | A8_SURFACE | 3 | Alpha-only surface support |
+| STREAM_REPORT | 4 | Streaming video diagnostics (stream lifecycle notifications) |
+| LZ4_COMPRESSION | 5 | LZ4-compressed image payloads (fallback from Zlib) |
+| PREF_COMPRESSION | 6 | Client preference messaging for image compression algorithm |
+| MULTI_CODEC | 8 | Multiple video codec support in streaming |
+| CODEC_MJPEG | 9 | MJPEG video codec for streaming |
+| CODEC_H264 | 11 | H.264 video codec for streaming |
+| PREF_VIDEO_CODEC_TYPE | 12 | Client preference messaging for video codec selection |
 
 Without **COMPOSITE**, the guest QXL driver falls back to a slow
 software rendering path that produces only `draw_copy` messages with

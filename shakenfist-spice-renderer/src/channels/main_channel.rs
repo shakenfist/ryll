@@ -1,6 +1,7 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::Result;
 use byteorder::{LittleEndian, WriteBytesExt};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::Notify as RepaintNotify;
@@ -89,13 +90,31 @@ fn build_mouse_mode_request_payload(mode: u32) -> Vec<u8> {
     payload
 }
 
+/// Decode the body of a `VD_AGENT_REPLY`.
+///
+/// `vd_agent.h` declares `VDAgentReply` as a packed struct of
+/// two little-endian `u32`s: `{ type, error }`. `type` echoes
+/// the opcode of the request being acknowledged; `error` is
+/// `VD_AGENT_SUCCESS` (0) on success or a failure code.
+///
+/// Returns `None` if `payload` is shorter than 8 bytes —
+/// caller logs and skips. Pure function so the parse logic is
+/// unit-testable without standing up a `MainChannel`.
+fn parse_vd_agent_reply(payload: &[u8]) -> Option<(u32, u32)> {
+    if payload.len() < 8 {
+        return None;
+    }
+    let reply_type = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let error = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
+    Some((reply_type, error))
+}
+
 const VD_AGENT_PROTOCOL: u32 = 1;
 
 // VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
 #[allow(dead_code)]
 const VD_AGENT_MOUSE_STATE: u32 = 1;
 const VD_AGENT_MONITORS_CONFIG: u32 = 2;
-#[allow(dead_code)]
 const VD_AGENT_REPLY: u32 = 3;
 const VD_AGENT_CLIPBOARD: u32 = 4;
 #[allow(dead_code)]
@@ -114,6 +133,38 @@ const VD_AGENT_CAP_REPLY: u32 = 2;
 const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5;
 const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6;
 const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
+
+/// Request opcodes that the guest agent acknowledges with a
+/// `VD_AGENT_REPLY` message. To add another type, append its
+/// constant here — that is the only change needed on the send
+/// side.
+const REPLY_ELIGIBLE_AGENT_REQUEST_TYPES: &[u32] = &[VD_AGENT_MONITORS_CONFIG];
+
+/// Maximum entries retained in the recent-reply-lag ring.
+/// 16 entries at the 30 s probe cadence (phase 9B) covers
+/// 8 minutes of agent history in a bug report.
+const MAX_RECENT_AGENT_REPLIES: usize = 16;
+
+/// Cadence for the vdagent liveness probe (phase 9B). 30 s is
+/// chosen so the snapshot ring (cap 16) covers ~8 minutes of
+/// agent history in a bug report — long enough to characterise
+/// an intermittent stall without burning bandwidth on a working
+/// agent. The probe re-sends the most recent monitors config
+/// (treated by the guest agent as a no-op when unchanged), so
+/// the lag of the resulting VD_AGENT_REPLY is a clean liveness
+/// measurement.
+const VDAGENT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long `outstanding_agent_request_count` may stay > 0
+/// before we consider the agent stuck and push a Warn
+/// notification. Conservative; healthy replies arrive in
+/// well under 100 ms.
+const STUCK_AGENT_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Minimum interval between consecutive stuck-agent
+/// notifications, to keep the notification panel quiet during
+/// a sustained stall.
+const STUCK_AGENT_NOTIFY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub struct MainChannel {
     stream: SpiceStream,
@@ -183,6 +234,51 @@ pub struct MainChannel {
     /// the same `Arc` to compute "now in mm_time" at
     /// `STREAM_REPORT` send time.
     mm_clock: Arc<MmClock>,
+    /// Per-request-type send timestamps for REPLY-eligible
+    /// agent requests. Keyed by VD_AGENT_* opcode. Populated in
+    /// `send_agent_data_message` for types in
+    /// `REPLY_ELIGIBLE_AGENT_REQUEST_TYPES`; consumed on REPLY
+    /// receipt in `handle_agent_message`.
+    ///
+    /// `HashMap` (rather than `Option<(u32, Instant)>`) because
+    /// `REPLY_ELIGIBLE_AGENT_REQUEST_TYPES` is sized to grow:
+    /// today it has one entry (MONITORS_CONFIG), DISPLAY_CONFIG
+    /// is the documented next addition for Windows agents. One
+    /// allocation per channel + one lookup per send is a fine
+    /// price for a fixed API surface as types are added.
+    agent_request_send_ts: HashMap<u32, Instant>,
+    /// Cumulative count of REPLY-eligible agent requests sent.
+    agent_request_count: u32,
+    /// Cumulative count of VD_AGENT_REPLY messages received.
+    agent_reply_count: u32,
+    /// Cumulative count of REPLY messages with non-zero `error`
+    /// (anything other than VD_AGENT_SUCCESS = 0).
+    agent_reply_error_count: u32,
+    /// Session-relative seconds at the most recent REPLY
+    /// receipt.
+    last_agent_reply_ts_secs: Option<f64>,
+    /// Microseconds between the most recent matched request
+    /// send and its REPLY. None until the first matched REPLY.
+    last_agent_reply_lag_us: Option<u32>,
+    /// Bounded ring of recent reply lags (µs), oldest first.
+    /// Capped at `MAX_RECENT_AGENT_REPLIES` (16).
+    recent_agent_reply_lag_us: VecDeque<u32>,
+    /// Count of REPLY-eligible requests sent without a matching
+    /// REPLY yet. Increments on send; decrements (saturating)
+    /// on every REPLY received.
+    outstanding_agent_request_count: u32,
+    /// Most recent monitors config payload sent to the agent.
+    /// Cached in `send_agent_monitors_config` so the probe
+    /// can re-send without recomputing. None if we haven't sent
+    /// a config yet.
+    last_monitors_config: Option<Vec<u8>>,
+    /// Timestamp of the most recent monitors config send (for
+    /// real or probe). Updated in `send_agent_monitors_config`.
+    /// Used to suppress probes if a real send happened within the
+    /// probe interval.
+    last_monitors_config_sent_at: Option<Instant>,
+    /// Most recent stuck-agent notification time, for 60 s cool-down.
+    last_stuck_agent_notification_at: Option<Instant>,
 }
 
 impl MainChannel {
@@ -242,6 +338,17 @@ impl MainChannel {
             last_unknown_opcode: None,
             unknown_opcode_count: 0,
             mm_clock,
+            agent_request_send_ts: HashMap::new(),
+            agent_request_count: 0,
+            agent_reply_count: 0,
+            agent_reply_error_count: 0,
+            last_agent_reply_ts_secs: None,
+            last_agent_reply_lag_us: None,
+            recent_agent_reply_lag_us: VecDeque::new(),
+            outstanding_agent_request_count: 0,
+            last_monitors_config: None,
+            last_monitors_config_sent_at: None,
+            last_stuck_agent_notification_at: None,
         }
     }
 
@@ -429,6 +536,15 @@ impl MainChannel {
         // path. Removing this when K1 is closed.
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
         heartbeat.tick().await;
+        // Phase 9B: vdagent liveness probe. Fires every 30 s (VDAGENT_PROBE_INTERVAL).
+        // Skip the first immediate tick so we don't probe before the agent
+        // even attaches.
+        let mut vdagent_probe = tokio::time::interval(VDAGENT_PROBE_INTERVAL);
+        vdagent_probe.tick().await;
+        // Phase 9C: stuck-agent warning. Polls every 5 s to detect
+        // stalled agent requests and emit notifications with cool-down.
+        let mut stuck_agent_check = tokio::time::interval(std::time::Duration::from_secs(5));
+        stuck_agent_check.tick().await;
         let mut last_arm: &'static str = "startup";
         // Iteration counter for K1 hang investigation. Incremented at
         // the top of every loop body. Logged from the heartbeat arm
@@ -551,6 +667,114 @@ impl MainChannel {
                         .await;
                     self.repaint_notify.notify_one();
                     break;
+                }
+                _ = vdagent_probe.tick() => {
+                    last_arm = "vdagent_probe";
+                    // Phase 9B: Send a liveness probe if conditions are met.
+                    // Skip if agent not connected or no agent caps received yet.
+                    if self.guest_caps_received {
+                        // Check suppression: if a real monitors-config send
+                        // happened recently, skip the probe — that send is its
+                        // own liveness signal.
+                        let should_probe = match self.last_monitors_config_sent_at {
+                            None => false,
+                            Some(sent_at) => {
+                                sent_at.elapsed() >= VDAGENT_PROBE_INTERVAL
+                            }
+                        };
+                        if should_probe {
+                            if let Some(payload) = self.last_monitors_config.clone() {
+                                // Re-send the cached payload. The guest treats
+                                // an unchanged config as a no-op, so this is safe.
+                                last_arm = "vdagent_probe+send";
+                                // Propagate IO errors via `?` so a socket
+                                // failure during the probe surfaces
+                                // immediately (matches every other send-site
+                                // in this file); `Ok(false)` means we ran out
+                                // of agent tokens, which is a transient and
+                                // expected condition — log and try the next
+                                // tick. Only refresh the send timestamp on a
+                                // confirmed Ok(true) send.
+                                let sent = self.send_agent_data_message(
+                                    VD_AGENT_MONITORS_CONFIG,
+                                    &payload,
+                                ).await?;
+                                if sent {
+                                    self.last_monitors_config_sent_at = Some(Instant::now());
+                                } else {
+                                    debug!("main: vdagent probe skipped, no agent tokens");
+                                }
+                                last_arm = "vdagent_probe+send_done";
+                            }
+                        }
+                    }
+                }
+                _ = stuck_agent_check.tick() => {
+                    last_arm = "stuck_agent_check";
+                    // Phase 9C: Check if agent requests are stuck and emit
+                    // Warn notification if conditions are met.
+                    //
+                    // NOTE for future maintainers: this check anchors on
+                    // `last_monitors_config_sent_at`, which is only refreshed
+                    // for VD_AGENT_MONITORS_CONFIG sends. When DISPLAY_CONFIG
+                    // (or any further type) is added to
+                    // REPLY_ELIGIBLE_AGENT_REQUEST_TYPES, this anchor must be
+                    // generalised — e.g. replaced with a
+                    // `last_reply_eligible_request_sent_at` field updated in
+                    // `send_agent_data_message` whenever the type matches.
+                    // Otherwise stuck-DISPLAY_CONFIG requests will never trip
+                    // this notification.
+                    if self.outstanding_agent_request_count == 0 {
+                        // No outstanding requests; healthy state.
+                        last_arm = "stuck_agent_check+no_outstanding";
+                    } else if let Some(sent_at) = self.last_monitors_config_sent_at {
+                        // Check if enough time has passed since the last send
+                        // to consider this a stuck state.
+                        if sent_at.elapsed() < STUCK_AGENT_THRESHOLD {
+                            // Too soon since the last send; not yet considered stuck.
+                            last_arm = "stuck_agent_check+too_soon";
+                        } else {
+                            // outstanding > 0 and the threshold has been exceeded.
+                            // Check the notification cool-down.
+                            let should_notify = self
+                                .last_stuck_agent_notification_at
+                                .map(|t| t.elapsed() >= STUCK_AGENT_NOTIFY_COOLDOWN)
+                                .unwrap_or(true);
+                            if should_notify {
+                                last_arm = "stuck_agent_check+notify";
+                                let elapsed_secs =
+                                    sent_at.elapsed().as_secs_f64();
+                                let count = self.outstanding_agent_request_count;
+                                let noun = if count == 1 { "request" } else { "requests" };
+                                // "last send was Xs ago" rather than "last
+                                // probe sent Xs ago" — outstanding may
+                                // include requests older than the most
+                                // recent send (we only track the most
+                                // recent send_at), so the anchor is the
+                                // most recent send, not the oldest
+                                // unanswered one.
+                                let message = format!(
+                                    "Guest agent is not replying — last send was {:.1}s ago, \
+                                     {} {} outstanding",
+                                    elapsed_secs, count, noun
+                                );
+                                let entry = NotificationEntry::new(
+                                    NotifySeverity::Warn,
+                                    NotificationSource::Internal,
+                                    message,
+                                );
+                                self.send_event(ChannelEvent::Notification(entry)).await;
+                                self.repaint_notify.notify_one();
+                                self.last_stuck_agent_notification_at = Some(Instant::now());
+                                last_arm = "stuck_agent_check+notify_done";
+                            } else {
+                                last_arm = "stuck_agent_check+cooldown";
+                            }
+                        }
+                    } else {
+                        // No send timestamp yet, so can't determine if stuck.
+                        last_arm = "stuck_agent_check+no_timestamp";
+                    }
                 }
                 _ = heartbeat.tick() => {
                     let now_ms = std::time::SystemTime::now()
@@ -909,6 +1133,29 @@ impl MainChannel {
                 self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
+                // Per PR #105 review items 1 + 8: drop phase-09
+                // probe bookkeeping tied to the previous agent
+                // instance. Without this, after the next agent
+                // reconnect:
+                //   - outstanding_agent_request_count would still
+                //     count requests the old agent will never reply
+                //     to (spurious stuck-agent Warn notification),
+                //   - a stale entry in agent_request_send_ts would
+                //     match the next REPLY and yield a multi-minute
+                //     lag measurement that pollutes recent_*_lag_us,
+                //   - the cool-down timer would suppress a real
+                //     new-agent stuck notification,
+                //   - a cached monitors-config from the prior
+                //     session could be re-sent by the probe to the
+                //     new agent, potentially with stale geometry.
+                // Clear all of them; the new session's first real
+                // monitors-config send (on resize or session bring-
+                // up) will re-populate the cache from current state.
+                self.agent_request_send_ts.clear();
+                self.outstanding_agent_request_count = 0;
+                self.last_monitors_config = None;
+                self.last_monitors_config_sent_at = None;
+                self.last_stuck_agent_notification_at = None;
             }
 
             main_server::AGENT_DATA => {
@@ -983,6 +1230,13 @@ impl MainChannel {
         snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
         snap.last_unknown_opcode = self.last_unknown_opcode;
         snap.unknown_opcode_count = self.unknown_opcode_count;
+        snap.agent_request_count = self.agent_request_count;
+        snap.agent_reply_count = self.agent_reply_count;
+        snap.agent_reply_error_count = self.agent_reply_error_count;
+        snap.last_agent_reply_ts_secs = self.last_agent_reply_ts_secs;
+        snap.last_agent_reply_lag_us = self.last_agent_reply_lag_us;
+        snap.recent_agent_reply_lag_us = self.recent_agent_reply_lag_us.clone();
+        snap.outstanding_agent_request_count = self.outstanding_agent_request_count;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1152,8 +1406,19 @@ impl MainChannel {
             active, flags
         );
 
-        self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
-            .await
+        // Send first; only refresh the phase-9B probe cache if the
+        // send actually went on the wire (Ok(true)). Caching before
+        // the send would defer the next probe by one interval after
+        // an Ok(false) "no tokens" outcome, suppressing the probe
+        // even though no message left the client.
+        let sent = self
+            .send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
+            .await?;
+        if sent {
+            self.last_monitors_config = Some(payload);
+            self.last_monitors_config_sent_at = Some(Instant::now());
+        }
+        Ok(sent)
     }
 
     async fn send_agent_data_message(&mut self, ty: u32, payload: &[u8]) -> Result<bool> {
@@ -1179,6 +1444,26 @@ impl MainChannel {
             self.send_with_log(main_client::AGENT_DATA, &msg).await?;
             self.agent_tokens = self.agent_tokens.saturating_sub(1);
             offset = end;
+        }
+
+        // Track send time for REPLY-eligible request types so we
+        // can compute reply lag when VD_AGENT_REPLY arrives.
+        //
+        // Overwriting any prior entry for `ty` is intentional —
+        // VD_AGENT_REPLY has no request id, only a request type,
+        // so two sends within a probe interval cannot be
+        // distinguished individually. We measure lag against the
+        // most recent send and accept that the in-flight earlier
+        // REPLY (if any) will skip the lag-update branch when it
+        // arrives (no matching map entry by then). The trade-off
+        // is documented in the phase 09 plan's *Background* and
+        // surfaces as a "no matching send entry" debug log in
+        // handle_agent_message.
+        if REPLY_ELIGIBLE_AGENT_REQUEST_TYPES.contains(&ty) {
+            self.agent_request_send_ts.insert(ty, Instant::now());
+            self.agent_request_count = self.agent_request_count.saturating_add(1);
+            self.outstanding_agent_request_count =
+                self.outstanding_agent_request_count.saturating_add(1);
         }
 
         Ok(true)
@@ -1287,6 +1572,46 @@ impl MainChannel {
                     }
                 }
             }
+            VD_AGENT_REPLY => match parse_vd_agent_reply(payload) {
+                Some((reply_type, error)) => {
+                    debug!("main: VD_AGENT_REPLY type={} error={}", reply_type, error);
+                    self.agent_reply_count = self.agent_reply_count.saturating_add(1);
+                    if error != 0 {
+                        self.agent_reply_error_count =
+                            self.agent_reply_error_count.saturating_add(1);
+                    }
+                    self.last_agent_reply_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+                    // Correlate by request type to compute lag. Only
+                    // decrement outstanding_agent_request_count when we
+                    // find a matching send — a REPLY for a type we did
+                    // NOT send (server bug, or our map was cleared on
+                    // agent disconnect) would otherwise mask a real
+                    // stuck-agent symptom by dropping the outstanding
+                    // count to zero. Per PR #105 review item 2.
+                    if let Some(sent) = self.agent_request_send_ts.remove(&reply_type) {
+                        let lag_us = sent.elapsed().as_micros().try_into().unwrap_or(u32::MAX);
+                        self.last_agent_reply_lag_us = Some(lag_us);
+                        self.recent_agent_reply_lag_us.push_back(lag_us);
+                        if self.recent_agent_reply_lag_us.len() > MAX_RECENT_AGENT_REPLIES {
+                            self.recent_agent_reply_lag_us.pop_front();
+                        }
+                        self.outstanding_agent_request_count =
+                            self.outstanding_agent_request_count.saturating_sub(1);
+                    } else {
+                        debug!(
+                            "main: VD_AGENT_REPLY type={} has no matching send entry — \
+                             skipping lag update and outstanding decrement",
+                            reply_type
+                        );
+                    }
+                }
+                None => {
+                    debug!(
+                        "main: VD_AGENT_REPLY payload too short ({} bytes)",
+                        payload.len()
+                    );
+                }
+            },
             _ => {
                 debug!("main: unhandled agent message type={}", agent_type);
             }
@@ -1417,9 +1742,10 @@ impl MainChannel {
 mod tests {
     use super::{
         build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
-        should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD,
-        VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
-        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        parse_vd_agent_reply, should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES,
+        VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE,
+        VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG,
+        VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1549,5 +1875,49 @@ mod tests {
         // user actually copies something different.
         assert_ne!(hash_clipboard("foo"), hash_clipboard("bar"));
         assert_ne!(hash_clipboard("foo\nbar"), hash_clipboard("foo\nbaz"));
+    }
+
+    // ── VD_AGENT_REPLY parser ───────────────────────────────
+
+    #[test]
+    fn parse_vd_agent_reply_decodes_valid_payload() {
+        // VD_AGENT_MONITORS_CONFIG (type=2), VD_AGENT_SUCCESS (error=0).
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_decodes_error_bit() {
+        // type=2 (MONITORS_CONFIG), error=42 (anything non-zero is failure).
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 42)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_handles_max_values() {
+        // u32::MAX in both fields — confirms little-endian decode width.
+        let payload = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((u32::MAX, u32::MAX)));
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_rejects_short_payload() {
+        // 7 bytes — one short of the required 8.
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_vd_agent_reply(&payload), None);
+        // Empty payload.
+        assert_eq!(parse_vd_agent_reply(&[]), None);
+    }
+
+    #[test]
+    fn parse_vd_agent_reply_ignores_trailing_bytes() {
+        // Server is permitted to send additional bytes after the
+        // documented 8 — we should decode the first 8 and ignore the
+        // rest rather than reject.
+        let payload = [
+            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // valid {2, 0}
+            0xff, 0xff, // trailing garbage
+        ];
+        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
     }
 }

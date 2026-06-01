@@ -32,6 +32,17 @@ pub struct DecodedJpeg {
     pub height: u32,
 }
 
+/// Upper bound on per-side decoded JPEG dimension. 16384 leaves
+/// headroom for >8K displays (7680×4320 fits comfortably; one
+/// side at 16K just fits) while capping the resulting RGBA
+/// allocation at 16384×16384×4 = 1 GiB rather than the JPEG
+/// maximum of 65535×65535×4 ≈ 17 GiB — a hostile or buggy
+/// server cannot force a multi-GB allocation per frame. Matches
+/// `jpeg-decoder` 0.3's internal default cap so the per-platform
+/// backends and the pure-Rust fallback agree on what's
+/// "implausible".
+pub const MAX_DECODED_JPEG_DIMENSION: u32 = 16384;
+
 /// Stateless JPEG decoder.
 ///
 /// Implementations must be `Send + Sync` because the selected
@@ -176,11 +187,15 @@ impl JpegDecoder for MozJpegDecoder {
             let decomp = mozjpeg::Decompress::new_mem(data).ok()?;
             let width = decomp.width() as u32;
             let height = decomp.height() as u32;
-            // Bound the allocation: 65535×65535 is the JPEG
-            // maximum; a frame much larger than that is almost
-            // certainly malformed and we'd rather drop it than
-            // try to allocate a gigabyte of RGBA buffer.
-            if width == 0 || height == 0 || width > 65535 || height > 65535 {
+            // Bound the allocation. See MAX_DECODED_JPEG_DIMENSION
+            // — caps the resulting RGBA buffer at 1 GiB rather
+            // than the JPEG maximum (~17 GiB) so a hostile server
+            // cannot force a multi-GB allocation per frame.
+            if width == 0
+                || height == 0
+                || width > MAX_DECODED_JPEG_DIMENSION
+                || height > MAX_DECODED_JPEG_DIMENSION
+            {
                 warn!(
                     "MozJpegDecoder: implausible dimensions {}x{}, dropping frame",
                     width, height
@@ -315,10 +330,12 @@ impl JpegDecoder for ImageIoDecoder {
         let width = CGImage::width(Some(&cg_image));
         let height = CGImage::height(Some(&cg_image));
 
-        // Bound the allocation: same defensive check as
-        // MozJpegDecoder. 65535x65535 is the JPEG maximum; anything
-        // larger is almost certainly malformed.
-        if width == 0 || height == 0 || width > 65535 || height > 65535 {
+        // Bound the allocation. See MAX_DECODED_JPEG_DIMENSION.
+        if width == 0
+            || height == 0
+            || width as u32 > MAX_DECODED_JPEG_DIMENSION
+            || height as u32 > MAX_DECODED_JPEG_DIMENSION
+        {
             warn!(
                 "ImageIoDecoder: implausible dimensions {}x{}, dropping frame",
                 width, height
@@ -637,10 +654,14 @@ impl JpegDecoder for WicDecoder {
             warn!("WicDecoder: IWICBitmapFrameDecode::GetSize failed: {e}");
             return None;
         }
-        if width == 0 || height == 0 || width > 65535 || height > 65535 {
+        if width == 0
+            || height == 0
+            || width > MAX_DECODED_JPEG_DIMENSION
+            || height > MAX_DECODED_JPEG_DIMENSION
+        {
             warn!(
-                "WicDecoder: implausible dimensions {}x{}, dropping frame",
-                width, height
+                "WicDecoder: implausible dimensions {}x{}, dropping frame (cap: {})",
+                width, height, MAX_DECODED_JPEG_DIMENSION,
             );
             return None;
         }
@@ -682,8 +703,9 @@ impl JpegDecoder for WicDecoder {
         }
 
         // Allocate the output buffer. 4 bytes per pixel; we've
-        // already bounded width*height to ≤ 65535*65535 above so
-        // this can't overflow on a 64-bit platform.
+        // already bounded width and height to
+        // MAX_DECODED_JPEG_DIMENSION above so this can't overflow
+        // on a 64-bit platform.
         let stride = (width as usize) * 4;
         let buf_len = stride * (height as usize);
         let mut rgba = vec![0u8; buf_len];
@@ -1751,15 +1773,22 @@ mod vaapi_tests {
     }
 
     /// If the probe succeeds, the resulting decoder must
-    /// identify itself as "VA-API" so bug reports show the
-    /// chosen path. If the probe fails (no libva, no render
-    /// node, no JPEGBaseline support), there is nothing to
-    /// assert and the test is a no-op — the previous test
-    /// covers the no-panic contract.
+    /// identify itself with a "VA-API" prefix so bug reports
+    /// show the chosen path. The full name today reads
+    /// "VA-API (probed, mozjpeg fallback)" — the parenthetical
+    /// disappears once the real VA-API decode path lands.
+    /// Asserting `starts_with` keeps this test honest across
+    /// that planned transition. If the probe fails (no libva,
+    /// no render node, no JPEGBaseline support), there is
+    /// nothing to assert and the test is a no-op.
     #[test]
-    fn vaapi_name_is_va_api_when_present() {
+    fn vaapi_name_starts_with_va_api_when_present() {
         if let Some(d) = VaapiDecoder::try_new() {
-            assert_eq!(d.name(), "VA-API");
+            assert!(
+                d.name().starts_with("VA-API"),
+                "VaapiDecoder.name() = {:?}, expected to start with \"VA-API\"",
+                d.name(),
+            );
         }
     }
 
@@ -1834,15 +1863,18 @@ mod best_for_platform_linux_tests {
     #[test]
     fn best_for_platform_returns_a_decoder_on_linux() {
         let decoder = best_for_platform();
-        // The name must be one of the documented values. We
-        // accept either VA-API (probe passed), libjpeg-turbo
-        // (mozjpeg feature on, no VA-API), or jpeg-decoder
-        // (no mozjpeg) — i.e. exactly the chain documented in
-        // best_for_platform's rustdoc.
+        // The name must come from the documented chain. We accept:
+        //   - any name starting with "VA-API" (probe passed; the
+        //     full string today is "VA-API (probed, mozjpeg
+        //     fallback)" and loses the parenthetical when the
+        //     real decode path lands),
+        //   - "libjpeg-turbo" (mozjpeg feature on, no VA-API),
+        //   - "jpeg-decoder" (no mozjpeg).
+        // i.e. exactly the chain documented in best_for_platform's
+        // rustdoc.
         let name = decoder.name();
-        assert!(
-            matches!(name, "VA-API" | "libjpeg-turbo" | "jpeg-decoder"),
-            "unexpected backend name on Linux: {name}"
-        );
+        let acceptable =
+            name.starts_with("VA-API") || matches!(name, "libjpeg-turbo" | "jpeg-decoder");
+        assert!(acceptable, "unexpected backend name on Linux: {name}");
     }
 }
