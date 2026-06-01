@@ -688,10 +688,12 @@ fn run_web(
             active_opus_tx,
         ));
         let cursor_bridge_slot = state.bridge_slot.clone();
+        let cursor_bridge_installed = state.bridge_installed_notify.clone();
         let cursor_handle = tokio::spawn(crate::web::cursor::run_cursor_relay(
             cursor_event_rx,
             cursor_bridge_slot,
             cursor_mirror,
+            cursor_bridge_installed,
         ));
 
         // Phase 6b: spawn the bridge reaper. It watches the

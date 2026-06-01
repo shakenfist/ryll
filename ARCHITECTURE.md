@@ -312,6 +312,19 @@ an `<img>` overlay element, and repositions it to follow cursor
 motion events — keeping cursor latency on the datachannel path
 rather than the video encoder path.
 
+The relay caches the last `cursor-shape` payload and last
+`CursorPosition` it observed. The signalling handler signals
+`WebState::bridge_installed_notify` after installing a fresh
+bridge on `POST /offer`; the relay `select!`s on this notify
+and spawns a small replay task that resends the cached state
+to the new viewer with a backoff. This covers the case where
+a viewer attaches after the SPICE cursor channel's initial
+`CURSOR_INIT` (which carries the shape) has already been
+broadcast — without the replay, static screens like GDM (which
+never change the cursor shape on their own) would show no
+cursor sprite until the user happened to enter a region where
+the guest pushed a new shape.
+
 ### Web-mode audio adapter
 
 `ryll/src/web/audio.rs` — `WebOpusSink` implements

@@ -370,6 +370,15 @@ pub async fn post_offer(
         state.bridge_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    // Wake the cursor relay so it can replay its cached
+    // shape/position to the freshly attached viewer. Without
+    // this, a viewer that arrives after the SPICE cursor
+    // channel's initial `CURSOR_INIT` (which carries the
+    // shape) would see no cursor sprite on static screens
+    // like GDM where the guest never changes the cursor
+    // shape on its own.
+    state.bridge_installed_notify.notify_one();
+
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
     Ok(Json(OfferRes {
         res_type: "answer",

@@ -20,7 +20,7 @@ use rand::RngCore;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tracing::info;
 
 use super::signalling::EncoderInfra;
@@ -110,6 +110,17 @@ pub struct WebState {
     /// lock hold time is microseconds and no `.await` is held
     /// while the guard is live.
     pub last_offer_at: std::sync::Mutex<Instant>,
+    /// Single-permit notification fired by `POST /offer` after a
+    /// new bridge is installed in `bridge_slot`. The cursor relay
+    /// `select!`s on this so it can replay its cached
+    /// `cursor-shape` / `cursor-pos` envelopes to the freshly
+    /// attached viewer — otherwise a viewer that arrives after
+    /// the SPICE cursor channel's initial `CURSOR_INIT` (the
+    /// shape carrier) would see no cursor sprite until the guest
+    /// happens to change cursor shape on its own. Uses
+    /// `notify_one()` so a notification raised before the relay
+    /// is waiting still wakes the next `.notified().await`.
+    pub bridge_installed_notify: Arc<Notify>,
 }
 
 impl WebState {
@@ -175,6 +186,7 @@ impl WebState {
             // Initialise 60 s in the past so the first offer
             // always succeeds without a cold-start delay.
             last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),
+            bridge_installed_notify: Arc::new(Notify::new()),
         }
     }
 }

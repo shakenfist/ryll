@@ -32,14 +32,24 @@
 //! variants, just the per-position flag.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Serialize;
 use shakenfist_spice_renderer::{ChannelEvent, CursorImage, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, Notify};
 use tracing::{debug, warn};
+
+/// Backoff schedule (in ms) for re-sending the cached cursor
+/// state after a new bridge is installed. The data channel
+/// isn't open until SCTP/DTLS finishes, which `/offer` does not
+/// wait for — so the first attempt almost always fails. The
+/// schedule covers a typical ICE/DTLS completion (~300-800 ms)
+/// with headroom for slow paths, then gives up; the next real
+/// cursor event will refresh state once the DC is up.
+const REPLAY_BACKOFFS_MS: &[u64] = &[150, 250, 400, 600, 1000, 1500];
 
 /// Wire-format server → browser cursor messages. The `type`
 /// discriminator matches the JSON envelopes parsed by `app.js`.
@@ -60,71 +70,212 @@ enum CursorMsg<'a> {
     Show,
 }
 
+/// Cached state the relay replays to a freshly attached viewer.
+/// Holds the most recent encoded `cursor-shape` payload (already
+/// PNG'd + base64'd + JSON-wrapped, ready for the wire) and the
+/// most recent `CursorPosition` (raw fields — denormalisation
+/// happens at replay time against the current surface size in
+/// case the guest has resized).
+#[derive(Default, Clone)]
+struct CursorCache {
+    shape: Option<Vec<u8>>,
+    position: Option<(u16, u16, bool)>,
+}
+
 /// Spawn-friendly relay. Loops until the broadcast channel
 /// closes (i.e. the renderer's session orchestrator has exited).
 /// `Lagged` from the broadcast receiver is logged and skipped —
 /// the cursor stream is stateless deltas, so a missed shape
 /// will be re-sent on the next pointer move and a missed
 /// position is corrected by the next `CursorPosition`.
+///
+/// The relay caches the last `cursor-shape` and last
+/// `CursorPosition` it sent. When `bridge_installed` fires
+/// (signalled by `/offer` after a new bridge is installed),
+/// the relay spawns a small task that replays the cached state
+/// to the new viewer with a backoff — the data channel isn't
+/// open the instant `/offer` returns, so the first send
+/// attempts typically fail. Without this replay, viewers that
+/// arrive after the cursor channel's initial `CURSOR_INIT`
+/// (the shape carrier) would see no cursor sprite on static
+/// screens like GDM where the guest never changes shape on
+/// its own.
 pub async fn run_cursor_relay(
+    event_rx: broadcast::Receiver<ChannelEvent>,
+    bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    bridge_installed: Arc<Notify>,
+) {
+    let cache: Arc<Mutex<CursorCache>> = Arc::new(Mutex::new(CursorCache::default()));
+    run_cursor_relay_inner(
+        event_rx,
+        bridge_slot,
+        surface_mirror,
+        bridge_installed,
+        cache,
+    )
+    .await
+}
+
+/// Shared implementation behind [`run_cursor_relay`]. The cache
+/// is taken as a parameter so unit tests can observe what was
+/// captured after driving events through the broadcast channel.
+async fn run_cursor_relay_inner(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
     bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    bridge_installed: Arc<Notify>,
+    cache: Arc<Mutex<CursorCache>>,
 ) {
     loop {
-        match event_rx.recv().await {
-            Ok(ChannelEvent::CursorShape(image)) => match encode_shape(&image) {
-                Ok(payload) => send_to_bridge(&bridge_slot, &payload).await,
-                Err(e) => warn!("web cursor: failed to encode shape: {}", e),
-            },
-            Ok(ChannelEvent::CursorPosition { x, y, visible }) => {
-                if !visible {
-                    if let Ok(payload) = serde_json::to_vec(&CursorMsg::Hide) {
-                        send_to_bridge(&bridge_slot, &payload).await;
+        tokio::select! {
+            ev = event_rx.recv() => match ev {
+                Ok(ChannelEvent::CursorShape(image)) => match encode_shape(&image) {
+                    Ok(payload) => {
+                        let _ = try_send_to_bridge(&bridge_slot, &payload).await;
+                        cache.lock().await.shape = Some(payload);
                     }
-                    continue;
+                    Err(e) => warn!("web cursor: failed to encode shape: {}", e),
+                },
+                Ok(ChannelEvent::CursorPosition { x, y, visible }) => {
+                    cache.lock().await.position = Some((x, y, visible));
+                    relay_position(&bridge_slot, &surface_mirror, x, y, visible).await;
                 }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        "web cursor: lagged by {} events; the next \
+                         cursor delta will resync",
+                        n
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    debug!("web cursor: event channel closed; relay exiting");
+                    return;
+                }
+            },
+            _ = bridge_installed.notified() => {
+                // Spawn the replay off-task so the backoff schedule
+                // doesn't block live event processing. The cache is
+                // Arc<Mutex<_>>, so the task always reads the latest
+                // state on each retry — a fresh CursorShape arriving
+                // mid-replay supersedes the cached payload, never
+                // races behind it.
+                let slot = bridge_slot.clone();
+                let mirror = surface_mirror.clone();
+                let cache = cache.clone();
+                tokio::spawn(async move {
+                    replay_to_new_bridge(slot, mirror, cache).await;
+                });
+            }
+        }
+    }
+}
+
+/// Send a `CursorPosition` to the active bridge: hide on
+/// `visible=false`, otherwise position + show. Pulled out of
+/// the main loop so the replay path can reuse it.
+async fn relay_position(
+    bridge_slot: &Arc<Mutex<Option<WebrtcBridge>>>,
+    surface_mirror: &Arc<Mutex<SurfaceMirror>>,
+    x: u16,
+    y: u16,
+    visible: bool,
+) {
+    if !visible {
+        if let Ok(payload) = serde_json::to_vec(&CursorMsg::Hide) {
+            let _ = try_send_to_bridge(bridge_slot, &payload).await;
+        }
+        return;
+    }
+    let dims = {
+        let guard = surface_mirror.lock().await;
+        guard.primary_surface().map(|s| s.size())
+    };
+    let Some((w, h)) = dims else {
+        // No primary surface yet — drop silently.
+        return;
+    };
+    let payload = match encode_position(x, y, w, h) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("web cursor: failed to encode position: {}", e);
+            return;
+        }
+    };
+    let _ = try_send_to_bridge(bridge_slot, &payload).await;
+    // After re-showing the cursor (visible=true) make
+    // sure the overlay isn't hidden from a previous
+    // hide.  The browser only reveals the overlay
+    // again when it sees a new shape OR an explicit
+    // show; sending a `cursor-show` after a real
+    // position keeps the overlay visible without
+    // flicker.
+    if let Ok(p) = serde_json::to_vec(&CursorMsg::Show) {
+        let _ = try_send_to_bridge(bridge_slot, &p).await;
+    }
+}
+
+/// Replay the cached cursor shape + position to the bridge in
+/// `bridge_slot`. The data channel typically isn't open the
+/// instant `/offer` returns, so we walk through
+/// [`REPLAY_BACKOFFS_MS`] sleeping between attempts. On each
+/// retry the cache is re-read so a CursorShape arriving during
+/// the replay supersedes the stale payload. Gives up silently
+/// after the schedule is exhausted — the next real cursor event
+/// will refresh state once the DC is up.
+async fn replay_to_new_bridge(
+    bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    cache: Arc<Mutex<CursorCache>>,
+) {
+    for delay_ms in REPLAY_BACKOFFS_MS {
+        tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+
+        let snapshot = cache.lock().await.clone();
+        if snapshot.shape.is_none() && snapshot.position.is_none() {
+            // Nothing to replay yet.
+            return;
+        }
+
+        let mut shape_ok = true;
+        if let Some(ref payload) = snapshot.shape {
+            shape_ok = try_send_to_bridge(&bridge_slot, payload).await.is_ok();
+        }
+
+        let mut position_ok = true;
+        if let Some((x, y, visible)) = snapshot.position {
+            if !visible {
+                if let Ok(payload) = serde_json::to_vec(&CursorMsg::Hide) {
+                    position_ok = try_send_to_bridge(&bridge_slot, &payload).await.is_ok();
+                }
+            } else {
                 let dims = {
                     let guard = surface_mirror.lock().await;
                     guard.primary_surface().map(|s| s.size())
                 };
-                let Some((w, h)) = dims else {
-                    // No primary surface yet — drop silently.
-                    continue;
-                };
-                let payload = match encode_position(x, y, w, h) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("web cursor: failed to encode position: {}", e);
-                        continue;
+                if let Some((w, h)) = dims {
+                    if let Ok(payload) = encode_position(x, y, w, h) {
+                        position_ok = try_send_to_bridge(&bridge_slot, &payload).await.is_ok();
                     }
-                };
-                send_to_bridge(&bridge_slot, &payload).await;
-                // After re-showing the cursor (visible=true) make
-                // sure the overlay isn't hidden from a previous
-                // hide.  The browser only reveals the overlay
-                // again when it sees a new shape OR an explicit
-                // show; sending a `cursor-show` after a real
-                // position keeps the overlay visible without
-                // flicker.
-                if let Ok(p) = serde_json::to_vec(&CursorMsg::Show) {
-                    send_to_bridge(&bridge_slot, &p).await;
+                    if position_ok {
+                        if let Ok(p) = serde_json::to_vec(&CursorMsg::Show) {
+                            position_ok = try_send_to_bridge(&bridge_slot, &p).await.is_ok();
+                        }
+                    }
+                } else {
+                    // No primary surface yet — try again next round.
+                    position_ok = false;
                 }
             }
-            Ok(_) => {}
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(
-                    "web cursor: lagged by {} events; the next \
-                     cursor delta will resync",
-                    n
-                );
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                debug!("web cursor: event channel closed; relay exiting");
-                return;
-            }
+        }
+
+        if shape_ok && position_ok {
+            debug!("web cursor: replayed cached state to new viewer");
+            return;
         }
     }
+    debug!("web cursor: replay budget exhausted; next real event will resync");
 }
 
 /// PNG-encode a [`CursorImage`] and wrap it in a `cursor-shape`
@@ -168,16 +319,25 @@ fn encode_position(x: u16, y: u16, width: u32, height: u32) -> anyhow::Result<Ve
 }
 
 /// Send a payload over the currently active bridge's control
-/// DC. If there's no bridge (no viewer connected) drop the
-/// message silently — the next `CursorShape` / `CursorPosition`
-/// will re-deliver state once a viewer attaches.
-async fn send_to_bridge(slot: &Arc<Mutex<Option<WebrtcBridge>>>, payload: &[u8]) {
+/// DC. Returns `Err` if there is no bridge in the slot or if
+/// the underlying `send_control` failed (the data channel is
+/// closed, or — most commonly during the replay path — not yet
+/// open because SCTP/DTLS is still handshaking). Both failure
+/// modes are swallowed at the caller in the steady-state path;
+/// the replay path uses the result to drive its backoff.
+async fn try_send_to_bridge(
+    slot: &Arc<Mutex<Option<WebrtcBridge>>>,
+    payload: &[u8],
+) -> anyhow::Result<()> {
     let guard = slot.lock().await;
-    if let Some(bridge) = guard.as_ref() {
-        if let Err(e) = bridge.send_control(payload).await {
-            debug!("web cursor: send_control failed: {}", e);
-        }
+    let Some(bridge) = guard.as_ref() else {
+        return Err(anyhow::anyhow!("no active bridge"));
+    };
+    if let Err(e) = bridge.send_control(payload).await {
+        debug!("web cursor: send_control failed: {}", e);
+        return Err(e);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -263,5 +423,88 @@ mod tests {
         let payload = serde_json::to_vec(&CursorMsg::Show).expect("serialize");
         let v: Value = serde_json::from_slice(&payload).expect("json");
         assert_eq!(v["type"], "cursor-show");
+    }
+
+    #[tokio::test]
+    async fn try_send_to_bridge_errs_when_slot_empty() {
+        let slot: Arc<Mutex<Option<WebrtcBridge>>> = Arc::new(Mutex::new(None));
+        let err = try_send_to_bridge(&slot, b"{}")
+            .await
+            .expect_err("no bridge should fail");
+        assert!(err.to_string().contains("no active bridge"));
+    }
+
+    /// `replay_to_new_bridge` with an empty cache must walk the
+    /// schedule and return without panicking. It must NOT block
+    /// for the full schedule — an empty cache exits on the first
+    /// iteration after the first sleep, so the whole call
+    /// completes within the first backoff window.
+    #[tokio::test]
+    async fn replay_with_empty_cache_returns_quickly() {
+        let slot: Arc<Mutex<Option<WebrtcBridge>>> = Arc::new(Mutex::new(None));
+        let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
+        let cache = Arc::new(Mutex::new(CursorCache::default()));
+
+        let start = std::time::Instant::now();
+        replay_to_new_bridge(slot, mirror, cache).await;
+        let elapsed = start.elapsed();
+
+        // First backoff is 150 ms; the empty-cache check fires
+        // right after it, so the whole call must finish well
+        // before the full schedule (~3.85 s) would.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "replay with empty cache took {:?}, expected <500 ms",
+            elapsed,
+        );
+    }
+
+    /// Drive a CursorShape and a CursorPosition through the
+    /// relay's broadcast channel and verify the cache reflects
+    /// them. No real bridge is involved — `try_send_to_bridge`
+    /// silently fails with "no active bridge", which is fine;
+    /// what we're asserting is that the cache update side-effect
+    /// fired regardless.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn relay_caches_shape_and_position() {
+        use shakenfist_spice_renderer::ChannelEvent;
+
+        let (event_tx, event_rx) = broadcast::channel::<ChannelEvent>(16);
+        let slot: Arc<Mutex<Option<WebrtcBridge>>> = Arc::new(Mutex::new(None));
+        let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
+        let installed = Arc::new(Notify::new());
+        let cache = Arc::new(Mutex::new(CursorCache::default()));
+
+        let cache_for_relay = cache.clone();
+        let relay = tokio::spawn(run_cursor_relay_inner(
+            event_rx,
+            slot,
+            mirror,
+            installed,
+            cache_for_relay,
+        ));
+
+        event_tx
+            .send(ChannelEvent::CursorShape(dummy_cursor(16, 16)))
+            .expect("broadcast send");
+        event_tx
+            .send(ChannelEvent::CursorPosition {
+                x: 100,
+                y: 200,
+                visible: true,
+            })
+            .expect("broadcast send");
+
+        // Yield long enough for the relay to drain both events.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let snapshot = cache.lock().await.clone();
+        let shape = snapshot.shape.expect("shape should be cached");
+        let v: Value = serde_json::from_slice(&shape).expect("shape json");
+        assert_eq!(v["type"], "cursor-shape");
+        assert_eq!(snapshot.position, Some((100, 200, true)));
+
+        relay.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), relay).await;
     }
 }
