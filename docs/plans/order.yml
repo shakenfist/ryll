@@ -41,3 +41,5 @@
 - PLAN-macos-runtime-metrics.md: macOS runtime metrics
 - PLAN-ci-platform-matrix.md: CI platform matrix
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics
+- PLAN-web-encoder-quality.md: Web-mode encoder quality and adaptive bitrate
+- PLAN-web-ui-convergence.md: Converge the web frontend toward the eframe GUI's UX
