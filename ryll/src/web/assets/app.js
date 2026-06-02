@@ -423,6 +423,17 @@
         hudEl.hidden = false;
     }
 
+    // Counterpart to updateHud: called on data-channel close so a
+    // reconnect doesn't flash stale numbers. Kept symmetric with
+    // updateHud so any future field added to the HUD is cleared
+    // here too — adding a field to updateHud without updating this
+    // helper would leave stale state visible.
+    function clearHud() {
+        if (!hudEl) return;
+        hudEl.textContent = '';
+        hudEl.hidden = true;
+    }
+
     // ---------------------------------------------------------------
     // Viewport reporting.
     //
@@ -750,10 +761,7 @@
             }
             bandwidthEma = null;
             lastSentKbps = null;
-            if (hudEl) {
-                hudEl.textContent = '';
-                hudEl.hidden = true;
-            }
+            clearHud();
         };
         dc.onmessage = (event) => {
             let msg;

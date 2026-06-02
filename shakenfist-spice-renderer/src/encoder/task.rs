@@ -606,6 +606,69 @@ mod tests {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
     }
 
+    /// SetBitrate below `MIN_BITRATE_KBPS` (500) must be clamped up to
+    /// the floor. Encoder starts at the 10 Mbps ceiling, so a request
+    /// of 100 kbps clamps to 500 kbps — which is well outside the 10%
+    /// band of 10 000 kbps → rebuild → keyframe. Verifies the lower
+    /// clamp actually fires; without it the encoder would attempt to
+    /// configure openh264 at 100 kbps, which is below any legitimate
+    /// VDI use case and risks the library returning quality-degradation
+    /// warnings or just refusing the configuration outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_bitrate_below_floor_clamps_up() {
+        let quality = EncoderQuality {
+            target_bitrate_bps: 10_000_000,
+        };
+        let encoder = H264Encoder::new_with_quality(64, 64, quality).expect("init");
+        let source = CountedFrameSource::new(64, 64, 200);
+        let (tx, mut rx) = mpsc::channel(64);
+        let (ctl_tx, ctl_rx) = mpsc::channel(8);
+
+        let handle = EncoderTask::spawn(encoder, source, tx, ctl_rx, 60);
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("first recv timed out")
+            .expect("first frame");
+        assert!(first.keyframe);
+        for _ in 0..3 {
+            let f = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("p-frame recv timed out")
+                .expect("p-frame");
+            assert!(!f.keyframe);
+        }
+
+        // Below MIN_BITRATE_KBPS (500) → clamped to 500 kbps → far
+        // outside the 10% band of 10000 kbps → must rebuild → IDR.
+        ctl_tx
+            .send(EncoderControl::SetBitrate(100))
+            .await
+            .expect("send below-floor set-bitrate");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Drain frames until we see the rebuild's IDR.
+        let mut saw_keyframe = false;
+        for _ in 0..4 {
+            let f = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("recv timed out")
+                .expect("recv");
+            if f.keyframe {
+                saw_keyframe = true;
+                break;
+            }
+        }
+        assert!(
+            saw_keyframe,
+            "expected keyframe from below-floor SetBitrate (clamp to 500 kbps)"
+        );
+
+        ctl_tx.send(EncoderControl::Stop).await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
     /// SetBitrate with a value above the operator-set ceiling must be
     /// clamped down to the ceiling. Since the clamped value equals
     /// the current bitrate (the encoder starts at the ceiling), the

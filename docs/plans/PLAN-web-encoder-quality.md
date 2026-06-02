@@ -428,6 +428,25 @@ because the following statements will be true:
   control DC stalls), the encoder should fall back to
   webrtc-rs's own stats rather than continuing to
   encode at the last-reported rate forever.
+- **Bug-report bandwidth ring (descoped phase 2 step 2d).**
+  The original step called for a 60-sample ring of recent
+  bandwidth values plus the active encoder bitrate threaded
+  into the eframe bug-report metadata. Web mode has no
+  bug-report trigger today, so the ring would write to a
+  struct nothing reads. Revisit once web-mode bug reports
+  exist (`PLAN-web-ui-convergence.md`).
+- **Encoder rebuild oscillation cooldown.** Push-review
+  flagged a low-severity amplification: a hostile
+  authenticated client crafting bandwidth values just
+  outside the 10% band on each step can walk the encoder
+  through a sequence of rebuilds (bounded by
+  `[MIN_BITRATE_KBPS, ceiling]`, so ~3–4 steps in each
+  direction, capped at one rebuild per encoder tick ≈ 60
+  Hz). Each rebuild is millisecond-scale and emits an
+  IDR. A minimum cooldown between accepted SetBitrate
+  adjustments (e.g. 1 s) or comparing against a slower-
+  moving EMA-of-applied baseline would close this if it
+  becomes a problem.
 
 ### Bugs fixed during this work
 

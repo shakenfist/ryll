@@ -88,6 +88,13 @@ pub async fn run_input_relay(
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
     encoder_control: mpsc::Sender<EncoderControl>,
 ) {
+    // Track the last `kbps` value we logged at info! level so a
+    // hostile client that floods Bandwidth messages (bypassing
+    // the JS-side 10% band-crossing filter) cannot saturate the
+    // ryll log. Legitimate browsers already band-cross before
+    // sending, so this filter is a no-op in the normal case.
+    let mut last_logged_kbps: Option<u32> = None;
+
     while let Some(payload) = control_rx.recv().await {
         let msg: BrowserMsg = match serde_json::from_slice(&payload) {
             Ok(m) => m,
@@ -174,9 +181,29 @@ pub async fn run_input_relay(
             BrowserMsg::Bandwidth { kbps } => {
                 // info! so operators tailing the log without
                 // --verbose can see the adaptive loop moving.
-                // The browser-side band-crossing filter (10% EMA)
-                // keeps this from spamming on a stable link.
-                info!("web inputs: browser bandwidth estimate {} kbps", kbps);
+                // Server-side mirror of the JS-side 10% band-
+                // crossing filter: only escalate to info! when the
+                // value moves more than 10% from the last logged
+                // value. This way a hostile client that floods
+                // Bandwidth messages cannot saturate the log
+                // (push-review hardening, low-severity finding).
+                let log_at_info = match last_logged_kbps {
+                    None => true,
+                    Some(prev) => {
+                        let delta = kbps.abs_diff(prev) as u64;
+                        let threshold = (prev as u64).saturating_mul(10) / 100;
+                        delta > threshold
+                    }
+                };
+                if log_at_info {
+                    info!("web inputs: browser bandwidth estimate {} kbps", kbps);
+                    last_logged_kbps = Some(kbps);
+                } else {
+                    debug!(
+                        "web inputs: browser bandwidth estimate {} kbps (within band, debug only)",
+                        kbps
+                    );
+                }
                 if encoder_control
                     .send(EncoderControl::SetBitrate(kbps))
                     .await
