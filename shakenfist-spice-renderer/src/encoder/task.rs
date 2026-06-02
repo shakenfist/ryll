@@ -83,6 +83,17 @@ fn run<S: FrameSource>(
 
         // Try to pull a fresh frame and encode it.
         if let Some(frame) = source.next_frame() {
+            // Self-heal on guest-initiated resize: when the surface
+            // mirror grows or shrinks, the FrameRef carries the new
+            // dimensions. `resize` is a no-op when they already
+            // match; on a real change it rebuilds the inner
+            // openh264 encoder so the next encoded frame starts a
+            // fresh stream (SPS / PPS + IDR), letting the browser
+            // decoder reconfigure without a WebRTC renegotiation.
+            // Without this, every post-resize encode would bail on
+            // the rgba.len() mismatch and the browser would see a
+            // frozen frame until the next /offer.
+            encoder.resize(frame.width, frame.height)?;
             let force_kf = keyframe_pending;
             match encoder.encode(frame.rgba, force_kf) {
                 Ok(mut encoded) => {
@@ -246,6 +257,143 @@ mod tests {
 
         ctl_tx.send(EncoderControl::Stop).await.expect("send stop");
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+    }
+
+    /// A FrameSource that switches dimensions partway through a
+    /// stream, mirroring what a guest-initiated display resize
+    /// looks like from the encoder's perspective. Used to verify
+    /// the encoder auto-resizes on FrameRef dimension changes
+    /// instead of bailing on the rgba.len() mismatch — the bug
+    /// observed in test-session-008e where 1280x800 → 1440x900
+    /// froze the browser stream.
+    struct ResizingFrameSource {
+        first_rgba: Vec<u8>,
+        first_dims: (u32, u32),
+        second_rgba: Vec<u8>,
+        second_dims: (u32, u32),
+        produced: u32,
+        switch_after: u32,
+        total: u32,
+    }
+
+    impl ResizingFrameSource {
+        fn new(first: (u32, u32), second: (u32, u32), switch_after: u32, total: u32) -> Self {
+            let first_len = (first.0 as usize) * (first.1 as usize) * 4;
+            let second_len = (second.0 as usize) * (second.1 as usize) * 4;
+            let mut first_rgba = vec![0u8; first_len];
+            let mut second_rgba = vec![0u8; second_len];
+            for chunk in first_rgba.chunks_exact_mut(4) {
+                chunk[3] = 255;
+            }
+            for chunk in second_rgba.chunks_exact_mut(4) {
+                chunk[3] = 255;
+            }
+            Self {
+                first_rgba,
+                first_dims: first,
+                second_rgba,
+                second_dims: second,
+                produced: 0,
+                switch_after,
+                total,
+            }
+        }
+    }
+
+    impl FrameSource for ResizingFrameSource {
+        fn next_frame(&mut self) -> Option<FrameRef<'_>> {
+            if self.produced >= self.total {
+                return None;
+            }
+            let i = self.produced;
+            self.produced += 1;
+            let timestamp_us = (i as u64) * 33_333;
+            if i < self.switch_after {
+                Some(FrameRef {
+                    width: self.first_dims.0,
+                    height: self.first_dims.1,
+                    rgba: &self.first_rgba,
+                    timestamp_us,
+                })
+            } else {
+                Some(FrameRef {
+                    width: self.second_dims.0,
+                    height: self.second_dims.1,
+                    rgba: &self.second_rgba,
+                    timestamp_us,
+                })
+            }
+        }
+    }
+
+    /// Guest-initiated mid-session resize: the encoder must
+    /// auto-resize on the new dimensions and continue emitting
+    /// frames, not bail with an rgba.len() mismatch. The first
+    /// frame after the resize must be an IDR (openh264 emits one
+    /// implicitly as the first frame of the new inner encoder)
+    /// so the browser decoder can reconfigure cleanly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn encoder_auto_resizes_mid_stream() {
+        // 3 frames at 64x64, then 5 frames at 96x96.
+        let encoder = H264Encoder::new(64, 64).expect("init");
+        let source = ResizingFrameSource::new((64, 64), (96, 96), 3, 8);
+        let (tx, mut rx) = mpsc::channel(16);
+        let (ctl_tx, ctl_rx) = mpsc::channel(4);
+
+        let handle = EncoderTask::spawn(encoder, source, tx, ctl_rx, 60);
+
+        let mut frames = Vec::new();
+        let drain = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(f) = rx.recv().await {
+                frames.push(f);
+                if frames.len() == 8 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(drain.is_ok(), "drain timed out — encoder likely bailed");
+        ctl_tx.send(EncoderControl::Stop).await.ok();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+
+        assert_eq!(frames.len(), 8, "all 8 frames must encode across resize");
+        assert!(frames[0].keyframe, "first frame is the implicit IDR");
+        // Frame index 3 is the first frame at the new resolution;
+        // the rebuilt inner encoder treats it as its own first
+        // frame, so it must also be an IDR for the browser decoder
+        // to reconfigure cleanly.
+        assert!(
+            frames[3].keyframe,
+            "post-resize frame must be an IDR (got keyframe={})",
+            frames[3].keyframe,
+        );
+    }
+
+    /// `H264Encoder::resize` is a no-op when dimensions match. The
+    /// inner encoder must stay the same so we don't drop frame
+    /// state every tick.
+    #[test]
+    fn encoder_resize_is_noop_when_dims_match() {
+        let mut encoder = H264Encoder::new(64, 64).expect("init");
+        // Round-down behaviour: 65 → 64, must still be a no-op.
+        encoder.resize(65, 65).expect("resize");
+        assert_eq!(encoder.width(), 64);
+        assert_eq!(encoder.height(), 64);
+        encoder.resize(64, 64).expect("resize exact");
+        assert_eq!(encoder.width(), 64);
+        assert_eq!(encoder.height(), 64);
+    }
+
+    /// `H264Encoder::resize` rejects sub-2-pixel dimensions the
+    /// same way `H264Encoder::new` does, so a buggy caller can't
+    /// silently put the encoder into a 0x0 state.
+    #[test]
+    fn encoder_resize_rejects_tiny_dimensions() {
+        let mut encoder = H264Encoder::new(64, 64).expect("init");
+        let err = encoder.resize(1, 64).expect_err("must error on width=1");
+        assert!(err.to_string().contains("too small"));
+        let err = encoder.resize(64, 1).expect_err("must error on height=1");
+        assert!(err.to_string().contains("too small"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

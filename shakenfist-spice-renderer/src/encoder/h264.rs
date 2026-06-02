@@ -119,6 +119,39 @@ impl H264Encoder {
         self.height
     }
 
+    /// Reconfigure the encoder for new dimensions. No-op when the
+    /// dimensions (after even-rounding) already match. On a real
+    /// change the inner openh264 encoder is rebuilt from scratch
+    /// so the next encoded frame starts a fresh stream — openh264
+    /// emits SPS / PPS alongside the implicit first-frame IDR,
+    /// which is exactly what the browser decoder needs to switch
+    /// resolution mid-WebRTC-session without renegotiation.
+    ///
+    /// Called by [`super::EncoderTask`] on every frame so guest-
+    /// initiated display resizes (or `VDAgentMonitorsConfig`-
+    /// driven ones from the browser viewport) self-heal in one
+    /// frame instead of freezing the stream.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        let w = width & !1;
+        let h = height & !1;
+        if w == 0 || h == 0 {
+            anyhow::bail!(
+                "H264Encoder::resize: dimensions too small after rounding down to even: {}x{}",
+                width,
+                height,
+            );
+        }
+        if w == self.width && h == self.height {
+            return Ok(());
+        }
+        let inner = openh264::encoder::Encoder::new()
+            .map_err(|e| anyhow::anyhow!("H264Encoder::resize: openh264 init failed: {}", e))?;
+        self.inner = inner;
+        self.width = w;
+        self.height = h;
+        Ok(())
+    }
+
     /// Encode a single RGBA frame.
     ///
     /// `rgba` must be `width * height * 4` bytes (tight, no row
