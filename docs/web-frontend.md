@@ -215,10 +215,23 @@ task:
 
 #### Observability
 
-Browser side: the sampler logs
-`console.debug('[ryll] bandwidth kbps=', N)` on every send.
-Open the browser DevTools console and confirm the value tracks
-the link capacity.
+In-page: a small monospace overlay at the bottom-left of the
+browser window reads `<kbps> kbps · <rtt> ms` and updates once
+per second while the data channel is open. The bandwidth value
+is the smoothed estimate the browser pushes to the server
+(updated every tick, not just on band-crossings, so the number
+moves more smoothly than the server log). The RTT comes from
+`RTCIceCandidatePairStats.currentRoundTripTime` on the same
+nominated candidate pair. Either cell shows `—` when the
+browser has not populated the field — typical for
+`availableOutgoingBitrate` on Firefox / Safari. This HUD is a
+down-payment on the bottom status bar planned in
+`docs/plans/PLAN-web-ui-convergence.md`; the convergence work
+will subsume it when it lands.
+
+Browser console: the sampler logs
+`console.debug('[ryll] bandwidth kbps=', N)` on every send to
+the server.
 
 Server side: every accepted bandwidth message is logged at
 `info!` level:

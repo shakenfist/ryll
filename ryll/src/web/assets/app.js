@@ -42,6 +42,7 @@
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
     const cursorEl = document.getElementById('cursor');
+    const hudEl = document.getElementById('hud');
 
     const params = new URLSearchParams(window.location.search);
     const TOKEN = params.get('token');
@@ -363,19 +364,31 @@
             return;
         }
         let bps = null;
+        let rttSeconds = null;
         stats.forEach((r) => {
             if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
                 if (typeof r.availableOutgoingBitrate === 'number') {
                     bps = r.availableOutgoingBitrate;
                 }
+                if (typeof r.currentRoundTripTime === 'number') {
+                    rttSeconds = r.currentRoundTripTime;
+                }
             }
         });
-        if (bps === null) return;
+        if (bps === null) {
+            // No bandwidth estimate available — still update the
+            // HUD's RTT cell if we have one, so the operator sees
+            // *something* on Firefox/Safari and can confirm the
+            // sampler is running.
+            updateHud(null, rttSeconds);
+            return;
+        }
         const kbps = Math.round(bps / 1000);
         bandwidthEma = bandwidthEma === null
             ? kbps
             : bandwidthEma * (1 - EMA_ALPHA) + kbps * EMA_ALPHA;
         const smoothed = Math.round(bandwidthEma);
+        updateHud(smoothed, rttSeconds);
         const cross = lastSentKbps === null
             || Math.abs(smoothed - lastSentKbps) / lastSentKbps > BAND_CROSS_PCT;
         if (cross) {
@@ -383,6 +396,31 @@
             sendCtrl({ type: 'bandwidth', kbps: smoothed });
             lastSentKbps = smoothed;
         }
+    }
+
+    // ---------------------------------------------------------------
+    // HUD update. Writes the smoothed bandwidth estimate and the
+    // candidate-pair RTT into the bottom-left overlay. Called from
+    // sampleBandwidth on every 1 Hz tick — including ticks where
+    // we suppress the server-side update via the band-crossing
+    // filter, so the displayed number reflects the encoder's
+    // applied bitrate floor/ceiling more accurately than the
+    // server log would.
+    //
+    // kbps / rttSeconds may be null when the browser hasn't
+    // populated the respective fields (Firefox / Safari sometimes
+    // omit availableOutgoingBitrate). Each cell renders "—" in
+    // that case rather than vanishing, so the layout doesn't jump
+    // and the operator can still see that the sampler is alive.
+    // ---------------------------------------------------------------
+    function updateHud(kbps, rttSeconds) {
+        if (!hudEl) return;
+        const kbpsCell = kbps === null ? '— kbps' : `${kbps} kbps`;
+        const rttCell = rttSeconds === null
+            ? '— ms'
+            : `${Math.round(rttSeconds * 1000)} ms`;
+        hudEl.textContent = `${kbpsCell} · ${rttCell}`;
+        hudEl.hidden = false;
     }
 
     // ---------------------------------------------------------------
@@ -712,6 +750,10 @@
             }
             bandwidthEma = null;
             lastSentKbps = null;
+            if (hudEl) {
+                hudEl.textContent = '';
+                hudEl.hidden = true;
+            }
         };
         dc.onmessage = (event) => {
             let msg;

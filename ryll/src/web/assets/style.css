@@ -30,3 +30,13 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
 #reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
 #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }
 #cursor[hidden] { display: none; }
+/* Bottom-left WebRTC stats HUD. Down-payment on the bottom
+   status bar in PLAN-web-ui-convergence.md — shows the smoothed
+   bandwidth estimate the browser pushes to the encoder and the
+   candidate-pair RTT so operators can see the adaptive loop
+   moving without tailing logs. Monospace so the digits stop
+   reflowing the layout on every update. Same translucent-dark
+   treatment as #status / #controls for contrast over arbitrary
+   video content. */
+#hud { position: absolute; bottom: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0, 0, 0, 0.6); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; line-height: 1.2; z-index: 25; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); pointer-events: none; }
+#hud[hidden] { display: none; }
