@@ -28,7 +28,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use shakenfist_spice_renderer::{EncoderControl, InputEvent, SurfaceMirror};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Wire-format browser → server input messages. The `type`
 /// discriminator matches the JSON envelopes built by `app.js`.
@@ -172,7 +172,11 @@ pub async fn run_input_relay(
             }
 
             BrowserMsg::Bandwidth { kbps } => {
-                debug!("web inputs: bandwidth estimate {} kbps", kbps);
+                // info! so operators tailing the log without
+                // --verbose can see the adaptive loop moving.
+                // The browser-side band-crossing filter (10% EMA)
+                // keeps this from spamming on a stable link.
+                info!("web inputs: browser bandwidth estimate {} kbps", kbps);
                 if encoder_control
                     .send(EncoderControl::SetBitrate(kbps))
                     .await
