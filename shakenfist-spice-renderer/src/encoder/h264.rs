@@ -12,6 +12,30 @@
 //! step 2c).
 
 use anyhow::Result;
+use openh264::encoder::{
+    BitRate, Complexity, EncoderConfig, FrameRate, IntraFramePeriod, Level, Profile, QpRange,
+    RateControlMode, UsageType,
+};
+
+/// Quality parameters for the H.264 encoder.
+///
+/// Deliberately a struct rather than a bare `u32` so that phase 2 can
+/// add per-resolution clamps and min/max bounds without changing every
+/// call-site signature.
+#[derive(Debug, Clone, Copy)]
+pub struct EncoderQuality {
+    /// Target bitrate in bits per second.
+    pub target_bitrate_bps: u32,
+}
+
+impl Default for EncoderQuality {
+    fn default() -> Self {
+        Self {
+            // 15 Mbps: comfortable ceiling for 1080p VDI over a LAN.
+            target_bitrate_bps: 15_000_000,
+        }
+    }
+}
 
 /// One encoded frame's NAL units in Annex-B framing.
 #[derive(Debug, Clone)]
@@ -82,15 +106,47 @@ pub struct H264Encoder {
     inner: openh264::encoder::Encoder,
     width: u32,
     height: u32,
+    quality: EncoderQuality,
+}
+
+/// Build a VDI-tuned [`EncoderConfig`] from an [`EncoderQuality`].
+///
+/// Centralised here so that both [`H264Encoder::new_with_quality`] and
+/// [`H264Encoder::resize`] produce identical encoder settings and
+/// neither path can silently fall back to openh264 defaults.
+fn build_config(quality: EncoderQuality) -> EncoderConfig {
+    EncoderConfig::new()
+        .usage_type(UsageType::ScreenContentRealTime)
+        .rate_control_mode(RateControlMode::Quality)
+        .qp(QpRange::new(18, 36))
+        .bitrate(BitRate::from_bps(quality.target_bitrate_bps))
+        .max_frame_rate(FrameRate::from_hz(30.0))
+        .profile(Profile::High)
+        .level(Level::Level_4_2)
+        .complexity(Complexity::Low)
+        .intra_frame_period(IntraFramePeriod::from_num_frames(60))
+        .skip_frames(false)
 }
 
 impl H264Encoder {
-    /// Create a new encoder for `width × height` RGBA frames.
+    /// Create a new encoder for `width × height` RGBA frames using
+    /// default [`EncoderQuality`] settings (15 Mbps). For non-default
+    /// quality, use [`H264Encoder::new_with_quality`].
     ///
     /// openh264 requires even dimensions, so both values are rounded
     /// down to the nearest even number. Returns `Err` if either
     /// rounded dimension is 0.
     pub fn new(width: u32, height: u32) -> Result<Self> {
+        Self::new_with_quality(width, height, EncoderQuality::default())
+    }
+
+    /// Create a new encoder for `width × height` RGBA frames with
+    /// explicit VDI-tuned quality settings.
+    ///
+    /// openh264 requires even dimensions, so both values are rounded
+    /// down to the nearest even number. Returns `Err` if either
+    /// rounded dimension is 0.
+    pub fn new_with_quality(width: u32, height: u32, quality: EncoderQuality) -> Result<Self> {
         let w = width & !1;
         let h = height & !1;
         if w == 0 || h == 0 {
@@ -100,12 +156,15 @@ impl H264Encoder {
                 height
             );
         }
-        let inner = openh264::encoder::Encoder::new()
-            .map_err(|e| anyhow::anyhow!("H264Encoder: openh264 init failed: {}", e))?;
+        let cfg = build_config(quality);
+        let inner =
+            openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
+                .map_err(|e| anyhow::anyhow!("H264Encoder: openh264 init failed: {}", e))?;
         Ok(Self {
             inner,
             width: w,
             height: h,
+            quality,
         })
     }
 
@@ -119,6 +178,20 @@ impl H264Encoder {
         self.height
     }
 
+    /// Return the current quality settings.
+    pub fn quality(&self) -> EncoderQuality {
+        self.quality
+    }
+
+    /// Update the stored quality settings.
+    ///
+    /// Phase 1: updates the stored field only. Phase 2 will extend
+    /// this to trigger a rebuild so the new bitrate takes effect
+    /// immediately without changing the call-site signature.
+    pub fn set_quality(&mut self, quality: EncoderQuality) {
+        self.quality = quality;
+    }
+
     /// Reconfigure the encoder for new dimensions. No-op when the
     /// dimensions (after even-rounding) already match. On a real
     /// change the inner openh264 encoder is rebuilt from scratch
@@ -126,6 +199,9 @@ impl H264Encoder {
     /// emits SPS / PPS alongside the implicit first-frame IDR,
     /// which is exactly what the browser decoder needs to switch
     /// resolution mid-WebRTC-session without renegotiation.
+    ///
+    /// The rebuild uses the stored [`EncoderQuality`] so that quality
+    /// settings are never silently dropped on a mid-stream resize.
     ///
     /// Called by [`super::EncoderTask`] on every frame so guest-
     /// initiated display resizes (or `VDAgentMonitorsConfig`-
@@ -144,8 +220,10 @@ impl H264Encoder {
         if w == self.width && h == self.height {
             return Ok(());
         }
-        let inner = openh264::encoder::Encoder::new()
-            .map_err(|e| anyhow::anyhow!("H264Encoder::resize: openh264 init failed: {}", e))?;
+        let cfg = build_config(self.quality);
+        let inner =
+            openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
+                .map_err(|e| anyhow::anyhow!("H264Encoder::resize: openh264 init failed: {}", e))?;
         self.inner = inner;
         self.width = w;
         self.height = h;
@@ -306,5 +384,33 @@ mod tests {
                 "missing Annex-B start code"
             );
         }
+    }
+
+    #[test]
+    fn quality_round_trips_through_constructor() {
+        let quality = EncoderQuality {
+            target_bitrate_bps: 5_000_000,
+        };
+        let enc = H264Encoder::new_with_quality(64, 64, quality).expect("init");
+        assert_eq!(enc.quality().target_bitrate_bps, 5_000_000);
+    }
+
+    #[test]
+    fn set_quality_updates_stored_field() {
+        let mut enc = H264Encoder::new(64, 64).expect("init");
+        enc.set_quality(EncoderQuality {
+            target_bitrate_bps: 7_500_000,
+        });
+        assert_eq!(enc.quality().target_bitrate_bps, 7_500_000);
+    }
+
+    #[test]
+    fn resize_preserves_custom_quality() {
+        let quality = EncoderQuality {
+            target_bitrate_bps: 3_000_000,
+        };
+        let mut enc = H264Encoder::new_with_quality(64, 64, quality).expect("init");
+        enc.resize(96, 96).expect("resize");
+        assert_eq!(enc.quality().target_bitrate_bps, 3_000_000);
     }
 }
