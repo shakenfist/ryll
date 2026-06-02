@@ -147,14 +147,90 @@ pub async fn run_input_relay(
             }
 
             BrowserMsg::Viewport { width, height } => {
-                debug!("web inputs: viewport {}x{}", width, height);
-                if resize_tx.send((width, height)).await.is_err() {
+                let (snap_w, snap_h) = snap_viewport_to_standard_mode(width, height);
+                if (snap_w, snap_h) == (width, height) {
+                    debug!("web inputs: viewport {}x{}", width, height);
+                } else {
+                    debug!(
+                        "web inputs: viewport {}x{} snapped to {}x{}",
+                        width, height, snap_w, snap_h,
+                    );
+                }
+                if resize_tx.send((snap_w, snap_h)).await.is_err() {
                     warn!("web inputs: resize_tx receiver dropped");
                 }
             }
         }
     }
     debug!("web inputs: control_rx closed; relay exiting");
+}
+
+/// Common display modes a Wayland GDM / mutter guest is likely
+/// to accept via `VDAgentMonitorsConfig`.
+///
+/// Background: virtio-gpu (without virgl) advertises a fixed
+/// canned mode list in its EDID. Modern mutter on Wayland only
+/// honours resolution-change requests whose dimensions match
+/// one of those modes; arbitrary client-window dimensions
+/// silently no-op. The X11 path used to work around this via
+/// `xrandr --newmode`+`--addmode`, but vdagent on Wayland
+/// can't fabricate modes.
+///
+/// The list below is the intersection of (a) the canned EDID
+/// modes QEMU's virtio-gpu commonly exposes and (b) the modes
+/// well-known Wayland compositors enumerate by default. Ordered
+/// by ascending pixel count for deterministic tie-breaking when
+/// two modes are equidistant from the request.
+const STANDARD_MODES: &[(u32, u32)] = &[
+    (640, 480),
+    (800, 600),
+    (1024, 768),
+    (1152, 864),
+    (1280, 720),
+    (1280, 800),
+    (1280, 1024),
+    (1366, 768),
+    (1440, 900),
+    (1600, 900),
+    (1600, 1200),
+    (1680, 1050),
+    (1920, 1080),
+    (1920, 1200),
+    (2048, 1152),
+    (2560, 1440),
+    (2560, 1600),
+    (3840, 2160),
+];
+
+/// Snap a browser-driven viewport request to the nearest mode
+/// the guest is likely to accept. See [`STANDARD_MODES`] for
+/// the candidate list and the rationale.
+///
+/// "Nearest" is Euclidean distance in pixel space. If the
+/// request exactly matches a standard mode (the common case
+/// when the operator drags the window to a familiar size) the
+/// pass-through is free. The crude metric biases toward modes
+/// of similar overall size rather than similar aspect, which
+/// in practice gives sensible results — a 2108x1267 request
+/// (close to 5:3) lands on 2048x1152 (16:9), which mutter
+/// accepts and the browser then scales/letterboxes to fill
+/// the actual window.
+pub(crate) fn snap_viewport_to_standard_mode(width: u32, height: u32) -> (u32, u32) {
+    let mut best = STANDARD_MODES[0];
+    let mut best_dist = u64::MAX;
+    for &(w, h) in STANDARD_MODES {
+        if w == width && h == height {
+            return (w, h);
+        }
+        let dw = (w as i64 - width as i64).unsigned_abs();
+        let dh = (h as i64 - height as i64).unsigned_abs();
+        let dist = dw.saturating_mul(dw).saturating_add(dh.saturating_mul(dh));
+        if dist < best_dist {
+            best_dist = dist;
+            best = (w, h);
+        }
+    }
+    best
 }
 
 /// Map normalised `[0, 1]` coordinates to absolute pixel
@@ -309,6 +385,61 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         assert_eq!(dims, (1920, 1080));
+    }
+
+    /// A viewport message at a non-standard size must arrive at
+    /// `resize_tx` snapped to the nearest standard mode. Without
+    /// the snap the guest's Wayland compositor silently drops the
+    /// request because the dims don't match the EDID mode list.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn viewport_message_snaps_non_standard_dims() {
+        let mirror = primary_mirror(640, 480).await;
+        let (tx, _input_rx, mut resize_rx, _h) = spawn_relay(mirror);
+
+        // 2108x1267 is one of the actual dims observed in
+        // test-session-008f. Closest standard mode by
+        // Euclidean distance is 2048x1152.
+        let payload = br#"{"type":"viewport","width":2108,"height":1267}"#.to_vec();
+        tx.send(payload).await.expect("send");
+
+        let dims = tokio::time::timeout(Duration::from_secs(1), resize_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should send");
+        assert_eq!(dims, (2048, 1152));
+    }
+
+    #[test]
+    fn snap_passes_through_exact_match() {
+        assert_eq!(snap_viewport_to_standard_mode(1920, 1080), (1920, 1080));
+        assert_eq!(snap_viewport_to_standard_mode(1280, 800), (1280, 800));
+    }
+
+    /// The very-small case must not panic and must land on the
+    /// smallest standard mode (640x480). A future regression that
+    /// underflowed the distance calc would surface here.
+    #[test]
+    fn snap_handles_below_smallest_mode() {
+        assert_eq!(snap_viewport_to_standard_mode(100, 100), (640, 480));
+    }
+
+    /// The above-largest case lands on the largest standard mode
+    /// (3840x2160). A future regression that overflowed the
+    /// squared-distance arithmetic would surface here.
+    #[test]
+    fn snap_handles_above_largest_mode() {
+        assert_eq!(snap_viewport_to_standard_mode(7680, 4320), (3840, 2160));
+    }
+
+    /// Real dims observed in test-session-008f. Each one mutter
+    /// silently rejected; the snap should produce a mode mutter
+    /// will accept.
+    #[test]
+    fn snap_matches_008f_observed_dims() {
+        assert_eq!(snap_viewport_to_standard_mode(2108, 1267), (2048, 1152));
+        assert_eq!(snap_viewport_to_standard_mode(2150, 511), (1920, 1080));
+        assert_eq!(snap_viewport_to_standard_mode(1742, 1208), (1600, 1200));
+        assert_eq!(snap_viewport_to_standard_mode(1544, 1325), (1600, 1200));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
