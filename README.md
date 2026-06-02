@@ -271,6 +271,7 @@ Optional flags:
 - `--web-port 8080` — port (defaults to ephemeral)
 - `--web-tls-cert /path/cert.pem` + `--web-tls-key /path/key.pem` — serve over HTTPS with native TLS (both required together; see `docs/web-frontend.md` for cert recipes)
 - `--web-exit-on-disconnect` — single-shot mode: exit ryll after the first viewer disconnects (intended for test harnesses like `./bin/runtest.sh`)
+- `--web-encoder-bitrate-kbps <N>` — upper bitrate ceiling for the H.264 Quality rate-control mode (default 15000 = 15 Mbps). The encoder sends less on static frames and up to this ceiling on high-motion frames; it is not a constant bitrate. Lower to 5000–7000 for constrained WAN links. See `docs/web-frontend.md` for tuning guidance.
 
 All 8 phases of the web-frontend plan are complete. Closing
 the browser tab reaps the bridge and encoder within ~1 second

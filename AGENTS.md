@@ -403,7 +403,13 @@ shakenfist-spice-renderer/src/
 │   │                    #   SurfaceMirror under try_lock,
 │   │                    #   skips tick on contention or clean frame)
 │   ├── h264.rs          # H264Encoder (openh264 wrapper),
-│   │                    #   EncodedFrame, Annex-B NAL output
+│   │                    #   EncodedFrame, Annex-B NAL output;
+│   │                    #   EncoderQuality (VDI-tuned config
+│   │                    #   struct, re-exported from lib.rs);
+│   │                    #   build_config() helper used by both
+│   │                    #   new_with_quality and resize so the
+│   │                    #   rebuild path cannot silently drop
+│   │                    #   stored quality settings
 │   └── task.rs          # EncoderTask async driver,
 │                        #   EncoderControl (RequestKeyframe/Stop)
 ├── usb/                 # USB device backends

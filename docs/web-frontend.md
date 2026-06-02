@@ -123,6 +123,65 @@ graceful-shutdown path) then explicitly closes any active
 bridge before the process exits, ensuring DTLS/SRTP state
 tears down cleanly.
 
+## Encoder quality
+
+### Defaults
+
+The H.264 encoder is pinned for screen content rather than camera
+video. The openh264 library defaults target video conferencing
+(usage type `CameraVideoRealTime`); VDI desktops — sharp text,
+largely static content with occasional full-screen redraws — sit at
+the opposite end of the design space. The explicit configuration
+applied by ryll is:
+
+- **Usage type**: `ScreenContentRealTime`. Tells the encoder to
+  treat the source as a screen feed and tune its spatial and
+  temporal decision-making accordingly.
+- **Rate control**: Quality mode with QP range 18–36. Rate control
+  stays quality-based so picture quality is consistent across
+  frame types; the QP ceiling of 36 prevents the encoder from
+  sacrificing fine detail when motion picks up.
+- **Profile / level**: High, 4.2. Gives the encoder access to
+  the full cabac entropy coder and 8x8 transforms.
+- **IDR cadence**: 60 frames (2 s at 30 Hz). Reconnecting viewers
+  get a fully self-contained keyframe within 2 s at most.
+- **Max frame rate**: 30 Hz.
+- **Frame skipping**: disabled. VDI users notice dropped frames
+  as cursor stutter; the encoder skips nothing and the decoder
+  stays in step.
+
+### `--web-encoder-bitrate-kbps`
+
+```
+ryll --web --web-encoder-bitrate-kbps 15000 session.vv
+```
+
+Default: 15000 (15 Mbps). Sets the upper bitrate guide-rail for
+the Quality rate-control mode. In Quality RC the encoder sends
+less data when the scene is static and more on high-motion frames,
+up to this ceiling. It is not a constant bitrate target — the
+encoder will never produce more than this ceiling per second, but
+will typically produce far less on typical desktop content.
+
+When to adjust:
+
+- **Constrained WAN link**: drop to 5000–7000 (5–7 Mbps) to
+  avoid filling the link on hard frames.
+- **LAN deployment**: the default 15 Mbps is a comfortable
+  ceiling; most desktop sessions stay well under it.
+- **Diagnostic floor**: if the picture is unexpectedly poor at
+  a given bitrate ceiling, check with `--verbose` whether the
+  encoder is reporting quality degradation warnings.
+
+### Phase 2
+
+Phase 2 (forthcoming) will close the loop with WebRTC bandwidth
+estimation so the operator no longer has to choose a single static
+ceiling — the encoder target will track network capacity
+automatically. See
+`docs/plans/PLAN-web-encoder-quality-phase-02-adaptive.md` for
+the full plan.
+
 ## Limitations (MVP)
 
 - Single viewer at a time. A second offer replaces the

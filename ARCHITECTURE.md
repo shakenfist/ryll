@@ -136,6 +136,22 @@ before encoding. The `force_keyframe: bool` parameter to
 `encode()` calls openh264's `force_intra_frame()` for the
 next encode.
 
+#### `EncoderQuality` (`shakenfist_spice_renderer::EncoderQuality`)
+
+Carries the operator-chosen encoder parameters: target bitrate
+ceiling (bps), QP range, profile/level, usage type, IDR cadence,
+and frame-skip policy. Passed to `H264Encoder::new_with_quality`
+and stored on `H264Encoder` so the resize-rebuild path calls
+`build_config()` with the same settings — without this, an
+`Encoder::new()` call at resize would silently revert to openh264
+defaults. The encoder is pinned to `ScreenContentRealTime` usage
+type because the openh264 library defaults (`CameraVideoRealTime`)
+target video conferencing; VDI screen content requires the
+opposite tuning. `EncoderInfra` (in `ryll/src/web/signalling.rs`)
+stores a copy of the quality so every encoder restart across
+reconnects picks up the same settings without the caller
+re-supplying them.
+
 ### `EncoderTask`
 
 Async driver that lives on tokio's blocking pool (openh264 is a
