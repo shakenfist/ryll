@@ -185,11 +185,45 @@ impl H264Encoder {
 
     /// Update the stored quality settings.
     ///
-    /// Phase 1: updates the stored field only. Phase 2 will extend
-    /// this to trigger a rebuild so the new bitrate takes effect
-    /// immediately without changing the call-site signature.
+    /// Phase 1: updates the stored field only. Phase 2 introduced
+    /// [`H264Encoder::set_bitrate`] as the entry point that actually
+    /// rebuilds the inner encoder; [`H264Encoder::set_quality`] is
+    /// deliberately left as a field-only update because no caller
+    /// needs a generic "update full quality + rebuild" path —
+    /// runtime adaptation only ever moves the target bitrate.
     pub fn set_quality(&mut self, quality: EncoderQuality) {
         self.quality = quality;
+    }
+
+    /// Update the target bitrate (in bits per second) and rebuild
+    /// the inner openh264 encoder so the change takes effect on
+    /// the next encoded frame.
+    ///
+    /// The rebuild mirrors the [`H264Encoder::resize`] pattern
+    /// (same `build_config` + `with_api_config` path) so that any
+    /// future openh264 init pitfalls only need fixing in one place.
+    /// Width and height are intentionally left unchanged here; the
+    /// new inner encoder picks them up from the next `encode()`
+    /// call's `YUVBuffer`.
+    ///
+    /// A request that matches the currently stored bitrate is a
+    /// cheap no-op (no rebuild, no IDR). The band-crossing filter
+    /// in `EncoderTask` should mostly prevent this from being
+    /// reached with a same-value request, but the guard keeps
+    /// direct callers from paying for a needless rebuild.
+    pub fn set_bitrate(&mut self, target_bitrate_bps: u32) -> Result<()> {
+        if self.quality.target_bitrate_bps == target_bitrate_bps {
+            return Ok(());
+        }
+        self.quality.target_bitrate_bps = target_bitrate_bps;
+        let cfg = build_config(self.quality);
+        let inner =
+            openh264::encoder::Encoder::with_api_config(openh264::OpenH264API::from_source(), cfg)
+                .map_err(|e| {
+                    anyhow::anyhow!("H264Encoder::set_bitrate: openh264 init failed: {}", e)
+                })?;
+        self.inner = inner;
+        Ok(())
     }
 
     /// Reconfigure the encoder for new dimensions. No-op when the
