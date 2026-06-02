@@ -411,7 +411,12 @@ shakenfist-spice-renderer/src/
 │   │                    #   rebuild path cannot silently drop
 │   │                    #   stored quality settings
 │   └── task.rs          # EncoderTask async driver,
-│                        #   EncoderControl (RequestKeyframe/Stop)
+│                        #   EncoderControl (RequestKeyframe /
+│                        #   SetBitrate(kbps) / Stop).
+│                        #   SetBitrate clamps to [500, ceiling],
+│                        #   applies 10 % hysteresis on the active
+│                        #   bitrate, rebuilds the encoder on
+│                        #   acceptance (IDR on next frame).
 ├── usb/                 # USB device backends
 │   ├── mod.rs           # UsbBackend trait, device enumeration
 │   ├── real.rs          # RealDevice (nusb, Linux only)

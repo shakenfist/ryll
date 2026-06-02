@@ -267,8 +267,8 @@ Explicitly out of scope, recorded so we don't relitigate:
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Explicit encoder defaults (quick win) | [PLAN-web-encoder-quality-phase-01-defaults.md](PLAN-web-encoder-quality-phase-01-defaults.md) | Not started |
-| 2. Adaptive bitrate via WebRTC stats | [PLAN-web-encoder-quality-phase-02-adaptive.md](PLAN-web-encoder-quality-phase-02-adaptive.md) | Not started |
+| 1. Explicit encoder defaults (quick win) | [PLAN-web-encoder-quality-phase-01-defaults.md](PLAN-web-encoder-quality-phase-01-defaults.md) | Complete |
+| 2. Adaptive bitrate via WebRTC stats | [PLAN-web-encoder-quality-phase-02-adaptive.md](PLAN-web-encoder-quality-phase-02-adaptive.md) | Complete |
 
 Phase 1 lands before phase 2 starts — phase 1 gives us
 the static-tuned baseline to measure phase 2 against,

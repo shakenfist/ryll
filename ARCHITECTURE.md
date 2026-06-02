@@ -152,6 +152,37 @@ stores a copy of the quality so every encoder restart across
 reconnects picks up the same settings without the caller
 re-supplying them.
 
+#### `EncoderControl::SetBitrate` and adaptive bitrate
+
+Phase 2 of the encoder-quality plan added
+`EncoderControl::SetBitrate(u32 /* kbps */)`. The semantics:
+
+- The task clamps the request into
+  `[MIN_BITRATE_KBPS (500), operator-ceiling]`. The ceiling is
+  the `target_bitrate_bps` on the `EncoderQuality` supplied at
+  task construction — i.e. `--web-encoder-bitrate-kbps` — and is
+  snapshotted at start so a prior `SetBitrate` that lowered the
+  active bitrate does not itself become the ceiling.
+- A 10 % hysteresis band is applied on the *currently active*
+  bitrate (not on the most-recent request). Changes within the
+  band are silently ignored.
+- An accepted change calls `H264Encoder::set_bitrate(bps)`, which
+  rebuilds the inner openh264 encoder. The rebuilt encoder emits
+  an implicit IDR on its first frame.
+
+The control-DC wire message that drives `SetBitrate` is
+`{type:'bandwidth', kbps:N}`, parsed by `BrowserMsg::Bandwidth`
+in `ryll/src/web/inputs.rs`. The input relay holds a clone of
+the encoder-control mpsc sender (`mpsc::Sender<EncoderControl>`)
+and forwards the value directly without converting kbps to bps
+(the conversion happens inside the encoder task).
+
+The sender-clone pattern lives in `ryll/src/web/signalling.rs`
+(`post_offer`): `encoder_control.clone()` is called before the
+original sender moves into `WebrtcBridgeConfig`, so the input
+relay and the bridge each hold independent senders to the same
+encoder-task receiver.
+
 ### `EncoderTask`
 
 Async driver that lives on tokio's blocking pool (openh264 is a
@@ -164,6 +195,8 @@ executor). The task loop:
   skips the tick — no idle frames are produced.
 - Handles `EncoderControl::RequestKeyframe` by setting a
   `keyframe_pending` flag consumed on the next encode.
+- Handles `EncoderControl::SetBitrate(kbps)` with the
+  clamp/hysteresis logic described above.
 - Handles `EncoderControl::Stop` by breaking the loop.
 
 ### `FrameSource` and `FrameRef`

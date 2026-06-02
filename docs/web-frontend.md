@@ -173,14 +173,95 @@ When to adjust:
   a given bitrate ceiling, check with `--verbose` whether the
   encoder is reporting quality degradation warnings.
 
-### Phase 2
+### Adaptive bitrate
 
-Phase 2 (forthcoming) will close the loop with WebRTC bandwidth
-estimation so the operator no longer has to choose a single static
-ceiling — the encoder target will track network capacity
-automatically. See
-`docs/plans/PLAN-web-encoder-quality-phase-02-adaptive.md` for
-the full plan.
+Phase 2 of the encoder-quality plan
+(`docs/plans/PLAN-web-encoder-quality-phase-02-adaptive.md`)
+shipped a closed-loop adaptive bitrate controller that drives the
+H.264 encoder target to match the available network capacity
+between the server and the browser.
+
+#### How the control loop works
+
+The browser samples `RTCPeerConnection.getStats()` at 1 Hz. On
+each sample it walks the stats map, finds the nominated,
+succeeded candidate-pair entry, and reads
+`availableOutgoingBitrate` from it. The raw value is
+EMA-smoothed with alpha 0.4. A `{type:'bandwidth', kbps:N}`
+message is sent over the control datachannel only when the
+smoothed value has moved more than 10 % from the last value
+reported, suppressing encoder rebuilds on bandwidth noise.
+
+On the server side, `BrowserMsg::Bandwidth` in
+`ryll/src/web/inputs.rs` receives the message and forwards it
+as `EncoderControl::SetBitrate(kbps)` to the encoder task
+(`shakenfist-spice-renderer/src/encoder/task.rs`). The encoder
+task:
+
+1. Clamps the requested value into
+   `[500, --web-encoder-bitrate-kbps ceiling]`. The floor of
+   500 kbps prevents the estimator from locking the stream into
+   an unusable state during transient congestion. The ceiling is
+   the operator-supplied value (or the default 15 000 kbps),
+   snapshotted at task start.
+2. Applies a 10 % hysteresis band on the *currently active*
+   bitrate (not on the most-recent request), so a noisy
+   estimate oscillating around a threshold does not repeatedly
+   rebuild the encoder.
+3. On an accepted change, calls `H264Encoder::set_bitrate(bps)`,
+   which rebuilds the inner openh264 encoder and sets
+   `keyframe_pending = true`. The next encoded frame is an
+   implicit IDR.
+
+#### Observability
+
+Browser side: the sampler logs
+`console.debug('[ryll] bandwidth kbps=', N)` on every send.
+Open the browser DevTools console and confirm the value tracks
+the link capacity.
+
+Server side: every accepted bandwidth message is logged at
+`info!` level:
+
+    web inputs: browser bandwidth estimate N kbps
+
+This appears in ryll's stdout/stderr without `--verbose`. On a
+stable link the band-crossing filter typically suppresses most
+messages; on a fluctuating link messages appear each time the
+estimate moves more than 10 % from the last applied value.
+
+To verify the loop end-to-end, tail the ryll output while the
+browser is connected and confirm the log line fires and the
+estimate tracks the link.
+
+#### Browser compatibility
+
+`availableOutgoingBitrate` is an optional field. Chrome's GCC
+bandwidth estimator populates it reliably. Firefox and Safari
+may omit it in some configurations. When the field is absent,
+`sampleBandwidth()` returns early without sending a message;
+the encoder continues at whatever bitrate was last applied —
+typically the operator-set ceiling. Firefox and Safari users
+therefore receive the static-bitrate behaviour described in the
+`--web-encoder-bitrate-kbps` section above.
+
+#### Validating the loop under constrained bandwidth
+
+To confirm the adaptive loop responds to a real link constraint,
+throttle the network interface with `tc`:
+
+    tc qdisc add dev <iface> root tbf rate 5mbit burst 32kbit latency 400ms
+
+With a 5 Mbps cap in place, the browser's bandwidth estimate
+should converge below 5 000 kbps within a few seconds and ryll's
+log should show the estimate declining. The picture should remain
+usable rather than freezing. To remove the throttle:
+
+    tc qdisc del dev <iface> root
+
+Replace `<iface>` with the interface the browser uses to reach
+ryll (e.g. `eth0`). These commands require root or `CAP_NET_ADMIN`.
+The `tc` tool ships with `iproute2` on most Linux systems.
 
 ## Limitations (MVP)
 
