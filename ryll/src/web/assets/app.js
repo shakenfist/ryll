@@ -59,6 +59,22 @@
     // Reconnect state.
     // ---------------------------------------------------------------
     const RECONNECT_BACKOFFS_MS = [1000, 2000, 4000, 8000, 16000];
+
+    // ---------------------------------------------------------------
+    // Bandwidth sampler constants.
+    //
+    // BANDWIDTH_SAMPLE_MS: how often (ms) we call pc.getStats().
+    // EMA_ALPHA: exponential moving average weight for new samples;
+    //   higher = faster tracking, lower = smoother.
+    // BAND_CROSS_PCT: fractional change threshold before we send a
+    //   new bandwidth message; suppresses noise when the estimate
+    //   is stable. 10% means we only report when the EMA moves more
+    //   than 10% from the last reported value.
+    // ---------------------------------------------------------------
+    const BANDWIDTH_SAMPLE_MS = 1000;
+    const EMA_ALPHA = 0.4;
+    const BAND_CROSS_PCT = 0.10;
+
     let reconnectAttempt = 0;
     // Set when the user clicks the Disconnect button, so the
     // ICE/PC state-change handlers don't reopen the connection
@@ -68,6 +84,13 @@
     // Module-level pc / dc references updated by connect().
     let pc = null;
     let dc = null;
+
+    // Bandwidth sampler state. Reset to null on DC close so that
+    // a fresh connection starts its EMA from scratch rather than
+    // inheriting a stale estimate from the previous session.
+    let bandwidthEma = null;
+    let lastSentKbps = null;
+    let bandwidthIntervalId = null;
 
     // ---------------------------------------------------------------
     // KeyboardEvent.code → AT scancode wire value (the PRESS form).
@@ -311,6 +334,56 @@
             console.warn('[ryll] dc.send failed:', err);
         }
     };
+
+    // ---------------------------------------------------------------
+    // Bandwidth sampler.
+    //
+    // Called at BANDWIDTH_SAMPLE_MS intervals while the data channel
+    // is open. Reads the nominated (succeeded) candidate-pair's
+    // availableOutgoingBitrate from RTCPeerConnection.getStats(),
+    // applies an EMA to smooth jitter, and sends a
+    // {type:'bandwidth',kbps:N} control message whenever the
+    // smoothed estimate crosses BAND_CROSS_PCT from the last value
+    // we reported. This suppresses chatter when the link is stable.
+    //
+    // Tolerant of:
+    //   * pc being null (DC closed between the interval firing and
+    //     this function running).
+    //   * availableOutgoingBitrate being absent (Firefox / Safari
+    //     do not expose this field on candidate-pair stats).
+    //   * getStats() throwing (e.g. after PC teardown).
+    // ---------------------------------------------------------------
+    async function sampleBandwidth() {
+        if (!pc) return;
+        let stats;
+        try {
+            stats = await pc.getStats();
+        } catch (err) {
+            console.debug('[ryll] getStats failed:', err);
+            return;
+        }
+        let bps = null;
+        stats.forEach((r) => {
+            if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+                if (typeof r.availableOutgoingBitrate === 'number') {
+                    bps = r.availableOutgoingBitrate;
+                }
+            }
+        });
+        if (bps === null) return;
+        const kbps = Math.round(bps / 1000);
+        bandwidthEma = bandwidthEma === null
+            ? kbps
+            : bandwidthEma * (1 - EMA_ALPHA) + kbps * EMA_ALPHA;
+        const smoothed = Math.round(bandwidthEma);
+        const cross = lastSentKbps === null
+            || Math.abs(smoothed - lastSentKbps) / lastSentKbps > BAND_CROSS_PCT;
+        if (cross) {
+            console.debug('[ryll] bandwidth kbps=', smoothed);
+            sendCtrl({ type: 'bandwidth', kbps: smoothed });
+            lastSentKbps = smoothed;
+        }
+    }
 
     // ---------------------------------------------------------------
     // Viewport reporting.
@@ -628,9 +701,17 @@
 
         dc.onopen = () => {
             console.log('[ryll] data channel open');
+            if (bandwidthIntervalId !== null) clearInterval(bandwidthIntervalId);
+            bandwidthIntervalId = setInterval(sampleBandwidth, BANDWIDTH_SAMPLE_MS);
         };
         dc.onclose = () => {
             console.log('[ryll] data channel closed');
+            if (bandwidthIntervalId !== null) {
+                clearInterval(bandwidthIntervalId);
+                bandwidthIntervalId = null;
+            }
+            bandwidthEma = null;
+            lastSentKbps = null;
         };
         dc.onmessage = (event) => {
             let msg;

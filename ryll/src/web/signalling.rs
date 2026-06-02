@@ -301,7 +301,11 @@ pub async fn post_offer(
         }
     };
 
-    // Step 4: build the new bridge.
+    // Step 4: build the new bridge. Clone encoder_control first so
+    // the input relay can forward bandwidth estimates as
+    // EncoderControl::SetBitrate without taking the sender away
+    // from the bridge (which needs it for quality-override messages).
+    let encoder_control_for_inputs = encoder_control.clone();
     let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
         ice_servers: vec![],
         encoder_control,
@@ -354,7 +358,11 @@ pub async fn post_offer(
         if let Some(control_rx) = bridge.control_rx() {
             let mirror = state.surface_mirror.clone();
             tokio::spawn(crate::web::inputs::run_input_relay(
-                control_rx, input_tx, resize_tx, mirror,
+                control_rx,
+                input_tx,
+                resize_tx,
+                mirror,
+                encoder_control_for_inputs,
             ));
         } else {
             warn!("web: bridge.control_rx() returned None; input relay not spawned");

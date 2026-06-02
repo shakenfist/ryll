@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{EncoderControl, InputEvent, SurfaceMirror};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, warn};
 
@@ -66,6 +66,15 @@ enum BrowserMsg {
     /// `VDAgentMonitorsConfig` in `MainChannel`.
     #[serde(rename = "viewport")]
     Viewport { width: u32, height: u32 },
+
+    /// Browser's smoothed bandwidth estimate, derived from
+    /// `RTCPeerConnection.getStats().availableOutgoingBitrate`
+    /// with an EMA filter applied on the browser side (see
+    /// `sampleBandwidth` in `app.js`). We forward this as
+    /// [`EncoderControl::SetBitrate`] so the encoder task can
+    /// adapt its output bitrate to network conditions.
+    #[serde(rename = "bandwidth")]
+    Bandwidth { kbps: u32 },
 }
 
 /// Spawn-friendly relay. Loops until `control_rx` closes (i.e.
@@ -77,6 +86,7 @@ pub async fn run_input_relay(
     input_tx: mpsc::Sender<InputEvent>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    encoder_control: mpsc::Sender<EncoderControl>,
 ) {
     while let Some(payload) = control_rx.recv().await {
         let msg: BrowserMsg = match serde_json::from_slice(&payload) {
@@ -158,6 +168,21 @@ pub async fn run_input_relay(
                 }
                 if resize_tx.send((snap_w, snap_h)).await.is_err() {
                     warn!("web inputs: resize_tx receiver dropped");
+                }
+            }
+
+            BrowserMsg::Bandwidth { kbps } => {
+                debug!("web inputs: bandwidth estimate {} kbps", kbps);
+                if encoder_control
+                    .send(EncoderControl::SetBitrate(kbps))
+                    .await
+                    .is_err()
+                {
+                    // The encoder task may have exited (e.g. the next
+                    // /offer restart will create a fresh one). This is
+                    // transient and non-fatal — the relay continues
+                    // so subsequent input events still reach the renderer.
+                    debug!("web inputs: encoder_control send failed; encoder may have exited");
                 }
             }
         }
@@ -271,27 +296,38 @@ mod tests {
 
     /// Helper: run the relay against a fresh set of channels.
     /// Returns the senders the test can drive plus the receivers
-    /// the test asserts against and the relay's join handle.
+    /// the test asserts against, the encoder-control receiver,
+    /// and the relay's join handle.
+    ///
+    /// Pass `Some(tx)` to supply a custom encoder-control sender
+    /// (e.g. to test send-failure by pre-dropping the receiver);
+    /// pass `None` to get an automatically-created pair.
     #[allow(clippy::type_complexity)]
     fn spawn_relay(
         mirror: Arc<Mutex<SurfaceMirror>>,
+        encoder_control_tx: Option<mpsc::Sender<EncoderControl>>,
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
         mpsc::Receiver<(u32, u32)>,
+        mpsc::Receiver<EncoderControl>,
         tokio::task::JoinHandle<()>,
     ) {
         let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
         let (input_tx, input_rx) = mpsc::channel::<InputEvent>(16);
         let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(4);
-        let handle = tokio::spawn(run_input_relay(control_rx, input_tx, resize_tx, mirror));
-        (control_tx, input_rx, resize_rx, handle)
+        let (enc_tx, enc_rx) = mpsc::channel::<EncoderControl>(8);
+        let enc_tx = encoder_control_tx.unwrap_or(enc_tx);
+        let handle = tokio::spawn(run_input_relay(
+            control_rx, input_tx, resize_tx, mirror, enc_tx,
+        ));
+        (control_tx, input_rx, resize_rx, enc_rx, handle)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn key_down_message_dispatches_keydown_event() {
         let mirror = primary_mirror(1920, 1080).await;
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         // 0xE048 is Up arrow in wire-format (E0-prefixed).
         let payload = br#"{"type":"key","scancode":57416,"down":true}"#.to_vec();
@@ -310,7 +346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn key_up_message_dispatches_keyup_event() {
         let mirror = primary_mirror(1920, 1080).await;
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         // 0x1E is the 'A' base scancode.
         let payload = br#"{"type":"key","scancode":30,"down":false}"#.to_vec();
@@ -329,7 +365,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pointer_move_denormalises_to_centre() {
         let mirror = primary_mirror(1920, 1080).await;
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         let payload = br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec();
         tx.send(payload).await.expect("send");
@@ -350,7 +386,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pointer_button_down_dispatches_mousedown() {
         let mirror = primary_mirror(1000, 800).await;
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         // SPICE bitmask: 1=LEFT.
         let payload =
@@ -375,7 +411,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewport_message_dispatches_to_resize_tx() {
         let mirror = primary_mirror(640, 480).await;
-        let (tx, _input_rx, mut resize_rx, _h) = spawn_relay(mirror);
+        let (tx, _input_rx, mut resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         let payload = br#"{"type":"viewport","width":1920,"height":1080}"#.to_vec();
         tx.send(payload).await.expect("send");
@@ -394,7 +430,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn viewport_message_snaps_non_standard_dims() {
         let mirror = primary_mirror(640, 480).await;
-        let (tx, _input_rx, mut resize_rx, _h) = spawn_relay(mirror);
+        let (tx, _input_rx, mut resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         // 2108x1267 is one of the actual dims observed in
         // test-session-008f. Closest standard mode by
@@ -445,7 +481,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_json_is_skipped_then_relay_keeps_running() {
         let mirror = primary_mirror(1920, 1080).await;
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         tx.send(b"not json".to_vec()).await.expect("send");
         // A well-formed message after the bad one should still
@@ -468,7 +504,7 @@ mod tests {
     async fn pointer_move_without_primary_is_dropped() {
         // Empty mirror: no primary surface yet.
         let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, None);
 
         tx.send(br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec())
             .await
@@ -481,11 +517,90 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn relay_exits_when_control_tx_dropped() {
         let mirror = primary_mirror(1920, 1080).await;
-        let (tx, _input_rx, _resize_rx, handle) = spawn_relay(mirror);
+        let (tx, _input_rx, _resize_rx, _enc_rx, handle) = spawn_relay(mirror, None);
         drop(tx);
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await
             .expect("relay did not exit within 1 s")
             .expect("relay task panicked");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bandwidth_message_dispatches_to_encoder_control() {
+        let mirror = primary_mirror(1920, 1080).await;
+        let (tx, _input_rx, _resize_rx, mut enc_rx, _h) = spawn_relay(mirror, None);
+
+        let payload = br#"{"type":"bandwidth","kbps":7500}"#.to_vec();
+        tx.send(payload).await.expect("send");
+
+        let ctrl = tokio::time::timeout(Duration::from_secs(1), enc_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("encoder_control should receive");
+        match ctrl {
+            EncoderControl::SetBitrate(kbps) => assert_eq!(kbps, 7500),
+            other => panic!("expected SetBitrate(7500), got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bandwidth_message_with_missing_kbps_is_ignored() {
+        let mirror = primary_mirror(1920, 1080).await;
+        let (tx, mut input_rx, _resize_rx, mut enc_rx, _h) = spawn_relay(mirror, None);
+
+        // Missing required field: should parse-fail and be skipped.
+        tx.send(br#"{"type":"bandwidth"}"#.to_vec())
+            .await
+            .expect("send");
+
+        // Nothing should arrive on encoder_control.
+        let r = tokio::time::timeout(Duration::from_millis(200), enc_rx.recv()).await;
+        assert!(r.is_err(), "bandwidth with missing kbps should be dropped");
+
+        // Relay must still be running: a subsequent valid key message
+        // should still dispatch normally.
+        tx.send(br#"{"type":"key","scancode":30,"down":true}"#.to_vec())
+            .await
+            .expect("send");
+        let event = tokio::time::timeout(Duration::from_secs(1), input_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should continue after bad bandwidth msg");
+        match event {
+            InputEvent::KeyDown(sc) => assert_eq!(sc, 0x1E),
+            other => panic!("expected KeyDown(0x1E), got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bandwidth_message_encoder_control_send_failure_does_not_kill_relay() {
+        let mirror = primary_mirror(1920, 1080).await;
+
+        // Create an encoder_control channel and immediately drop the
+        // receiver so any send will fail.
+        let (enc_tx, enc_rx) = mpsc::channel::<EncoderControl>(8);
+        drop(enc_rx);
+
+        let (tx, mut input_rx, _resize_rx, _enc_rx, _h) = spawn_relay(mirror, Some(enc_tx));
+
+        // Send a bandwidth message — encoder_control.send() will fail
+        // because the receiver is dropped, but the relay must not exit.
+        tx.send(br#"{"type":"bandwidth","kbps":5000}"#.to_vec())
+            .await
+            .expect("send");
+
+        // Send a key message immediately after; it must still arrive.
+        tx.send(br#"{"type":"key","scancode":1,"down":true}"#.to_vec())
+            .await
+            .expect("send");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), input_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should still run after encoder_control send failure");
+        match event {
+            InputEvent::KeyDown(sc) => assert_eq!(sc, 1),
+            other => panic!("expected KeyDown(1), got {:?}", other),
+        }
     }
 }
