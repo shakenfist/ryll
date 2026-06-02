@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_renderer::{
-    EncodedFrame, EncoderControl, EncoderTask, H264Encoder, RealFrameSource, SurfaceMirror,
+    EncodedFrame, EncoderControl, EncoderQuality, EncoderTask, H264Encoder, RealFrameSource,
+    SurfaceMirror,
 };
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 use tokio::sync::{mpsc, Mutex};
@@ -78,13 +79,19 @@ pub struct EncoderInfra {
     /// JoinHandle of the running encoder task. `None` until
     /// the first restart.
     handle: Option<JoinHandle<anyhow::Result<()>>>,
+    /// Quality settings applied to every [`H264Encoder`] this
+    /// infra spawns. Stored here so `restart()` can forward the
+    /// same quality to each new encoder without the caller
+    /// having to re-supply it on every reconnect.
+    quality: EncoderQuality,
 }
 
 impl EncoderInfra {
-    pub fn new() -> Self {
+    pub fn new(quality: EncoderQuality) -> Self {
         Self {
             control_tx: None,
             handle: None,
+            quality,
         }
     }
 
@@ -154,8 +161,8 @@ impl EncoderInfra {
         }
 
         // Build new pipeline at the SPICE-derived dimensions.
-        let encoder = H264Encoder::new(width, height)
-            .map_err(|e| anyhow::anyhow!("H264Encoder::new: {}", e))?;
+        let encoder = H264Encoder::new_with_quality(width, height, self.quality)
+            .map_err(|e| anyhow::anyhow!("H264Encoder::new_with_quality: {}", e))?;
         let source = RealFrameSource::new(surface_mirror.clone());
         let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(32);
         let (control_tx, control_rx) = mpsc::channel::<EncoderControl>(8);
@@ -207,7 +214,7 @@ impl EncoderInfra {
 
 impl Default for EncoderInfra {
     fn default() -> Self {
-        Self::new()
+        Self::new(EncoderQuality::default())
     }
 }
 
@@ -584,7 +591,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn restart_errs_when_mirror_empty() {
         let mirror = Arc::new(Mutex::new(SurfaceMirror::new()));
-        let mut infra = EncoderInfra::new();
+        let mut infra = EncoderInfra::new(shakenfist_spice_renderer::EncoderQuality::default());
         let err = infra
             .restart(&mirror)
             .await
@@ -612,7 +619,7 @@ mod tests {
                 height: 480,
             });
         }
-        let mut infra = EncoderInfra::new();
+        let mut infra = EncoderInfra::new(shakenfist_spice_renderer::EncoderQuality::default());
         let (frame_rx, control_tx) = infra
             .restart(&mirror)
             .await
@@ -641,7 +648,7 @@ mod tests {
                 height: 480,
             });
         }
-        let mut infra = EncoderInfra::new();
+        let mut infra = EncoderInfra::new(shakenfist_spice_renderer::EncoderQuality::default());
         let (_frame_rx, _control_tx) = infra
             .restart(&mirror)
             .await

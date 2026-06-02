@@ -185,6 +185,14 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub web_exit_on_disconnect: bool,
 
+    /// Upper guide-rail for the H.264 encoder's quality
+    /// rate-control in `--web` mode. Higher values produce
+    /// a sharper picture at the cost of more bandwidth on
+    /// the wire; the encoder may send less when the scene is
+    /// static. Default 15 000 kbps (15 Mbps).
+    #[arg(long, value_name = "KBPS", default_value_t = 15_000)]
+    pub web_encoder_bitrate_kbps: u32,
+
     /// Maximum total bytes for the SPICE display image cache,
     /// in MiB. Defaults to 256. The cache holds decoded RGBA
     /// for images the server flagged with CACHE_ME; without a

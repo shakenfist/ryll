@@ -17,7 +17,7 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
 use rand::RngCore;
-use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{ChannelEvent, EncoderQuality, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, Mutex, Notify};
@@ -137,6 +137,7 @@ impl WebState {
             None,
             Arc::new(Mutex::new(SurfaceMirror::new())),
             Arc::new(std::sync::Mutex::new(None)),
+            EncoderQuality::default(),
         )
     }
 
@@ -144,12 +145,17 @@ impl WebState {
     /// 5a's `run_web` calls this after spawning `run_connection`
     /// so the HTTP handlers (and 5b–5e relays) can find the
     /// senders.
+    ///
+    /// `quality` sets the H.264 encoder's rate-control target for
+    /// every encoder spawned during this web session. Callers
+    /// derive this from `--web-encoder-bitrate-kbps`.
     pub fn with_channels(
         input_tx: mpsc::Sender<InputEvent>,
         resize_tx: mpsc::Sender<(u32, u32)>,
         event_tx: broadcast::Sender<ChannelEvent>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
+        quality: EncoderQuality,
     ) -> Self {
         Self::build(
             Some(input_tx),
@@ -157,6 +163,7 @@ impl WebState {
             Some(event_tx),
             surface_mirror,
             active_opus_tx,
+            quality,
         )
     }
 
@@ -166,6 +173,7 @@ impl WebState {
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
+        quality: EncoderQuality,
     ) -> Self {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -176,7 +184,7 @@ impl WebState {
         Self {
             token,
             bridge_slot: Arc::new(Mutex::new(None)),
-            encoder: Arc::new(Mutex::new(EncoderInfra::new())),
+            encoder: Arc::new(Mutex::new(EncoderInfra::new(quality))),
             input_tx,
             resize_tx,
             event_tx,

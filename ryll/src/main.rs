@@ -461,6 +461,9 @@ fn run_web(
     let web_tls_cert = args.web_tls_cert.clone();
     let web_tls_key = args.web_tls_key.clone();
     let web_exit_on_disconnect = args.web_exit_on_disconnect;
+    let encoder_quality = shakenfist_spice_renderer::EncoderQuality {
+        target_bitrate_bps: args.web_encoder_bitrate_kbps.saturating_mul(1000),
+    };
     let monitors = args.monitors;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
@@ -686,6 +689,7 @@ fn run_web(
             event_broadcast_tx,
             surface_mirror,
             active_opus_tx,
+            encoder_quality,
         ));
         let cursor_bridge_slot = state.bridge_slot.clone();
         let cursor_bridge_installed = state.bridge_installed_notify.clone();
