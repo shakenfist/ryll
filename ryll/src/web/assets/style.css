@@ -1,8 +1,18 @@
 body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-serif; }
 #status { position: absolute; top: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0,0,0,0.5); border-radius: 4px; font-size: 0.85rem; }
-#controls { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.5rem; }
-#controls button { padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
-#controls button:hover { background: rgba(255, 255, 255, 0.25); }
+/* Top-right control cluster (Disconnect, Enable audio). The
+   buttons sit above the <video> element and must stay readable
+   regardless of what the guest happens to be rendering behind
+   them — early sessions used a low-opacity white background
+   that vanished against bright video content (white windows,
+   light terminal palettes). Dark translucent background +
+   backdrop blur gives consistent contrast on every video
+   frame; z-index puts the cluster above the SPICE cursor
+   overlay (z-index: 10) and the reconnect button (z-index: 20)
+   so the operator can always reach Disconnect. */
+#controls { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.5rem; z-index: 30; }
+#controls button { padding: 0.4rem 0.8rem; background: rgba(0, 0, 0, 0.6); color: #fff; border: 1px solid rgba(255, 255, 255, 0.5); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+#controls button:hover { background: rgba(0, 0, 0, 0.8); }
 #controls button[hidden] { display: none; }
 #video { display: block; width: 100vw; height: 100vh; object-fit: contain; }
 /* SPICE cursor overlay rendered above the <video> element. The
