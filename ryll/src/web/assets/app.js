@@ -313,6 +313,48 @@
     };
 
     // ---------------------------------------------------------------
+    // Viewport reporting.
+    //
+    // The viewport message tells the guest's vdagent the
+    // dimensions the browser would like the SPICE primary
+    // surface to take. Server-side it lands on `resize_tx` →
+    // `VDAgentMonitorsConfig` → guest re-renders at the new
+    // size, and the H264 encoder auto-resizes on the next frame
+    // (see `H264Encoder::resize` in
+    // shakenfist-spice-renderer/src/encoder/h264.rs).
+    //
+    // We send the viewport in two situations:
+    //   1. Once when the PC reaches Connected — handled inside
+    //      `connect()` via a per-connect `viewportSent` guard so
+    //      a flapping state-change event doesn't re-send during
+    //      the same negotiation.
+    //   2. Whenever the browser window is resized — handled by
+    //      the listener below, debounced 250 ms so dragging the
+    //      window edge doesn't flood the guest's vdagent with
+    //      intermediate dimensions. `sendCtrl` silently no-ops
+    //      while the DC isn't open, so the listener is safe to
+    //      register once at IIFE startup and outlive reconnects.
+    // ---------------------------------------------------------------
+    const sendCurrentViewport = () => {
+        const rect = videoEl.getBoundingClientRect();
+        const w = Math.round(rect.width);
+        const h = Math.round(rect.height);
+        if (w <= 0 || h <= 0) return;
+        sendCtrl({ type: 'viewport', width: w, height: h });
+        console.log('[ryll] viewport sent:', w, 'x', h);
+    };
+
+    const VIEWPORT_RESIZE_DEBOUNCE_MS = 250;
+    let viewportResizeTimer = null;
+    window.addEventListener('resize', () => {
+        if (viewportResizeTimer !== null) clearTimeout(viewportResizeTimer);
+        viewportResizeTimer = setTimeout(() => {
+            viewportResizeTimer = null;
+            sendCurrentViewport();
+        }, VIEWPORT_RESIZE_DEBOUNCE_MS);
+    });
+
+    // ---------------------------------------------------------------
     // Keyboard listeners — bound on `document` because the
     // <video> element doesn't naturally have keyboard focus.
     // We preventDefault on every recognised key so browser
@@ -630,24 +672,16 @@
 
         // ---------------------------------------------------------------
         // Send the initial viewport message exactly once when the PC
-        // reaches the connected state. Use the <video> element's
-        // bounding rect as the requested resolution — the guest's
-        // vdagent will resize its X session to match (via
-        // VDAgentMonitorsConfig dispatched on the Rust side from
-        // the resize_tx channel that this message lands on).
-        // viewportSent is scoped to this connect() call so it
-        // retriggers correctly on reconnect.
+        // reaches the connected state. Subsequent viewport updates
+        // (window resize) are handled by the module-level resize
+        // listener above. `viewportSent` is scoped to this connect()
+        // call so reconnects re-trigger the initial send.
         // ---------------------------------------------------------------
         let viewportSent = false;
-        const sendViewport = () => {
+        const sendInitialViewport = () => {
             if (viewportSent) return;
-            const rect = videoEl.getBoundingClientRect();
-            const w = Math.round(rect.width);
-            const h = Math.round(rect.height);
-            if (w <= 0 || h <= 0) return;
             viewportSent = true;
-            sendCtrl({ type: 'viewport', width: w, height: h });
-            console.log('[ryll] viewport sent:', w, 'x', h);
+            sendCurrentViewport();
         };
 
         pc.onconnectionstatechange = () => {
@@ -655,7 +689,7 @@
             if (pc.connectionState === 'connected') {
                 // Reset backoff counter on successful connection.
                 reconnectAttempt = 0;
-                sendViewport();
+                sendInitialViewport();
             } else if (pc.connectionState === 'failed') {
                 scheduleReconnect();
             }
