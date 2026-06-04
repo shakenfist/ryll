@@ -405,6 +405,7 @@ fn run_headless(
             cancel,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
+            args.control_socket.clone(),
         )
         .await;
 

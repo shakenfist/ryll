@@ -18,13 +18,15 @@
 //! bug-report assembly. The host (ryll's `main.rs` and `app.rs`)
 //! constructs the trait objects and wraps the orchestrator.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot, Notify};
-use tracing::{error, info};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
 
@@ -59,6 +61,39 @@ struct HeadlessStats {
     frames_received: u64,
     bytes_in: u64,
     bytes_out: u64,
+}
+
+/// Minimal `StatusProvider` implementation for headless mode.
+///
+/// `spice_connected` is conservative: we report `true` as long as
+/// the connection task handle is still alive (it exits only once the
+/// main channel disconnects).  `agent_connected` and `surfaces` are
+/// stubs that later phase-3 steps will populate:
+///
+/// - `agent_connected` → wired via `ChannelEvent::AgentConnected` in
+///   step 3d when the broadcast fan-out lands.
+/// - `surfaces` → populated in step 3e once the `SurfaceMirror` is
+///   instantiated in headless mode.
+struct HeadlessStatus {
+    /// True while the connection task is running.  The control server
+    /// reads this via the `StatusProvider` trait.
+    connected: Arc<AtomicBool>,
+}
+
+impl HeadlessStatus {
+    fn new(connected: Arc<AtomicBool>) -> Self {
+        Self { connected }
+    }
+}
+
+impl crate::control::StatusProvider for HeadlessStatus {
+    fn snapshot(&self) -> crate::control::protocol::StatusResult {
+        crate::control::protocol::StatusResult {
+            spice_connected: self.connected.load(Ordering::Relaxed),
+            agent_connected: false, // wired in step 3d
+            surfaces: Vec::new(),   // populated in step 3e
+        }
+    }
 }
 
 /// Run the SPICE connection in async context.
@@ -420,6 +455,7 @@ pub async fn run_headless(
     cancel: Arc<AtomicBool>,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
+    control_socket_path: Option<PathBuf>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -435,12 +471,18 @@ pub async fn run_headless(
     // no waker if no waiters) so this is harmless.
     let repaint_notify = Arc::new(Notify::new());
 
+    // Track whether the SPICE connection task is still alive. The
+    // control server's `HeadlessStatus` impl reads this flag to answer
+    // `status` queries.
+    let spice_connected = Arc::new(AtomicBool::new(true));
+
     // Spawn connection task. The cancel flag is passed through so
     // a host-side Ctrl+C bridge can flip it and have every channel
     // task exit promptly.
     let cancel_for_conn = cancel.clone();
+    let spice_connected_for_conn = spice_connected.clone();
     let connection_handle = tokio::spawn(async move {
-        run_connection(
+        let result = run_connection(
             config,
             event_tx,
             repaint_notify,
@@ -464,7 +506,9 @@ pub async fn run_headless(
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
         )
-        .await
+        .await;
+        spice_connected_for_conn.store(false, Ordering::Relaxed);
+        result
     });
     tokio::pin!(connection_handle);
 
@@ -496,6 +540,25 @@ pub async fn run_headless(
                     char_delay_ms: delay_ms,
                 })
                 .await;
+        }))
+    } else {
+        None
+    };
+
+    // Control socket task — spawned when --control-socket is set.
+    // A `CancellationToken` is used so the server can exit cleanly
+    // when the SPICE session ends (rather than being aborted, which
+    // would skip the socket-file unlink).
+    let control_cancel = CancellationToken::new();
+    let control_handle = if let Some(sock_path) = control_socket_path {
+        let status: Arc<dyn crate::control::StatusProvider> =
+            Arc::new(HeadlessStatus::new(spice_connected.clone()));
+        let server = crate::control::Server::new(sock_path);
+        let token = control_cancel.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = server.run(status, token).await {
+                warn!("control: server exited with error: {}", e);
+            }
         }))
     } else {
         None
@@ -598,6 +661,13 @@ pub async fn run_headless(
     }
     if let Some(handle) = paste_handle {
         handle.abort();
+    }
+
+    // Signal the control server to shut down and wait up to 2 s for
+    // it to unlink the socket file cleanly.
+    if let Some(handle) = control_handle {
+        control_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
     if paste_failed {

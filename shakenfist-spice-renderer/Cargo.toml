@@ -57,6 +57,9 @@ anyhow = "1"
 # Async channels
 async-channel = "2"
 
+# CancellationToken for coordinated task shutdown (control socket)
+tokio-util = "0.7"
+
 # TCP keepalive configuration (matches spice-gtk behaviour)
 socket2 = { version = "0.6", features = ["all"] }
 
