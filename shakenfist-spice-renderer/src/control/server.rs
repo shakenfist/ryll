@@ -3,8 +3,14 @@
 //! Binds a Unix-domain socket at a caller-supplied path, enforces
 //! single-client concurrency (a second connect gets a `busy` response
 //! and is closed immediately), runs an NDJSON request/response loop,
-//! and dispatches the `hello` and `status` verbs.  All other v1 verbs
-//! return `not_implemented` until later phase-3 steps wire them.
+//! and dispatches the v1 verbs.  The high-throughput event side is
+//! served from a `tokio::sync::broadcast` fan-out (see
+//! `session.rs`): each connected client owns its own
+//! `broadcast::Receiver` plus a small bounded outbound queue.  If
+//! the client falls behind, events are dropped on its side and a
+//! `dropped` event is emitted once the queue drains — the SPICE
+//! producers are never back-pressured by a slow control-socket
+//! client.
 //!
 //! # Lifecycle
 //!
@@ -17,20 +23,31 @@
 //!    accept loop exits, the socket file is unlinked, and the task
 //!    returns.
 
+use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::protocol::{
-    major_version_matches, ErrorCode, HelloParams, HelloResult, Request, Response, StatusResult,
+    major_version_matches, ErrorCode, Event, HelloParams, HelloResult, Request, RequestId,
+    Response, RpcError, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
     PROTOCOL_VERSION, SUPPORTED_EVENTS, SUPPORTED_METHODS,
 };
+use crate::channels::ChannelEvent;
+
+/// Capacity of the per-client outbound queue (request responses +
+/// translated event lines).  If the writer falls behind by more
+/// than this, new events are counted as dropped and reported via
+/// a `dropped` event once the queue drains.
+const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 
 // ── StatusProvider ────────────────────────────────────────────────
 
@@ -57,9 +74,14 @@ impl Server {
     }
 
     /// Bind the socket and run the accept loop until `shutdown` fires.
+    ///
+    /// `event_tx` is the broadcast bus that the headless event-loop
+    /// fan-out publishes to.  Each accepted client subscribes a fresh
+    /// `broadcast::Receiver` from this sender.
     pub async fn run(
         self,
         status_provider: Arc<dyn StatusProvider>,
+        event_tx: broadcast::Sender<ChannelEvent>,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
         let path = &self.socket_path;
@@ -118,8 +140,9 @@ impl Server {
                                 let flag = client_active.clone();
                                 let provider = status_provider.clone();
                                 let cancel = shutdown.clone();
+                                let event_rx = event_tx.subscribe();
                                 tokio::spawn(async move {
-                                    handle_client(stream, provider, cancel).await;
+                                    handle_client(stream, provider, event_rx, cancel).await;
                                     flag.store(false, Ordering::Release);
                                 });
                             }
@@ -152,17 +175,75 @@ impl Server {
 
 // ── Per-client handler ────────────────────────────────────────────
 
+/// One outbound line waiting to be written to the client socket.
+///
+/// Responses and events share a single mpsc into the writer task so
+/// that lines interleave in the correct chronological order on the
+/// wire.
+enum OutboundMessage {
+    Response(Response),
+    Event(Event),
+}
+
+/// Per-client state shared across the request handler, event
+/// translator, and writer tasks within a single connection.
+struct ClientState {
+    /// Names the client is currently subscribed to.  Empty by
+    /// default; mutated by `subscribe` / `unsubscribe` verbs.
+    subscriptions: std::sync::Mutex<HashSet<String>>,
+}
+
+impl ClientState {
+    fn new() -> Self {
+        Self {
+            subscriptions: std::sync::Mutex::new(HashSet::new()),
+        }
+    }
+
+    fn is_subscribed(&self, event: &str) -> bool {
+        self.subscriptions
+            .lock()
+            .map(|s| s.contains(event))
+            .unwrap_or(false)
+    }
+}
+
 async fn handle_client(
     stream: tokio::net::UnixStream,
     status_provider: Arc<dyn StatusProvider>,
+    event_rx: broadcast::Receiver<ChannelEvent>,
     shutdown: CancellationToken,
 ) {
     info!("control: client connected");
 
-    let (read_half, mut write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
+    let (read_half, write_half) = stream.into_split();
 
-    // Track whether this client has completed a successful hello.
+    // Outbound mpsc carrying responses + events to the writer task.
+    // Capacity 256 matches the per-client backpressure budget called
+    // out in the protocol doc.  Responses use the same queue so that
+    // a slow writer also back-pressures request handling, but the
+    // event-translation task uses `try_send` so it never blocks the
+    // broadcast bus.
+    let (out_tx, out_rx) = mpsc::channel::<OutboundMessage>(OUTBOUND_QUEUE_CAPACITY);
+
+    let client_state = Arc::new(ClientState::new());
+
+    // Writer task: drains the outbound mpsc and writes lines.
+    let writer_handle = tokio::spawn(writer_task(write_half, out_rx));
+
+    // Event-translation task: subscribes to the broadcast bus,
+    // filters by `subscriptions`, formats wire `Event` payloads,
+    // and tries to push them onto the outbound queue without
+    // blocking.  On overflow, increments a dropped counter; when
+    // the queue catches up, emits a single `dropped` event.
+    let event_state = client_state.clone();
+    let event_out_tx = out_tx.clone();
+    let event_handle = tokio::spawn(event_translator_task(event_rx, event_state, event_out_tx));
+
+    // Reader / dispatcher: parses each request line, dispatches to
+    // the appropriate verb handler, and queues the response on the
+    // outbound mpsc.
+    let mut lines = BufReader::new(read_half).lines();
     let mut helloed = false;
 
     loop {
@@ -173,40 +254,30 @@ async fn handle_client(
                         if line.trim().is_empty() {
                             continue;
                         }
-                        let response = dispatch_request(
+                        let (response, close_after) = dispatch_request(
                             &line,
                             &mut helloed,
                             &*status_provider,
+                            &client_state,
                         );
 
-                        let close_after = response
-                            .error
-                            .as_ref()
-                            .map(|e| e.code == ErrorCode::ProtocolVersionMismatch)
-                            .unwrap_or(false);
-
-                        let mut serialised = match serde_json::to_string(&response) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                error!("control: failed to serialise response: {}", e);
-                                break;
-                            }
-                        };
-                        serialised.push('\n');
-
-                        if let Err(e) = write_half.write_all(serialised.as_bytes()).await {
-                            warn!("control: write error: {}", e);
+                        if out_tx
+                            .send(OutboundMessage::Response(response))
+                            .await
+                            .is_err()
+                        {
+                            warn!("control: writer task closed; dropping client");
                             break;
                         }
 
                         if close_after {
-                            // Protocol version mismatch: close after writing.
-                            let _ = write_half.shutdown().await;
+                            // Protocol-version-mismatch path: drop the
+                            // outbound sender so the writer drains and
+                            // exits, then bail out of the reader loop.
                             break;
                         }
                     }
                     Ok(None) => {
-                        // EOF — client closed the connection.
                         info!("control: client disconnected");
                         break;
                     }
@@ -217,36 +288,219 @@ async fn handle_client(
                 }
             }
             _ = shutdown.cancelled() => {
-                // Session is shutting down; drop the stream.
                 info!("control: client task cancelled by shutdown");
                 break;
             }
         }
     }
+
+    // Drop our outbound sender so the writer task exits cleanly
+    // once it has drained the queue.  The event-translator task is
+    // explicitly aborted because it would otherwise idle on the
+    // broadcast receiver forever.
+    drop(out_tx);
+    event_handle.abort();
+    let _ = event_handle.await;
+    let _ = writer_handle.await;
 }
 
-/// Dispatch one request line and return the appropriate `Response`.
+/// Writer side of the per-client connection.  Owned by its own task
+/// so the dispatcher / translator never block on `write_all`.
+async fn writer_task(
+    mut write_half: tokio::net::unix::OwnedWriteHalf,
+    mut out_rx: mpsc::Receiver<OutboundMessage>,
+) {
+    while let Some(message) = out_rx.recv().await {
+        let line = match &message {
+            OutboundMessage::Response(r) => serde_json::to_string(r),
+            OutboundMessage::Event(e) => serde_json::to_string(e),
+        };
+        let mut serialised = match line {
+            Ok(s) => s,
+            Err(e) => {
+                error!("control: failed to serialise outbound message: {}", e);
+                continue;
+            }
+        };
+        serialised.push('\n');
+        if let Err(e) = write_half.write_all(serialised.as_bytes()).await {
+            warn!("control: write error: {}", e);
+            break;
+        }
+    }
+    let _ = write_half.shutdown().await;
+}
+
+/// Translator side of the per-client connection.  Subscribes to the
+/// broadcast bus, filters by the active subscription set, formats
+/// each `ChannelEvent` into a wire `Event`, and `try_send`s the
+/// result onto the outbound mpsc.
+///
+/// Backpressure rule: on `try_send` failure (queue full) or on a
+/// broadcast `Lagged(n)` error, increment a local dropped counter.
+/// When the next send succeeds AND the counter is non-zero, emit a
+/// `dropped` event with the cumulative count and reset.
+async fn event_translator_task(
+    mut event_rx: broadcast::Receiver<ChannelEvent>,
+    state: Arc<ClientState>,
+    out_tx: mpsc::Sender<OutboundMessage>,
+) {
+    // Cumulative dropped-events counter, since the last `dropped`
+    // event was emitted.  Saturates at `u32::MAX` on emit.
+    let mut dropped_count: u64 = 0;
+
+    // Track the previous agent-connected state so we emit only on
+    // transitions, as the protocol doc commits to.  `None` means we
+    // have not yet seen an `AgentConnected` event since the client
+    // connected.
+    let mut last_agent_connected: Option<bool> = None;
+
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => {
+                // Translate the ChannelEvent into the wire shape.  Any
+                // variant the protocol doesn't care about returns
+                // `None` here and is silently discarded.
+                let translated = translate_event(&event, &state, &mut last_agent_connected);
+                let Some(wire) = translated else {
+                    continue;
+                };
+
+                match out_tx.try_send(OutboundMessage::Event(wire)) {
+                    Ok(()) => {
+                        // If we previously dropped events and the
+                        // queue has now caught up, flush the
+                        // accumulated count.  We approximate
+                        // "caught up" by checking remaining capacity:
+                        // capacity == OUTBOUND_QUEUE_CAPACITY - 1
+                        // immediately after a successful send means
+                        // the queue is essentially empty.
+                        if dropped_count > 0 && out_tx.capacity() >= OUTBOUND_QUEUE_CAPACITY - 1 {
+                            emit_dropped(&out_tx, &mut dropped_count).await;
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        dropped_count = dropped_count.saturating_add(1);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Writer has gone away; nothing more to do.
+                        return;
+                    }
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                dropped_count = dropped_count.saturating_add(n);
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                return;
+            }
+        }
+    }
+}
+
+/// Emit a `dropped` event with the accumulated count and reset the
+/// counter.  Saturates the on-wire `count` field at `u32::MAX`.
+async fn emit_dropped(out_tx: &mpsc::Sender<OutboundMessage>, dropped_count: &mut u64) {
+    let count: u32 = (*dropped_count).min(u32::MAX as u64) as u32;
+    let event = Event {
+        event: "dropped".into(),
+        data: serde_json::json!({ "count": count }),
+    };
+    // Use a non-blocking send for the dropped event too — if the
+    // queue is full again, treat the dropped-event itself as
+    // accumulating: leave the counter intact for a future attempt.
+    if out_tx.try_send(OutboundMessage::Event(event)).is_ok() {
+        *dropped_count = 0;
+    }
+}
+
+/// Map a `ChannelEvent` to a wire `Event` if the client is currently
+/// subscribed to a matching event name.
+///
+/// Returns `None` for `ChannelEvent` variants that do not correspond
+/// to a v1 event, or for events the client has not subscribed to.
+///
+/// The `last_agent_connected` slot is used to suppress emitting the
+/// `agent_connected` event for non-transitions (the SPICE main
+/// channel can re-announce the same agent-connected state at
+/// session-startup time; the protocol commits to delivering only
+/// transitions).
+fn translate_event(
+    event: &ChannelEvent,
+    state: &ClientState,
+    last_agent_connected: &mut Option<bool>,
+) -> Option<Event> {
+    match event {
+        ChannelEvent::Latency { sample_ms } => {
+            if !state.is_subscribed("latency") {
+                return None;
+            }
+            // Wallclock timestamp is captured at translation time.
+            // Wallclock can jump; this is "client-observable
+            // timestamp", not a monotonic stamp.  Documented as
+            // such in the protocol doc.
+            let wallclock_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            Some(Event {
+                event: "latency".into(),
+                data: serde_json::json!({
+                    "sample_ms": *sample_ms as f64,
+                    "wallclock_us": wallclock_us,
+                }),
+            })
+        }
+        ChannelEvent::AgentConnected(connected) => {
+            // Transitions-only: suppress if the new state equals the
+            // last one we forwarded to this client.
+            if last_agent_connected.as_ref() == Some(connected) {
+                return None;
+            }
+            *last_agent_connected = Some(*connected);
+            if !state.is_subscribed("agent_connected") {
+                return None;
+            }
+            Some(Event {
+                event: "agent_connected".into(),
+                data: serde_json::json!({ "connected": *connected }),
+            })
+        }
+        // 3c: emit paste_completed / paste_failed here.  When
+        // `ChannelEvent::PasteCompleted` / `PasteFailed` carry a
+        // `request_id` field (added by step 3c so paste correlations
+        // survive the broadcast tap), translate them to the wire
+        // shape documented in control-socket-protocol.md.
+        _ => None,
+    }
+}
+
+/// Dispatch one request line and return the appropriate `Response`
+/// along with a flag indicating whether the connection should be
+/// closed after writing the response (currently set only for the
+/// `protocol_version_mismatch` error path).
 fn dispatch_request(
     line: &str,
     helloed: &mut bool,
     status_provider: &dyn StatusProvider,
-) -> Response {
+    client_state: &ClientState,
+) -> (Response, bool) {
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
-            // We don't have a valid id to echo back; use a synthetic
-            // id of null is not valid protocol, so we use id=0 as
-            // a best-effort placeholder for unparseable requests.
             warn!("control: failed to parse request: {}", e);
-            return Response {
-                id: None,
-                ok: false,
-                result: None,
-                error: Some(super::protocol::RpcError {
-                    code: ErrorCode::BadParams,
-                    message: format!("failed to parse request: {}", e),
-                }),
-            };
+            return (
+                Response {
+                    id: None,
+                    ok: false,
+                    result: None,
+                    error: Some(RpcError {
+                        code: ErrorCode::BadParams,
+                        message: format!("failed to parse request: {}", e),
+                    }),
+                },
+                false,
+            );
         }
     };
 
@@ -255,35 +509,50 @@ fn dispatch_request(
 
     // Hello must precede all other verbs.
     if !*helloed && method != "hello" {
-        return Response::err(id, ErrorCode::NoHelloYet, "first request must be hello");
+        return (
+            Response::err(id, ErrorCode::NoHelloYet, "first request must be hello"),
+            false,
+        );
     }
 
     match method {
-        "hello" => handle_hello(id, request.params, helloed),
-        "status" => handle_status(id, status_provider),
+        "hello" => {
+            let response = handle_hello(id, request.params, helloed);
+            let close = response
+                .error
+                .as_ref()
+                .map(|e| e.code == ErrorCode::ProtocolVersionMismatch)
+                .unwrap_or(false);
+            (response, close)
+        }
+        "status" => (handle_status(id, status_provider), false),
+        "subscribe" => (handle_subscribe(id, request.params, client_state), false),
+        "unsubscribe" => (handle_unsubscribe(id, request.params, client_state), false),
         // Recognised but not yet implemented:
-        "send_key" | "paste" | "screenshot" | "subscribe" | "unsubscribe" => Response::err(
-            id,
-            ErrorCode::NotImplemented,
-            format!(
-                "method \"{}\" is recognised but not yet implemented",
-                method
+        "send_key" | "paste" | "screenshot" => (
+            Response::err(
+                id,
+                ErrorCode::NotImplemented,
+                format!(
+                    "method \"{}\" is recognised but not yet implemented",
+                    method
+                ),
             ),
+            false,
         ),
         // Completely unknown:
-        _ => Response::err(
-            id,
-            ErrorCode::UnknownMethod,
-            format!("unknown method \"{}\"", method),
+        _ => (
+            Response::err(
+                id,
+                ErrorCode::UnknownMethod,
+                format!("unknown method \"{}\"", method),
+            ),
+            false,
         ),
     }
 }
 
-fn handle_hello(
-    id: super::protocol::RequestId,
-    params: serde_json::Value,
-    helloed: &mut bool,
-) -> Response {
+fn handle_hello(id: RequestId, params: serde_json::Value, helloed: &mut bool) -> Response {
     let p: HelloParams = match serde_json::from_value(params) {
         Ok(v) => v,
         Err(e) => {
@@ -315,7 +584,6 @@ fn handle_hello(
             )
         }
         Ok(false) => {
-            // Parse the major version for the error message.
             let client_major = super::protocol::parse_protocol_version(&p.protocol_version)
                 .map(|(maj, _)| maj)
                 .unwrap_or(0);
@@ -339,10 +607,69 @@ fn handle_hello(
     }
 }
 
-fn handle_status(id: super::protocol::RequestId, status_provider: &dyn StatusProvider) -> Response {
+fn handle_status(id: RequestId, status_provider: &dyn StatusProvider) -> Response {
     let snapshot = status_provider.snapshot();
     Response::ok(
         id,
         serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
+fn handle_subscribe(id: RequestId, params: serde_json::Value, state: &ClientState) -> Response {
+    let p: SubscribeParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid subscribe params: {}", e),
+            );
+        }
+    };
+
+    // Filter requested names against the v1 supported set; unknown
+    // names are silently ignored for forward compatibility.
+    let mut subscribed: Vec<String> = Vec::new();
+    if let Ok(mut subs) = state.subscriptions.lock() {
+        for name in &p.events {
+            if SUPPORTED_EVENTS.contains(&name.as_str()) {
+                subs.insert(name.clone());
+                subscribed.push(name.clone());
+            }
+        }
+    }
+
+    Response::ok(
+        id,
+        serde_json::to_value(SubscribeResult { subscribed })
+            .unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
+fn handle_unsubscribe(id: RequestId, params: serde_json::Value, state: &ClientState) -> Response {
+    let p: SubscribeParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid unsubscribe params: {}", e),
+            );
+        }
+    };
+
+    let mut unsubscribed: Vec<String> = Vec::new();
+    if let Ok(mut subs) = state.subscriptions.lock() {
+        for name in &p.events {
+            if subs.remove(name) {
+                unsubscribed.push(name.clone());
+            }
+        }
+    }
+
+    Response::ok(
+        id,
+        serde_json::to_value(UnsubscribeResult { unsubscribed })
+            .unwrap_or(serde_json::Value::Object(Default::default())),
     )
 }

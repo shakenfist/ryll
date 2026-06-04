@@ -193,6 +193,33 @@ pub struct SurfaceInfo {
     pub height: u32,
 }
 
+/// Params for the `subscribe` and `unsubscribe` verbs.
+///
+/// Both verbs share the same shape (`{"events": [...]}`); only the
+/// result type differs.  Unknown event names are silently ignored
+/// for forward compatibility — a client compiled against a future
+/// version of the protocol can ask for `digest_updated` without
+/// breaking the call.
+#[derive(Debug, Deserialize)]
+pub struct SubscribeParams {
+    pub events: Vec<String>,
+}
+
+/// Result payload for `subscribe`: the subset of requested event
+/// names the server actually agreed to deliver.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SubscribeResult {
+    pub subscribed: Vec<String>,
+}
+
+/// Result payload for `unsubscribe`: the subset of requested event
+/// names that were actually removed from the active subscription
+/// set (i.e. were present beforehand).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UnsubscribeResult {
+    pub unsubscribed: Vec<String>,
+}
+
 // ── Version helpers ──────────────────────────────────────────────
 
 /// Parse a `"major.minor"` protocol-version string and return the
