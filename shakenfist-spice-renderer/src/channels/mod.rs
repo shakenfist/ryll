@@ -17,6 +17,7 @@ pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
+use crate::control::protocol::RequestId;
 use crate::notification::NotificationEntry;
 use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
@@ -169,14 +170,23 @@ pub enum ChannelEvent {
     },
 
     /// Paste-as-keystrokes sequence completed.
+    ///
+    /// `request_id` is `Some` when the paste was initiated via the
+    /// control socket (so subscribers can correlate the completion
+    /// back to the originating `paste` request).  It is `None` for
+    /// pastes initiated by the `--paste-text` CLI flag.
     PasteCompleted {
         chars: usize,
         elapsed_ms: u64,
+        request_id: Option<RequestId>,
     },
 
     /// Paste-as-keystrokes failed (unrepresentable characters).
+    ///
+    /// `request_id` mirrors the semantics of `PasteCompleted`.
     PasteFailed {
         reason: String,
+        request_id: Option<RequestId>,
     },
 
     /// vdagent connection state changed.
@@ -253,7 +263,24 @@ pub enum InputEvent {
     MouseUp { button: u32, x: u32, y: u32 },
 
     /// Paste a string as synthetic keystrokes (US-QWERTY).
-    PasteText { text: String, char_delay_ms: u32 },
+    ///
+    /// `request_id` and `cancel` are `Some` when the paste was
+    /// initiated via the control socket.  The `cancel` token is
+    /// polled between characters so a client disconnect can abort
+    /// the in-progress paste without leaving synthetic key events
+    /// running.  Both are `None` for the `--paste-text` CLI path.
+    PasteText {
+        text: String,
+        char_delay_ms: u32,
+        /// Correlation token echoed in the resulting
+        /// `PasteCompleted` / `PasteFailed` channel event.
+        request_id: Option<RequestId>,
+        /// Optional cancellation token.  When `Some`, the paste
+        /// state machine checks `cancel.is_cancelled()` before
+        /// advancing each sub-step and aborts with a
+        /// `PasteFailed` event if it fires.
+        cancel: Option<tokio_util::sync::CancellationToken>,
+    },
 }
 
 /// Commands sent from the app to the webdav channel.

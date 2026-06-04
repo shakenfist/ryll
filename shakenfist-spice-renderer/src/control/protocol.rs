@@ -39,7 +39,7 @@ pub const SUPPORTED_EVENTS: &[&str] = &[
 /// echoed in the matching response.  The protocol allows both JSON
 /// integers and JSON strings; `#[serde(untagged)]` serialises the
 /// inner value directly with no wrapper object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {
     Int(i64),

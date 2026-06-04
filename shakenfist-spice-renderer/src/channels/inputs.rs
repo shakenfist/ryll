@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Notify};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::snapshots::{InputEventRecord, InputsSnapshot};
@@ -53,6 +54,13 @@ struct PasteState {
     saved_ctrl: bool,
     saved_shift: bool,
     saved_alt: bool,
+    /// Correlation token for control-socket-initiated pastes; `None`
+    /// for `--paste-text` CLI pastes.  Echoed in `PasteCompleted` /
+    /// `PasteFailed` channel events.
+    request_id: Option<crate::control::protocol::RequestId>,
+    /// Optional cancellation token.  Checked before each sub-step;
+    /// when cancelled the paste aborts with a `PasteFailed` event.
+    cancel: Option<CancellationToken>,
 }
 
 pub struct InputsChannel {
@@ -729,6 +737,8 @@ impl InputsChannel {
             InputEvent::PasteText {
                 text,
                 char_delay_ms,
+                request_id,
+                cancel,
             } => {
                 if !self.enable_paste {
                     warn!("inputs: paste-as-keystrokes not enabled, ignoring");
@@ -765,7 +775,7 @@ impl InputsChannel {
                         );
                         error!("inputs: {}", reason);
                         self.event_tx
-                            .send(ChannelEvent::PasteFailed { reason })
+                            .send(ChannelEvent::PasteFailed { reason, request_id })
                             .await
                             .ok();
                         self.repaint_notify.notify_one();
@@ -778,6 +788,7 @@ impl InputsChannel {
                         .send(ChannelEvent::PasteCompleted {
                             chars: 0,
                             elapsed_ms: 0,
+                            request_id,
                         })
                         .await
                         .ok();
@@ -821,6 +832,8 @@ impl InputsChannel {
                     saved_ctrl,
                     saved_shift,
                     saved_alt,
+                    request_id,
+                    cancel,
                 });
             }
         }
@@ -932,7 +945,30 @@ impl InputsChannel {
     }
 
     /// Advance the paste state machine by one sub-step.
+    ///
+    /// Before advancing, checks whether the associated
+    /// `CancellationToken` (if any) has been fired.  If it has, the
+    /// paste is aborted and a `PasteFailed` event is emitted.  This
+    /// lets a control-socket client disconnect abort an in-progress
+    /// paste without leaving synthetic key events running.
     async fn advance_paste(&mut self) -> Result<()> {
+        // Check for cancellation before doing any work.
+        {
+            let state = self.paste_state.as_ref().unwrap();
+            if state.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+                let request_id = state.request_id.clone();
+                let reason = "paste cancelled (client disconnected)".to_string();
+                info!("inputs: paste cancelled by cancellation token");
+                self.paste_state = None;
+                self.event_tx
+                    .send(ChannelEvent::PasteFailed { reason, request_id })
+                    .await
+                    .ok();
+                self.repaint_notify.notify_one();
+                return Ok(());
+            }
+        }
+
         let state = self.paste_state.as_mut().unwrap();
         let key = state.keys[state.index];
 
@@ -959,6 +995,7 @@ impl InputsChannel {
                     // Paste complete
                     let chars = state.keys.len();
                     let elapsed_ms = state.start.elapsed().as_millis() as u64;
+                    let request_id = state.request_id.clone();
 
                     // Restore modifiers
                     let saved_ctrl = state.saved_ctrl;
@@ -985,7 +1022,11 @@ impl InputsChannel {
                         chars, elapsed_ms
                     );
                     self.event_tx
-                        .send(ChannelEvent::PasteCompleted { chars, elapsed_ms })
+                        .send(ChannelEvent::PasteCompleted {
+                            chars,
+                            elapsed_ms,
+                            request_id,
+                        })
                         .await
                         .ok();
                     self.repaint_notify.notify_one();

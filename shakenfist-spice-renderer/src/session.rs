@@ -539,16 +539,19 @@ pub async fn run_headless(
     });
     tokio::pin!(connection_handle);
 
-    // Clone input_tx before cadence moves it, so the paste trigger can also use it.
+    // Clone input_tx for each consumer before any `async move` closure
+    // captures ownership.  Order matters: clones must precede moves.
     let paste_input_tx = input_tx.clone();
+    let cadence_input_tx = input_tx.clone();
+    let input_tx_for_control = input_tx.clone();
 
     // Cadence task if enabled
     let cadence_handle = if cadence {
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = input_tx.try_send(InputEvent::KeyDown(0x39));
-                let _ = input_tx.try_send(InputEvent::KeyUp(0xB9));
+                let _ = cadence_input_tx.try_send(InputEvent::KeyDown(0x39));
+                let _ = cadence_input_tx.try_send(InputEvent::KeyUp(0xB9));
             }
         }))
     } else {
@@ -565,6 +568,8 @@ pub async fn run_headless(
                 .send(InputEvent::PasteText {
                     text,
                     char_delay_ms: delay_ms,
+                    request_id: None, // CLI path: no correlation token
+                    cancel: None,     // CLI path: no cancellation token
                 })
                 .await;
         }))
@@ -586,7 +591,10 @@ pub async fn run_headless(
         let token = control_cancel.clone();
         let event_tx_for_control = event_broadcast_tx.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) = server.run(status, event_tx_for_control, token).await {
+            if let Err(e) = server
+                .run(status, event_tx_for_control, input_tx_for_control, token)
+                .await
+            {
                 warn!("control: server exited with error: {}", e);
             }
         }))
@@ -695,13 +703,13 @@ pub async fn run_headless(
                     ChannelEvent::WebdavError(err) => {
                         error!("headless: WebDAV error: {}", err);
                     }
-                    ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                    ChannelEvent::PasteCompleted { chars, elapsed_ms, .. } => {
                         info!(
                             "headless: paste complete: {} chars in {}ms",
                             chars, elapsed_ms
                         );
                     }
-                    ChannelEvent::PasteFailed { reason } => {
+                    ChannelEvent::PasteFailed { reason, .. } => {
                         error!("headless: paste failed: {}", reason);
                         paste_failed = true;
                     }

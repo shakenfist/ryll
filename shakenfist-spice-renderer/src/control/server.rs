@@ -23,13 +23,14 @@
 //!    accept loop exits, the socket file is unlinked, and the task
 //!    returns.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc};
@@ -41,7 +42,7 @@ use super::protocol::{
     Response, RpcError, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
     PROTOCOL_VERSION, SUPPORTED_EVENTS, SUPPORTED_METHODS,
 };
-use crate::channels::ChannelEvent;
+use crate::channels::{ChannelEvent, InputEvent};
 
 /// Capacity of the per-client outbound queue (request responses +
 /// translated event lines).  If the writer falls behind by more
@@ -78,10 +79,16 @@ impl Server {
     /// `event_tx` is the broadcast bus that the headless event-loop
     /// fan-out publishes to.  Each accepted client subscribes a fresh
     /// `broadcast::Receiver` from this sender.
+    ///
+    /// `input_tx` is the mpsc sender used by `run_headless` to push
+    /// `InputEvent`s to the SPICE inputs channel.  The control server
+    /// clones it into each accepted client so `send_key` and `paste`
+    /// verbs can enqueue events.
     pub async fn run(
         self,
         status_provider: Arc<dyn StatusProvider>,
         event_tx: broadcast::Sender<ChannelEvent>,
+        input_tx: mpsc::Sender<InputEvent>,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
         let path = &self.socket_path;
@@ -141,8 +148,9 @@ impl Server {
                                 let provider = status_provider.clone();
                                 let cancel = shutdown.clone();
                                 let event_rx = event_tx.subscribe();
+                                let tx = input_tx.clone();
                                 tokio::spawn(async move {
-                                    handle_client(stream, provider, event_rx, cancel).await;
+                                    handle_client(stream, provider, event_rx, tx, cancel).await;
                                     flag.store(false, Ordering::Release);
                                 });
                             }
@@ -191,12 +199,21 @@ struct ClientState {
     /// Names the client is currently subscribed to.  Empty by
     /// default; mutated by `subscribe` / `unsubscribe` verbs.
     subscriptions: std::sync::Mutex<HashSet<String>>,
+
+    /// In-flight paste operations keyed by request id.  Each entry
+    /// holds a `CancellationToken` that is fired when the client
+    /// disconnects (or when the paste completes / fails and the
+    /// entry is removed).  The lock is taken briefly by the request
+    /// handler to insert/remove, and by the disconnect path to fire
+    /// all remaining tokens.
+    in_flight_pastes: std::sync::Mutex<HashMap<RequestId, CancellationToken>>,
 }
 
 impl ClientState {
     fn new() -> Self {
         Self {
             subscriptions: std::sync::Mutex::new(HashSet::new()),
+            in_flight_pastes: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -206,12 +223,41 @@ impl ClientState {
             .map(|s| s.contains(event))
             .unwrap_or(false)
     }
+
+    /// Register a new in-flight paste and return the cancellation
+    /// token to pass into the `InputEvent::PasteText`.
+    fn register_paste(&self, request_id: RequestId) -> CancellationToken {
+        let token = CancellationToken::new();
+        if let Ok(mut map) = self.in_flight_pastes.lock() {
+            map.insert(request_id, token.clone());
+        }
+        token
+    }
+
+    /// Remove the in-flight paste entry for the given request id.
+    /// Called when a `PasteCompleted` or `PasteFailed` event arrives.
+    fn complete_paste(&self, request_id: &RequestId) {
+        if let Ok(mut map) = self.in_flight_pastes.lock() {
+            map.remove(request_id);
+        }
+    }
+
+    /// Cancel all in-flight pastes.  Called on client disconnect so
+    /// background paste tasks stop generating synthetic key events.
+    fn cancel_all_pastes(&self) {
+        if let Ok(map) = self.in_flight_pastes.lock() {
+            for token in map.values() {
+                token.cancel();
+            }
+        }
+    }
 }
 
 async fn handle_client(
     stream: tokio::net::UnixStream,
     status_provider: Arc<dyn StatusProvider>,
     event_rx: broadcast::Receiver<ChannelEvent>,
+    input_tx: mpsc::Sender<InputEvent>,
     shutdown: CancellationToken,
 ) {
     info!("control: client connected");
@@ -259,6 +305,7 @@ async fn handle_client(
                             &mut helloed,
                             &*status_provider,
                             &client_state,
+                            &input_tx,
                         );
 
                         if out_tx
@@ -293,6 +340,10 @@ async fn handle_client(
             }
         }
     }
+
+    // Cancel every in-flight paste so background tasks stop
+    // producing synthetic key events into an orphaned session.
+    client_state.cancel_all_pastes();
 
     // Drop our outbound sender so the writer task exits cleanly
     // once it has drained the queue.  The event-translator task is
@@ -466,11 +517,56 @@ fn translate_event(
                 data: serde_json::json!({ "connected": *connected }),
             })
         }
-        // 3c: emit paste_completed / paste_failed here.  When
-        // `ChannelEvent::PasteCompleted` / `PasteFailed` carry a
-        // `request_id` field (added by step 3c so paste correlations
-        // survive the broadcast tap), translate them to the wire
-        // shape documented in control-socket-protocol.md.
+        ChannelEvent::PasteCompleted {
+            chars,
+            request_id: Some(request_id),
+            ..
+        } => {
+            // Remove the in-flight entry regardless of whether the
+            // client subscribed — the paste is done.
+            state.complete_paste(request_id);
+
+            if !state.is_subscribed("paste_completed") {
+                return None;
+            }
+            // `paste_completed` carries `chars_sent` (u32 in the
+            // protocol).  `chars` is `usize`; saturate at u32::MAX
+            // to avoid wrapping on absurd inputs.
+            let chars_sent = (*chars).min(u32::MAX as usize) as u32;
+            Some(Event {
+                event: "paste_completed".into(),
+                data: serde_json::json!({
+                    "request_id": request_id,
+                    "chars_sent": chars_sent,
+                }),
+            })
+        }
+        ChannelEvent::PasteCompleted { .. } => {
+            // CLI-initiated paste (request_id == None): no control-
+            // socket event; already logged by the headless stats drain.
+            None
+        }
+        ChannelEvent::PasteFailed {
+            reason,
+            request_id: Some(request_id),
+        } => {
+            state.complete_paste(request_id);
+
+            if !state.is_subscribed("paste_failed") {
+                return None;
+            }
+            Some(Event {
+                event: "paste_failed".into(),
+                data: serde_json::json!({
+                    "request_id": request_id,
+                    "reason": reason,
+                }),
+            })
+        }
+        ChannelEvent::PasteFailed { .. } => {
+            // CLI-initiated paste: no control-socket event.
+            None
+        }
         _ => None,
     }
 }
@@ -479,11 +575,16 @@ fn translate_event(
 /// along with a flag indicating whether the connection should be
 /// closed after writing the response (currently set only for the
 /// `protocol_version_mismatch` error path).
+///
+/// `input_tx` is forwarded to the verb handlers that need to push
+/// `InputEvent`s (`send_key`, `paste`).  It is a borrow of the
+/// sender that lives for the lifetime of the client connection.
 fn dispatch_request(
     line: &str,
     helloed: &mut bool,
     status_provider: &dyn StatusProvider,
     client_state: &ClientState,
+    input_tx: &mpsc::Sender<InputEvent>,
 ) -> (Response, bool) {
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -528,15 +629,17 @@ fn dispatch_request(
         "status" => (handle_status(id, status_provider), false),
         "subscribe" => (handle_subscribe(id, request.params, client_state), false),
         "unsubscribe" => (handle_unsubscribe(id, request.params, client_state), false),
+        "send_key" => (handle_send_key(id, request.params, input_tx), false),
+        "paste" => (
+            handle_paste(id, request.params, client_state, input_tx),
+            false,
+        ),
         // Recognised but not yet implemented:
-        "send_key" | "paste" | "screenshot" => (
+        "screenshot" => (
             Response::err(
                 id,
                 ErrorCode::NotImplemented,
-                format!(
-                    "method \"{}\" is recognised but not yet implemented",
-                    method
-                ),
+                "method \"screenshot\" is recognised but not yet implemented",
             ),
             false,
         ),
@@ -672,4 +775,169 @@ fn handle_unsubscribe(id: RequestId, params: serde_json::Value, state: &ClientSt
         serde_json::to_value(UnsubscribeResult { unsubscribed })
             .unwrap_or(serde_json::Value::Object(Default::default())),
     )
+}
+
+// ── Params structs for the new verbs ─────────────────────────────
+
+/// Params for the `send_key` verb.
+#[derive(Debug, Deserialize)]
+struct SendKeyParams {
+    scancode: u16,
+    state: String,
+}
+
+/// Params for the `paste` verb.
+#[derive(Debug, Deserialize)]
+struct PasteParams {
+    text: String,
+    /// Milliseconds to wait between characters.  Falls back to the
+    /// inputs channel's built-in default (10 ms) when absent.
+    char_delay_ms: Option<u32>,
+}
+
+// ── Verb handlers for the new verbs ──────────────────────────────
+
+/// Handle a `send_key` request.
+///
+/// Translates the `state` field into one or two `InputEvent`s:
+/// - `"down"` → `InputEvent::KeyDown(scancode)`.
+/// - `"up"` → `InputEvent::KeyUp(scancode)`.
+/// - `"press"` → `InputEvent::KeyDown(scancode)` followed immediately
+///   by `InputEvent::KeyUp(scancode)` (two separate sends).
+///
+/// Returns `{}` on success.  The two sends for `"press"` are
+/// non-atomic from the inputs channel's perspective, but they arrive
+/// in order because the mpsc preserves insertion order.
+///
+/// Does NOT emit any event.  Does NOT require the vdagent.
+fn handle_send_key(
+    id: RequestId,
+    params: serde_json::Value,
+    input_tx: &mpsc::Sender<InputEvent>,
+) -> Response {
+    let p: SendKeyParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid send_key params: {}", e),
+            );
+        }
+    };
+
+    let scancode = p.scancode as u32;
+
+    match p.state.as_str() {
+        "down" => {
+            if input_tx.try_send(InputEvent::KeyDown(scancode)).is_err() {
+                return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
+            }
+        }
+        "up" => {
+            if input_tx.try_send(InputEvent::KeyUp(scancode)).is_err() {
+                return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
+            }
+        }
+        "press" => {
+            // Send KeyDown then KeyUp.  If either fails, return an
+            // error; the channel is likely closed.
+            if input_tx.try_send(InputEvent::KeyDown(scancode)).is_err() {
+                return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
+            }
+            if input_tx.try_send(InputEvent::KeyUp(scancode)).is_err() {
+                return Response::err(
+                    id,
+                    ErrorCode::InternalError,
+                    "input channel closed or full (after key-down)",
+                );
+            }
+        }
+        other => {
+            return Response::err(
+                id,
+                ErrorCode::BadState,
+                format!(
+                    "unrecognised state value {:?}: expected \"down\", \"up\", or \"press\"",
+                    other
+                ),
+            );
+        }
+    }
+
+    Response::ok(id, serde_json::Value::Object(Default::default()))
+}
+
+/// Handle a `paste` request.
+///
+/// The response is returned immediately (the paste queues
+/// asynchronously).  Completion is reported via a `paste_completed`
+/// or `paste_failed` event on the broadcast bus, which the
+/// translation layer delivers to subscribed clients.
+///
+/// Per-request cancellation: a fresh `CancellationToken` is minted
+/// for each paste and stored in `ClientState::in_flight_pastes` keyed
+/// by request id.  When the client disconnects, `cancel_all_pastes`
+/// fires every token so the inputs channel stops generating synthetic
+/// key events.
+///
+/// Empty text is a trivial success: the inputs channel emits
+/// `PasteCompleted { chars: 0 }` immediately (same as the existing
+/// `--paste-text ""` behaviour), so we just queue the event and
+/// return `{}`.
+///
+/// `agent_not_connected` is intentionally NOT returned: paste in Ryll
+/// works by translating text to US-QWERTY scancodes and issuing
+/// `KeyDown`/`KeyUp` events through the SPICE inputs channel — it
+/// does NOT use the vdagent clipboard path.  The `agent_not_connected`
+/// error code exists in the enum for future clipboard-based verbs.
+/// See `InputsChannel::handle_input_event` at the `PasteText` arm in
+/// `channels/inputs.rs` for confirmation that no agent is involved.
+fn handle_paste(
+    id: RequestId,
+    params: serde_json::Value,
+    client_state: &ClientState,
+    input_tx: &mpsc::Sender<InputEvent>,
+) -> Response {
+    let p: PasteParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid paste params: {}", e),
+            );
+        }
+    };
+
+    // Default char delay matches the inputs channel's existing
+    // built-in default used by the --paste-text CLI path.
+    const DEFAULT_CHAR_DELAY_MS: u32 = 10;
+    let char_delay_ms = p.char_delay_ms.unwrap_or(DEFAULT_CHAR_DELAY_MS);
+
+    // Register a cancellation token for this paste so we can abort
+    // it if the client disconnects mid-type.
+    let cancel_token = client_state.register_paste(id.clone());
+
+    let event = InputEvent::PasteText {
+        text: p.text,
+        char_delay_ms,
+        request_id: Some(id.clone()),
+        cancel: Some(cancel_token),
+    };
+
+    // `try_send` is sufficient: the input channel is sized at 256
+    // (INPUT_CHANNEL_SIZE) and a single paste message is tiny.
+    // If the channel is full or closed, return an internal error.
+    if input_tx.try_send(event).is_err() {
+        // Remove the registration we just added — the paste never started.
+        client_state.complete_paste(&id);
+        return Response::err(
+            id,
+            ErrorCode::InternalError,
+            "input channel closed or full; paste not queued",
+        );
+    }
+
+    Response::ok(id, serde_json::Value::Object(Default::default()))
 }
