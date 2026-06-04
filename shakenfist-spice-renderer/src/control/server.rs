@@ -30,12 +30,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::protocol::{
     major_version_matches, ErrorCode, Event, HelloParams, HelloResult, Request, RequestId,
@@ -43,6 +44,7 @@ use super::protocol::{
     PROTOCOL_VERSION, SUPPORTED_EVENTS, SUPPORTED_METHODS,
 };
 use crate::channels::{ChannelEvent, InputEvent};
+use crate::surface_mirror::SurfaceMirror;
 
 /// Capacity of the per-client outbound queue (request responses +
 /// translated event lines).  If the writer falls behind by more
@@ -84,11 +86,17 @@ impl Server {
     /// `InputEvent`s to the SPICE inputs channel.  The control server
     /// clones it into each accepted client so `send_key` and `paste`
     /// verbs can enqueue events.
+    ///
+    /// `surface_mirror` is the live pixel store that `run_headless`
+    /// keeps in lock-step with the SPICE display channel.  Each
+    /// accepted client clones the `Arc` and the `screenshot` verb
+    /// locks it briefly to snapshot a surface.
     pub async fn run(
         self,
         status_provider: Arc<dyn StatusProvider>,
         event_tx: broadcast::Sender<ChannelEvent>,
         input_tx: mpsc::Sender<InputEvent>,
+        surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
         let path = &self.socket_path;
@@ -149,8 +157,12 @@ impl Server {
                                 let cancel = shutdown.clone();
                                 let event_rx = event_tx.subscribe();
                                 let tx = input_tx.clone();
+                                let mirror = surface_mirror.clone();
                                 tokio::spawn(async move {
-                                    handle_client(stream, provider, event_rx, tx, cancel).await;
+                                    handle_client(
+                                        stream, provider, event_rx, tx, mirror, cancel,
+                                    )
+                                    .await;
                                     flag.store(false, Ordering::Release);
                                 });
                             }
@@ -258,6 +270,7 @@ async fn handle_client(
     status_provider: Arc<dyn StatusProvider>,
     event_rx: broadcast::Receiver<ChannelEvent>,
     input_tx: mpsc::Sender<InputEvent>,
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     shutdown: CancellationToken,
 ) {
     info!("control: client connected");
@@ -306,7 +319,9 @@ async fn handle_client(
                             &*status_provider,
                             &client_state,
                             &input_tx,
-                        );
+                            &surface_mirror,
+                        )
+                        .await;
 
                         if out_tx
                             .send(OutboundMessage::Response(response))
@@ -579,12 +594,13 @@ fn translate_event(
 /// `input_tx` is forwarded to the verb handlers that need to push
 /// `InputEvent`s (`send_key`, `paste`).  It is a borrow of the
 /// sender that lives for the lifetime of the client connection.
-fn dispatch_request(
+async fn dispatch_request(
     line: &str,
     helloed: &mut bool,
     status_provider: &dyn StatusProvider,
     client_state: &ClientState,
     input_tx: &mpsc::Sender<InputEvent>,
+    surface_mirror: &Arc<tokio::sync::Mutex<SurfaceMirror>>,
 ) -> (Response, bool) {
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -634,13 +650,8 @@ fn dispatch_request(
             handle_paste(id, request.params, client_state, input_tx),
             false,
         ),
-        // Recognised but not yet implemented:
         "screenshot" => (
-            Response::err(
-                id,
-                ErrorCode::NotImplemented,
-                "method \"screenshot\" is recognised but not yet implemented",
-            ),
+            handle_screenshot(id, request.params, surface_mirror).await,
             false,
         ),
         // Completely unknown:
@@ -940,4 +951,183 @@ fn handle_paste(
     }
 
     Response::ok(id, serde_json::Value::Object(Default::default()))
+}
+
+// ── Screenshot verb ──────────────────────────────────────────────
+
+/// Params for the `screenshot` verb.  Both fields are optional and
+/// fall back to documented defaults (`surface_id` → primary surface,
+/// `format` → `"png"`).
+#[derive(Debug, Deserialize)]
+struct ScreenshotParams {
+    #[serde(default)]
+    surface_id: Option<u32>,
+    #[serde(default)]
+    format: Option<String>,
+}
+
+/// Result payload for `screenshot`.  Serialised inline so the handler
+/// returns a `serde_json::Value` without a separate result struct.
+const SCREENSHOT_FORMAT_PNG: &str = "png";
+const SCREENSHOT_FORMAT_RGBA: &str = "rgba";
+
+/// Handle a `screenshot` request.
+///
+/// Locks the surface mirror just long enough to find the requested
+/// surface and clone its pixel buffer + dimensions, drops the lock,
+/// and (for PNG) hands the encode off to `tokio::task::spawn_blocking`
+/// so the per-client task is not stalled and the tokio runtime is not
+/// blocked while the `image` crate compresses several megabytes.
+///
+/// Primary-surface selection uses [`SurfaceMirror::primary_key`] when
+/// the caller omits `surface_id` — the same convention `--web` mode
+/// already uses to pick a "default" surface.  When `surface_id` is
+/// supplied, the primary's `channel_id` is used as the channel; if
+/// that combination is not present, returns `no_such_surface`.
+///
+/// Pixel-order note: the renderer's `DisplaySurface` stores pixels in
+/// RGBA order (see the `// RGBA format` comment in
+/// `display/surface.rs`), the same order `image::RgbaImage` expects
+/// and the same order the protocol commits to for the `"rgba"` format.
+/// No BGRA→RGBA conversion is required.
+async fn handle_screenshot(
+    id: RequestId,
+    params: serde_json::Value,
+    surface_mirror: &Arc<tokio::sync::Mutex<SurfaceMirror>>,
+) -> Response {
+    let p: ScreenshotParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid screenshot params: {}", e),
+            );
+        }
+    };
+
+    // Validate format before locking the mirror so a bad request
+    // fails fast.  Default is "png" per the protocol doc.
+    let format = p
+        .format
+        .as_deref()
+        .unwrap_or(SCREENSHOT_FORMAT_PNG)
+        .to_string();
+    if format != SCREENSHOT_FORMAT_PNG && format != SCREENSHOT_FORMAT_RGBA {
+        return Response::err(
+            id,
+            ErrorCode::UnsupportedFormat,
+            format!(
+                "unsupported screenshot format {:?}: expected \"png\" or \"rgba\"",
+                format
+            ),
+        );
+    }
+
+    // Lock the mirror briefly: locate the target surface, clone its
+    // pixel buffer + dimensions, then drop the lock before any
+    // CPU-bound encode work.  The clone is the only allocation while
+    // holding the lock, so contention with the apply task is bounded
+    // by memcpy speed.
+    let (pixels, width, height) = {
+        let mirror = surface_mirror.lock().await;
+        let key = match p.surface_id {
+            None => match mirror.primary_key() {
+                Some(k) => k,
+                None => {
+                    return Response::err(
+                        id,
+                        ErrorCode::NoSuchSurface,
+                        "no surfaces present in mirror; SPICE session may still be initialising",
+                    );
+                }
+            },
+            Some(sid) => {
+                // Use the primary surface's channel_id as the channel
+                // for an explicit surface_id request.  Falls back to
+                // (0, sid) when no primary exists yet.
+                let channel_id = mirror.primary_key().map(|(c, _)| c).unwrap_or(0);
+                (channel_id, sid)
+            }
+        };
+        match mirror.surfaces.get(&key) {
+            Some(surf) => {
+                let (w, h) = surf.size();
+                (surf.pixels().to_vec(), w, h)
+            }
+            None => {
+                return Response::err(
+                    id,
+                    ErrorCode::NoSuchSurface,
+                    format!("no surface with channel_id={}, surface_id={}", key.0, key.1),
+                );
+            }
+        }
+    };
+
+    // Encode + base64 according to the requested format.
+    let encoded: Vec<u8> = if format == SCREENSHOT_FORMAT_RGBA {
+        pixels
+    } else {
+        // PNG encode on a blocking task: at 1024×768 this is ~5–10 ms
+        // of pure CPU; running it on the tokio runtime would stall
+        // every other task on the same worker.
+        let w = width;
+        let h = height;
+        let result = tokio::task::spawn_blocking(move || {
+            let img = match image::RgbaImage::from_raw(w, h, pixels) {
+                Some(img) => img,
+                None => {
+                    return Err(format!(
+                        "RgbaImage::from_raw failed for {}x{} ({} bytes)",
+                        w,
+                        h,
+                        (w as usize).saturating_mul(h as usize).saturating_mul(4)
+                    ));
+                }
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            use image::ImageEncoder;
+            encoder
+                .write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+                .map_err(|e| format!("PNG encode failed: {}", e))?;
+            Ok(buf)
+        })
+        .await;
+        match result {
+            Ok(Ok(buf)) => buf,
+            Ok(Err(msg)) => {
+                return Response::err(id, ErrorCode::InternalError, msg);
+            }
+            Err(e) => {
+                return Response::err(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("PNG encode task panicked: {}", e),
+                );
+            }
+        }
+    };
+
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&encoded);
+
+    debug!(
+        "control: screenshot {}x{} format={} encoded_bytes={} base64_bytes={}",
+        width,
+        height,
+        format,
+        encoded.len(),
+        data_base64.len()
+    );
+
+    Response::ok(
+        id,
+        serde_json::json!({
+            "width": width,
+            "height": height,
+            "format": format,
+            "data_base64": data_base64,
+        }),
+    )
 }

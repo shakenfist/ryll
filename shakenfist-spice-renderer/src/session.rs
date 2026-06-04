@@ -43,6 +43,7 @@ use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification_sink::NotificationSink;
 use crate::snapshots::ChannelSnapshots;
+use crate::surface_mirror::SurfaceMirror;
 use crate::traffic::TrafficSink;
 
 /// Channel buffer sizes used by `run_headless`. The GUI side
@@ -76,8 +77,9 @@ struct HeadlessStats {
 /// the connection task handle is still alive (it exits only once the
 /// main channel disconnects).  `agent_connected` reflects the latest
 /// `ChannelEvent::AgentConnected` observed by the broadcast fan-out
-/// (step 3d).  `surfaces` remains a stub until step 3e instantiates
-/// a `SurfaceMirror` in headless mode.
+/// (step 3d).  `surfaces` is populated from the live `SurfaceMirror`
+/// (step 3e) so a `status` reply matches what the `screenshot` verb
+/// would observe.
 struct HeadlessStatus {
     /// True while the connection task is running.  The control server
     /// reads this via the `StatusProvider` trait.
@@ -89,23 +91,62 @@ struct HeadlessStatus {
     /// and the fan-out task storing it will see the older value, but
     /// that race is at most one bus-tick wide.
     agent_connected: Arc<AtomicBool>,
+    /// Live pixel-store mirror.  `snapshot()` uses `try_lock` so a
+    /// slow apply task never stalls the `status` reply path; on
+    /// contention it falls back to an empty surface list.  This is
+    /// safe because the apply task holds the lock only for a single
+    /// `apply_event` call (well under a millisecond), so contention
+    /// is rare in practice.
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
 }
 
 impl HeadlessStatus {
-    fn new(connected: Arc<AtomicBool>, agent_connected: Arc<AtomicBool>) -> Self {
+    fn new(
+        connected: Arc<AtomicBool>,
+        agent_connected: Arc<AtomicBool>,
+        surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    ) -> Self {
         Self {
             connected,
             agent_connected,
+            surface_mirror,
         }
     }
 }
 
 impl crate::control::StatusProvider for HeadlessStatus {
     fn snapshot(&self) -> crate::control::protocol::StatusResult {
+        // try_lock: never block the per-client task on a slow apply.
+        // The apply task only holds the lock for a single
+        // `apply_event` call, so contention is rare; on the rare
+        // failure path we degrade gracefully to an empty list and
+        // log it for debugging.
+        let surfaces = match self.surface_mirror.try_lock() {
+            Ok(mirror) => mirror
+                .surfaces
+                .iter()
+                .map(|((channel_id, surface_id), surf)| {
+                    let (width, height) = surf.size();
+                    crate::control::protocol::SurfaceInfo {
+                        channel_id: *channel_id,
+                        surface_id: *surface_id,
+                        width,
+                        height,
+                    }
+                })
+                .collect(),
+            Err(_) => {
+                tracing::debug!(
+                    "headless: status snapshot could not acquire surface_mirror lock; \
+                     returning empty surfaces list"
+                );
+                Vec::new()
+            }
+        };
         crate::control::protocol::StatusResult {
             spice_connected: self.connected.load(Ordering::Relaxed),
             agent_connected: self.agent_connected.load(Ordering::Relaxed),
-            surfaces: Vec::new(), // populated in step 3e
+            surfaces,
         }
     }
 }
@@ -503,6 +544,17 @@ pub async fn run_headless(
     // reflect reality without having to peer into the main channel.
     let agent_connected = Arc::new(AtomicBool::new(false));
 
+    // Live pixel store rebuilt from the broadcast bus.  Constructed
+    // unconditionally so the control socket's `screenshot` verb and
+    // `status` surface list always have a coherent source; the apply
+    // task below subscribes to the broadcast bus and pipes every
+    // display-bearing `ChannelEvent` through `SurfaceMirror::apply_event`.
+    // This is the same wrap pattern `run_web` uses in `ryll/src/main.rs`
+    // — both code paths call the same `apply_event` helper directly on
+    // the mirror, so the apply logic itself is shared without an extra
+    // indirection.
+    let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
+
     // Spawn connection task. The cancel flag is passed through so
     // a host-side Ctrl+C bridge can flip it and have every channel
     // task exit promptly.
@@ -586,13 +638,21 @@ pub async fn run_headless(
         let status: Arc<dyn crate::control::StatusProvider> = Arc::new(HeadlessStatus::new(
             spice_connected.clone(),
             agent_connected.clone(),
+            surface_mirror.clone(),
         ));
         let server = crate::control::Server::new(sock_path);
         let token = control_cancel.clone();
         let event_tx_for_control = event_broadcast_tx.clone();
+        let mirror_for_control = surface_mirror.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = server
-                .run(status, event_tx_for_control, input_tx_for_control, token)
+                .run(
+                    status,
+                    event_tx_for_control,
+                    input_tx_for_control,
+                    mirror_for_control,
+                    token,
+                )
                 .await
             {
                 warn!("control: server exited with error: {}", e);
@@ -630,6 +690,39 @@ pub async fn run_headless(
             let _ = fanout_broadcast_tx.send(event);
         }
     });
+    // Surface-mirror apply task: subscribes to the broadcast bus and
+    // pipes every `ChannelEvent` through `SurfaceMirror::apply_event`.
+    // Mirrors `ryll/src/main.rs::run_web`'s identically-shaped task —
+    // both code paths call the same `SurfaceMirror::apply_event`
+    // helper directly on the shared mirror, so the apply dispatch is
+    // single-sourced inside `surface_mirror.rs` itself.  A `Lagged`
+    // error means a slow consumer missed N events; for the mirror
+    // that's bad because surface state diverges from what SPICE sent,
+    // but the same trade-off `run_web` already makes — log and continue.
+    let mirror_for_apply = surface_mirror.clone();
+    let mut mirror_event_rx = event_broadcast_tx.subscribe();
+    let _mirror_apply_handle = tokio::spawn(async move {
+        loop {
+            match mirror_event_rx.recv().await {
+                Ok(event) => {
+                    let mut m = mirror_for_apply.lock().await;
+                    m.apply_event(&event);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        "headless: surface mirror lagged by {} events; \
+                         surface state may briefly diverge",
+                        n
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    info!("headless: surface mirror task exiting (broadcast closed)");
+                    break;
+                }
+            }
+        }
+    });
+
     // Drop our extra reference to the broadcast sender so that, once
     // the fan-out task exits (on `event_rx` closing), the remaining
     // receivers see `RecvError::Closed` and tear themselves down.

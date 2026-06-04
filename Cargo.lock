@@ -5770,6 +5770,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "byteorder",
  "bytes",
  "cpal",
