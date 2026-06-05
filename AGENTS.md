@@ -448,6 +448,76 @@ shakenfist-spice-webrtc/src/
                          #     dead_flag_handle() → Arc<AtomicBool>
 ```
 
+## Control socket
+
+### Module home
+
+`shakenfist-spice-renderer/src/control/` — three files:
+
+| File | Role |
+|------|------|
+| `mod.rs` | Public re-exports (`Server`, `StatusProvider`) |
+| `protocol.rs` | Wire types: `Request`, `Response`, `Event`, verb params / result structs |
+| `server.rs` | `Server::run` — tokio task, socket lifecycle, verb dispatch, per-client writer task |
+
+### Wire-protocol spec
+
+`docs/control-socket-protocol.md` is the canonical,
+version-controlled contract for the Unix-domain control socket.
+**Any sub-agent extending the control surface MUST update this
+spec in lockstep with the code.** The protocol doc is
+load-bearing: the phase 4 latency loadtest port, the phase 6
+`digest_updated` event, and the phase 7 Sextant scenario test all
+implement against it. Changing verb signatures or event shapes
+without updating the spec will break those downstream consumers.
+
+### Phase plan
+
+Phase 3 of the kerbside automated-SPICE-test-harness plan
+introduced this interface:
+`shakenfist/kerbside/docs/plans/PLAN-test-harness-phase-03-control-socket.md`.
+Per the cross-repo single-home rule, that plan lives in
+kerbside even though the implementation commits land in ryll.
+
+### `Server::run` signature sketch
+
+```rust
+pub async fn run(
+    broadcast_rx: broadcast::Receiver<ChannelEvent>,
+    input_tx: mpsc::Sender<InputEvent>,
+    surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    status: Arc<dyn StatusProvider>,
+    cancel: CancellationToken,
+    socket_path: PathBuf,
+)
+```
+
+The server owns the `UnixListener` lifetime. It accepts one client,
+runs the per-client dispatch loop to completion, then loops back to
+accept the next client — all inside the cancellation token scope.
+
+### Integration tests
+
+`shakenfist-spice-renderer/tests/control_socket.rs` exercises
+every v1 verb and event without spinning a real SPICE session. New
+verbs or events **SHOULD** ship with a matching test in that file.
+The test harness uses a stub `StatusProvider` and an in-process
+broadcast channel so no QEMU or network is required.
+
+### Example client
+
+`examples/control-socket-demo.py` — a stdlib-only Python script,
+runnable directly, that demonstrates the full hello → status →
+subscribe → send_key → paste → screenshot → disconnect sequence.
+Use it as the starting point for downstream test-harness drivers.
+
+### Cross-repo commit discipline
+
+Commits on the ryll feature branch that implement or extend the
+control socket include a `Plan:` trailer pointing back to the
+kerbside phase-3 plan path, so the trail between implementation
+and design is explicit in `git log`.
+
 ## Trait / Observer Scheme
 
 Phase 1 introduced a trait surface that lets channel handlers

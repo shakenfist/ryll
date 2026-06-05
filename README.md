@@ -250,6 +250,13 @@ This will:
 - Send automatic keystrokes every 2 seconds
 - Print statistics periodically
 
+Headless mode supports a Unix-socket control interface via
+`--control-socket <path>` for driving the session from external
+tools. See [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md)
+for the full verb and event reference, and
+[`examples/control-socket-demo.py`](examples/control-socket-demo.py)
+for a runnable Python example client.
+
 ### Web frontend (`--web` mode)
 
 ```bash
