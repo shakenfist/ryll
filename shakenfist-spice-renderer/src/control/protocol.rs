@@ -177,7 +177,7 @@ pub struct HelloResult {
 }
 
 /// Result payload for a successful `status` response.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResult {
     pub spice_connected: bool,
     pub agent_connected: bool,
@@ -185,7 +185,7 @@ pub struct StatusResult {
 }
 
 /// Per-surface entry within a `StatusResult`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurfaceInfo {
     pub channel_id: u8,
     pub surface_id: u32,

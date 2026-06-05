@@ -203,6 +203,40 @@ impl Default for SurfaceMirror {
     }
 }
 
+impl SurfaceMirror {
+    /// Construct a `SurfaceMirror` pre-populated with a single RGBA
+    /// surface at key `(display_channel_id, surface_id)`, filled with
+    /// the supplied pixel data.
+    ///
+    /// Intended for integration tests that need a ready-made mirror
+    /// without driving the full `ChannelEvent` pipeline.  The caller
+    /// supplies raw RGBA bytes (`width * height * 4`); if the slice is
+    /// too short the surface pixels are zero-padded; if it is too long
+    /// the excess is silently ignored (same semantics as `blit`).
+    ///
+    /// Panics if `width` or `height` is 0.
+    pub fn with_test_surface(
+        display_channel_id: u8,
+        surface_id: u32,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Self {
+        assert!(
+            width > 0 && height > 0,
+            "surface must have non-zero dimensions"
+        );
+        let mut mirror = Self::new();
+        let mut surface = DisplaySurface::new(surface_id, width, height);
+        // Blit the supplied pixels into the entire surface area.
+        surface.blit(0, 0, width, height, pixels);
+        mirror
+            .surfaces
+            .insert((display_channel_id, surface_id), surface);
+        mirror
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
