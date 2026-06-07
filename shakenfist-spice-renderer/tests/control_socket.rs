@@ -1,5 +1,9 @@
 //! Integration tests for the control-socket server (v1 protocol).
 //!
+//! The control-socket server is Unix-only (tokio::net::UnixListener
+//! has no Windows equivalent in the same shape).  Gate the whole
+//! test file so `cargo test` succeeds on Windows.
+//!
 //! Tests exercise every v1 verb and event through the public API
 //! of the `control` module.  No real SPICE session is spawned; instead,
 //! `Server::run` is driven directly with in-process test doubles:
@@ -24,6 +28,8 @@
 //! tests and hard to drive in a repeatable way.  The broadcast sender,
 //! input mpsc, and surface mirror are all lightweight to construct in-
 //! process, so the isolation is clean.
+
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

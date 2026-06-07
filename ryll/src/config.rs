@@ -39,6 +39,10 @@ pub struct Args {
     /// incompatible with --web and the GUI default. The socket is
     /// created with mode 0600 (owner read/write only). See
     /// ryll/docs/control-socket-protocol.md for the wire format.
+    ///
+    /// Unix-only: tokio::net::UnixListener has no equivalent on
+    /// Windows; the flag is omitted from the CLI on non-Unix builds.
+    #[cfg(unix)]
     #[arg(long, value_name = "PATH", requires = "headless",
           conflicts_with = "web",
           value_parser = clap::value_parser!(PathBuf))]

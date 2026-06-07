@@ -17,10 +17,22 @@ pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
 
-use crate::control::protocol::RequestId;
+use serde::{Deserialize, Serialize};
+
 use crate::notification::NotificationEntry;
 use crate::usb::UsbDeviceInfo;
 use shakenfist_spice_protocol::ChannelType;
+
+/// A caller-chosen correlation token carried in every control-socket
+/// request and echoed in the matching response.  Lives here (rather
+/// than in `control::protocol`) so that channel events can carry one
+/// on every platform — the control module itself is Unix-only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    Int(i64),
+    Str(String),
+}
 
 /// Events sent from channels to the main application
 #[derive(Debug, Clone)]

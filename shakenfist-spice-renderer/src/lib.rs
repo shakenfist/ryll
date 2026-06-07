@@ -13,6 +13,7 @@ pub mod byte_counter;
 pub mod capture_sink;
 pub mod channels;
 pub mod clipboard;
+#[cfg(unix)]
 pub mod control;
 pub mod device_config;
 pub mod display;

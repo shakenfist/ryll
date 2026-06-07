@@ -57,7 +57,7 @@ struct PasteState {
     /// Correlation token for control-socket-initiated pastes; `None`
     /// for `--paste-text` CLI pastes.  Echoed in `PasteCompleted` /
     /// `PasteFailed` channel events.
-    request_id: Option<crate::control::protocol::RequestId>,
+    request_id: Option<crate::channels::RequestId>,
     /// Optional cancellation token.  Checked before each sub-step;
     /// when cancelled the paste aborts with a `PasteFailed` event.
     cancel: Option<CancellationToken>,

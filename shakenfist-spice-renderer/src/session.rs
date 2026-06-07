@@ -114,6 +114,7 @@ impl HeadlessStatus {
     }
 }
 
+#[cfg(unix)]
 impl crate::control::StatusProvider for HeadlessStatus {
     fn snapshot(&self) -> crate::control::protocol::StatusResult {
         // try_lock: never block the per-client task on a slow apply.
@@ -595,6 +596,7 @@ pub async fn run_headless(
     // captures ownership.  Order matters: clones must precede moves.
     let paste_input_tx = input_tx.clone();
     let cadence_input_tx = input_tx.clone();
+    #[cfg(unix)]
     let input_tx_for_control = input_tx.clone();
 
     // Cadence task if enabled
@@ -633,7 +635,13 @@ pub async fn run_headless(
     // A `CancellationToken` is used so the server can exit cleanly
     // when the SPICE session ends (rather than being aborted, which
     // would skip the socket-file unlink).
+    //
+    // The control socket is Unix-only: it uses tokio::net::UnixListener
+    // which has no Windows equivalent in the same shape.  On non-Unix
+    // platforms the path is logged-and-ignored.
+    #[cfg(unix)]
     let control_cancel = CancellationToken::new();
+    #[cfg(unix)]
     let control_handle = if let Some(sock_path) = control_socket_path {
         let status: Arc<dyn crate::control::StatusProvider> = Arc::new(HeadlessStatus::new(
             spice_connected.clone(),
@@ -661,6 +669,12 @@ pub async fn run_headless(
     } else {
         None
     };
+    #[cfg(not(unix))]
+    {
+        if control_socket_path.is_some() {
+            warn!("control: --control-socket is Unix-only; ignoring on this platform");
+        }
+    }
 
     // Event fan-out task: drains the renderer's mpsc and republishes
     // each `ChannelEvent` onto the broadcast bus.  This is the
@@ -851,6 +865,7 @@ pub async fn run_headless(
 
     // Signal the control server to shut down and wait up to 2 s for
     // it to unlink the socket file cleanly.
+    #[cfg(unix)]
     if let Some(handle) = control_handle {
         control_cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;

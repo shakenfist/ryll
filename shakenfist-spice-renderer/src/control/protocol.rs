@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::channels::RequestId;
+
 /// Protocol version this server speaks.
 pub const PROTOCOL_VERSION: &str = "1.0";
 
@@ -32,19 +34,6 @@ pub const SUPPORTED_EVENTS: &[&str] = &[
     "paste_failed",
     "dropped",
 ];
-
-// ── Request-id ────────────────────────────────────────────────────
-
-/// A caller-chosen correlation token carried in every request and
-/// echoed in the matching response.  The protocol allows both JSON
-/// integers and JSON strings; `#[serde(untagged)]` serialises the
-/// inner value directly with no wrapper object.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum RequestId {
-    Int(i64),
-    Str(String),
-}
 
 // ── Request envelope ─────────────────────────────────────────────
 
