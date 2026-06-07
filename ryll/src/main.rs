@@ -374,6 +374,14 @@ fn run_headless(
     // headless session.
     let cancel = Arc::new(AtomicBool::new(false));
 
+    // --control-socket is a Unix-only flag (see config.rs).  On
+    // non-Unix the field doesn't exist on Args; pass None to keep
+    // run_headless's signature stable across platforms.
+    #[cfg(unix)]
+    let control_socket_arg = args.control_socket.clone();
+    #[cfg(not(unix))]
+    let control_socket_arg: Option<std::path::PathBuf> = None;
+
     let runtime = tokio::runtime::Runtime::new()?;
     let result = runtime.block_on(async {
         let cancel_for_bridge = cancel.clone();
@@ -405,6 +413,7 @@ fn run_headless(
             cancel,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
+            control_socket_arg,
         )
         .await;
 

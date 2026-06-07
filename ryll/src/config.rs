@@ -34,6 +34,20 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub headless: bool,
 
+    /// Bind a Unix-domain control socket at <PATH> for external
+    /// NDJSON-based session control. Only valid with --headless;
+    /// incompatible with --web and the GUI default. The socket is
+    /// created with mode 0600 (owner read/write only). See
+    /// ryll/docs/control-socket-protocol.md for the wire format.
+    ///
+    /// Unix-only: tokio::net::UnixListener has no equivalent on
+    /// Windows; the flag is omitted from the CLI on non-Unix builds.
+    #[cfg(unix)]
+    #[arg(long, value_name = "PATH", requires = "headless",
+          conflicts_with = "web",
+          value_parser = clap::value_parser!(PathBuf))]
+    pub control_socket: Option<PathBuf>,
+
     /// Enable cadence mode (automatic keystroke every 2 seconds)
     #[arg(long, default_value_t = false)]
     pub cadence: bool,

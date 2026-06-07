@@ -18,13 +18,15 @@
 //! bug-report assembly. The host (ryll's `main.rs` and `app.rs`)
 //! constructs the trait objects and wraps the orchestrator.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{mpsc, oneshot, Notify};
-use tracing::{error, info};
+use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio_util::sync::CancellationToken;
+use tracing::{error, info, warn};
 
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
 
@@ -41,6 +43,7 @@ use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification_sink::NotificationSink;
 use crate::snapshots::ChannelSnapshots;
+use crate::surface_mirror::SurfaceMirror;
 use crate::traffic::TrafficSink;
 
 /// Channel buffer sizes used by `run_headless`. The GUI side
@@ -51,6 +54,13 @@ use crate::traffic::TrafficSink;
 pub const EVENT_CHANNEL_SIZE: usize = 1024;
 pub const INPUT_CHANNEL_SIZE: usize = 256;
 
+/// Capacity of the per-headless broadcast bus that fans
+/// `ChannelEvent`s out to multiple subscribers (the headless stats
+/// drain, the control-socket per-client tap, and future digest /
+/// MCP consumers).  A slow subscriber lags rather than back-
+/// pressuring the SPICE channel producers.
+pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
+
 /// Minimal stats tracker used by the headless event drain. The
 /// GUI tracks much richer stats inside `RyllApp`; headless only
 /// needs aggregated counters for the periodic info log.
@@ -59,6 +69,87 @@ struct HeadlessStats {
     frames_received: u64,
     bytes_in: u64,
     bytes_out: u64,
+}
+
+/// Minimal `StatusProvider` implementation for headless mode.
+///
+/// `spice_connected` is conservative: we report `true` as long as
+/// the connection task handle is still alive (it exits only once the
+/// main channel disconnects).  `agent_connected` reflects the latest
+/// `ChannelEvent::AgentConnected` observed by the broadcast fan-out
+/// (step 3d).  `surfaces` is populated from the live `SurfaceMirror`
+/// (step 3e) so a `status` reply matches what the `screenshot` verb
+/// would observe.
+struct HeadlessStatus {
+    /// True while the connection task is running.  The control server
+    /// reads this via the `StatusProvider` trait.
+    connected: Arc<AtomicBool>,
+    /// Current vdagent connection state, updated by the broadcast
+    /// fan-out task whenever a `ChannelEvent::AgentConnected` is
+    /// observed.  Reads here are best-effort: a `status` request
+    /// arriving between the SPICE main channel publishing the event
+    /// and the fan-out task storing it will see the older value, but
+    /// that race is at most one bus-tick wide.
+    agent_connected: Arc<AtomicBool>,
+    /// Live pixel-store mirror.  `snapshot()` uses `try_lock` so a
+    /// slow apply task never stalls the `status` reply path; on
+    /// contention it falls back to an empty surface list.  This is
+    /// safe because the apply task holds the lock only for a single
+    /// `apply_event` call (well under a millisecond), so contention
+    /// is rare in practice.
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+}
+
+impl HeadlessStatus {
+    fn new(
+        connected: Arc<AtomicBool>,
+        agent_connected: Arc<AtomicBool>,
+        surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    ) -> Self {
+        Self {
+            connected,
+            agent_connected,
+            surface_mirror,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl crate::control::StatusProvider for HeadlessStatus {
+    fn snapshot(&self) -> crate::control::protocol::StatusResult {
+        // try_lock: never block the per-client task on a slow apply.
+        // The apply task only holds the lock for a single
+        // `apply_event` call, so contention is rare; on the rare
+        // failure path we degrade gracefully to an empty list and
+        // log it for debugging.
+        let surfaces = match self.surface_mirror.try_lock() {
+            Ok(mirror) => mirror
+                .surfaces
+                .iter()
+                .map(|((channel_id, surface_id), surf)| {
+                    let (width, height) = surf.size();
+                    crate::control::protocol::SurfaceInfo {
+                        channel_id: *channel_id,
+                        surface_id: *surface_id,
+                        width,
+                        height,
+                    }
+                })
+                .collect(),
+            Err(_) => {
+                tracing::debug!(
+                    "headless: status snapshot could not acquire surface_mirror lock; \
+                     returning empty surfaces list"
+                );
+                Vec::new()
+            }
+        };
+        crate::control::protocol::StatusResult {
+            spice_connected: self.connected.load(Ordering::Relaxed),
+            agent_connected: self.agent_connected.load(Ordering::Relaxed),
+            surfaces,
+        }
+    }
 }
 
 /// Run the SPICE connection in async context.
@@ -420,6 +511,7 @@ pub async fn run_headless(
     cancel: Arc<AtomicBool>,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
+    control_socket_path: Option<PathBuf>,
 ) -> Result<()> {
     info!("Running in headless mode");
 
@@ -429,18 +521,48 @@ pub async fn run_headless(
     let (_webdav_tx, webdav_rx) = mpsc::channel(16);
     let (_resize_tx, resize_rx) = mpsc::channel(32);
 
+    // Broadcast bus that the headless event loop and the control
+    // socket both subscribe to.  The fan-out task spawned below
+    // drains the renderer's mpsc and republishes each event onto
+    // this bus, so SPICE channel producers are never back-pressured
+    // by any single consumer (e.g. a slow control-socket client).
+    let (event_broadcast_tx, _) = broadcast::channel::<ChannelEvent>(EVENT_BROADCAST_CAPACITY);
+
     // Headless mode does not paint anything, but the channel handlers still
     // call notify_one().  Give them a Notify whose notifications nobody
     // listens for; tokio::sync::Notify::notify_one is cheap (no allocation,
     // no waker if no waiters) so this is harmless.
     let repaint_notify = Arc::new(Notify::new());
 
+    // Track whether the SPICE connection task is still alive. The
+    // control server's `HeadlessStatus` impl reads this flag to answer
+    // `status` queries.
+    let spice_connected = Arc::new(AtomicBool::new(true));
+
+    // Track the current vdagent connection state.  Updated by the
+    // fan-out task whenever a `ChannelEvent::AgentConnected` arrives;
+    // read by the `HeadlessStatus` provider so `status` requests
+    // reflect reality without having to peer into the main channel.
+    let agent_connected = Arc::new(AtomicBool::new(false));
+
+    // Live pixel store rebuilt from the broadcast bus.  Constructed
+    // unconditionally so the control socket's `screenshot` verb and
+    // `status` surface list always have a coherent source; the apply
+    // task below subscribes to the broadcast bus and pipes every
+    // display-bearing `ChannelEvent` through `SurfaceMirror::apply_event`.
+    // This is the same wrap pattern `run_web` uses in `ryll/src/main.rs`
+    // — both code paths call the same `apply_event` helper directly on
+    // the mirror, so the apply logic itself is shared without an extra
+    // indirection.
+    let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
+
     // Spawn connection task. The cancel flag is passed through so
     // a host-side Ctrl+C bridge can flip it and have every channel
     // task exit promptly.
     let cancel_for_conn = cancel.clone();
+    let spice_connected_for_conn = spice_connected.clone();
     let connection_handle = tokio::spawn(async move {
-        run_connection(
+        let result = run_connection(
             config,
             event_tx,
             repaint_notify,
@@ -464,20 +586,26 @@ pub async fn run_headless(
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
         )
-        .await
+        .await;
+        spice_connected_for_conn.store(false, Ordering::Relaxed);
+        result
     });
     tokio::pin!(connection_handle);
 
-    // Clone input_tx before cadence moves it, so the paste trigger can also use it.
+    // Clone input_tx for each consumer before any `async move` closure
+    // captures ownership.  Order matters: clones must precede moves.
     let paste_input_tx = input_tx.clone();
+    let cadence_input_tx = input_tx.clone();
+    #[cfg(unix)]
+    let input_tx_for_control = input_tx.clone();
 
     // Cadence task if enabled
     let cadence_handle = if cadence {
         Some(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = input_tx.try_send(InputEvent::KeyDown(0x39));
-                let _ = input_tx.try_send(InputEvent::KeyUp(0xB9));
+                let _ = cadence_input_tx.try_send(InputEvent::KeyDown(0x39));
+                let _ = cadence_input_tx.try_send(InputEvent::KeyUp(0xB9));
             }
         }))
     } else {
@@ -494,6 +622,8 @@ pub async fn run_headless(
                 .send(InputEvent::PasteText {
                     text,
                     char_delay_ms: delay_ms,
+                    request_id: None, // CLI path: no correlation token
+                    cancel: None,     // CLI path: no cancellation token
                 })
                 .await;
         }))
@@ -501,14 +631,147 @@ pub async fn run_headless(
         None
     };
 
-    // Process events
+    // Control socket task — spawned when --control-socket is set.
+    // A `CancellationToken` is used so the server can exit cleanly
+    // when the SPICE session ends (rather than being aborted, which
+    // would skip the socket-file unlink).
+    //
+    // The control socket is Unix-only: it uses tokio::net::UnixListener
+    // which has no Windows equivalent in the same shape.  On non-Unix
+    // platforms the path is logged-and-ignored.
+    #[cfg(unix)]
+    let control_cancel = CancellationToken::new();
+    #[cfg(unix)]
+    let control_handle = if let Some(sock_path) = control_socket_path {
+        let status: Arc<dyn crate::control::StatusProvider> = Arc::new(HeadlessStatus::new(
+            spice_connected.clone(),
+            agent_connected.clone(),
+            surface_mirror.clone(),
+        ));
+        let server = crate::control::Server::new(sock_path);
+        let token = control_cancel.clone();
+        let event_tx_for_control = event_broadcast_tx.clone();
+        let mirror_for_control = surface_mirror.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) = server
+                .run(
+                    status,
+                    event_tx_for_control,
+                    input_tx_for_control,
+                    mirror_for_control,
+                    token,
+                )
+                .await
+            {
+                warn!("control: server exited with error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    {
+        if control_socket_path.is_some() {
+            warn!("control: --control-socket is Unix-only; ignoring on this platform");
+        }
+    }
+
+    // Event fan-out task: drains the renderer's mpsc and republishes
+    // each `ChannelEvent` onto the broadcast bus.  This is the
+    // architectural pivot that lets multiple consumers (the headless
+    // stats drain below, control-socket clients, future digest
+    // consumers) tap the same stream without back-pressuring the
+    // SPICE channel producers.  The web-mode equivalent in
+    // `ryll/src/main.rs::run_web` follows the same shape; we keep
+    // both paths separate rather than abstracting because each is
+    // five lines and the surrounding wiring differs.
+    //
+    // The fan-out also caches the latest `agent_connected` state in
+    // the shared `AtomicBool` so `status` requests reflect reality.
+    let stats_event_rx = event_broadcast_tx.subscribe();
+    let fanout_broadcast_tx = event_broadcast_tx.clone();
+    let fanout_agent_connected = agent_connected.clone();
+    let _fanout_handle = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            if let ChannelEvent::AgentConnected(connected) = &event {
+                fanout_agent_connected.store(*connected, Ordering::Relaxed);
+            }
+            // `broadcast::Sender::send` is non-blocking.  An error
+            // means there are no current receivers, which is fine
+            // for events the headless stats drain does not care
+            // about (everything proceeds normally — the broadcast
+            // sender re-arms automatically when subscribers appear).
+            let _ = fanout_broadcast_tx.send(event);
+        }
+    });
+    // Surface-mirror apply task: subscribes to the broadcast bus and
+    // pipes every `ChannelEvent` through `SurfaceMirror::apply_event`.
+    // Mirrors `ryll/src/main.rs::run_web`'s identically-shaped task —
+    // both code paths call the same `SurfaceMirror::apply_event`
+    // helper directly on the shared mirror, so the apply dispatch is
+    // single-sourced inside `surface_mirror.rs` itself.  A `Lagged`
+    // error means a slow consumer missed N events; for the mirror
+    // that's bad because surface state diverges from what SPICE sent,
+    // but the same trade-off `run_web` already makes — log and continue.
+    let mirror_for_apply = surface_mirror.clone();
+    let mut mirror_event_rx = event_broadcast_tx.subscribe();
+    let _mirror_apply_handle = tokio::spawn(async move {
+        loop {
+            match mirror_event_rx.recv().await {
+                Ok(event) => {
+                    let mut m = mirror_for_apply.lock().await;
+                    m.apply_event(&event);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        "headless: surface mirror lagged by {} events; \
+                         surface state may briefly diverge",
+                        n
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    info!("headless: surface mirror task exiting (broadcast closed)");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Drop our extra reference to the broadcast sender so that, once
+    // the fan-out task exits (on `event_rx` closing), the remaining
+    // receivers see `RecvError::Closed` and tear themselves down.
+    drop(event_broadcast_tx);
+
+    // Process events.  The headless drain subscribes to the
+    // broadcast bus rather than the original mpsc — exactly the
+    // same `ChannelEvent` stream, fan-out architecture.
+    let mut event_rx = stats_event_rx;
     let mut stats = HeadlessStats::default();
     let mut last_stats_print = Instant::now();
     let mut paste_failed = false;
 
     loop {
         tokio::select! {
-            Some(event) = event_rx.recv() => {
+            event_result = event_rx.recv() => {
+                let event = match event_result {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        // The headless stats drain only updates
+                        // counters and emits info-log lines, so
+                        // briefly missing N events here costs us
+                        // some statistical accuracy but never
+                        // session correctness.  Log and continue.
+                        warn!(
+                            "headless: event drain lagged by {} events; stats may underreport",
+                            n
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("headless: event stream closed");
+                        break;
+                    }
+                };
                 match event {
                     ChannelEvent::SessionInitialized(id) => {
                         info!("Session {} initialized", id);
@@ -547,13 +810,13 @@ pub async fn run_headless(
                     ChannelEvent::WebdavError(err) => {
                         error!("headless: WebDAV error: {}", err);
                     }
-                    ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                    ChannelEvent::PasteCompleted { chars, elapsed_ms, .. } => {
                         info!(
                             "headless: paste complete: {} chars in {}ms",
                             chars, elapsed_ms
                         );
                     }
-                    ChannelEvent::PasteFailed { reason } => {
+                    ChannelEvent::PasteFailed { reason, .. } => {
                         error!("headless: paste failed: {}", reason);
                         paste_failed = true;
                     }
@@ -598,6 +861,14 @@ pub async fn run_headless(
     }
     if let Some(handle) = paste_handle {
         handle.abort();
+    }
+
+    // Signal the control server to shut down and wait up to 2 s for
+    // it to unlink the socket file cleanly.
+    #[cfg(unix)]
+    if let Some(handle) = control_handle {
+        control_cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
     if paste_failed {

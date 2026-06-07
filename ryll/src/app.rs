@@ -1915,7 +1915,9 @@ impl RyllApp {
                     self.webdav_error_time = Some(Instant::now());
                 }
 
-                ChannelEvent::PasteCompleted { chars, elapsed_ms } => {
+                ChannelEvent::PasteCompleted {
+                    chars, elapsed_ms, ..
+                } => {
                     info!("app: paste complete: {} chars in {}ms", chars, elapsed_ms);
                     self.push_notification(
                         NotifySeverity::Info,
@@ -1924,7 +1926,7 @@ impl RyllApp {
                     );
                 }
 
-                ChannelEvent::PasteFailed { reason } => {
+                ChannelEvent::PasteFailed { reason, .. } => {
                     error!("app: paste failed: {}", reason);
                     self.paste_error_message = Some(reason);
                 }
@@ -2078,6 +2080,8 @@ impl RyllApp {
                     let _ = tx.try_send(InputEvent::PasteText {
                         text,
                         char_delay_ms: self.paste_char_delay_ms,
+                        request_id: None, // GUI path: no correlation token
+                        cancel: None,     // GUI path: no cancellation token
                     });
                 }
             }
