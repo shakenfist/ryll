@@ -259,7 +259,23 @@ pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>>
     let padding = Oaep::new::<Sha1>();
     let mut rng = OsRng;
 
-    let encrypted = pub_key.encrypt(&mut rng, padding, password.as_bytes())?;
+    // SPICE auth convention is a NUL-terminated plaintext.  Every
+    // reference implementation does this and every spec-compliant
+    // server depends on it:
+    //   spice-gtk  (spice-channel.c:1265,1273,1282): encrypts
+    //              `strlen(password) + 1` bytes.
+    //   spice-html5 (spiceconn.js:274): sends
+    //              `this.password + String.fromCharCode(0)`.
+    //   spice-server (reds.cpp:2086): writes `password[len] = '\0'`
+    //              before `strcmp`, treating the decrypted blob as
+    //              a C string.
+    // Omitting the NUL causes any server that strips a trailing
+    // sentinel byte (kerbside does this too) to chop the last
+    // character of the real password and reject the auth.
+    let mut plaintext = Vec::with_capacity(password.len() + 1);
+    plaintext.extend_from_slice(password.as_bytes());
+    plaintext.push(0);
+    let encrypted = pub_key.encrypt(&mut rng, padding, &plaintext)?;
 
     // Pad to 128 bytes (RSA block size)
     let mut result = vec![0u8; 128];
