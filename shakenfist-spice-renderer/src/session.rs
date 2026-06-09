@@ -841,8 +841,12 @@ pub async fn run_headless(
                     last_stats_print = Instant::now();
                 }
             }
-            _ = &mut connection_handle => {
-                info!("Connection task completed");
+            join_result = &mut connection_handle => {
+                match join_result {
+                    Ok(Ok(())) => info!("Connection task completed"),
+                    Ok(Err(e)) => error!("Connection task failed: {:#}", e),
+                    Err(e) => error!("Connection task panicked: {}", e),
+                }
                 break;
             }
             // Poll the host's cancel flag at a reasonable interval. The host
