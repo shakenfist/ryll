@@ -1,12 +1,23 @@
-/// Bug report infrastructure — per-channel traffic ring buffer
-/// and bug-report ZIP assembly.
-///
-/// Always active regardless of `--capture`. Retains the most
-/// recent protocol traffic for bug-report export and the live
-/// traffic viewer. Channel-state snapshot types live in
-/// `shakenfist_spice_renderer::snapshots`; this module re-exports
-/// them so callers in `ryll/` can keep importing them from
-/// `crate::bugreport::*`.
+//! Bug report infrastructure — per-channel traffic ring buffer
+//! and bug-report ZIP assembly.
+//!
+//! Always active regardless of `--capture`.  Retains the most
+//! recent protocol traffic for bug-report export and the live
+//! traffic viewer.  Channel-state snapshot types live in
+//! `shakenfist_spice_renderer::snapshots`; this module re-exports
+//! them so callers in `ryll/` can keep importing them from
+//! `crate::bugreport::*`.
+//!
+//! Most of the ZIP-writing API (`BugReport::write_zip*`,
+//! `write_notification`, etc.) is only reachable from the eframe
+//! GUI's "save bug report" affordance.  When ryll is built with
+//! `--no-default-features` the GUI is gated out and the unused
+//! methods produce dead-code warnings.  Suppress those at the
+//! module level only on slim builds so the code stays compiled
+//! (and therefore type-checked) without poisoning `-D warnings`.
+
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

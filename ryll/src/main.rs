@@ -1,9 +1,12 @@
+#[cfg(feature = "gui")]
 mod app;
+#[cfg(feature = "gui")]
 mod auto_snapshot;
 mod bugreport;
 #[cfg(feature = "capture")]
 mod capture;
 mod notifications;
+#[cfg(feature = "gui")]
 mod streaming_state;
 mod web;
 #[cfg(not(feature = "capture"))]
@@ -12,6 +15,7 @@ mod capture {
     /// Methods are never called (capture is always None), but
     /// the compiler needs to see them for type-checking.
     pub struct CaptureSession {
+        #[allow(dead_code)]
         pub dir: std::path::PathBuf,
     }
     impl CaptureSession {
@@ -41,9 +45,12 @@ mod capture {
         }
     }
 }
+#[cfg(feature = "gui")]
 mod clipboard_arboard;
 mod config;
+#[cfg(feature = "gui")]
 mod display_gui;
+#[cfg(feature = "gui")]
 mod input_egui;
 mod settings;
 
@@ -52,6 +59,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+#[cfg(feature = "gui")]
 use eframe::egui;
 use tracing::{info, Level};
 use tracing_subscriber::fmt;
@@ -285,15 +293,34 @@ fn main() -> Result<()> {
             obey_guest_size,
         )
     } else {
-        run_gui(
-            config,
-            &args,
-            virtual_disks,
-            share_dir,
-            capture,
-            pedantic_config,
-            obey_guest_size,
-        )
+        #[cfg(feature = "gui")]
+        {
+            run_gui(
+                config,
+                &args,
+                virtual_disks,
+                share_dir,
+                capture,
+                pedantic_config,
+                obey_guest_size,
+            )
+        }
+        #[cfg(not(feature = "gui"))]
+        {
+            let _ = (
+                config,
+                &args,
+                virtual_disks,
+                share_dir,
+                capture,
+                pedantic_config,
+                obey_guest_size,
+            );
+            anyhow::bail!(
+                "this ryll binary was built without the `gui` feature; \
+                 pass --headless or --web"
+            );
+        }
     }
 }
 
@@ -776,6 +803,7 @@ fn run_web(
     result
 }
 
+#[cfg(feature = "gui")]
 fn run_gui(
     config: Config,
     args: &Args,

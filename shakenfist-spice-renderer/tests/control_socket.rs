@@ -242,7 +242,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.0");
+    assert_eq!(result["protocol_version"], "1.1");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -263,7 +263,20 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     assert!(events.contains(&"paste_completed".into()));
     assert!(events.contains(&"paste_failed".into()));
     assert!(events.contains(&"dropped".into()));
-    assert_eq!(events.len(), 5, "expected exactly 5 v1 events");
+    assert!(
+        events.contains(&"surface_drawn".into()),
+        "surface_drawn (added in v1.1) missing from supported_events: {:?}",
+        events,
+    );
+    // 6 base events for any build; the `digest-decode` feature
+    // appends one more.  Check the lower bound so the assertion
+    // does not flap across feature configs.
+    assert!(
+        events.len() >= 6,
+        "expected at least 6 events; got {}: {:?}",
+        events.len(),
+        events,
+    );
 
     handle.stop().await;
 }
@@ -792,6 +805,220 @@ async fn dropped_event_after_queue_overflow() {
         saw_dropped,
         "expected a `dropped` event after overflowing the broadcast ring buffer"
     );
+
+    handle.stop().await;
+}
+
+/// 13a. v1.1 `surface_drawn` event fires on an `ImageReady` injection.
+#[tokio::test]
+async fn surface_drawn_emitted_on_image_ready() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["surface_drawn"] }),
+    )
+    .await;
+    let sub_resp = recv_line(&mut r).await;
+    let subbed: Vec<String> =
+        serde_json::from_value(sub_resp["result"]["subscribed"].clone()).expect("subscribed");
+    assert_eq!(subbed, vec!["surface_drawn".to_string()]);
+
+    inputs
+        .event_tx
+        .send(ChannelEvent::ImageReady {
+            display_channel_id: 1,
+            surface_id: 2,
+            left: 0,
+            top: 0,
+            width: 4,
+            height: 4,
+            pixels: vec![0; 16 * 4],
+            image_id: 99,
+            produced_at_secs: 1.5,
+        })
+        .expect("broadcast send");
+
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "surface_drawn");
+    assert_eq!(ev["data"]["display_channel_id"], 1);
+    assert_eq!(ev["data"]["surface_id"], 2);
+    let produced = ev["data"]["produced_at_secs"]
+        .as_f64()
+        .expect("produced_at_secs");
+    assert!(
+        (produced - 1.5_f64).abs() < 1e-6,
+        "produced_at_secs round-trip: got {}",
+        produced
+    );
+    let wallclock_us = ev["data"]["wallclock_us"].as_u64().expect("wallclock_us");
+    assert!(wallclock_us > 0, "wallclock_us must be positive");
+
+    handle.stop().await;
+}
+
+/// 13b. v1.1 `surface_drawn` fires once for each of the six draw variants.
+#[tokio::test]
+async fn surface_drawn_emitted_for_each_draw_variant() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["surface_drawn"] }),
+    )
+    .await;
+    let _sub_resp = recv_line(&mut r).await;
+
+    // Inject one of each draw-bearing variant in a deterministic
+    // order.  Vary the surface_id so the wire payloads can be
+    // distinguished if the translator ever accidentally emitted a
+    // duplicate for the same input.
+    let events = [
+        ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id: 10,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+            image_id: 1,
+            produced_at_secs: 0.1,
+        },
+        ChannelEvent::ImageReadyChroma {
+            display_channel_id: 0,
+            surface_id: 11,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+            chroma_rgba: [0, 0, 0, 0],
+            image_id: 2,
+            produced_at_secs: 0.2,
+        },
+        ChannelEvent::ImageReadyAlpha {
+            display_channel_id: 0,
+            surface_id: 12,
+            left: 0,
+            top: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![0; 4],
+            alpha: 128,
+            image_id: 3,
+            produced_at_secs: 0.3,
+        },
+        ChannelEvent::FillRect {
+            display_channel_id: 0,
+            surface_id: 13,
+            rect: (0, 0, 1, 1),
+            colour: [0; 4],
+            clip: vec![],
+            produced_at_secs: 0.4,
+        },
+        ChannelEvent::CopyBits {
+            display_channel_id: 0,
+            surface_id: 14,
+            src_x: 0,
+            src_y: 0,
+            dest_rect: (0, 0, 1, 1),
+            clip: vec![],
+            produced_at_secs: 0.5,
+        },
+        ChannelEvent::Invert {
+            display_channel_id: 0,
+            surface_id: 15,
+            rect: (0, 0, 1, 1),
+            clip: vec![],
+            produced_at_secs: 0.6,
+        },
+    ];
+    for event in events {
+        inputs.event_tx.send(event).expect("broadcast send");
+    }
+
+    let expected_surface_ids = [10u32, 11, 12, 13, 14, 15];
+    for expected in expected_surface_ids {
+        let ev = recv_line(&mut r).await;
+        assert_eq!(
+            ev["event"], "surface_drawn",
+            "expected surface_drawn for surface_id {}",
+            expected
+        );
+        assert_eq!(ev["data"]["surface_id"], expected);
+    }
+
+    handle.stop().await;
+}
+
+/// 13c. v1.1 `digest_updated` event fires on `DigestUpdated` injection
+/// (digest-decode feature only).
+///
+/// Tests the translate_event arm only: that a synthetic
+/// `ChannelEvent::DigestUpdated` produced upstream (in
+/// `crate::digest::run_digest_poller`, gated by the same
+/// feature) round-trips to a `digest_updated` wire event with
+/// `frame_counter`, `framebuffer_hash`, `events`, and
+/// `wallclock_us`.  End-to-end "QR-bytes-on-primary-surface →
+/// wire event" verification lives upstream in the
+/// shakenfist-visual-digest crate's `tests/qr.rs` round-trip
+/// suite; reproducing the QR-render setup here would add
+/// `qrcodegen` as a dev-dep just to re-test the same
+/// invariant.
+#[cfg(feature = "digest-decode")]
+#[tokio::test]
+async fn digest_updated_emitted_on_digest_event() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["digest_updated"] }),
+    )
+    .await;
+    let sub_resp = recv_line(&mut r).await;
+    let subbed: Vec<String> =
+        serde_json::from_value(sub_resp["result"]["subscribed"].clone()).expect("subscribed");
+    assert_eq!(
+        subbed,
+        vec!["digest_updated".to_string()],
+        "hello must advertise digest_updated when digest-decode is on",
+    );
+
+    let events_json = serde_json::json!([
+        {"keypress": {"unicode": "a", "scancode": 30, "timestamp_ms": 100}},
+    ]);
+    inputs
+        .event_tx
+        .send(ChannelEvent::DigestUpdated {
+            frame_counter: 7,
+            framebuffer_hash: 0xdead_beef,
+            events: events_json.clone(),
+        })
+        .expect("broadcast send");
+
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "digest_updated");
+    assert_eq!(ev["data"]["frame_counter"], 7);
+    assert_eq!(ev["data"]["framebuffer_hash"], 0xdead_beef_u32);
+    assert_eq!(ev["data"]["events"], events_json);
+    let wallclock_us = ev["data"]["wallclock_us"].as_u64().expect("wallclock_us");
+    assert!(wallclock_us > 0, "wallclock_us must be positive");
 
     handle.stop().await;
 }

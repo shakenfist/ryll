@@ -1425,6 +1425,36 @@ contract for this interface.
   is emitted with the cumulative count. The SPICE session is never
   back-pressured by a slow control-socket client.
 
+**v1.1 additions.** Phase 6 of the kerbside test-harness plan
+layered two events on top of the v1.0 verb/event surface, both
+emitted by extending `translate_event` (the per-client broadcast
+filter) — no new `ChannelEvent` variants required on the SPICE
+side, no new module on the control-server side:
+
+- `surface_drawn` fires once per display draw command
+  (`ImageReady`, `ImageReadyChroma`, `ImageReadyAlpha`,
+  `FillRect`, `CopyBits`, `Invert`).  Renderer-internal
+  `produced_at_secs` flows through unchanged; the event carries
+  a fresh `wallclock_us` captured at translation time so cross-
+  process consumers (the kerbside loadtest orchestrator) can
+  compute keypress-to-screen latency against wallclock-recorded
+  keypress times.
+- `digest_updated` lives behind the `digest-decode` Cargo
+  feature.  Off in production builds.  When enabled,
+  `crate::digest::run_digest_poller` ticks every 100 ms,
+  snapshots the primary surface RGBA, runs
+  `shakenfist-visual-digest::decode_qr_rgba` followed by
+  `decode`, deduplicates by `frame_counter`, and broadcasts a
+  `ChannelEvent::DigestUpdated`.  The translator converts that
+  to a `digest_updated` wire event.  The hello / subscribe
+  paths both gate on `protocol::supported_events()`, which only
+  advertises `digest_updated` when the feature is on.
+
+Both events are pushed to subscribers via the same broadcast
+bus / per-client mpsc / drop-oldest backpressure path the v1.0
+events use.  See `docs/control-socket-protocol.md` for wire
+shapes.
+
 **Future work (deferred from phase 3).** The following items are
 explicitly out of scope for v1 and will be addressed in later phases
 or follow-up plans:
@@ -1441,9 +1471,16 @@ or follow-up plans:
 - Synchronous paste (the async model was chosen deliberately; a
   synchronous convenience wrapper belongs in the client, not the
   server).
+- Rate-limit knobs for `digest_updated` (currently a fixed
+  100 ms tick; add a `--digest-min-interval-ms` if phase 7's
+  Sextant scenarios produce too many events for slow consumers).
+- Cross-platform CI matrix for the new feature combinations;
+  phase 6 verifies Linux only.
 
 See phase 3 of the test-harness plan for the full rationale:
 `shakenfist/kerbside/docs/plans/PLAN-test-harness-phase-03-control-socket.md`.
+Phase 6 (the v1.1 additions above) lives at
+`shakenfist/kerbside/docs/plans/PLAN-test-harness-phase-06-digest-decoding.md`.
 
 ## Notifications
 

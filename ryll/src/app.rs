@@ -1735,6 +1735,7 @@ impl RyllApp {
                     rect: (left, top, right, bottom),
                     colour,
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()
@@ -1752,6 +1753,7 @@ impl RyllApp {
                     src_y,
                     dest_rect: (left, top, right, bottom),
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()
@@ -1767,6 +1769,7 @@ impl RyllApp {
                     surface_id,
                     rect: (left, top, right, bottom),
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()
@@ -5394,7 +5397,7 @@ mod tests {
         // get/set semantics on both sides of the boundary. Pin
         // the contract so a future refactor of VolumeControl's
         // storage cannot quietly re-introduce the regression.
-        let vc = shakenfist_spice_renderer::channels::playback::VolumeControl::new();
+        let vc = shakenfist_spice_renderer::channels::VolumeControl::new();
         assert_eq!(vc.volume(), 80);
         assert!(!vc.muted());
         vc.set_volume(25);

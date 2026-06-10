@@ -139,6 +139,37 @@ apt-get install -y \
     libwayland-dev libssl-dev pkg-config
 ```
 
+### Cargo features
+
+ryll ships several default-on Cargo features that can be opted
+out at build time:
+
+- **`gui`** (default-on) — eframe, egui, arboard, rfd, and the
+  whole interactive UI.  Disabling it produces a `--headless`
+  / `--web`-only binary that does not link the X11/Wayland/
+  winit runtime and the runtime image drops libgl1, libx11-6,
+  libxcb1, libxkbcommon0, libwayland-client0.  Running such a
+  binary without `--headless` or `--web` exits with a clear
+  "this binary was built without the `gui` feature" message.
+- **`audio`** (default-on) — cpal, opus-decoder, rtrb, and the
+  SPICE playback channel in `shakenfist-spice-renderer`.
+  Disabling it drops libasound2 from the runtime image and
+  skips the SPICE playback channel at connect time (the rest
+  of the session is unaffected).
+- **`capture`** (default-on) — pcap-file + etherparse + mp4 for
+  `--capture` recording.
+- **`digest-decode`** (default-off) — adds the
+  shakenfist-visual-digest crate as a git dependency and
+  enables a polling task that scans the primary surface for a
+  QR-encoded visual digest and emits a `digest_updated`
+  control-socket event on each frame counter change.  Built
+  only for the kerbside test harness; not in production ryll.
+
+The slim test-harness binary is built with
+`cargo build --release --no-default-features -p ryll`.  See
+[docs/control-socket-protocol.md](docs/control-socket-protocol.md)
+for the `surface_drawn` and `digest_updated` event shapes.
+
 **macOS** (Apple Silicon): No additional system libraries are needed --
 just Xcode Command Line Tools and Rust. See
 [docs/development-macos.md](docs/development-macos.md) for full setup

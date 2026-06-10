@@ -2,8 +2,10 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
+#[cfg(feature = "audio")]
 pub mod playback;
 pub mod usbredir;
+pub mod volume;
 pub mod webdav;
 
 pub use cursor::CursorChannel;
@@ -11,8 +13,10 @@ pub use display::DisplayChannel;
 #[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::MainChannel;
-pub use playback::{PlaybackChannel, VolumeControl};
+#[cfg(feature = "audio")]
+pub use playback::PlaybackChannel;
 pub use usbredir::UsbredirChannel;
+pub use volume::VolumeControl;
 pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
@@ -124,6 +128,8 @@ pub enum ChannelEvent {
         rect: (u32, u32, u32, u32),
         colour: [u8; 4],
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Intra-surface pixel copy (DRAW_COPY_BITS).
@@ -134,6 +140,8 @@ pub enum ChannelEvent {
         src_y: u32,
         dest_rect: (u32, u32, u32, u32),
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// In-place RGB inversion of a rect (DRAW_INVERS).
@@ -142,6 +150,8 @@ pub enum ChannelEvent {
         surface_id: u32,
         rect: (u32, u32, u32, u32),
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Display mark (frame boundary)
@@ -251,6 +261,24 @@ pub enum ChannelEvent {
 
     /// Channel disconnected
     Disconnected(ChannelType),
+
+    /// A new visual digest was decoded from the primary surface.
+    ///
+    /// Emitted by the polling task in `crate::digest` when the
+    /// `digest-decode` Cargo feature is on.  The control server's
+    /// `translate_event` turns this into a `digest_updated` wire
+    /// event for any client that subscribed.  Deduplication is by
+    /// `frame_counter` on the producer side; consumers always see
+    /// each event exactly once per counter change.
+    #[cfg(feature = "digest-decode")]
+    DigestUpdated {
+        frame_counter: u32,
+        framebuffer_hash: u32,
+        /// Decoded raw events from the digest payload.  Stored as
+        /// `serde_json::Value` so the renderer crate does not have
+        /// to re-export the digest crate's `Event` type publicly.
+        events: serde_json::Value,
+    },
 }
 
 /// Events sent from the application to the inputs channel
