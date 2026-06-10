@@ -33,9 +33,11 @@ use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
 use crate::audio_sink::OpusPacketSink;
 use crate::byte_counter::ByteCounter;
 use crate::capture_sink::CaptureSink;
+#[cfg(feature = "audio")]
+use crate::channels::PlaybackChannel;
 use crate::channels::{
     ChannelEvent, CursorChannel, DisplayChannel, InputEvent, InputsChannel, MainChannel,
-    PlaybackChannel, UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel, WebdavCommand,
+    UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel, WebdavCommand,
 };
 use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
@@ -185,6 +187,15 @@ pub async fn run_connection(
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
 ) -> Result<()> {
+    // When the `audio` feature is off, `volume_control` and
+    // `opus_sink` are never read (the playback channel arm is
+    // gated out below).  Keep the function's public signature
+    // stable across feature configurations so host callers do
+    // not have to know which features the renderer was built
+    // with; suppress the resulting unused-variable lints here.
+    #[cfg(not(feature = "audio"))]
+    let _ = (&volume_control, &opus_sink);
+
     let client = SpiceClient::new(config)?;
 
     // Shared mm_time clock. The main channel writes to it from
@@ -388,6 +399,7 @@ pub async fn run_connection(
                 }
             }
 
+            #[cfg(feature = "audio")]
             ChannelType::Playback => {
                 let stream = client
                     .connect_channel(session_id, channel_type, channel_id)
@@ -408,6 +420,13 @@ pub async fn run_connection(
                     ChannelType::Playback,
                     tokio::spawn(async move { channel.run().await }),
                 ));
+            }
+            #[cfg(not(feature = "audio"))]
+            ChannelType::Playback => {
+                info!(
+                    "Skipping playback channel (id={}): audio feature disabled at compile time",
+                    channel_id
+                );
             }
 
             _ => {

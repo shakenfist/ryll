@@ -8,7 +8,27 @@ repository.workspace = true
 description = "A Rust SPICE VDI test client"
 
 [features]
-default = ["capture"]
+# `gui`, `audio`, and `capture` are all default-on so production
+# builds (debian package, GUI install) keep their behaviour.
+# `cargo build --no-default-features -p ryll` is the slim
+# headless build used by the kerbside loadtest and direct-qemu
+# CI lane: no eframe, no arboard, no rfd, no cpal, no opus-
+# decoder.  See docs/control-socket-protocol.md and PLAN-test-
+# harness-phase-06-digest-decoding.md for the rationale.
+default = ["capture", "gui", "audio"]
+
+# `gui` carries the egui/eframe display, the arboard host-side
+# clipboard, and the rfd native file picker.  Disabled at compile
+# time produces a ryll binary that requires `--headless` (or
+# `--web`) and exits with a clear error if invoked without one.
+gui = ["dep:eframe", "dep:arboard", "dep:rfd"]
+
+# `audio` enables the cpal/opus playback pipeline both here and
+# in shakenfist-spice-renderer.  Disabling it leaves the SPICE
+# main channel running normally but skips the playback channel
+# (logs "Skipping playback channel: audio feature disabled").
+audio = ["shakenfist-spice-renderer/audio"]
+
 capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
 # Diagnostic-only feature for the K1 hang investigation. Adds
 # `console-subscriber` and a startup hook that exposes ryll's
@@ -19,8 +39,10 @@ capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]
 tokio-console = ["dep:console-subscriber"]
 
 [dependencies]
-# GUI framework
-eframe = { version = "0.34", features = ["persistence"] }
+# GUI framework.  Gated behind the `gui` feature so the slim
+# headless build does not link eframe / egui / egui-winit / the
+# winit/wayland/xkb runtime libraries those pull in.
+eframe = { version = "0.34", features = ["persistence"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -40,12 +62,10 @@ rsa = "0.9"
 sha1 = "0.10"
 rand = "0.8"
 
-# Audio playback. A dedicated audio thread owns the cpal stream
-# so it never needs to be Send. The rtrb ring buffer provides
-# lock-free sample transfer from the tokio network task.
-cpal = "0.17"
-opus-decoder = "0.1"
-rtrb = "0.3"
+# Audio playback lives in shakenfist-spice-renderer's
+# `channels::playback` module and is gated by the `audio`
+# feature on that crate.  ryll's own `audio` feature
+# (above) toggles the dependency through to the renderer.
 
 # Logging
 tracing = "0.1"
@@ -74,7 +94,7 @@ lz4_flex = "0.13"
 # cargo-release; see tools/cut-release.sh.
 shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.5" }
 shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.5" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.5" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.5", default-features = false }
 shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.5" }
 shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.5" }
 
@@ -90,8 +110,11 @@ pcap-file = { version = "2", optional = true }
 etherparse = { version = "0.20", optional = true }
 mp4 = { version = "0.14", optional = true }
 
-# Clipboard access (host <-> guest copy/paste)
-arboard = "3"
+# Clipboard access (host <-> guest copy/paste).  Gated behind
+# the `gui` feature because the only consumer is the eframe
+# UI; the headless control socket has its own `paste` verb that
+# does not touch the host clipboard.
+arboard = { version = "3", optional = true }
 
 # Signal handling (Ctrl+C graceful shutdown, cross-platform)
 ctrlc = "3"
@@ -120,8 +143,8 @@ socket2 = { version = "0.6", features = ["all"] }
 # USB device access (pure Rust, no libusb)
 nusb = "0.2"
 
-# Native file dialog for USB disk image selection
-rfd = "0.17"
+# Native file dialog for USB disk image selection.  GUI-only.
+rfd = { version = "0.17", optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
 dav-server = { version = "0.11", default-features = false, features = ["localfs"] }

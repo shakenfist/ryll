@@ -8,6 +8,14 @@ repository.workspace = true
 description = "Shared SPICE rendering substrate for ryll: software framebuffer, channel handlers, session orchestration."
 readme = "README.md"
 
+[features]
+# `audio` pulls in the cpal/opus/rtrb playback stack and the
+# `channels::playback` module that depends on them.  Default-on
+# so existing builds (GUI ryll, the loadtest before phase 6,
+# CI lanes that did not opt out) keep their behaviour.
+default = ["audio"]
+audio = ["dep:cpal", "dep:opus-decoder", "dep:rtrb"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -26,10 +34,12 @@ rand = "0.8"
 
 # Audio playback. A dedicated audio thread owns the cpal stream
 # so it never needs to be Send. The rtrb ring buffer provides
-# lock-free sample transfer from the tokio network task.
-cpal = "0.17"
-opus-decoder = "0.1"
-rtrb = "0.3"
+# lock-free sample transfer from the tokio network task. All
+# three live behind the default-on `audio` feature so a slim
+# headless build (`--no-default-features`) does not link them.
+cpal = { version = "0.17", optional = true }
+opus-decoder = { version = "0.1", optional = true }
+rtrb = { version = "0.3", optional = true }
 
 # Logging
 tracing = "0.1"

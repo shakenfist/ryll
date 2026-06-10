@@ -4,12 +4,23 @@
 //! (`NotificationEntry`, `NotificationSource`) live in the
 //! renderer crate and are re-exported here for backwards-
 //! compatible imports across `ryll/src/`.
+//!
+//! Most of the reader-side API (`mark_all_read`, `clear`,
+//! `iter_newest_first`, `highest_bell_severity`, etc.) is only
+//! called from the eframe GUI panel.  On a slim
+//! (`--no-default-features`) build the GUI is gated out and
+//! these methods produce dead-code warnings.  Suppress them at
+//! the module level so the store keeps the same shape across
+//! feature configs without poisoning `-D warnings`.
+
+#![cfg_attr(not(feature = "gui"), allow(dead_code))]
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+#[cfg(feature = "gui")]
 use eframe::egui;
 
 #[cfg(test)]
@@ -232,6 +243,9 @@ pub fn format_relative(when: SystemTime) -> String {
 }
 
 /// Returns (glyph, optional colour). `None` colour means "default text colour".
+/// GUI-only helper used by the eframe notification panel; the headless
+/// build has no consumer.
+#[cfg(feature = "gui")]
 pub(crate) fn severity_visuals(s: NotifySeverity) -> (&'static str, Option<egui::Color32>) {
     match s {
         NotifySeverity::Info => ("\u{2139}", None),

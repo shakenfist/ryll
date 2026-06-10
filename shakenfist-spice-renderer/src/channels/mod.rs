@@ -2,8 +2,10 @@ pub mod cursor;
 pub mod display;
 pub mod inputs;
 pub mod main_channel;
+#[cfg(feature = "audio")]
 pub mod playback;
 pub mod usbredir;
+pub mod volume;
 pub mod webdav;
 
 pub use cursor::CursorChannel;
@@ -11,8 +13,10 @@ pub use display::DisplayChannel;
 #[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
 pub use main_channel::MainChannel;
-pub use playback::{PlaybackChannel, VolumeControl};
+#[cfg(feature = "audio")]
+pub use playback::PlaybackChannel;
 pub use usbredir::UsbredirChannel;
+pub use volume::VolumeControl;
 pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
