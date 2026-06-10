@@ -711,6 +711,27 @@ applies to all future webrtc-rs work:
 
 ## Build System
 
+- **Cargo features**.  The top-level binary crate (`ryll`) ships
+  four features, all but `digest-decode` on by default:
+  - `gui` (default-on) — eframe, egui, arboard, rfd.
+  - `audio` (default-on) — wires through to
+    `shakenfist-spice-renderer/audio` for cpal / opus-decoder
+    / rtrb and the `channels::playback` module.
+  - `capture` (default-on) — pcap-file / etherparse / mp4 for
+    `--capture`.
+  - `digest-decode` (default-off) — pulls
+    `shakenfist-visual-digest` (git, `qr` + `serde`) and
+    enables the polling task at `crate::digest` plus the
+    `digest_updated` control-socket event.
+  The kerbside loadtest + direct-qemu CI build with
+  `--no-default-features` (then opt in to `digest-decode`
+  when phase 7's Sextant scenarios land).  See the
+  Cargo features section in `README.md` for the user-facing
+  story.  When adding new code that needs a GUI / audio /
+  digest type, gate the import at the use site and update the
+  verification matrix in
+  `kerbside/docs/plans/PLAN-test-harness-phase-06-digest-decoding.md`
+  before merging.
 - **Devcontainer** for consistent local builds (`.devcontainer/`)
 - **Makefile** for common local operations
 - Cargo cache persisted in `.cargo-cache/` for faster rebuilds
