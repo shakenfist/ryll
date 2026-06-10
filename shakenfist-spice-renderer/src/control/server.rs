@@ -647,6 +647,31 @@ fn translate_event(
             })
         }
 
+        // ── v1.1 digest_updated (digest-decode feature) ────────
+        #[cfg(feature = "digest-decode")]
+        ChannelEvent::DigestUpdated {
+            frame_counter,
+            framebuffer_hash,
+            events,
+        } => {
+            if !state.is_subscribed("digest_updated") {
+                return None;
+            }
+            let wallclock_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            Some(Event {
+                event: "digest_updated".into(),
+                data: serde_json::json!({
+                    "frame_counter": *frame_counter,
+                    "framebuffer_hash": *framebuffer_hash,
+                    "events": events,
+                    "wallclock_us": wallclock_us,
+                }),
+            })
+        }
+
         _ => None,
     }
 }

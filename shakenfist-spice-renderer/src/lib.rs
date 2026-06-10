@@ -16,6 +16,8 @@ pub mod clipboard;
 #[cfg(unix)]
 pub mod control;
 pub mod device_config;
+#[cfg(feature = "digest-decode")]
+pub mod digest;
 pub mod display;
 pub mod encoder;
 pub mod image_cache;

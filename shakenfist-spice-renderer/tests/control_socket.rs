@@ -962,6 +962,67 @@ async fn surface_drawn_emitted_for_each_draw_variant() {
     handle.stop().await;
 }
 
+/// 13c. v1.1 `digest_updated` event fires on `DigestUpdated` injection
+/// (digest-decode feature only).
+///
+/// Tests the translate_event arm only: that a synthetic
+/// `ChannelEvent::DigestUpdated` produced upstream (in
+/// `crate::digest::run_digest_poller`, gated by the same
+/// feature) round-trips to a `digest_updated` wire event with
+/// `frame_counter`, `framebuffer_hash`, `events`, and
+/// `wallclock_us`.  End-to-end "QR-bytes-on-primary-surface →
+/// wire event" verification lives upstream in the
+/// shakenfist-visual-digest crate's `tests/qr.rs` round-trip
+/// suite; reproducing the QR-render setup here would add
+/// `qrcodegen` as a dev-dep just to re-test the same
+/// invariant.
+#[cfg(feature = "digest-decode")]
+#[tokio::test]
+async fn digest_updated_emitted_on_digest_event() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["digest_updated"] }),
+    )
+    .await;
+    let sub_resp = recv_line(&mut r).await;
+    let subbed: Vec<String> =
+        serde_json::from_value(sub_resp["result"]["subscribed"].clone()).expect("subscribed");
+    assert_eq!(
+        subbed,
+        vec!["digest_updated".to_string()],
+        "hello must advertise digest_updated when digest-decode is on",
+    );
+
+    let events_json = serde_json::json!([
+        {"keypress": {"unicode": "a", "scancode": 30, "timestamp_ms": 100}},
+    ]);
+    inputs
+        .event_tx
+        .send(ChannelEvent::DigestUpdated {
+            frame_counter: 7,
+            framebuffer_hash: 0xdead_beef,
+            events: events_json.clone(),
+        })
+        .expect("broadcast send");
+
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "digest_updated");
+    assert_eq!(ev["data"]["frame_counter"], 7);
+    assert_eq!(ev["data"]["framebuffer_hash"], 0xdead_beef_u32);
+    assert_eq!(ev["data"]["events"], events_json);
+    let wallclock_us = ev["data"]["wallclock_us"].as_u64().expect("wallclock_us");
+    assert!(wallclock_us > 0, "wallclock_us must be positive");
+
+    handle.stop().await;
+}
+
 /// 13. screenshot with format "png" returns a valid PNG of the right size.
 #[tokio::test]
 async fn screenshot_png_returns_valid_image() {

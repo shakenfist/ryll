@@ -575,6 +575,24 @@ pub async fn run_headless(
     // indirection.
     let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
 
+    // When the `digest-decode` feature is on, spawn a polling
+    // task that watches the primary surface for a QR-encoded
+    // visual digest and broadcasts a `DigestUpdated` event when
+    // the frame_counter changes.  The control server's event
+    // translator turns that into a `digest_updated` wire event.
+    // See `crate::digest` and the kerbside test-harness phase 6
+    // step 6c plan.
+    #[cfg(feature = "digest-decode")]
+    let _digest_handle = {
+        let mirror_for_digest = surface_mirror.clone();
+        let tx_for_digest = event_broadcast_tx.clone();
+        let cancel_for_digest = cancel.clone();
+        tokio::spawn(async move {
+            crate::digest::run_digest_poller(mirror_for_digest, tx_for_digest, cancel_for_digest)
+                .await;
+        })
+    };
+
     // Spawn connection task. The cancel flag is passed through so
     // a host-side Ctrl+C bridge can flip it and have every channel
     // task exit promptly.

@@ -261,6 +261,24 @@ pub enum ChannelEvent {
 
     /// Channel disconnected
     Disconnected(ChannelType),
+
+    /// A new visual digest was decoded from the primary surface.
+    ///
+    /// Emitted by the polling task in `crate::digest` when the
+    /// `digest-decode` Cargo feature is on.  The control server's
+    /// `translate_event` turns this into a `digest_updated` wire
+    /// event for any client that subscribed.  Deduplication is by
+    /// `frame_counter` on the producer side; consumers always see
+    /// each event exactly once per counter change.
+    #[cfg(feature = "digest-decode")]
+    DigestUpdated {
+        frame_counter: u32,
+        framebuffer_hash: u32,
+        /// Decoded raw events from the digest payload.  Stored as
+        /// `serde_json::Value` so the renderer crate does not have
+        /// to re-export the digest crate's `Event` type publicly.
+        events: serde_json::Value,
+    },
 }
 
 /// Events sent from the application to the inputs channel
