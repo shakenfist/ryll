@@ -1735,6 +1735,7 @@ impl RyllApp {
                     rect: (left, top, right, bottom),
                     colour,
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()
@@ -1752,6 +1753,7 @@ impl RyllApp {
                     src_y,
                     dest_rect: (left, top, right, bottom),
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()
@@ -1767,6 +1769,7 @@ impl RyllApp {
                     surface_id,
                     rect: (left, top, right, bottom),
                     clip,
+                    ..
                 } => {
                     if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
                         gs.surface_mut()

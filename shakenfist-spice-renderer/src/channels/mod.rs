@@ -128,6 +128,8 @@ pub enum ChannelEvent {
         rect: (u32, u32, u32, u32),
         colour: [u8; 4],
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Intra-surface pixel copy (DRAW_COPY_BITS).
@@ -138,6 +140,8 @@ pub enum ChannelEvent {
         src_y: u32,
         dest_rect: (u32, u32, u32, u32),
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// In-place RGB inversion of a rect (DRAW_INVERS).
@@ -146,6 +150,8 @@ pub enum ChannelEvent {
         surface_id: u32,
         rect: (u32, u32, u32, u32),
         clip: Vec<(u32, u32, u32, u32)>,
+        /// See `ImageReady::produced_at_secs`.
+        produced_at_secs: f64,
     },
 
     /// Display mark (frame boundary)

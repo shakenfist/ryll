@@ -130,6 +130,7 @@ impl SurfaceMirror {
                 rect: (left, top, right, bottom),
                 colour,
                 clip,
+                ..
             } => {
                 if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
                     s.fill_rect(*left, *top, *right, *bottom, *colour, clip);
@@ -143,6 +144,7 @@ impl SurfaceMirror {
                 src_y,
                 dest_rect: (left, top, right, bottom),
                 clip,
+                ..
             } => {
                 if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
                     s.copy_bits(*src_x, *src_y, *left, *top, *right, *bottom, clip);
@@ -154,6 +156,7 @@ impl SurfaceMirror {
                 surface_id,
                 rect: (left, top, right, bottom),
                 clip,
+                ..
             } => {
                 if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
                     s.invert_rect(*left, *top, *right, *bottom, clip);
@@ -388,6 +391,7 @@ mod tests {
             rect: (0, 0, 2, 2),
             colour: [200, 100, 50, 255],
             clip: vec![],
+            produced_at_secs: 0.0,
         });
         let s = m.primary_surface().expect("primary");
         assert_eq!(&s.pixels()[0..4], &[200, 100, 50, 255]);

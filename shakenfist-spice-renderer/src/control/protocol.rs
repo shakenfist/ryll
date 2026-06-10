@@ -1,16 +1,22 @@
-//! Wire types for the Ryll control-socket protocol (version 1.0).
+//! Wire types for the Ryll control-socket protocol (version 1.1).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
 //! The serialisation choices here are the binding contract: changing
 //! them is a protocol-breaking change.
+//!
+//! v1.0 → v1.1 added the `surface_drawn` event (and, under the
+//! `digest-decode` Cargo feature, `digest_updated`).  Hello
+//! handshake compatibility is at the major-version level, so
+//! v1.0 clients still hello successfully; they just never
+//! subscribe to v1.1 events.
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::channels::RequestId;
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.0";
+pub const PROTOCOL_VERSION: &str = "1.1";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -25,15 +31,43 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "unsubscribe",
 ];
 
-/// All v1 event names the server can emit. Advertised in the `hello`
-/// response alongside `SUPPORTED_METHODS`.
-pub const SUPPORTED_EVENTS: &[&str] = &[
+/// All event names the server can emit. Advertised in the `hello`
+/// response alongside `SUPPORTED_METHODS`.  `surface_drawn` was
+/// added in v1.1; `digest_updated` lives behind the
+/// `digest-decode` Cargo feature and is appended at runtime by
+/// [`supported_events`].
+const BASE_SUPPORTED_EVENTS: &[&str] = &[
     "latency",
     "agent_connected",
     "paste_completed",
     "paste_failed",
     "dropped",
+    "surface_drawn",
 ];
+
+/// Names of every event this server can emit, including any
+/// feature-gated entries (currently `digest_updated`, gated by
+/// `digest-decode`).  Returned as an owned `Vec` because the
+/// list grows at compile time only — the runtime cost is a
+/// trivial allocation per hello.
+pub fn supported_events() -> Vec<String> {
+    // `mut` is needed in the `digest-decode` configuration; allow
+    // the unused-mut lint to fire silently on the slim build.
+    #[allow(unused_mut)]
+    let mut out: Vec<String> = BASE_SUPPORTED_EVENTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    #[cfg(feature = "digest-decode")]
+    out.push("digest_updated".to_string());
+    out
+}
+
+/// Compile-time slice of base events.  Existing callers that
+/// only need the always-on list (e.g. tests asserting on a
+/// known set) can continue using this; new code that needs the
+/// feature-aware list should call [`supported_events`] instead.
+pub const SUPPORTED_EVENTS: &[&str] = BASE_SUPPORTED_EVENTS;
 
 // ── Request envelope ─────────────────────────────────────────────
 
@@ -180,6 +214,24 @@ pub struct SurfaceInfo {
     pub surface_id: u32,
     pub width: u32,
     pub height: u32,
+}
+
+/// Data payload of the v1.1 `surface_drawn` event.
+///
+/// Emitted once per draw command on the display channel — the
+/// granularity that gives consumers (the loadtest orchestrator's
+/// keypress-to-screen latency probe) the earliest visible-pixel
+/// signal.  Carries both the renderer-internal `produced_at_secs`
+/// monotonic timestamp (lifted unchanged from the underlying
+/// `ChannelEvent`) and a host wallclock timestamp in microseconds
+/// so cross-process consumers can compute deltas against keypress
+/// times recorded in wallclock without straddling clocks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SurfaceDrawnData {
+    pub display_channel_id: u8,
+    pub surface_id: u32,
+    pub produced_at_secs: f64,
+    pub wallclock_us: u64,
 }
 
 /// Params for the `subscribe` and `unsubscribe` verbs.

@@ -41,7 +41,7 @@ use tracing::{debug, error, info, warn};
 use super::protocol::{
     major_version_matches, ErrorCode, Event, HelloParams, HelloResult, Request, RequestId,
     Response, RpcError, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
-    PROTOCOL_VERSION, SUPPORTED_EVENTS, SUPPORTED_METHODS,
+    PROTOCOL_VERSION, SUPPORTED_METHODS,
 };
 use crate::channels::{ChannelEvent, InputEvent};
 use crate::surface_mirror::SurfaceMirror;
@@ -582,6 +582,71 @@ fn translate_event(
             // CLI-initiated paste: no control-socket event.
             None
         }
+
+        // ── v1.1 surface_drawn ─────────────────────────────────
+        //
+        // Six display-event variants all map to a single
+        // `surface_drawn` wire event.  The renderer's draw events
+        // each carry a `produced_at_secs` monotonic timestamp;
+        // wallclock is captured here at translation time, the
+        // same pattern the `latency` arm uses, so the cross-
+        // process consumer (the kerbside loadtest orchestrator)
+        // can compute keypress-to-screen latency against its own
+        // wallclock keypress record.
+        ChannelEvent::ImageReady {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        }
+        | ChannelEvent::ImageReadyChroma {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        }
+        | ChannelEvent::ImageReadyAlpha {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        }
+        | ChannelEvent::FillRect {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        }
+        | ChannelEvent::CopyBits {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        }
+        | ChannelEvent::Invert {
+            display_channel_id,
+            surface_id,
+            produced_at_secs,
+            ..
+        } => {
+            if !state.is_subscribed("surface_drawn") {
+                return None;
+            }
+            let wallclock_us = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            Some(Event {
+                event: "surface_drawn".into(),
+                data: serde_json::json!({
+                    "display_channel_id": *display_channel_id,
+                    "surface_id": *surface_id,
+                    "produced_at_secs": *produced_at_secs,
+                    "wallclock_us": wallclock_us,
+                }),
+            })
+        }
+
         _ => None,
     }
 }
@@ -689,7 +754,7 @@ fn handle_hello(id: RequestId, params: serde_json::Value, helloed: &mut bool) ->
                 server_name: "ryll".into(),
                 protocol_version: PROTOCOL_VERSION.into(),
                 supported_methods: SUPPORTED_METHODS.iter().map(|s| s.to_string()).collect(),
-                supported_events: SUPPORTED_EVENTS.iter().map(|s| s.to_string()).collect(),
+                supported_events: super::protocol::supported_events(),
             };
             Response::ok(
                 id,
@@ -741,12 +806,16 @@ fn handle_subscribe(id: RequestId, params: serde_json::Value, state: &ClientStat
         }
     };
 
-    // Filter requested names against the v1 supported set; unknown
+    // Filter requested names against the supported set; unknown
     // names are silently ignored for forward compatibility.
+    // Use the feature-aware `supported_events()` so subscribers
+    // can ask for `digest_updated` when the server was built with
+    // `--features digest-decode`.
+    let supported = super::protocol::supported_events();
     let mut subscribed: Vec<String> = Vec::new();
     if let Ok(mut subs) = state.subscriptions.lock() {
         for name in &p.events {
-            if SUPPORTED_EVENTS.contains(&name.as_str()) {
+            if supported.iter().any(|s| s == name) {
                 subs.insert(name.clone());
                 subscribed.push(name.clone());
             }

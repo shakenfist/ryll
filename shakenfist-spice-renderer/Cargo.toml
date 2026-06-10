@@ -16,6 +16,13 @@ readme = "README.md"
 default = ["audio"]
 audio = ["dep:cpal", "dep:opus-decoder", "dep:rtrb"]
 
+# `digest-decode` is wired up in phase 6 step 6c (visual digest
+# decoding from the primary surface).  Declared here in 6b as a
+# no-op stub so the control-server's hello/subscribe paths can
+# already gate on it; step 6c will add the actual dependency and
+# polling task.
+digest-decode = []
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }

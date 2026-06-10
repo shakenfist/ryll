@@ -2455,6 +2455,7 @@ impl DisplayChannel {
                         rect: (base.left, base.top, base.right, base.bottom),
                         colour,
                         clip: base.clip_rects,
+                        produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
                     .await
                     .ok();
@@ -2492,6 +2493,7 @@ impl DisplayChannel {
                 rect: (base.left, base.top, base.right, base.bottom),
                 colour,
                 clip: base.clip_rects,
+                produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await
             .ok();
@@ -2543,6 +2545,7 @@ impl DisplayChannel {
                 surface_id: base.surface_id,
                 rect: (base.left, base.top, base.right, base.bottom),
                 clip: base.clip_rects,
+                produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await
             .ok();
@@ -2563,6 +2566,7 @@ impl DisplayChannel {
                 src_y,
                 dest_rect: (base.left, base.top, base.right, base.bottom),
                 clip: base.clip_rects,
+                produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await
             .ok();
