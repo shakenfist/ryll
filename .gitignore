@@ -23,3 +23,8 @@ Thumbs.db
 
 # Latency measurement output
 latency.csv
+
+# Python bytecode caches (e.g. examples/*.py compiled by the
+# operator running them locally).
+__pycache__/
+*.pyc
