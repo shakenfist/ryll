@@ -100,7 +100,7 @@ jobs:
       # macOS and Windows.
       CMAKE_POLICY_VERSION_MINIMUM: '3.5'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
