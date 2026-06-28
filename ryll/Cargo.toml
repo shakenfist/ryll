@@ -50,7 +50,7 @@ tokio-console = ["dep:console-subscriber"]
 # GUI framework.  Gated behind the `gui` feature so the slim
 # headless build does not link eframe / egui / egui-winit / the
 # winit/wayland/xkb runtime libraries those pull in.
-eframe = { version = "0.34", features = ["persistence"], optional = true }
+eframe = { version = "0.35", features = ["persistence"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
