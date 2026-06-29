@@ -1,15 +1,13 @@
 // Main application - egui App.
 //
-// eframe 0.34 deprecated a broad swath of the egui API we depend on
-// (`Frame::none`, `CentralPanel`/`SidePanel`/`TopBottomPanel` as type
-// aliases, `Panel::show*`, `Context::style` / `wants_pointer_input`,
-// `InputState::screen_rect`, `Ui::close_menu`, `menu::menu_button`,
-// and the `update()` trait method itself). The minimum-diff bump on
-// the renovate/eframe-0.x branch leaves these call sites alone and
-// silences the deprecation warnings module-wide so clippy's `-D
-// warnings` policy still passes. The migration is tracked in
-// `docs/plans/PLAN-egui-0.34-followups.md`.
-#![allow(deprecated)]
+// This implements `eframe::App::ui` — eframe 0.34 replaced the old
+// `update()` trait method with `ui()`, which hands us a root
+// `&mut Ui` that fills the viewport. egui 0.35 then unified
+// `TopBottomPanel`/`SidePanel` into a single `Panel` type and made
+// every panel's `show` take that `&mut Ui` instead of a `&Context`
+// (`Window`s still take `&Context`). The panel/menu/frame call sites
+// in `ui()` carry per-change notes; this completes the migration
+// formerly tracked in `docs/plans/PLAN-egui-0.34-followups.md`.
 
 use eframe::egui;
 use std::collections::{HashMap, VecDeque};
@@ -2644,7 +2642,7 @@ impl RyllApp {
             i.viewport()
                 .inner_rect
                 .map(|rect| rect.size())
-                .unwrap_or_else(|| i.screen_rect().size())
+                .unwrap_or_else(|| i.viewport_rect().size())
         });
 
         let is_max = ctx.input(|i| {
@@ -2752,7 +2750,15 @@ impl eframe::App for RyllApp {
     // docs/plans/PLAN-egui-0.34-followups.md for the proper
     // restructure.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx();
+        // egui 0.35 unified the panel types and made every panel's
+        // `show` take `&mut Ui` instead of `&Context`. We own a
+        // cloned `Context` (cheap: it is `Arc`-backed) and bind
+        // `ctx` to a borrow of it, rather than to `ui.ctx()`. That
+        // keeps `ctx: &Context` — so all the existing `ctx.method()`
+        // and `Window::show(ctx, …)` calls are unchanged — while
+        // leaving `ui` free to be borrowed mutably by the panels.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
         // Mirror egui's per-frame focus state into the shared
         // AtomicBool that the FocusGatedClipboard reads. The
         // value flips on the same frame egui sees the
@@ -3005,9 +3011,9 @@ impl eframe::App for RyllApp {
             i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
         });
 
-        let stats_frame = egui::Frame::none()
+        let stats_frame = egui::Frame::NONE
             .inner_margin(egui::Margin::symmetric(4, 2))
-            .fill(ctx.style().visuals.panel_fill);
+            .fill(ctx.style_of(ctx.theme()).visuals.panel_fill);
         // Phase 8: compute the live streaming-state classification
         // once per frame. The result drives the status-bar
         // indicator below; a fired notification (Flapping +
@@ -3034,9 +3040,15 @@ impl eframe::App for RyllApp {
             (state, active)
         };
 
-        egui::TopBottomPanel::bottom("stats")
+        // egui 0.35: `TopBottomPanel`/`SidePanel` were unified into
+        // `Panel`, and `show_animated(ctx, bool, …)` became
+        // `show_collapsible(ui, &mut bool, …)`. The bool is taken by
+        // `&mut` so the panel can flip it; we recompute it from
+        // `is_maximized` every frame, so a flip is harmless.
+        let mut show_stats = !is_maximized;
+        egui::Panel::bottom("stats")
             .frame(stats_frame)
-            .show_animated(ctx, !is_maximized, |ui| {
+            .show_collapsible(ui, &mut show_stats, |ui| {
                 ui.horizontal(|ui| {
                     if !self.latency.history.is_empty() {
                         ui.label(format!("Latency: {}", self.latency.label()));
@@ -3268,7 +3280,7 @@ impl eframe::App for RyllApp {
                         }
 
                         ui.separator();
-                        egui::menu::menu_button(ui, "☰", |ui| {
+                        ui.menu_button("☰", |ui| {
                             ui.checkbox(&mut self.obey_guest_size, "Obey guest size hints");
                             ui.separator();
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
@@ -3279,7 +3291,7 @@ impl eframe::App for RyllApp {
                                 .clicked()
                             {
                                 self.open_screenshot_dialog();
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui
                                 .add(egui::Button::new("Report").shortcut_text("F12"))
@@ -3289,7 +3301,7 @@ impl eframe::App for RyllApp {
                                 self.bug_report_type = BugReportType::Display;
                                 self.bug_description.clear();
                                 self.begin_trigger_snapshot();
-                                ui.close_menu();
+                                ui.close();
                             }
                             if self.enable_paste {
                                 ui.separator();
@@ -3298,7 +3310,7 @@ impl eframe::App for RyllApp {
                                 let response = ui.add_enabled(enabled, label);
                                 if response.clicked() {
                                     self.trigger_paste();
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 if !enabled {
                                     response.on_disabled_hover_text(
@@ -3313,9 +3325,9 @@ impl eframe::App for RyllApp {
 
         // Traffic viewer side panel (conditional)
         if self.show_traffic_viewer {
-            egui::SidePanel::right("traffic_viewer")
-                .default_width(350.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("traffic_viewer")
+                .default_size(350.0)
+                .show(ui, |ui| {
                     // Header
                     ui.horizontal(|ui| {
                         ui.heading("Traffic");
@@ -3405,9 +3417,9 @@ impl eframe::App for RyllApp {
 
         // Notifications side panel (conditional)
         if self.show_notifications_panel {
-            egui::SidePanel::right("notifications")
-                .default_width(360.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("notifications")
+                .default_size(360.0)
+                .show(ui, |ui| {
                     // Header: title + actions
                     ui.horizontal(|ui| {
                         ui.heading("Notifications");
@@ -3619,9 +3631,9 @@ impl eframe::App for RyllApp {
             let mut usb_action = None;
             let mut open_usb_bug_report = false;
 
-            egui::SidePanel::right("usb_panel")
-                .default_width(300.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("usb_panel")
+                .default_size(300.0)
+                .show(ui, |ui| {
                     // Header with refresh button
                     ui.horizontal(|ui| {
                         ui.heading("USB Devices");
@@ -3838,9 +3850,9 @@ impl eframe::App for RyllApp {
                 ctx.request_repaint_after(Duration::from_secs(1));
             }
 
-            egui::SidePanel::right("webdav_panel")
-                .default_width(300.0)
-                .show(ctx, |ui| {
+            egui::Panel::right("webdav_panel")
+                .default_size(300.0)
+                .show(ui, |ui| {
                     ui.heading("Shared Folders");
                     ui.separator();
 
@@ -3923,10 +3935,10 @@ impl eframe::App for RyllApp {
 
         // Main display area (no margin so the surface fills edge-to-edge)
         let mut open_channel_bug_report = false;
-        let panel_frame = egui::Frame::none().inner_margin(0.0);
+        let panel_frame = egui::Frame::NONE.inner_margin(0.0);
         egui::CentralPanel::default()
             .frame(panel_frame)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                 if self.error_message.is_some() {
                     ui.colored_label(
@@ -4467,7 +4479,7 @@ impl eframe::App for RyllApp {
         if self.cursor_image.is_some()
             && !self.region_select_active
             && self.surface_rect != egui::Rect::NOTHING
-            && !ctx.wants_pointer_input()
+            && !ctx.egui_wants_pointer_input()
             && ctx.input(|i| {
                 i.pointer
                     .hover_pos()
