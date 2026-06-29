@@ -44,7 +44,7 @@ rand = "0.8"
 # lock-free sample transfer from the tokio network task. All
 # three live behind the default-on `audio` feature so a slim
 # headless build (`--no-default-features`) does not link them.
-cpal = { version = "0.17", optional = true }
+cpal = { version = "0.18", optional = true }
 opus-decoder = { version = "0.1", optional = true }
 rtrb = { version = "0.3", optional = true }
 

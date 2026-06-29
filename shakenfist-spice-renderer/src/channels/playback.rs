@@ -323,7 +323,7 @@ impl AudioThread {
                 let vol = vol.clone();
                 let counters = counters.clone();
                 device.build_output_stream(
-                    &config,
+                    config,
                     move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                         counters
                             .device_callbacks_total
@@ -347,7 +347,7 @@ impl AudioThread {
                 let vol = vol.clone();
                 let counters = counters.clone();
                 device.build_output_stream(
-                    &config,
+                    config,
                     move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                         counters
                             .device_callbacks_total
