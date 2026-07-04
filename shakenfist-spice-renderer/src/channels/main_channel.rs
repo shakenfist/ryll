@@ -589,6 +589,10 @@ impl MainChannel {
                             use tokio::io::AsyncReadExt;
                             s.read(&mut chunk).await
                         }
+                        SpiceStream::TlsServer(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
                     }
                 } => {
                     last_arm = "read";

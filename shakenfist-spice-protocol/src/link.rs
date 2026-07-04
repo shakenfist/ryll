@@ -5,18 +5,25 @@ use rand::rngs::OsRng;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::{Oaep, RsaPublicKey};
 use sha1::Sha1;
-use std::io::{Cursor, Read};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::io::{Cursor, IoSlice, Read};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
-use tokio_rustls::client::TlsStream;
+use tokio_rustls::client::TlsStream as ClientTlsStream;
+use tokio_rustls::server::TlsStream as ServerTlsStream;
 
 use super::constants::*;
 
-/// Either a plain TCP stream or TLS-wrapped stream
+/// Either a plain TCP stream or a TLS-wrapped stream (client or server
+/// role). `Tls` is the outbound (client) role used when ryll connects to
+/// a SPICE server; `TlsServer` is the inbound (server) role used when a
+/// proxy terminates a SPICE connection from a client.
 #[allow(clippy::large_enum_variant)]
 pub enum SpiceStream {
     Plain(TcpStream),
-    Tls(TlsStream<TcpStream>),
+    Tls(ClientTlsStream<TcpStream>),
+    TlsServer(ServerTlsStream<TcpStream>),
 }
 
 impl SpiceStream {
@@ -28,6 +35,9 @@ impl SpiceStream {
             SpiceStream::Tls(s) => {
                 s.read_exact(buf).await?;
             }
+            SpiceStream::TlsServer(s) => {
+                s.read_exact(buf).await?;
+            }
         }
         Ok(())
     }
@@ -36,6 +46,7 @@ impl SpiceStream {
         match self {
             SpiceStream::Plain(s) => s.write_all(buf).await?,
             SpiceStream::Tls(s) => s.write_all(buf).await?,
+            SpiceStream::TlsServer(s) => s.write_all(buf).await?,
         }
         Ok(())
     }
@@ -44,8 +55,77 @@ impl SpiceStream {
         match self {
             SpiceStream::Plain(s) => s.flush().await?,
             SpiceStream::Tls(s) => s.flush().await?,
+            SpiceStream::TlsServer(s) => s.flush().await?,
         }
         Ok(())
+    }
+}
+
+/// Delegate `AsyncRead` to the inner stream so `SpiceStream` can be used
+/// anywhere a generic `AsyncRead + AsyncWrite + Unpin` bound is required
+/// (e.g. `perform_link`/`perform_auth`), alongside its inherent
+/// `read_exact`/`write_all`/`flush` helpers used by channel handlers.
+impl AsyncRead for SpiceStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            SpiceStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            SpiceStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
+            SpiceStream::TlsServer(s) => Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for SpiceStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            SpiceStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            SpiceStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
+            SpiceStream::TlsServer(s) => Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            SpiceStream::Plain(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            SpiceStream::Tls(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            SpiceStream::TlsServer(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+        }
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        match self {
+            SpiceStream::Plain(s) => s.is_write_vectored(),
+            SpiceStream::Tls(s) => s.is_write_vectored(),
+            SpiceStream::TlsServer(s) => s.is_write_vectored(),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            SpiceStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            SpiceStream::Tls(s) => Pin::new(s).poll_flush(cx),
+            SpiceStream::TlsServer(s) => Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            SpiceStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            SpiceStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
+            SpiceStream::TlsServer(s) => Pin::new(s).poll_shutdown(cx),
+        }
     }
 }
 
@@ -286,12 +366,15 @@ pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>>
 }
 
 /// Perform the link handshake
-pub async fn perform_link(
-    stream: &mut SpiceStream,
+pub async fn perform_link<S>(
+    stream: &mut S,
     connection_id: u32,
     channel_type: ChannelType,
     channel_id: u8,
-) -> Result<SpiceLinkReply> {
+) -> Result<SpiceLinkReply>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     // Per-channel capabilities.  The display caps are critical:
     // without COMPOSITE the guest QXL driver renders via a
     // software fallback that produces far fewer display updates.
@@ -333,11 +416,10 @@ pub async fn perform_link(
 }
 
 /// Perform authentication
-pub async fn perform_auth(
-    stream: &mut SpiceStream,
-    pub_key: &[u8],
-    password: Option<&str>,
-) -> Result<()> {
+pub async fn perform_auth<S>(stream: &mut S, pub_key: &[u8], password: Option<&str>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     // Send auth mechanism selection
     let mut auth_select = Vec::new();
     WriteBytesExt::write_u32::<LittleEndian>(&mut auth_select, AUTH_MECHANISM_SPICE).unwrap();
@@ -368,4 +450,59 @@ pub async fn perform_auth(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `perform_link` is generic over any `AsyncRead + AsyncWrite + Unpin
+    /// + Send` type, not just `SpiceStream`. Drive its write side against
+    /// a `tokio::io::duplex` in-memory stream (a non-`SpiceStream` type)
+    /// and check the bytes that land on the peer: the 16-byte header
+    /// (magic + version + size) followed by the link message body. The
+    /// peer never replies, so `perform_link` blocks on the subsequent
+    /// read; that's fine here since only the write side is under test.
+    /// Full server-side handshake tests land in a later step.
+    #[tokio::test]
+    async fn perform_link_writes_valid_header_and_body_over_duplex_stream() {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+
+        let handle = tokio::spawn(async move {
+            let _ = perform_link(&mut client, 42, ChannelType::Main, 0).await;
+        });
+
+        // Read the 16-byte link message header.
+        let mut header = [0u8; 16];
+        server
+            .read_exact(&mut header)
+            .await
+            .expect("read link header");
+
+        assert_eq!(&header[0..4], SPICE_MAGIC, "link message magic mismatch");
+        let major = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let minor = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        assert_eq!(major, SPICE_VERSION_MAJOR);
+        assert_eq!(minor, SPICE_VERSION_MINOR);
+
+        // Read the rest of the link message body.
+        let size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+        let mut body = vec![0u8; size];
+        server
+            .read_exact(&mut body)
+            .await
+            .expect("read link message body");
+
+        // connection_id (u32 LE) is the first field of the body.
+        let connection_id = u32::from_le_bytes(body[0..4].try_into().unwrap());
+        assert_eq!(connection_id, 42);
+
+        // Channel type/id follow the connection id.
+        assert_eq!(body[4], ChannelType::Main as u8);
+        assert_eq!(body[5], 0);
+
+        // Let the still-blocked perform_link task unwind cleanly.
+        drop(server);
+        handle.await.expect("perform_link task panicked");
+    }
 }

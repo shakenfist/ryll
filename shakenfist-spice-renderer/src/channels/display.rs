@@ -877,6 +877,10 @@ impl DisplayChannel {
                     use tokio::io::AsyncReadExt;
                     s.read(&mut chunk).await?
                 }
+                SpiceStream::TlsServer(s) => {
+                    use tokio::io::AsyncReadExt;
+                    s.read(&mut chunk).await?
+                }
             };
 
             if n == 0 {
