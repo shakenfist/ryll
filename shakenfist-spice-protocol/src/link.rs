@@ -382,6 +382,77 @@ impl SpiceLinkReply {
             channel_caps,
         })
     }
+
+    /// Build an error reply (zeroed 162-byte key, no capabilities), used
+    /// for the need_secured TLS redirect and other link-time failures.
+    pub fn error_reply(error: SpiceError) -> Self {
+        SpiceLinkReply {
+            error,
+            pub_key: vec![0u8; 162],
+            common_caps: Vec::new(),
+            channel_caps: Vec::new(),
+        }
+    }
+
+    /// Serialize a link reply (16-byte header + body) for sending to a
+    /// client.
+    ///
+    /// The body layout mirrors [`parse`](Self::parse): a `u32` error code,
+    /// the 162-byte DER RSA public key (all-zero on error replies),
+    /// `num_common_caps`/`num_channel_caps`/`caps_offset` (all `u32`), then
+    /// the common and channel capability words in turn. `caps_offset` is
+    /// `178` (the fixed body prefix) when at least one capability word
+    /// follows, or `0` when there are none — matching the reference
+    /// implementation, which uses `0` for the no-caps error-redirect reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkError::BadKeyLength`] if `pub_key` is not exactly 162
+    /// bytes.
+    pub fn serialize(&self) -> Result<Vec<u8>, LinkError> {
+        if self.pub_key.len() != 162 {
+            return Err(LinkError::BadKeyLength {
+                len: self.pub_key.len(),
+            });
+        }
+
+        let num_common_caps = self.common_caps.len() as u32;
+        let num_channel_caps = self.channel_caps.len() as u32;
+
+        // Fixed body prefix: error (4) + pub_key (162) + three u32 fields
+        // (12) = 178. Capability words immediately follow when present; the
+        // reference implementation reports offset 0 when there are none.
+        let caps_offset = if num_common_caps + num_channel_caps > 0 {
+            178u32
+        } else {
+            0u32
+        };
+        let size = 178 + (num_common_caps + num_channel_caps) as usize * 4;
+
+        let mut buf = Vec::with_capacity(16 + size);
+
+        // Header: magic, version, size.
+        buf.extend_from_slice(SPICE_MAGIC);
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MAJOR).unwrap();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MINOR).unwrap();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, size as u32).unwrap();
+
+        // Body.
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, self.error.to_u32()).unwrap();
+        buf.extend_from_slice(&self.pub_key);
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_common_caps).unwrap();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_channel_caps).unwrap();
+        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, caps_offset).unwrap();
+
+        for cap in &self.common_caps {
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+        }
+        for cap in &self.channel_caps {
+            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+        }
+
+        Ok(buf)
+    }
 }
 
 /// Parse the RSA public key from the SPICE link reply.
@@ -812,6 +883,90 @@ mod tests {
         match SpiceLinkMess::parse(&bytes) {
             Err(LinkError::Truncated { .. }) | Err(LinkError::BadOffset { .. }) => {}
             other => panic!("undersized caps region should be Truncated/BadOffset, got {other:?}"),
+        }
+    }
+
+    /// Byte-exact match against the Python reference
+    /// (`kerbside/linkmessages.py`):
+    /// `struct.pack('<4sIIII162sIIIII', b'REDQ', 2, 2, 186, 0, der_pubkey,
+    /// 1, 1, 178, common_caps, channel_caps)`. Built by hand here, not via
+    /// any helper shared with `serialize`, so the two cannot share a latent
+    /// bug.
+    #[test]
+    fn byte_exact_success() {
+        let key = vec![0xABu8; 162];
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: key.clone(),
+            common_caps: vec![11],
+            channel_caps: vec![9],
+        };
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(SPICE_MAGIC);
+        expected.extend_from_slice(&2u32.to_le_bytes()); // major
+        expected.extend_from_slice(&2u32.to_le_bytes()); // minor
+        expected.extend_from_slice(&186u32.to_le_bytes()); // size
+        expected.extend_from_slice(&0u32.to_le_bytes()); // error = Ok
+        expected.extend_from_slice(&key); // pub_key
+        expected.extend_from_slice(&1u32.to_le_bytes()); // num_common_caps
+        expected.extend_from_slice(&1u32.to_le_bytes()); // num_channel_caps
+        expected.extend_from_slice(&178u32.to_le_bytes()); // caps_offset
+        expected.extend_from_slice(&11u32.to_le_bytes()); // common cap word
+        expected.extend_from_slice(&9u32.to_le_bytes()); // channel cap word
+
+        assert_eq!(reply.serialize().unwrap(), expected);
+    }
+
+    /// Byte-exact match against the Python reference need_secured error
+    /// redirect: `struct.pack('<4sIIII162sIII', b'REDQ', 2, 2, 178, 5,
+    /// b'', 0, 0, 0)` (the `b''` fills the 162-byte key field with zeros).
+    #[test]
+    fn byte_exact_need_secured() {
+        let reply = SpiceLinkReply::error_reply(SpiceError::NeedSecured);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(SPICE_MAGIC);
+        expected.extend_from_slice(&2u32.to_le_bytes()); // major
+        expected.extend_from_slice(&2u32.to_le_bytes()); // minor
+        expected.extend_from_slice(&178u32.to_le_bytes()); // size
+        expected.extend_from_slice(&5u32.to_le_bytes()); // error = NeedSecured
+        expected.extend_from_slice(&[0u8; 162]); // zeroed pub_key
+        expected.extend_from_slice(&0u32.to_le_bytes()); // num_common_caps
+        expected.extend_from_slice(&0u32.to_le_bytes()); // num_channel_caps
+        expected.extend_from_slice(&0u32.to_le_bytes()); // caps_offset
+
+        assert_eq!(reply.serialize().unwrap(), expected);
+    }
+
+    #[test]
+    fn round_trip_serialize_parse_link_reply() {
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: vec![0x5Au8; 162],
+            common_caps: vec![11, 2],
+            channel_caps: vec![9],
+        };
+
+        let bytes = reply.serialize().expect("serialize");
+        let parsed = SpiceLinkReply::parse(&bytes).expect("parse of own serialize");
+
+        assert_eq!(parsed.error, reply.error);
+        assert_eq!(parsed.pub_key, reply.pub_key);
+        assert_eq!(parsed.common_caps, reply.common_caps);
+        assert_eq!(parsed.channel_caps, reply.channel_caps);
+    }
+
+    #[test]
+    fn bad_key_length_returns_typed_error_not_panic() {
+        for len in [161, 200] {
+            let reply = SpiceLinkReply {
+                error: SpiceError::Ok,
+                pub_key: vec![0u8; len],
+                common_caps: Vec::new(),
+                channel_caps: Vec::new(),
+            };
+            assert_eq!(reply.serialize(), Err(LinkError::BadKeyLength { len }));
         }
     }
 }

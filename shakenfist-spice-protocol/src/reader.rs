@@ -84,6 +84,15 @@ pub enum LinkError {
     /// step); consumed by string-field readers.
     #[error("invalid UTF-8 in text field")]
     BadUtf8,
+
+    /// The RSA public key supplied to
+    /// [`SpiceLinkReply::serialize`](crate::link::SpiceLinkReply::serialize)
+    /// was not exactly 162 bytes (the fixed DER SubjectPublicKeyInfo size
+    /// for a 1024-bit RSA key). This is a programming error on our side
+    /// (a malformed key never reaches here from wire input), but a typed
+    /// error is cleaner than a panic.
+    #[error("bad RSA public key length: expected 162 bytes, got {len}")]
+    BadKeyLength { len: usize },
 }
 
 /// A cursor over a byte slice that tracks position and enforces
