@@ -11,10 +11,14 @@
 //! - [`messages`] — wire-format struct definitions with
 //!   `read` and `write` methods, including the input message
 //!   types (`KeyEvent`, `MousePosition`, etc.).
-//! - [`link`] — SPICE link handshake (`SpiceLinkMess`,
-//!   `SpiceLinkReply`, `perform_link`, `perform_auth`),
-//!   `SpiceStream` (a Plain/TLS wrapper), and the
-//!   `encrypt_password` helper for SPICE auth.
+//! - [`link`] — SPICE link handshake for both roles.
+//!   Client: `SpiceLinkMess`, `SpiceLinkReply`, `perform_link`,
+//!   `perform_auth`, `encrypt_password`. Server/proxy:
+//!   `read_link_mess`, `send_link_reply`/`send_need_secured`,
+//!   `read_auth_ticket`, `send_auth_result`, plus
+//!   `generate_ticket_keypair` and `decrypt_password` — the
+//!   composable drivers for building a SPICE proxy or server.
+//!   Also `SpiceStream` (a Plain/TLS wrapper).
 //! - [`logging`] — protocol-traffic logging helpers and
 //!   message-name lookup tables for every channel direction.
 //! - [`reader`] — generic, SPICE-agnostic infrastructure for

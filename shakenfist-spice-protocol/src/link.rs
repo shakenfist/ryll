@@ -667,6 +667,153 @@ where
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Server-role handshake drivers
+// ---------------------------------------------------------------------------
+//
+// These mirror the client drivers `perform_link`/`perform_auth`, but for the
+// inbound (server / proxy) side of the wire. They are deliberately split into
+// small, composable steps rather than one monolithic `perform_server_link`:
+// the real SPICE proxy must perform a token lookup against an external
+// authorization service *between* decrypting the client's ticket and deciding
+// the auth verdict. `read_auth_ticket` therefore returns the recovered
+// password and stops; the caller consults its authorization service and then
+// calls `send_auth_result` with the verdict. Fusing these steps would force
+// the token lookup into this crate, which has no business knowing about it.
+
+/// Read a client's link message from `stream`.
+///
+/// Reads the 16-byte header, extracts the declared body `size` from bytes
+/// `[12..16]` (little-endian `u32`), reads exactly `size` further bytes, then
+/// hands the concatenated 16 + `size` byte buffer to [`SpiceLinkMess::parse`]
+/// (which re-validates every field against hostile input).
+///
+/// The declared `size` is checked against [`MAX_LINK_MESSAGE_SIZE`] *before*
+/// allocating the body buffer, so a hostile client cannot induce a huge
+/// speculative allocation with an oversized length field.
+///
+/// # Errors
+///
+/// Propagates read errors from `stream`, and any [`LinkError`] produced by the
+/// size cap or by [`SpiceLinkMess::parse`] (converted to `anyhow` via `?`).
+pub async fn read_link_mess<S>(stream: &mut S) -> Result<SpiceLinkMess>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // Header: magic, major, minor, size.
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header).await?;
+
+    // Declared body size lives in bytes [12..16]. Reject an oversized value
+    // before allocating the body buffer (DoS guard), reusing the same cap the
+    // parser enforces.
+    let size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    if size > MAX_LINK_MESSAGE_SIZE {
+        return Err(LinkError::TooLarge {
+            what: "link message size",
+            value: size,
+            max: MAX_LINK_MESSAGE_SIZE,
+        }
+        .into());
+    }
+
+    // Concatenate header + body and hand the whole buffer to the parser.
+    let mut buf = vec![0u8; 16 + size];
+    buf[..16].copy_from_slice(&header);
+    stream.read_exact(&mut buf[16..]).await?;
+
+    Ok(SpiceLinkMess::parse(&buf)?)
+}
+
+/// Serialize `reply` and write it to `stream`, flushing afterwards.
+///
+/// # Errors
+///
+/// Propagates [`LinkError::BadKeyLength`] from serialization and any write
+/// error from `stream`.
+pub async fn send_link_reply<S>(stream: &mut S, reply: &SpiceLinkReply) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let data = reply.serialize()?;
+    stream.write_all(&data).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Send a `need_secured` error redirect, telling the client to reconnect over
+/// the TLS port.
+///
+/// Convenience wrapper over [`send_link_reply`] with
+/// [`SpiceLinkReply::error_reply`]`(SpiceError::NeedSecured)`.
+///
+/// # Errors
+///
+/// Propagates any write error from `stream`.
+pub async fn send_need_secured<S>(stream: &mut S) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    send_link_reply(
+        stream,
+        &SpiceLinkReply::error_reply(SpiceError::NeedSecured),
+    )
+    .await
+}
+
+/// Read the client's auth mechanism selector and encrypted ticket, returning
+/// the recovered password.
+///
+/// Reads a `u32` mechanism (little-endian); if it is not
+/// [`AUTH_MECHANISM_SPICE`] the client asked for something we do not implement
+/// and this errors with [`LinkError::UnsupportedAuthMechanism`]. Otherwise it
+/// reads the fixed 128-byte RSA-OAEP ticket blob and decrypts it with `key`
+/// via [`decrypt_password`].
+///
+/// This function intentionally stops at the recovered password rather than
+/// deciding the auth verdict: the caller (a proxy) consults its external
+/// authorization service with the password and then calls [`send_auth_result`]
+/// with the outcome. See the module comment on the server-role split.
+///
+/// # Errors
+///
+/// Propagates read errors from `stream`, [`LinkError::UnsupportedAuthMechanism`]
+/// on a mismatched mechanism, and [`LinkError::DecryptFailed`]/[`LinkError::BadUtf8`]
+/// from decryption (all converted to `anyhow` via `?`).
+pub async fn read_auth_ticket<S>(stream: &mut S, key: &RsaPrivateKey) -> Result<String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // Auth mechanism selector (u32 LE).
+    let mut mech = [0u8; 4];
+    stream.read_exact(&mut mech).await?;
+    let mechanism = u32::from_le_bytes(mech);
+    if mechanism != AUTH_MECHANISM_SPICE {
+        return Err(LinkError::UnsupportedAuthMechanism { mechanism }.into());
+    }
+
+    // Fixed 128-byte RSA-OAEP ticket blob.
+    let mut blob = [0u8; 128];
+    stream.read_exact(&mut blob).await?;
+
+    Ok(decrypt_password(key, &blob)?)
+}
+
+/// Send the final auth result to the client: a single `u32` [`SpiceError`]
+/// code, little-endian (`0` = ok). Flushes afterwards.
+///
+/// # Errors
+///
+/// Propagates any write error from `stream`.
+pub async fn send_auth_result<S>(stream: &mut S, error: SpiceError) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    stream.write_all(&error.to_u32().to_le_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1209,136 @@ mod tests {
             decrypt_password(&private_key, &garbage),
             Err(LinkError::DecryptFailed)
         );
+    }
+
+    /// The new server-role drivers and the existing client drivers must
+    /// interoperate over a real bidirectional stream. Drive the client on a
+    /// spawned task and the server inline over a `tokio::io::duplex` pair: the
+    /// client `perform_link`/`perform_auth`s, the server
+    /// `read_link_mess`/`send_link_reply`/`read_auth_ticket`/`send_auth_result`s,
+    /// and both sides must agree on the recovered password.
+    #[tokio::test]
+    async fn end_to_end_handshake_succeeds() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+
+        // Client: existing drivers, generic over the duplex half.
+        let client = tokio::spawn(async move {
+            let reply = perform_link(&mut client_end, 0, ChannelType::Main, 0)
+                .await
+                .expect("client perform_link");
+            perform_auth(&mut client_end, &reply.pub_key, Some("s3cret"))
+                .await
+                .expect("client perform_auth");
+        });
+
+        // Server: new drivers, inline.
+        let (private_key, der) = generate_ticket_keypair().expect("keypair generation");
+        let _link_mess = read_link_mess(&mut server_end)
+            .await
+            .expect("read_link_mess");
+
+        // Mirror the Python proxy's success reply: common_caps=[11],
+        // channel_caps=[9].
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: der,
+            common_caps: vec![11],
+            channel_caps: vec![9],
+        };
+        send_link_reply(&mut server_end, &reply)
+            .await
+            .expect("send_link_reply");
+
+        let password = read_auth_ticket(&mut server_end, &private_key)
+            .await
+            .expect("read_auth_ticket");
+        assert_eq!(password, "s3cret", "server recovered the client's password");
+
+        send_auth_result(&mut server_end, SpiceError::Ok)
+            .await
+            .expect("send_auth_result");
+
+        client.await.expect("client task panicked");
+    }
+
+    /// A `need_secured` redirect sent by the server surfaces to the client's
+    /// `perform_link`. `perform_link` returns `Ok(reply)` with
+    /// `reply.error == SpiceError::NeedSecured` (it does not early-return an
+    /// `Err`): the error redirect is a well-formed link reply with a zeroed
+    /// key and no capabilities, which `SpiceLinkReply::parse` accepts, so the
+    /// caller inspects `reply.error` to see the verdict.
+    #[tokio::test]
+    async fn need_secured_redirect_surfaces_to_client() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+
+        let client = tokio::spawn(async move {
+            perform_link(&mut client_end, 0, ChannelType::Main, 0)
+                .await
+                .expect("client perform_link")
+        });
+
+        // Server: read the link message, then redirect to TLS. No auth phase.
+        let _link_mess = read_link_mess(&mut server_end)
+            .await
+            .expect("read_link_mess");
+        send_need_secured(&mut server_end)
+            .await
+            .expect("send_need_secured");
+
+        let reply = client.await.expect("client task panicked");
+        assert_eq!(
+            reply.error,
+            SpiceError::NeedSecured,
+            "perform_link returns Ok(reply) with the NeedSecured error field set"
+        );
+    }
+
+    /// The server rejects a client that selects an auth mechanism other than
+    /// SPICE. The client writes mechanism `2` (not [`AUTH_MECHANISM_SPICE`])
+    /// followed by 128 zero bytes; the server's `read_auth_ticket` must error.
+    #[tokio::test]
+    async fn wrong_auth_mechanism_rejected() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+
+        // Client: real link, then a hand-written bad auth selector + blob.
+        let client = tokio::spawn(async move {
+            let reply = perform_link(&mut client_end, 0, ChannelType::Main, 0)
+                .await
+                .expect("client perform_link");
+            // Mechanism 2 is not AUTH_MECHANISM_SPICE (1).
+            client_end
+                .write_all(&2u32.to_le_bytes())
+                .await
+                .expect("write bad mechanism");
+            client_end
+                .write_all(&[0u8; 128])
+                .await
+                .expect("write ticket blob");
+            client_end.flush().await.expect("flush");
+            reply
+        });
+
+        // Server: successful link reply, then attempt to read the ticket.
+        let (private_key, der) = generate_ticket_keypair().expect("keypair generation");
+        let _link_mess = read_link_mess(&mut server_end)
+            .await
+            .expect("read_link_mess");
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: der,
+            common_caps: vec![11],
+            channel_caps: vec![9],
+        };
+        send_link_reply(&mut server_end, &reply)
+            .await
+            .expect("send_link_reply");
+
+        let result = read_auth_ticket(&mut server_end, &private_key).await;
+        assert!(
+            result.is_err(),
+            "read_auth_ticket must reject a non-SPICE auth mechanism"
+        );
+
+        client.await.expect("client task panicked");
     }
 }
