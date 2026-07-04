@@ -17,6 +17,10 @@
 //!   `encrypt_password` helper for SPICE auth.
 //! - [`logging`] — protocol-traffic logging helpers and
 //!   message-name lookup tables for every channel direction.
+//! - [`reader`] — generic, SPICE-agnostic infrastructure for
+//!   safely parsing untrusted wire input (`BoundedReader`,
+//!   `LinkError`). Panic-free bounds- and overflow-checked
+//!   reads for use by handshake and message parsers.
 //!
 //! - [`ConnectionConfig`] — SPICE server connection
 //!   parameters (host, port, TLS, credentials). This is the
@@ -30,6 +34,7 @@ pub mod link;
 pub mod logging;
 pub mod messages;
 pub mod parse;
+pub mod reader;
 
 pub use client::SpiceClient;
 

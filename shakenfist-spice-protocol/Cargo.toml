@@ -17,6 +17,7 @@ rsa = "0.9"
 sha1 = "0.10"
 tokio = { version = "1", features = ["io-util", "net"] }
 tokio-rustls = "0.26"
+thiserror = "2"
 tracing = "0.1"
 rustls-pemfile = "2"
 socket2 = { version = "0.6", features = ["all"] }
