@@ -315,65 +315,58 @@ pub struct SpiceLinkReply {
 }
 
 impl SpiceLinkReply {
+    /// Parse a link reply (16-byte header + body) received from a server.
+    ///
+    /// Although ryll only parses replies from SPICE servers it chose to
+    /// connect to, the reply still arrives over the network, so counts and
+    /// lengths are treated as untrusted: parsing goes through
+    /// [`BoundedReader`], the declared size is capped at
+    /// [`MAX_LINK_MESSAGE_SIZE`], and capability counts are capped at
+    /// [`MAX_CAP_WORDS`] before any allocation. (A prior unbounded
+    /// `Vec::with_capacity` on the wire-supplied count could be driven to
+    /// an out-of-memory abort; this was found by the fuzz target added for
+    /// this parser.)
     pub fn parse(data: &[u8]) -> Result<Self> {
-        if data.len() < 16 {
-            return Err(anyhow!("Link reply too short"));
-        }
+        let mut reader = BoundedReader::new(data);
 
-        let mut cursor = Cursor::new(data);
-
-        // Verify magic
-        let mut magic = [0u8; 4];
-        Read::read_exact(&mut cursor, &mut magic)?;
+        // Header: magic, major, minor, size.
+        let magic = reader.read_array::<4>()?;
         if &magic != SPICE_MAGIC {
-            return Err(anyhow!("Invalid magic in link reply"));
+            return Err(LinkError::BadMagic { found: magic }.into());
         }
-
-        // Version
-        let major = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?;
-        let minor = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?;
-
+        let major = reader.read_u32()?;
+        let minor = reader.read_u32()?;
         if major != SPICE_VERSION_MAJOR {
-            return Err(anyhow!(
-                "Version mismatch: expected {}.x, got {}.{}",
-                SPICE_VERSION_MAJOR,
-                major,
-                minor
-            ));
+            return Err(LinkError::UnsupportedVersion { major, minor }.into());
+        }
+        let size = reader.read_u32()? as usize;
+        if size > MAX_LINK_MESSAGE_SIZE {
+            return Err(LinkError::TooLarge {
+                what: "link reply size",
+                value: size,
+                max: MAX_LINK_MESSAGE_SIZE,
+            }
+            .into());
         }
 
-        // Size
-        let size = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)? as usize;
+        // Body: `size` bytes at byte 16. A short buffer surfaces as
+        // BadOffset rather than a panic.
+        let mut body = reader.sub_reader(16, size)?;
 
-        if data.len() < 16 + size {
-            return Err(anyhow!("Link reply truncated"));
-        }
+        let error = SpiceError::from_u32(body.read_u32()?);
 
-        // Error code
-        let error_code = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?;
-        let error = SpiceError::from_u32(error_code);
+        // RSA public key: always 162 bytes (DER SubjectPublicKeyInfo).
+        let pub_key = body.read_bytes(162)?.to_vec();
 
-        // RSA public key (162 bytes - DER format)
-        let mut pub_key = vec![0u8; 162];
-        Read::read_exact(&mut cursor, &mut pub_key)?;
+        let num_common_caps = body.read_u32()? as usize;
+        let num_channel_caps = body.read_u32()? as usize;
+        // caps_offset is advisory here: the reference server (and our own
+        // serialize) place the words immediately after this field, so we
+        // read them sequentially from the current position.
+        let _caps_offset = body.read_u32()?;
 
-        // Number of capabilities
-        let num_common_caps = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)? as usize;
-        let num_channel_caps = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)? as usize;
-
-        // Caps offset (skip)
-        let _caps_offset = ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?;
-
-        // Read capabilities
-        let mut common_caps = Vec::with_capacity(num_common_caps);
-        for _ in 0..num_common_caps {
-            common_caps.push(ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?);
-        }
-
-        let mut channel_caps = Vec::with_capacity(num_channel_caps);
-        for _ in 0..num_channel_caps {
-            channel_caps.push(ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)?);
-        }
+        let common_caps = body.read_vec_u32(num_common_caps, MAX_CAP_WORDS)?;
+        let channel_caps = body.read_vec_u32(num_channel_caps, MAX_CAP_WORDS)?;
 
         Ok(SpiceLinkReply {
             error,
@@ -1150,6 +1143,27 @@ mod tests {
         assert_eq!(parsed.pub_key, reply.pub_key);
         assert_eq!(parsed.common_caps, reply.common_caps);
         assert_eq!(parsed.channel_caps, reply.channel_caps);
+    }
+
+    /// Regression test for the unbounded-allocation OOM the fuzz target
+    /// found: a reply header declaring a huge capability count must be
+    /// rejected without attempting to allocate that many words.
+    #[test]
+    fn link_reply_cap_flood_rejected_without_allocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SPICE_MAGIC);
+        bytes.extend_from_slice(&SPICE_VERSION_MAJOR.to_le_bytes());
+        bytes.extend_from_slice(&SPICE_VERSION_MINOR.to_le_bytes());
+        bytes.extend_from_slice(&178u32.to_le_bytes()); // size: fixed body prefix
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // error = Ok
+        bytes.extend_from_slice(&[0u8; 162]); // pub_key
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // num_common_caps (hostile)
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // num_channel_caps
+        bytes.extend_from_slice(&178u32.to_le_bytes()); // caps_offset
+
+        // Must return an error (TooLarge, surfaced through anyhow), not OOM
+        // and not panic.
+        assert!(SpiceLinkReply::parse(&bytes).is_err());
     }
 
     #[test]
