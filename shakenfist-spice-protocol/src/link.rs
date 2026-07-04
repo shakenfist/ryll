@@ -14,6 +14,18 @@ use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 
 use super::constants::*;
+use crate::reader::{BoundedReader, LinkError};
+
+/// Sanity cap on the declared link-message body `size`, in bytes. This is a
+/// DoS guard set far above any legitimate link message (real ones are only
+/// tens of bytes); a client declaring more than this is treated as hostile
+/// and rejected before any allocation.
+pub(crate) const MAX_LINK_MESSAGE_SIZE: usize = 4096;
+
+/// Sanity cap on the number of capability words in each of the common and
+/// channel capability arrays. Real implementations send 1 word; 16 is
+/// generous headroom while still bounding a hostile count before allocation.
+pub(crate) const MAX_CAP_WORDS: usize = 16;
 
 /// Either a plain TCP stream or a TLS-wrapped stream (client or server
 /// role). `Tls` is the outbound (client) role used when ryll connects to
@@ -204,6 +216,90 @@ impl SpiceLinkMess {
         }
 
         buf
+    }
+
+    /// Parse a full link message (16-byte header + body) received from a
+    /// client.
+    ///
+    /// This parser faces the public internet: every length, count, and
+    /// offset in `data` is treated as hostile. All bounds enforcement goes
+    /// through [`BoundedReader`], so the function is panic-free for any
+    /// input — there is no open-coded slice indexing or unchecked
+    /// arithmetic.
+    ///
+    /// The capability words are addressed by `caps_offset`, measured from
+    /// the start of the body (i.e. byte 16 of the whole message); `18` when
+    /// they immediately follow the fixed fields. Any bytes after the
+    /// capability words but within the declared `size` are tolerated and
+    /// ignored (qemu clients may pad).
+    ///
+    /// # Errors
+    ///
+    /// - [`LinkError::BadMagic`] if the four-byte magic is not `REDQ`.
+    /// - [`LinkError::UnsupportedVersion`] if `major` is not
+    ///   [`SPICE_VERSION_MAJOR`] (any minor is accepted).
+    /// - [`LinkError::TooLarge`] if the declared `size` exceeds
+    ///   [`MAX_LINK_MESSAGE_SIZE`], or a capability count exceeds
+    ///   [`MAX_CAP_WORDS`] (rejected before allocation).
+    /// - [`LinkError::Truncated`] if the buffer ends before a declared field
+    ///   or capability word could be read.
+    /// - [`LinkError::BadOffset`] if `caps_offset` falls outside the body.
+    pub fn parse(data: &[u8]) -> Result<Self, LinkError> {
+        let mut reader = BoundedReader::new(data);
+
+        // Header (16 bytes): magic, major, minor, size.
+        let magic = reader.read_array::<4>()?;
+        if &magic != SPICE_MAGIC {
+            return Err(LinkError::BadMagic { found: magic });
+        }
+        let major = reader.read_u32()?;
+        let minor = reader.read_u32()?;
+        if major != SPICE_VERSION_MAJOR {
+            return Err(LinkError::UnsupportedVersion { major, minor });
+        }
+        let size = reader.read_u32()? as usize;
+        if size > MAX_LINK_MESSAGE_SIZE {
+            return Err(LinkError::TooLarge {
+                what: "link message size",
+                value: size,
+                max: MAX_LINK_MESSAGE_SIZE,
+            });
+        }
+
+        // Body: `size` bytes starting at byte 16 of the message. A buffer
+        // holding fewer than 16 + size bytes surfaces here as BadOffset
+        // rather than a panic.
+        let mut body = reader.sub_reader(16, size)?;
+
+        // Fixed fields (18 bytes). `caps_offset` is relative to the body
+        // start, so all subsequent addressing uses `body`.
+        let connection_id = body.read_u32()?;
+        let channel_type = body.read_u8()?;
+        let channel_id = body.read_u8()?;
+        let num_common_caps = body.read_u32()? as usize;
+        let num_channel_caps = body.read_u32()? as usize;
+        let caps_offset = body.read_u32()? as usize;
+
+        // Capability words live at `caps_offset` within the body and run to
+        // the end of the declared body. An offset past the body end yields
+        // BadOffset via the checked subtraction; the bounded sub_reader then
+        // guarantees the words fit inside the declared size.
+        let caps_len = size.checked_sub(caps_offset).ok_or(LinkError::BadOffset {
+            offset: caps_offset,
+            len: 0,
+            buffer_len: size,
+        })?;
+        let mut caps = body.sub_reader(caps_offset, caps_len)?;
+        let common_caps = caps.read_vec_u32(num_common_caps, MAX_CAP_WORDS)?;
+        let channel_caps = caps.read_vec_u32(num_channel_caps, MAX_CAP_WORDS)?;
+
+        Ok(SpiceLinkMess {
+            connection_id,
+            channel_type,
+            channel_id,
+            common_caps,
+            channel_caps,
+        })
     }
 }
 
@@ -504,5 +600,218 @@ mod tests {
         // Let the still-blocked perform_link task unwind cleanly.
         drop(server);
         handle.await.expect("perform_link task panicked");
+    }
+
+    /// Assemble a 16-byte header for the given version and body size. The
+    /// body is supplied separately so adversarial tests can declare a size
+    /// that disagrees with the real body length.
+    fn header(major: u32, minor: u32, size: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(16);
+        buf.extend_from_slice(SPICE_MAGIC);
+        buf.extend_from_slice(&major.to_le_bytes());
+        buf.extend_from_slice(&minor.to_le_bytes());
+        buf.extend_from_slice(&size.to_le_bytes());
+        buf
+    }
+
+    /// Build the 18-byte fixed portion of a link body plus an arbitrary
+    /// capability-region tail. `caps_offset` and the counts are written
+    /// verbatim so tests can supply hostile values.
+    fn body(
+        connection_id: u32,
+        channel_type: u8,
+        channel_id: u8,
+        num_common_caps: u32,
+        num_channel_caps: u32,
+        caps_offset: u32,
+        tail: &[u8],
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&connection_id.to_le_bytes());
+        buf.push(channel_type);
+        buf.push(channel_id);
+        buf.extend_from_slice(&num_common_caps.to_le_bytes());
+        buf.extend_from_slice(&num_channel_caps.to_le_bytes());
+        buf.extend_from_slice(&caps_offset.to_le_bytes());
+        buf.extend_from_slice(tail);
+        buf
+    }
+
+    /// Header + body glued together with `size` set to the body length.
+    fn message(body: &[u8]) -> Vec<u8> {
+        let mut buf = header(SPICE_VERSION_MAJOR, SPICE_VERSION_MINOR, body.len() as u32);
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    #[test]
+    fn round_trip_serialize_parse() {
+        let cases = [
+            // Main channel, connection id 0, single-word caps.
+            SpiceLinkMess::new(0, ChannelType::Main, 0, 0x0000_000b, 0x0000_0001),
+            // Display channel with a non-zero connection id.
+            SpiceLinkMess::new(
+                0xdead_beef,
+                ChannelType::Display,
+                3,
+                0x0000_000b,
+                0x1a2b_3c4d,
+            ),
+            // Multi-word caps: 2 common + 3 channel words.
+            SpiceLinkMess {
+                connection_id: 42,
+                channel_type: ChannelType::Inputs as u8,
+                channel_id: 1,
+                common_caps: vec![0x1111_1111, 0x2222_2222],
+                channel_caps: vec![0xaaaa_aaaa, 0xbbbb_bbbb, 0xcccc_cccc],
+            },
+        ];
+
+        for original in &cases {
+            let bytes = original.serialize();
+            let parsed = SpiceLinkMess::parse(&bytes).expect("parse of own serialize");
+            assert_eq!(parsed.connection_id, original.connection_id);
+            assert_eq!(parsed.channel_type, original.channel_type);
+            assert_eq!(parsed.channel_id, original.channel_id);
+            assert_eq!(parsed.common_caps, original.common_caps);
+            assert_eq!(parsed.channel_caps, original.channel_caps);
+        }
+    }
+
+    #[test]
+    fn byte_exact_layout() {
+        // Hand-built message, independent of serialize(), so the two cannot
+        // share a latent bug. caps_offset = 18 (words follow fixed fields).
+        let tail: Vec<u8> = [0x0000_000bu32, 0x0000_0001, 0x0000_00ff]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        // num_common = 1, num_channel = 2.
+        let b = body(7, ChannelType::Display as u8, 5, 1, 2, 18, &tail);
+        let bytes = message(&b);
+
+        let parsed = SpiceLinkMess::parse(&bytes).expect("parse hand-built message");
+        assert_eq!(parsed.connection_id, 7);
+        assert_eq!(parsed.channel_type, ChannelType::Display as u8);
+        assert_eq!(parsed.channel_id, 5);
+        assert_eq!(parsed.common_caps, vec![0x0000_000b]);
+        assert_eq!(parsed.channel_caps, vec![0x0000_0001, 0x0000_00ff]);
+    }
+
+    #[test]
+    fn trailing_bytes_after_caps_are_tolerated() {
+        // caps_offset 18, one common word, then 8 bytes of padding that the
+        // declared size covers but the parser must ignore.
+        let mut tail = 0x1234_5678u32.to_le_bytes().to_vec();
+        tail.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00, 0x11, 0x22, 0x33]);
+        let b = body(1, ChannelType::Main as u8, 0, 1, 0, 18, &tail);
+        let bytes = message(&b);
+
+        let parsed = SpiceLinkMess::parse(&bytes).expect("parse with padding");
+        assert_eq!(parsed.common_caps, vec![0x1234_5678]);
+        assert!(parsed.channel_caps.is_empty());
+    }
+
+    #[test]
+    fn truncation_at_every_boundary_never_ok_never_panics() {
+        let original = SpiceLinkMess {
+            connection_id: 99,
+            channel_type: ChannelType::Display as u8,
+            channel_id: 2,
+            common_caps: vec![0x0000_000b, 0x0000_0010],
+            channel_caps: vec![0x0000_0001],
+        };
+        let bytes = original.serialize();
+
+        for n in 0..bytes.len() {
+            match SpiceLinkMess::parse(&bytes[..n]) {
+                Err(LinkError::Truncated { .. }) | Err(LinkError::BadOffset { .. }) => {}
+                other => panic!("prefix len {n} should be Truncated/BadOffset, got {other:?}"),
+            }
+        }
+        // The full message still parses.
+        SpiceLinkMess::parse(&bytes).expect("full message parses");
+    }
+
+    #[test]
+    fn bad_magic_rejected() {
+        let mut bytes = message(&body(0, ChannelType::Main as u8, 0, 0, 0, 18, &[]));
+        bytes[0] = b'X';
+        assert_eq!(
+            SpiceLinkMess::parse(&bytes).unwrap_err(),
+            LinkError::BadMagic {
+                found: [b'X', b'E', b'D', b'Q'],
+            }
+        );
+    }
+
+    #[test]
+    fn bad_major_version_rejected() {
+        let mut bytes = header(3, 7, 18);
+        bytes.extend_from_slice(&body(0, ChannelType::Main as u8, 0, 0, 0, 18, &[]));
+        assert_eq!(
+            SpiceLinkMess::parse(&bytes).unwrap_err(),
+            LinkError::UnsupportedVersion { major: 3, minor: 7 }
+        );
+    }
+
+    #[test]
+    fn size_over_cap_rejected_as_too_large() {
+        // Header declares a body of 4097 bytes; rejected before we even try
+        // to address a body.
+        let bytes = header(SPICE_VERSION_MAJOR, SPICE_VERSION_MINOR, 4097);
+        assert_eq!(
+            SpiceLinkMess::parse(&bytes).unwrap_err(),
+            LinkError::TooLarge {
+                what: "link message size",
+                value: 4097,
+                max: MAX_LINK_MESSAGE_SIZE,
+            }
+        );
+    }
+
+    #[test]
+    fn adversarial_caps_offset_yields_bad_offset() {
+        // caps_offset far larger than the body, in three flavours: u32::MAX
+        // (would overflow a naive add), just past the body end, and a mid
+        // sized value still outside the 18-byte body. All must be BadOffset,
+        // never a panic.
+        for offset in [u32::MAX, 19, 1000] {
+            let b = body(0, ChannelType::Main as u8, 0, 0, 0, offset, &[]);
+            let bytes = message(&b);
+            match SpiceLinkMess::parse(&bytes) {
+                Err(LinkError::BadOffset { .. }) => {}
+                other => panic!("caps_offset {offset} should be BadOffset, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cap_count_flood_rejected_before_allocation() {
+        // num_common_caps = u32::MAX with a valid (empty) caps region. The
+        // count check fires before any Vec is built.
+        let b = body(0, ChannelType::Main as u8, 0, u32::MAX, 0, 18, &[]);
+        let bytes = message(&b);
+        assert_eq!(
+            SpiceLinkMess::parse(&bytes).unwrap_err(),
+            LinkError::TooLarge {
+                what: "count",
+                value: u32::MAX as usize,
+                max: MAX_CAP_WORDS,
+            }
+        );
+    }
+
+    #[test]
+    fn caps_not_fitting_in_declared_size_is_truncated() {
+        // Declares 2 common words but supplies only one word (4 bytes) of
+        // capability region inside the declared size.
+        let tail = 0x0000_000bu32.to_le_bytes();
+        let b = body(0, ChannelType::Main as u8, 0, 2, 0, 18, &tail);
+        let bytes = message(&b);
+        match SpiceLinkMess::parse(&bytes) {
+            Err(LinkError::Truncated { .. }) | Err(LinkError::BadOffset { .. }) => {}
+            other => panic!("undersized caps region should be Truncated/BadOffset, got {other:?}"),
+        }
     }
 }
