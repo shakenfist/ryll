@@ -7,6 +7,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use tokio_rustls::rustls::crypto::CryptoProvider;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{
     ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
@@ -21,9 +22,17 @@ use crate::{ChannelType, ConnectionConfig, SpiceError};
 /// verification. SPICE self-signed certificates typically lack SAN
 /// extensions, so standard hostname checking always fails. The CA
 /// trust itself validates the server identity.
+///
+/// Signature verification is delegated to the process-wide rustls
+/// [`CryptoProvider`], captured at construction. The embedding process
+/// must install a default provider (e.g. `ring` or `aws-lc-rs`) before a
+/// TLS connection is made; ryll and the kerbside proxy both install
+/// `ring`. Capturing it here rather than hardcoding one provider keeps
+/// this crate agnostic to the embedder's choice.
 #[derive(Debug)]
 struct SpiceCaVerifier {
     roots: Arc<RootCertStore>,
+    provider: Arc<CryptoProvider>,
 }
 
 impl ServerCertVerifier for SpiceCaVerifier {
@@ -74,8 +83,7 @@ impl ServerCertVerifier for SpiceCaVerifier {
             message,
             cert,
             dss,
-            &tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
-                .signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
@@ -89,13 +97,12 @@ impl ServerCertVerifier for SpiceCaVerifier {
             message,
             cert,
             dss,
-            &tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
-                .signature_verification_algorithms,
+            &self.provider.signature_verification_algorithms,
         )
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        tokio_rustls::rustls::crypto::aws_lc_rs::default_provider()
+        self.provider
             .signature_verification_algorithms
             .supported_schemes()
     }
@@ -151,8 +158,20 @@ impl SpiceClient {
             // SPICE self-signed certs typically lack SAN extensions, so
             // standard hostname verification always fails. Use a custom
             // verifier that checks the CA chain but allows hostname mismatch.
+            // The verifier delegates signature checks to the process-wide
+            // crypto provider, so one must be installed before we connect.
+            let provider = CryptoProvider::get_default()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no rustls CryptoProvider installed; the embedding process must call \
+                         install_default() (e.g. rustls::crypto::ring::default_provider()) \
+                         before establishing a SPICE TLS connection"
+                    )
+                })?
+                .clone();
             let verifier = SpiceCaVerifier {
                 roots: Arc::new(root_store),
+                provider,
             };
             ClientConfig::builder()
                 .dangerous()

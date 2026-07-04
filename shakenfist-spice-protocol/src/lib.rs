@@ -31,6 +31,15 @@
 //!   narrow configuration type that [`SpiceClient`] accepts.
 //! - [`client`] — `SpiceClient` for managing SPICE channel
 //!   connections (TLS/TCP, keepalive, link handshake, auth).
+//!
+//! # Crypto provider
+//!
+//! TLS signature verification is delegated to the process-wide
+//! rustls [`CryptoProvider`](tokio_rustls::rustls::crypto::CryptoProvider).
+//! An embedding process that opens TLS SPICE connections must
+//! install a default provider before connecting, e.g.
+//! `rustls::crypto::ring::default_provider().install_default()`.
+//! This crate does not pick a provider on the embedder's behalf.
 
 pub mod client;
 pub mod constants;
