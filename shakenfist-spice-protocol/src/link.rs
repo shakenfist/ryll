@@ -2,8 +2,8 @@
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use rand::rngs::OsRng;
-use rsa::pkcs8::DecodePublicKey;
-use rsa::{Oaep, RsaPublicKey};
+use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
+use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha1::Sha1;
 use std::io::{Cursor, IoSlice, Read};
 use std::pin::Pin;
@@ -532,6 +532,54 @@ pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>>
     Ok(result)
 }
 
+/// Generate a fresh per-connection RSA keypair for SPICE ticket exchange.
+///
+/// Returns the private key and its DER SubjectPublicKeyInfo encoding
+/// (exactly 162 bytes for the 1024-bit key SPICE uses), suitable for the
+/// `pub_key` field of a [`SpiceLinkReply`].
+pub fn generate_ticket_keypair() -> Result<(RsaPrivateKey, Vec<u8>)> {
+    let mut rng = OsRng;
+
+    // `RsaPrivateKey::new` uses the default public exponent of 65537, which
+    // matches the Python reference (`ClientPassword` in kerbside's
+    // proxy.py) and every other SPICE server implementation.
+    let private_key = RsaPrivateKey::new(&mut rng, 1024)?;
+    let public_key = private_key.to_public_key();
+    let der = public_key.to_public_key_der()?.as_bytes().to_vec();
+
+    // DER SubjectPublicKeyInfo encoding of a 1024-bit RSA key with a
+    // 65537 exponent is always exactly 162 bytes -- the field width baked
+    // into SpiceLinkReply's wire format. Key generation is our own trusted
+    // input (not attacker-controlled), so a debug_assert! is sufficient:
+    // this would only fire on a bug in our own key generation, never on
+    // hostile input.
+    debug_assert_eq!(der.len(), 162, "1024-bit RSA SPKI DER must be 162 bytes");
+
+    Ok((private_key, der))
+}
+
+/// Decrypt a 128-byte RSA-OAEP(SHA-1) ticket blob received from a client
+/// using the server's private key, returning the recovered password.
+///
+/// The SPICE convention appends a NUL terminator to the plaintext before
+/// encryption (see [`encrypt_password`]); a single trailing NUL is
+/// stripped if present.
+pub fn decrypt_password(key: &RsaPrivateKey, blob: &[u8; 128]) -> Result<String, LinkError> {
+    let padding = Oaep::new::<Sha1>();
+    let mut decrypted = key
+        .decrypt(padding, blob)
+        .map_err(|_| LinkError::DecryptFailed)?;
+
+    // encrypt_password always appends exactly one NUL terminator before
+    // encrypting; strip it if present rather than unconditionally (as the
+    // Python reference does), so a plaintext without one still round-trips.
+    if decrypted.last() == Some(&0) {
+        decrypted.pop();
+    }
+
+    String::from_utf8(decrypted).map_err(|_| LinkError::BadUtf8)
+}
+
 /// Perform the link handshake
 pub async fn perform_link<S>(
     stream: &mut S,
@@ -968,5 +1016,51 @@ mod tests {
             };
             assert_eq!(reply.serialize(), Err(LinkError::BadKeyLength { len }));
         }
+    }
+
+    /// Round-trip a password through the client's `encrypt_password` and
+    /// the server's `decrypt_password` against a freshly generated
+    /// keypair, for a given plaintext. This is the primary compatibility
+    /// guarantee between the two sides of the ticket exchange.
+    fn round_trip(password: &str) {
+        let (private_key, der) = generate_ticket_keypair().expect("keypair generation");
+        let blob = encrypt_password(&der, password).expect("encrypt");
+        let blob: [u8; 128] = blob.try_into().expect("128-byte blob");
+        let decrypted = decrypt_password(&private_key, &blob).expect("decrypt");
+        assert_eq!(decrypted, password);
+    }
+
+    #[test]
+    fn round_trip_empty() {
+        round_trip("");
+    }
+
+    #[test]
+    fn round_trip_short() {
+        round_trip("hunter2");
+    }
+
+    #[test]
+    fn round_trip_max() {
+        // SPICE max password length is 60 bytes including the NUL
+        // terminator, so 59 usable characters.
+        let password = "a".repeat(59);
+        round_trip(&password);
+    }
+
+    #[test]
+    fn der_key_is_162_bytes() {
+        let (_private_key, der) = generate_ticket_keypair().expect("keypair generation");
+        assert_eq!(der.len(), 162);
+    }
+
+    #[test]
+    fn decrypt_garbage_is_error() {
+        let (private_key, _der) = generate_ticket_keypair().expect("keypair generation");
+        let garbage = [0xFFu8; 128];
+        assert_eq!(
+            decrypt_password(&private_key, &garbage),
+            Err(LinkError::DecryptFailed)
+        );
     }
 }
