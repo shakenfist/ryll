@@ -28,11 +28,11 @@
   ],
   "auditedFiles": [
     {
-      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "path": "shakenfist-spice-compression/src/glz.rs",
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/glz.rs",
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
       "author": "mikal"
     }
   ],

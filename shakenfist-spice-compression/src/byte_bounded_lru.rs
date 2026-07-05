@@ -144,8 +144,7 @@ impl ByteBoundedLru {
                     debug_assert!(
                         false,
                         "byte accounting drift: cache empty but bytes = {} (cap_bytes = {})",
-                        self.bytes,
-                        self.cap_bytes
+                        self.bytes, self.cap_bytes
                     );
                     self.bytes = 0;
                     break;
