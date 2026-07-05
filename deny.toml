@@ -21,12 +21,6 @@ targets = [
 version = 2
 yanked = "deny"
 ignore = [
-    # RUSTSEC-2025-0008: openh264-sys2 heap overflow.
-    # Fix is in >=0.8.0 but that is a semver-incompatible upgrade.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2025-0008
-    "RUSTSEC-2025-0008",
-
     # RUSTSEC-2024-0436: paste crate unmaintained.
     # Transitive dependency. Drop-in replacement `pastey` exists.
     # Tracked in PLAN-supply-chain-followups.md.
@@ -66,6 +60,29 @@ ignore = [
     # Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2026-0150
     "RUSTSEC-2026-0150",
+
+    # RUSTSEC-2026-0194: quick-xml quadratic duplicate-attribute
+    # check. Fixed in 0.41.0, semver-incompatible with the 0.39.2
+    # we get transitively via wayland-scanner (build-time codegen)
+    # and zbus_xml. Neither path parses attacker-controlled XML at
+    # runtime, so exposure is low.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0194
+    "RUSTSEC-2026-0194",
+
+    # RUSTSEC-2026-0195: quick-xml unbounded namespace allocation
+    # in NsReader. Same inclusion path and rationale as
+    # RUSTSEC-2026-0194 above.
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0195
+    "RUSTSEC-2026-0195",
+
+    # RUSTSEC-2026-0192: ttf-parser unmaintained. Reaches us via
+    # egui's font stack (ab_glyph -> owned_ttf_parser). No upstream
+    # fix until egui migrates (skrifa is the suggested successor).
+    # Tracked in PLAN-supply-chain-followups.md.
+    # https://rustsec.org/advisories/RUSTSEC-2026-0192
+    "RUSTSEC-2026-0192",
 
     # Yanked: aes 0.8.4.
     # Transitive via webrtc -> aes-gcm 0.10.3 -> aes 0.8.4 (and
