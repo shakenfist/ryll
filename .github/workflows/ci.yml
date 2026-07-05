@@ -44,6 +44,59 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # Builds the cargo-fuzz targets in shakenfist-spice-protocol/fuzz and
+  # smoke-runs each for a few seconds. This is a build-and-doesn't-panic
+  # gate, not a real fuzz campaign -- long-running coverage-guided fuzzing
+  # is tracked separately in shakenfist/ryll#135. The fuzz crate is its own
+  # detached workspace (see fuzz/Cargo.toml's `[workspace]` table) so it
+  # needs its own toolchain/cache/dependency install, independent of the
+  # `lint` and `build` jobs above.
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-fuzz-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password]
+    steps:
+      - uses: actions/checkout@v7
+
+      # cargo-fuzz needs nightly for coverage-instrumented builds.
+      # rustfmt is requested explicitly for the fuzz-crate format check
+      # below (bare nightly does not include it).
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz-${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake libssl-dev
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # The fuzz crate is a detached workspace, so the top-level lint job's
+      # `cargo fmt --all --check` does not reach it. Format-check it here.
+      - name: Check fuzz formatting
+        working-directory: shakenfist-spice-protocol/fuzz
+        run: cargo +nightly fmt --check
+
+      - name: Build fuzz target
+        working-directory: shakenfist-spice-protocol
+        run: cargo +nightly fuzz build ${{ matrix.target }}
+
+      - name: Smoke-run fuzz target
+        working-directory: shakenfist-spice-protocol
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=30 -runs=100000
+
   build:
     name: Build (${{ matrix.name }})
     strategy:

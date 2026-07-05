@@ -91,6 +91,13 @@ impl SpiceError {
             _ => SpiceError::Error,
         }
     }
+
+    /// Wire value for this error code, the inverse of
+    /// [`from_u32`](Self::from_u32). Needed by the server role to
+    /// serialise a `SpiceLinkReply` error field.
+    pub fn to_u32(self) -> u32 {
+        self as u32
+    }
 }
 
 /// Capability flags
@@ -512,6 +519,27 @@ impl SpiceVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spice_error_to_u32_round_trips() {
+        // Every defined code must survive to_u32 -> from_u32. The
+        // unmapped-value fallback of from_u32 (-> Error) is deliberately
+        // not part of this round-trip contract.
+        for err in [
+            SpiceError::Ok,
+            SpiceError::Error,
+            SpiceError::InvalidMagic,
+            SpiceError::InvalidData,
+            SpiceError::VersionMismatch,
+            SpiceError::NeedSecured,
+            SpiceError::NeedUnsecured,
+            SpiceError::PermissionDenied,
+            SpiceError::BadConnectionId,
+            SpiceError::ChannelUnavailable,
+        ] {
+            assert_eq!(SpiceError::from_u32(err.to_u32()), err);
+        }
+    }
 
     #[test]
     fn spice_visibility_from_u32_round_trips() {

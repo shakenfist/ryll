@@ -6179,6 +6179,7 @@ dependencies = [
  "serde",
  "sha1 0.10.6",
  "socket2 0.6.4",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "tracing",

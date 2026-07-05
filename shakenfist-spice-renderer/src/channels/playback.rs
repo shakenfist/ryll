@@ -577,6 +577,10 @@ impl PlaybackChannel {
                             use tokio::io::AsyncReadExt;
                             s.read(&mut chunk).await
                         }
+                        SpiceStream::TlsServer(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
                     }
                 } => Some(result),
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
@@ -989,6 +993,10 @@ impl PlaybackChannel {
                 s.write_all(data).await?;
             }
             SpiceStream::Tls(s) => {
+                use tokio::io::AsyncWriteExt;
+                s.write_all(data).await?;
+            }
+            SpiceStream::TlsServer(s) => {
                 use tokio::io::AsyncWriteExt;
                 s.write_all(data).await?;
             }

@@ -1,0 +1,46 @@
+[package]
+name = "shakenfist-spice-protocol-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Only needed to name `RsaPrivateKey` in the `fuzz_decrypt_password` target's
+# `OnceLock` static -- the key itself is generated via the parent crate's own
+# `generate_ticket_keypair()`, never constructed directly here. Pinned to the
+# same "0.9" the parent crate uses (see ../Cargo.toml).
+rsa = "0.9"
+
+[dependencies.shakenfist-spice-protocol]
+path = ".."
+
+# Detach this crate from the parent Cargo workspace. cargo-fuzz needs
+# nightly and its own dependency resolution; without this empty
+# `[workspace]` table, `cargo build --workspace` / `cargo test
+# --workspace` on stable would try (and fail) to build this crate.
+[workspace]
+
+[[bin]]
+name = "fuzz_link_mess_parse"
+path = "fuzz_targets/fuzz_link_mess_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_link_reply_parse"
+path = "fuzz_targets/fuzz_link_reply_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_decrypt_password"
+path = "fuzz_targets/fuzz_decrypt_password.rs"
+test = false
+doc = false
+bench = false

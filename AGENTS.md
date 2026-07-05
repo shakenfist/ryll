@@ -591,6 +591,20 @@ Adding a new ryll-side concern that channels need to call into:
    `shakenfist-spice-protocol/src/constants.rs`
 3. Channel-specific logic in
    `shakenfist-spice-renderer/src/channels/*.rs`
+4. Link handshake and auth in
+   `shakenfist-spice-protocol/src/link.rs` — both the client
+   role (`perform_link`, `perform_auth`, `encrypt_password`)
+   and the server/proxy role (`read_link_mess`,
+   `send_link_reply`, `read_auth_ticket`, `send_auth_result`,
+   `generate_ticket_keypair`, `decrypt_password`). The
+   kerbside SPICE proxy rewrite consumes the server role.
+5. Parsers of untrusted wire input use the `BoundedReader`
+   in `shakenfist-spice-protocol/src/reader.rs` (bounds- and
+   overflow-checked, panic-free) rather than ad-hoc slicing.
+   New link/message parsers should ship with a fuzz target
+   under `shakenfist-spice-protocol/fuzz/` — see
+   shakenfist/ryll#135 (broaden coverage) and #136 (retrofit
+   existing parsers onto `BoundedReader`).
 
 ### Inspecting a `--capture` pcap
 

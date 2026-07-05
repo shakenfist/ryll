@@ -198,6 +198,10 @@ impl UsbredirChannel {
                             use tokio::io::AsyncReadExt;
                             s.read(&mut chunk).await
                         }
+                        SpiceStream::TlsServer(s) => {
+                            use tokio::io::AsyncReadExt;
+                            s.read(&mut chunk).await
+                        }
                     };
                     n.map(|n| (n, chunk))
                 } => {

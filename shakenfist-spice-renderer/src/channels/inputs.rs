@@ -230,6 +230,10 @@ impl InputsChannel {
                         use tokio::io::AsyncReadExt;
                         s.read(&mut chunk).await?
                     }
+                    SpiceStream::TlsServer(s) => {
+                        use tokio::io::AsyncReadExt;
+                        s.read(&mut chunk).await?
+                    }
                 };
                 if n > 0 {
                     byte_counter.add(n as u64);
@@ -368,6 +372,10 @@ impl InputsChannel {
                 s.read(&mut chunk).await?
             }
             SpiceStream::Tls(s) => {
+                use tokio::io::AsyncReadExt;
+                s.read(&mut chunk).await?
+            }
+            SpiceStream::TlsServer(s) => {
                 use tokio::io::AsyncReadExt;
                 s.read(&mut chunk).await?
             }
