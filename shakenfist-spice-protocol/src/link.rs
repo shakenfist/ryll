@@ -530,6 +530,12 @@ pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>>
 /// Returns the private key and its DER SubjectPublicKeyInfo encoding
 /// (exactly 162 bytes for the 1024-bit key SPICE uses), suitable for the
 /// `pub_key` field of a [`SpiceLinkReply`].
+///
+/// Generate a fresh keypair for every connection and never reuse one. The
+/// `rsa` crate's decryption is not constant-time (RUSTSEC-2023-0071, the
+/// "Marvin" attack), so reusing a key across many decryptions would expose a
+/// timing side-channel. A per-connection key limits an attacker to a single
+/// decryption per key, far below what the attack requires.
 pub fn generate_ticket_keypair() -> Result<(RsaPrivateKey, Vec<u8>)> {
     let mut rng = OsRng;
 
@@ -684,6 +690,12 @@ where
 /// The declared `size` is checked against [`MAX_LINK_MESSAGE_SIZE`] *before*
 /// allocating the body buffer, so a hostile client cannot induce a huge
 /// speculative allocation with an oversized length field.
+///
+/// This driver bounds *memory* but not *time*: `read_exact` will wait
+/// indefinitely for a slow or stalled peer. Callers accepting untrusted
+/// connections (e.g. a proxy accept loop) must impose an I/O timeout — for
+/// example `tokio::time::timeout` — and cap the number of concurrent
+/// connections; these primitives deliberately leave that policy to the caller.
 ///
 /// # Errors
 ///
@@ -1354,5 +1366,34 @@ mod tests {
         );
 
         client.await.expect("client task panicked");
+    }
+
+    /// `read_link_mess` must reject an oversized declared `size` from the
+    /// 16-byte header *before* trying to read (and allocate) the body — the
+    /// DoS guard for a server accepting untrusted connections. We write only
+    /// a header declaring a body far larger than `MAX_LINK_MESSAGE_SIZE` and
+    /// never send a body; the call must return an error rather than block
+    /// waiting for gigabytes that will never arrive.
+    #[tokio::test]
+    async fn read_link_mess_rejects_oversized_size_before_reading_body() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(64);
+
+        // A well-formed header (magic, version) but a hostile size field.
+        let mut header = Vec::new();
+        header.extend_from_slice(SPICE_MAGIC);
+        header.extend_from_slice(&SPICE_VERSION_MAJOR.to_le_bytes());
+        header.extend_from_slice(&SPICE_VERSION_MINOR.to_le_bytes());
+        header.extend_from_slice(&u32::MAX.to_le_bytes()); // declared body size
+        client_end.write_all(&header).await.expect("write header");
+        client_end.flush().await.expect("flush");
+        // Deliberately send no body and drop the client so any attempt to read
+        // the body would see EOF rather than hang.
+        drop(client_end);
+
+        let result = read_link_mess(&mut server_end).await;
+        assert!(
+            result.is_err(),
+            "read_link_mess must reject an oversized declared size"
+        );
     }
 }

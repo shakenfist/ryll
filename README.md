@@ -405,7 +405,7 @@ native TLS) have landed. Quick-start: `docs/web-frontend.md`.
 | Crate | Role |
 |-------|------|
 | `ryll` | The binary: egui GUI, headless runner, CLI, Ctrl+C, trait impls for host-side concerns (capture, notifications, clipboard, USB devices, WebDAV server) |
-| `shakenfist-spice-protocol` | Protocol constants, message framing, handshake, auth, warn-once gap registry |
+| `shakenfist-spice-protocol` | Protocol constants, message framing, link handshake and auth for both the client and server/proxy roles, the `BoundedReader` for panic-free parsing of untrusted input, warn-once gap registry. Fuzz targets for the internet-facing parsers live in `shakenfist-spice-protocol/fuzz/` (a detached workspace, run under nightly `cargo fuzz`) |
 | `shakenfist-spice-compression` | GLZ/LZ decompression, shared GLZ dictionary (cross-channel), per-platform MJPEG decoders (ImageIO/WIC/VA-API with fallback to libjpeg-turbo and pure-Rust decoder); see `docs/plans/PLAN-stream-caps-and-flap.md` for platform decoder details |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
