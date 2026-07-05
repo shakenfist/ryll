@@ -29,6 +29,10 @@ ignore = [
     # PLAN-supply-chain-followups.md item 4.
     "RUSTSEC-2025-0134",
 
+    # audiopus_sys unmaintained; CMake 4.0 workaround carried in CI.
+    # See PLAN-supply-chain-followups.md item 5.
+    "RUSTSEC-2026-0150",
+
     # quick-xml 0.39.2 duplicate-attribute and namespace-allocation
     # DoS. Fixed in 0.41.0 (semver-incompatible); transitive via
     # wayland-scanner and zbus_xml, neither of which parses
@@ -36,4 +40,9 @@ ignore = [
     # PLAN-supply-chain-followups.md item 6.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
+
+    # ttf-parser unmaintained; transitive via egui's font stack
+    # (ab_glyph -> owned_ttf_parser). Nothing to change until egui
+    # migrates. See PLAN-supply-chain-followups.md item 7.
+    "RUSTSEC-2026-0192",
 ]

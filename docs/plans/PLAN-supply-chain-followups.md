@@ -143,6 +143,17 @@ below. When an ignore is resolved, delete both the
   Wayland protocol definitions at build time or D-Bus
   introspection replies from the local session bus; both
   imply the machine is already compromised.
+- **Runtime path check (July 2026):** `zbus_xml` enters the
+  tree only via `zbus-lockstep` / `zbus-lockstep-macros`,
+  whose sole dependent is `atspi-common` (accesskit's
+  AT-SPI backend). In atspi-common 0.13.0 every
+  `zbus_lockstep` call sits inside a `#[cfg(test)]` module,
+  and the `#[validate]` attribute is a proc macro that
+  parses the AT-SPI introspection XML vendored in the crate
+  at build/test time. The runtime AT-SPI wiring
+  (accesskit_unix -> atspi -> zbus) never calls into
+  `zbus_xml`'s parsing path, so the low-exposure rationale
+  above is confirmed, not assumed.
 - **Action plan:**
   1. Watch `wayland-scanner` (wayland-rs) and `zbus_xml`
      (zbus) releases for quick-xml >= 0.41 adoption.
