@@ -98,13 +98,12 @@ impl ByteBoundedLru {
     /// `bytes <= cap_bytes`, then returns either
     /// [`InsertOutcome::Inserted`] or
     /// [`InsertOutcome::InsertedAfterEviction`].
-
-    // NOTE(mikal): while the implementation here looks like it would
-    // temporarily overshoot the maximum size of the cache, the new entry
-    // is passed value so any overshoot is accounted for in the memory
-    // footprint of the caller of this method. This implementation is also
-    // simpler and therefore safer than evicting items before insertion.
     pub fn insert(&mut self, key: u64, value: Vec<u8>) -> InsertOutcome {
+        // NOTE(mikal): while the implementation here looks like it would
+        // temporarily overshoot the maximum size of the cache, the new entry
+        // is passed value so any overshoot is accounted for in the memory
+        // footprint of the caller of this method. This implementation is also
+        // simpler and therefore safer than evicting items before insertion.
         let incoming_bytes = value.len();
 
         // Refuse entries that can never fit.
