@@ -1,0 +1,37 @@
+{
+  "clientRemote": "https://github.com/shakenfist/ryll",
+  "gitRemote": "https://github.com/shakenfist/ryll",
+  "gitSha": "9574f4f2fe46536c1d74be5d9b5bbcebdf352e02",
+  "treeEntries": [
+    {
+      "label": "saturating_sub() is equivalent to max(0, ...) -- that is, it does not allow negative numbers",
+      "entryType": 1,
+      "author": "mikal",
+      "details": {
+        "severity": "",
+        "difficulty": "",
+        "type": "",
+        "description": "",
+        "exploit": "",
+        "recommendation": "Short term, \nLong term, \n"
+      },
+      "locations": [
+        {
+          "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+          "startLine": 114,
+          "endLine": 114,
+          "label": "",
+          "description": ""
+        }
+      ]
+    }
+  ],
+  "auditedFiles": [
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    }
+  ],
+  "partiallyAuditedFiles": [],
+  "resolvedEntries": []
+}

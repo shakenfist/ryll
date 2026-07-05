@@ -98,6 +98,12 @@ impl ByteBoundedLru {
     /// `bytes <= cap_bytes`, then returns either
     /// [`InsertOutcome::Inserted`] or
     /// [`InsertOutcome::InsertedAfterEviction`].
+
+    // NOTE(mikal): while the implementation here looks like it would
+    // temporarily overshoot the maximum size of the cache, the new entry
+    // is passed value so any overshoot is accounted for in the memory
+    // footprint of the caller of this method. This implementation is also
+    // simpler and therefore safer than evicting items before insertion.
     pub fn insert(&mut self, key: u64, value: Vec<u8>) -> InsertOutcome {
         let incoming_bytes = value.len();
 
@@ -110,6 +116,12 @@ impl ByteBoundedLru {
 
         // `put` returns the previous value if the key already existed,
         // so we can subtract the old byte count from our running total.
+        //
+        // NOTE(mikal): that is, the intent of this block is to reduce the
+        // number of bytes recorded as in the cache by the size of the
+        // evicted element (if any), and then increase it by the size of
+        // the new element. saturating_sub() here ensures that we never
+        // experience a negative number as part of the subtraction.
         let displaced = self.inner.put(key, value);
         if let Some(old_val) = &displaced {
             self.bytes = self.bytes.saturating_sub(old_val.len());
@@ -122,8 +134,22 @@ impl ByteBoundedLru {
 
         while self.bytes > self.cap_bytes {
             match self.inner.pop_lru() {
-                // Should not happen; cache has the entry we just inserted.
-                None => break,
+                // Should not happen: the cache still holds the entry we just
+                // inserted and incoming_bytes <= cap_bytes, so running out of
+                // entries while bytes > cap_bytes means the byte accounting
+                // has drifted from the real cache contents.  Reset the
+                // counter to match the (now empty) cache so the drift does
+                // not become permanent.
+                None => {
+                    debug_assert!(
+                        false,
+                        "byte accounting drift: cache empty but bytes = {} (cap_bytes = {})",
+                        self.bytes,
+                        self.cap_bytes
+                    );
+                    self.bytes = 0;
+                    break;
+                }
                 Some((_k, v)) => {
                     let n = v.len();
                     self.bytes = self.bytes.saturating_sub(n);
