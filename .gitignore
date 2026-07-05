@@ -12,7 +12,9 @@
 # IDE
 .idea/
 *.iml
-.vscode/
+# Ignore VS Code settings, but keep weaudit review files.
+.vscode/*
+!.vscode/*.weaudit
 
 # OS
 .DS_Store
