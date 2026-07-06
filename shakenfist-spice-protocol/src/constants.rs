@@ -189,6 +189,9 @@ pub mod main_server {
     pub const WAIT_FOR_CHANNELS: u16 = 5;
     pub const DISCONNECTING: u16 = 6;
     pub const NOTIFY: u16 = 7;
+    // Channel-specific opcodes from enums.h SPICE_MSG_MAIN_* (101+).
+    pub const MIGRATE_BEGIN: u16 = 101;
+    pub const MIGRATE_CANCEL: u16 = 102;
     pub const INIT: u16 = 103;
     pub const CHANNELS_LIST: u16 = 104;
     pub const MOUSE_MODE: u16 = 105;
@@ -197,6 +200,14 @@ pub mod main_server {
     pub const AGENT_DISCONNECTED: u16 = 108;
     pub const AGENT_DATA: u16 = 109;
     pub const AGENT_TOKEN: u16 = 110;
+    pub const MIGRATE_SWITCH_HOST: u16 = 111;
+    pub const MIGRATE_END: u16 = 112;
+    pub const NAME: u16 = 113;
+    pub const UUID: u16 = 114;
+    pub const AGENT_CONNECTED_TOKENS: u16 = 115;
+    pub const MIGRATE_BEGIN_SEAMLESS: u16 = 116;
+    pub const MIGRATE_DST_SEAMLESS_ACK: u16 = 117;
+    pub const MIGRATE_DST_SEAMLESS_NACK: u16 = 118;
 }
 
 /// Main channel message types (client -> server)
@@ -207,11 +218,19 @@ pub mod main_client {
     pub const MIGRATE_FLUSH_MARK: u16 = 4;
     pub const MIGRATE_DATA: u16 = 5;
     pub const DISCONNECTING: u16 = 6;
+    // Channel-specific opcodes from enums.h SPICE_MSGC_MAIN_* (101+).
+    pub const CLIENT_INFO: u16 = 101;
+    pub const MIGRATE_CONNECTED: u16 = 102;
+    pub const MIGRATE_CONNECT_ERROR: u16 = 103;
     pub const ATTACH_CHANNELS: u16 = 104;
     pub const MOUSE_MODE_REQUEST: u16 = 105;
     pub const AGENT_START: u16 = 106;
     pub const AGENT_DATA: u16 = 107;
     pub const AGENT_TOKEN: u16 = 108;
+    pub const MIGRATE_END: u16 = 109;
+    pub const MIGRATE_DST_DO_SEAMLESS: u16 = 110;
+    pub const MIGRATE_CONNECTED_SEAMLESS: u16 = 111;
+    pub const QUALITY_INDICATOR: u16 = 112;
 }
 
 /// Mouse mode constants
@@ -227,7 +246,9 @@ pub mod display_server {
     pub const RESET: u16 = 103;
     pub const COPY_BITS: u16 = 104;
     pub const INVALIDATE_LIST: u16 = 105;
-    pub const INVAL_ALL_PIXMAPS: u16 = 108;
+    pub const INVAL_ALL_PIXMAPS: u16 = 106;
+    pub const INVAL_PALETTE: u16 = 107;
+    pub const INVAL_ALL_PALETTES: u16 = 108;
     pub const STREAM_CREATE: u16 = 122;
     pub const STREAM_DATA: u16 = 123;
     pub const STREAM_CLIP: u16 = 124;
@@ -257,6 +278,8 @@ pub mod display_server {
     pub const STREAM_ACTIVATE_REPORT: u16 = 319;
     pub const GL_SCANOUT_UNIX: u16 = 320;
     pub const GL_DRAW: u16 = 321;
+    pub const QUALITY_INDICATOR: u16 = 322;
+    pub const GL_SCANOUT2_UNIX: u16 = 323;
 
     // Common
     pub const SET_ACK: u16 = 3;
