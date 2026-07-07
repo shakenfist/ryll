@@ -341,6 +341,8 @@ pub mod message_names {
             main_server::WAIT_FOR_CHANNELS => "wait_for_channels",
             main_server::DISCONNECTING => "disconnecting",
             main_server::NOTIFY => "notify",
+            main_server::MIGRATE_BEGIN => "migrate_begin",
+            main_server::MIGRATE_CANCEL => "migrate_cancel",
             main_server::INIT => "init",
             main_server::CHANNELS_LIST => "channels_list",
             main_server::MOUSE_MODE => "mouse_mode",
@@ -349,6 +351,14 @@ pub mod message_names {
             main_server::AGENT_DISCONNECTED => "agent_disconnected",
             main_server::AGENT_DATA => "agent_data",
             main_server::AGENT_TOKEN => "agent_token",
+            main_server::MIGRATE_SWITCH_HOST => "migrate_switch_host",
+            main_server::MIGRATE_END => "migrate_end",
+            main_server::NAME => "name",
+            main_server::UUID => "uuid",
+            main_server::AGENT_CONNECTED_TOKENS => "agent_connected_tokens",
+            main_server::MIGRATE_BEGIN_SEAMLESS => "migrate_begin_seamless",
+            main_server::MIGRATE_DST_SEAMLESS_ACK => "migrate_dst_seamless_ack",
+            main_server::MIGRATE_DST_SEAMLESS_NACK => "migrate_dst_seamless_nack",
             _ => "unknown",
         }
     }
@@ -359,11 +369,18 @@ pub mod message_names {
             main_client::MIGRATE_FLUSH_MARK => "migrate_flush_mark",
             main_client::MIGRATE_DATA => "migrate_data",
             main_client::DISCONNECTING => "disconnecting",
+            main_client::CLIENT_INFO => "client_info",
+            main_client::MIGRATE_CONNECTED => "migrate_connected",
+            main_client::MIGRATE_CONNECT_ERROR => "migrate_connect_error",
             main_client::ATTACH_CHANNELS => "attach_channels",
             main_client::MOUSE_MODE_REQUEST => "mouse_mode_request",
             main_client::AGENT_START => "agent_start",
             main_client::AGENT_DATA => "agent_data",
             main_client::AGENT_TOKEN => "agent_token",
+            main_client::MIGRATE_END => "migrate_end",
+            main_client::MIGRATE_DST_DO_SEAMLESS => "migrate_dst_do_seamless",
+            main_client::MIGRATE_CONNECTED_SEAMLESS => "migrate_connected_seamless",
+            main_client::QUALITY_INDICATOR => "quality_indicator",
             _ => common_client(msg_type).unwrap_or("unknown"),
         }
     }
@@ -377,6 +394,8 @@ pub mod message_names {
             display_server::COPY_BITS => "copy_bits",
             display_server::INVALIDATE_LIST => "invalidate_list",
             display_server::INVAL_ALL_PIXMAPS => "inval_all_pixmaps",
+            display_server::INVAL_PALETTE => "inval_palette",
+            display_server::INVAL_ALL_PALETTES => "inval_all_palettes",
             display_server::STREAM_CREATE => "stream_create",
             display_server::STREAM_DATA => "stream_data",
             display_server::STREAM_CLIP => "stream_clip",
@@ -402,6 +421,8 @@ pub mod message_names {
             display_server::STREAM_ACTIVATE_REPORT => "stream_activate_report",
             display_server::GL_SCANOUT_UNIX => "gl_scanout_unix",
             display_server::GL_DRAW => "gl_draw",
+            display_server::QUALITY_INDICATOR => "quality_indicator",
+            display_server::GL_SCANOUT2_UNIX => "gl_scanout2_unix",
             display_server::SET_ACK => "set_ack",
             display_server::PING => "ping",
             display_server::NOTIFY => "notify",
@@ -552,7 +573,7 @@ mod tests {
     use super::{
         intern_key, log_unknown_once, message_names, register_gap_observer, warn_once_keys,
     };
-    use crate::constants::{display_client, main_server};
+    use crate::constants::{display_client, display_server, main_client, main_server};
 
     // The registry is process-global and cargo-test runs tests in
     // parallel, so assertions here key off specific literals unique
@@ -722,6 +743,111 @@ mod tests {
     fn display_client_stream_report_const_and_name() {
         assert_eq!(display_client::STREAM_REPORT, 102);
         assert_eq!(message_names::display_client(102), "stream_report");
+    }
+
+    // The main_server (SPICE_MSG_MAIN_*) table was completed against
+    // enums.h; a downstream firewall treats a "unknown" name as an
+    // invalid message, so every opcode enums.h defines must resolve to
+    // a real name. Values are from spice-protocol/spice/enums.h
+    // (MIGRATE_BEGIN=101, auto-incrementing to
+    // MIGRATE_DST_SEAMLESS_NACK=118).
+    #[test]
+    fn main_server_full_opcode_table_const_and_name() {
+        for (op, value, name) in [
+            (main_server::MIGRATE_BEGIN, 101, "migrate_begin"),
+            (main_server::MIGRATE_CANCEL, 102, "migrate_cancel"),
+            (main_server::MIGRATE_SWITCH_HOST, 111, "migrate_switch_host"),
+            (main_server::MIGRATE_END, 112, "migrate_end"),
+            (main_server::NAME, 113, "name"),
+            (main_server::UUID, 114, "uuid"),
+            (
+                main_server::AGENT_CONNECTED_TOKENS,
+                115,
+                "agent_connected_tokens",
+            ),
+            (
+                main_server::MIGRATE_BEGIN_SEAMLESS,
+                116,
+                "migrate_begin_seamless",
+            ),
+            (
+                main_server::MIGRATE_DST_SEAMLESS_ACK,
+                117,
+                "migrate_dst_seamless_ack",
+            ),
+            (
+                main_server::MIGRATE_DST_SEAMLESS_NACK,
+                118,
+                "migrate_dst_seamless_nack",
+            ),
+        ] {
+            assert_eq!(op, value, "unexpected value for {}", name);
+            assert_eq!(message_names::main_server(op), name);
+            assert_ne!(message_names::main_server(op), "unknown");
+        }
+    }
+
+    // main_client (SPICE_MSGC_MAIN_*) completed against enums.h
+    // (CLIENT_INFO=101 auto-incrementing to QUALITY_INDICATOR=112).
+    // CLIENT_INFO in particular was the motivating gap: a real message
+    // being rejected as "unknown".
+    #[test]
+    fn main_client_full_opcode_table_const_and_name() {
+        assert_eq!(main_client::CLIENT_INFO, 101);
+        assert_eq!(
+            message_names::main_client(main_client::CLIENT_INFO),
+            "client_info"
+        );
+        for (op, value, name) in [
+            (main_client::CLIENT_INFO, 101, "client_info"),
+            (main_client::MIGRATE_CONNECTED, 102, "migrate_connected"),
+            (
+                main_client::MIGRATE_CONNECT_ERROR,
+                103,
+                "migrate_connect_error",
+            ),
+            (main_client::MIGRATE_END, 109, "migrate_end"),
+            (
+                main_client::MIGRATE_DST_DO_SEAMLESS,
+                110,
+                "migrate_dst_do_seamless",
+            ),
+            (
+                main_client::MIGRATE_CONNECTED_SEAMLESS,
+                111,
+                "migrate_connected_seamless",
+            ),
+            (main_client::QUALITY_INDICATOR, 112, "quality_indicator"),
+        ] {
+            assert_eq!(op, value, "unexpected value for {}", name);
+            assert_eq!(message_names::main_client(op), name);
+            assert_ne!(message_names::main_client(op), "unknown");
+        }
+    }
+
+    // Guard the INVAL mislabel fix: enums.h assigns 106=INVAL_ALL_PIXMAPS,
+    // 107=INVAL_PALETTE, 108=INVAL_ALL_PALETTES consecutively. The crate
+    // previously defined INVAL_ALL_PIXMAPS=108 (really INVAL_ALL_PALETTES).
+    #[test]
+    fn display_server_inval_opcodes_const_and_name() {
+        assert_eq!(display_server::INVAL_ALL_PIXMAPS, 106);
+        assert_eq!(display_server::INVAL_PALETTE, 107);
+        assert_eq!(display_server::INVAL_ALL_PALETTES, 108);
+        assert_eq!(message_names::display_server(106), "inval_all_pixmaps");
+        assert_eq!(message_names::display_server(107), "inval_palette");
+        assert_eq!(message_names::display_server(108), "inval_all_palettes");
+    }
+
+    // display_server (SPICE_MSG_DISPLAY_*) gained QUALITY_INDICATOR=322
+    // and GL_SCANOUT2_UNIX=323 from enums.h.
+    #[test]
+    fn display_server_gl_and_quality_const_and_name() {
+        assert_eq!(display_server::QUALITY_INDICATOR, 322);
+        assert_eq!(display_server::GL_SCANOUT2_UNIX, 323);
+        assert_eq!(message_names::display_server(322), "quality_indicator");
+        assert_eq!(message_names::display_server(323), "gl_scanout2_unix");
+        assert_ne!(message_names::display_server(322), "unknown");
+        assert_ne!(message_names::display_server(323), "unknown");
     }
 
     // Guard against regressions where the new multi-codec display
