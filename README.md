@@ -57,7 +57,10 @@ Pre-built `.deb` packages for Debian/Ubuntu are available from
 GitHub Actions CI builds and tests ryll on Linux (x86_64 + aarch64),
 macOS (Apple Silicon), and Windows (x86_64 + aarch64) on every push to
 `develop` and on pull requests. PRs also receive an automated code
-review via Claude Code.
+review via Claude Code. Changes that only touch code-review artifacts
+(`REVIEWS.md`, `.vscode/*.weaudit*`, `.vscode/review-scope.toml`) skip
+the CI and CodeQL workflows entirely; the supply-chain content
+scanners still run on them.
 
 Workflows in `.github/workflows/`:
 

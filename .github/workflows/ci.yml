@@ -1,10 +1,28 @@
 name: CI
 
+# Review-only changes (weaudit annotations and the rendered REVIEWS.md)
+# cannot affect the build, so skip this workflow for them. Keep this
+# list in sync with the .vscode whitelist in .gitignore and with
+# codeql-analysis.yml. Safe because no status checks are required by
+# branch protection — skipped workflows do not leave "expected" checks
+# blocking the merge. The supply-chain workflow still runs: gitleaks
+# and the bidi/zero-width scan check content, and review text is a
+# place secrets or unicode smuggling could land.
 on:
   push:
     branches: [develop]
+    paths-ignore:
+      - 'REVIEWS.md'
+      - '.vscode/*.weaudit'
+      - '.vscode/*.weaudit-shas.json'
+      - '.vscode/review-scope.toml'
   pull_request:
     branches: [develop]
+    paths-ignore:
+      - 'REVIEWS.md'
+      - '.vscode/*.weaudit'
+      - '.vscode/*.weaudit-shas.json'
+      - '.vscode/review-scope.toml'
   workflow_dispatch:
 
 permissions:
