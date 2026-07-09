@@ -38,7 +38,7 @@ repos:
         pass_filenames: true
 
   - repo: https://github.com/shakenfist/development
-    rev: 0957d15d7e2b29088470a0535980545383be6687
+    rev: ee6d4eab7cc341d5b48e3ea36c57ab87b209d3db
     hooks:
       - id: review-stamp
       - id: review-prune
