@@ -4,6 +4,18 @@
     "shakenfist-spice-compression/src/glz.rs": {
       "sha": "6600fc53e28bcfbc4192828037251fb291fe1a8d",
       "date": "2026-07-05"
+    },
+    "shakenfist-spice-renderer/src/usb/mod.rs": {
+      "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
+      "date": "2026-07-09"
+    },
+    "shakenfist-spice-renderer/src/usb/real.rs": {
+      "sha": "560381d9c53fa63b95c2d3cfef6ed2cce75d6012",
+      "date": "2026-07-09"
+    },
+    "shakenfist-spice-renderer/src/usb/virtual_msc.rs": {
+      "sha": "5818f326e3b839325e43aeff70c77fc1ac5e0393",
+      "date": "2026-07-09"
     }
   }
 }

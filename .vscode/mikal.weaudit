@@ -30,6 +30,18 @@
     {
       "path": "shakenfist-spice-compression/src/glz.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb/real.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb/virtual_msc.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
