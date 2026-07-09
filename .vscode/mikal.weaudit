@@ -32,15 +32,23 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/usb/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/usb/real.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-renderer/src/usb/virtual_msc.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb",
       "author": "mikal"
     }
   ],

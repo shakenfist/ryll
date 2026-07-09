@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
+      "sha": "9949d37a339dccb6939ed53149b2c10810c47986",
+      "date": "2026-07-10"
+    },
     "shakenfist-spice-compression/src/glz.rs": {
       "sha": "6600fc53e28bcfbc4192828037251fb291fe1a8d",
       "date": "2026-07-05"
