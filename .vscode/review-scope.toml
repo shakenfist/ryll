@@ -1,0 +1,7 @@
+# Which files are subject to whole-file code review (see
+# shakenfist/development docs/code-review-tracking.md). Patterns are
+# fnmatch-style against repo-relative paths; '*' matches across
+# directory separators. An empty include list would mean all tracked
+# files.
+include = ['*.rs']
+exclude = []
