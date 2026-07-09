@@ -12,9 +12,12 @@
 # IDE
 .idea/
 *.iml
-# Ignore VS Code settings, but keep weaudit review files.
+# Ignore VS Code settings, but keep the review tracking state (see
+# shakenfist/development docs/code-review-tracking.md).
 .vscode/*
 !.vscode/*.weaudit
+!.vscode/*.weaudit-shas.json
+!.vscode/review-scope.toml
 
 # OS
 .DS_Store

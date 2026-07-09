@@ -1,3 +1,11 @@
+# The review tracking hooks need more than the default pre-commit
+# stage; make a plain "pre-commit install" set them all up.
+default_install_hook_types:
+  - pre-commit
+  - post-merge
+  - post-checkout
+  - post-rewrite
+
 repos:
   - repo: local
     hooks:
@@ -28,3 +36,9 @@ repos:
         entry: ./tools/check-bidi.sh
         language: script
         pass_filenames: true
+
+  - repo: https://github.com/shakenfist/development
+    rev: 0957d15d7e2b29088470a0535980545383be6687
+    hooks:
+      - id: review-stamp
+      - id: review-prune
