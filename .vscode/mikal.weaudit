@@ -32,15 +32,95 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/usb/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/usb/real.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-renderer/src/usb/virtual_msc.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/usb",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_link_mess_parse.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_link_reply_parse.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/.gitignore",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/Cargo.lock",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/jpeg.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/quic.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/README.md",
       "author": "mikal"
     }
   ],

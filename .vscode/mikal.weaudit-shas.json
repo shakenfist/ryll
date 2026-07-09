@@ -1,9 +1,73 @@
 {
   "version": 1,
   "files": {
+    "shakenfist-spice-compression/Cargo.toml": {
+      "sha": "9487df07002d9f7a7c2e577a46f772a3ebf7a1dc",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/README.md": {
+      "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
+      "sha": "9949d37a339dccb6939ed53149b2c10810c47986",
+      "date": "2026-07-10"
+    },
     "shakenfist-spice-compression/src/glz.rs": {
       "sha": "6600fc53e28bcfbc4192828037251fb291fe1a8d",
       "date": "2026-07-05"
+    },
+    "shakenfist-spice-compression/src/jpeg.rs": {
+      "sha": "52daa8310f08e63ea2de77cde8f4d733108ae85c",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/lib.rs": {
+      "sha": "acfe70b86a1b0cc1b537338bdb3f638fd74dd8bc",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/lz.rs": {
+      "sha": "6fe93535c1072a69e427c53960a4f40cfefac663",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/lz4.rs": {
+      "sha": "17e2f2c2e4e66c6e1a17938b615e9ce09535bd92",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/quic.rs": {
+      "sha": "6e93dea56cb55fe0714f83d99f646efa573f004d",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/video.rs": {
+      "sha": "aa15b7c1965b4bf21a4d353cea043634e62298b4",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/.gitignore": {
+      "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/Cargo.lock": {
+      "sha": "7971af05644f04854da2ab10073659529485c7e0",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
+      "sha": "52f49d3f0be2bd6945ef6032a51b45f4eef692ad",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
+      "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_link_mess_parse.rs": {
+      "sha": "4729ed8a3294d89479be471700631ae44de01e33",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_link_reply_parse.rs": {
+      "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/src/constants.rs": {
+      "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
+      "date": "2026-07-10"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
