@@ -1010,9 +1010,7 @@ mod tests {
         bytes[0] = b'X';
         assert_eq!(
             SpiceLinkMess::parse(&bytes).unwrap_err(),
-            LinkError::BadMagic {
-                found: [b'X', b'E', b'D', b'Q'],
-            }
+            LinkError::BadMagic { found: *b"XEDQ" }
         );
     }
 

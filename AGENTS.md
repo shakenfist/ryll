@@ -770,7 +770,9 @@ applies to all future webrtc-rs work:
   CI also runs `tools/web-smoke.sh` (plain + `--tls` variants) on Linux to
   verify `--web` mode startup and graceful shutdown. PRs also receive an
   automated code review via the shared `shakenfist/actions/review-pr-with-claude`
-  action.
+  action. Review-only changes (`REVIEWS.md`, `.vscode/*.weaudit*`,
+  `.vscode/review-scope.toml`) skip the CI and CodeQL workflows via
+  `paths-ignore`; the supply-chain content scanners still run on them.
 - **Bot-triggered workflows** for PR automation:
   `@shakenfist-bot please re-review`, `please address comments`,
   `please retest`
