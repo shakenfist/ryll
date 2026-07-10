@@ -122,6 +122,18 @@
     {
       "path": "shakenfist-spice-compression/README.md",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/link.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
