@@ -65,12 +65,20 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "10fb879db0d50ac09d11262762cecb6e4536c3f5",
+      "date": "2026-07-10"
+    },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
       "date": "2026-07-10"
     },
     "shakenfist-spice-protocol/src/lib.rs": {
       "sha": "de3032807f77b0cfa26ee82a179462f39ff72ca3",
+      "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "0577e0eca0253dfc370a839af0fcfd1fc6c270ec",
       "date": "2026-07-10"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
