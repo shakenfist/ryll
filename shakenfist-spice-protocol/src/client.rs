@@ -7,10 +7,11 @@ use tokio::net::TcpStream;
 use tokio_rustls::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
 };
+use tokio_rustls::rustls::client::WebPkiServerVerifier;
 use tokio_rustls::rustls::crypto::CryptoProvider;
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{
-    ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
+    CertificateError, ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
 };
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
@@ -31,8 +32,16 @@ use crate::{ChannelType, ConnectionConfig, SpiceError};
 /// this crate agnostic to the embedder's choice.
 #[derive(Debug)]
 struct SpiceCaVerifier {
-    roots: Arc<RootCertStore>,
+    webpki: Arc<WebPkiServerVerifier>,
     provider: Arc<CryptoProvider>,
+}
+
+impl SpiceCaVerifier {
+    fn new(roots: Arc<RootCertStore>, provider: Arc<CryptoProvider>) -> Result<Self> {
+        let webpki =
+            WebPkiServerVerifier::builder_with_provider(roots, provider.clone()).build()?;
+        Ok(SpiceCaVerifier { webpki, provider })
+    }
 }
 
 impl ServerCertVerifier for SpiceCaVerifier {
@@ -46,12 +55,7 @@ impl ServerCertVerifier for SpiceCaVerifier {
     ) -> std::result::Result<ServerCertVerified, Error> {
         // Verify the certificate chain against our CA roots, but
         // skip hostname checking (SPICE certs lack SAN extensions).
-        let verifier =
-            tokio_rustls::rustls::client::WebPkiServerVerifier::builder(self.roots.clone())
-                .build()
-                .map_err(|e| Error::General(format!("{}", e)))?;
-
-        match verifier.verify_server_cert(
+        match self.webpki.verify_server_cert(
             end_entity,
             intermediates,
             _server_name,
@@ -59,17 +63,17 @@ impl ServerCertVerifier for SpiceCaVerifier {
             now,
         ) {
             Ok(v) => Ok(v),
-            Err(e) => {
-                let msg = format!("{}", e);
-                if msg.contains("not valid for name") || msg.contains("NotValidForName") {
-                    info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
-                    Ok(ServerCertVerified::assertion())
-                } else {
-                    // Other errors (expired, unknown CA, bad signature) are
-                    // still fatal.
-                    Err(e)
-                }
+            // webpki only checks the name after the chain has validated,
+            // so a hostname mismatch means "valid chain, wrong name".
+            Err(Error::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
+            )) => {
+                info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
+                Ok(ServerCertVerified::assertion())
             }
+            // Other errors (expired, unknown CA, bad signature) are
+            // still fatal.
+            Err(e) => Err(e),
         }
     }
 
@@ -169,10 +173,7 @@ impl SpiceClient {
                     )
                 })?
                 .clone();
-            let verifier = SpiceCaVerifier {
-                roots: Arc::new(root_store),
-                provider,
-            };
+            let verifier = SpiceCaVerifier::new(Arc::new(root_store), provider)?;
             ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
