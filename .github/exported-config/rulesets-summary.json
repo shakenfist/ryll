@@ -1,6 +1,12 @@
 [
     {
         "enforcement": "active",
+        "id": 18708684,
+        "name": "Protect default branch history",
+        "target": "branch"
+    },
+    {
+        "enforcement": "active",
         "id": 14655450,
         "name": "Restrict releases",
         "target": "tag"
