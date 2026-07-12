@@ -1214,7 +1214,7 @@ impl MainChannel {
     /// is set once on a terminal path and then read by the
     /// disconnect-cause assembly.
     fn update_snapshot(&self) {
-        let mut snap = self.snapshot.lock().unwrap();
+        let mut snap = self.snapshot.lock().expect("lock poisoned");
         snap.session_id = self.session_id;
         snap.bytes_in = self.bytes_in;
         snap.bytes_out = self.bytes_out;

@@ -70,7 +70,7 @@ impl MmClock {
     /// time used by the bug-report visibility fields; pass
     /// `traffic.elapsed().as_secs_f64()` from the caller.
     pub fn set(&self, mm_time: u32, traffic_elapsed_secs: f64) {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("lock poisoned");
         inner.base_mm_time = mm_time;
         inner.base_instant = Instant::now();
         inner.set_count = inner.set_count.saturating_add(1);
@@ -97,7 +97,7 @@ impl MmClock {
     /// the duration of a single load + a `Duration` subtract;
     /// no allocation, no I/O.
     pub fn now(&self) -> u32 {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("lock poisoned");
         Self::compute_now(inner.base_mm_time, inner.base_instant, Instant::now())
     }
 
@@ -117,14 +117,14 @@ impl MmClock {
     /// Cumulative number of `set` calls since construction.
     /// Surfaced in `MainSnapshot::mm_time_set_count`.
     pub fn set_count(&self) -> u64 {
-        self.inner.lock().unwrap().set_count
+        self.inner.lock().expect("lock poisoned").set_count
     }
 
     /// Session-relative seconds at the most recent `set`. None
     /// until the first `set` lands. Surfaced in
     /// `MainSnapshot::last_mm_time_set_ts_secs`.
     pub fn last_set_ts_secs(&self) -> Option<f64> {
-        self.inner.lock().unwrap().last_set_ts_secs
+        self.inner.lock().expect("lock poisoned").last_set_ts_secs
     }
 }
 

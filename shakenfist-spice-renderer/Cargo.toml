@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Shared SPICE rendering substrate for ryll: software framebuffer, channel handlers, session orchestration."
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [features]
 # `audio` pulls in the cpal/opus/rtrb playback stack and the
 # `channels::playback` module that depends on them.  Default-on

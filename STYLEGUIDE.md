@@ -308,6 +308,27 @@ let output_size = (width as usize)
 - **Unknown message types**: log via `logging::log_unknown()` with a
   hex dump, then continue.
 
+### unwrap() policy
+
+Clippy's `unwrap_used` lint is enabled workspace-wide (`Cargo.toml`),
+with test code exempted via `allow-unwrap-in-tests` in `clippy.toml`.
+In production code:
+
+- **Never `unwrap()` on anything derived from outside the process**
+  (network input, config, files). Handle it per the rules above.
+- **Provably-infallible cases** use `expect("why this cannot fail")`
+  so the invariant is documented and the panic message is
+  self-explanatory. Established messages: `"lock poisoned"` for mutex
+  guards (escalating a poisoned lock is correct -- don't run on
+  possibly-corrupt shared state), `"length checked above"` for
+  slice-to-array conversions behind a length guard, and
+  `"write to Vec cannot fail"` for `io::Write` into a `Vec`.
+  For new length-prefixed writes prefer
+  `buf.extend_from_slice(&x.to_le_bytes())`, which is infallible.
+- **Guarded `Option` access** uses `if let` / `let-else`, not
+  an `is_some()` check followed by `unwrap()`.
+- **In tests, plain `unwrap()` is fine** -- a panic is a test failure.
+
 ## Events
 
 Channel handlers communicate with the UI via `ChannelEvent` variants

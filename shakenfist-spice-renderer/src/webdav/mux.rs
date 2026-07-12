@@ -56,8 +56,10 @@ impl MuxDemuxer {
             return None;
         }
 
-        let client_id = i64::from_le_bytes(self.buf[0..8].try_into().unwrap());
-        let data_size = u16::from_le_bytes(self.buf[8..10].try_into().unwrap()) as usize;
+        let client_id =
+            i64::from_le_bytes(self.buf[0..8].try_into().expect("length checked above"));
+        let data_size =
+            u16::from_le_bytes(self.buf[8..10].try_into().expect("length checked above")) as usize;
         let total_size = MUX_HEADER_SIZE + data_size;
 
         if self.buf.len() < total_size {

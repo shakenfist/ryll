@@ -859,7 +859,7 @@ impl InputsChannel {
 
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
-        let mut snap = self.snapshot.lock().unwrap();
+        let mut snap = self.snapshot.lock().expect("lock poisoned");
         snap.button_state = self.button_state;
         snap.motion_count = self.motion_count;
         snap.secs_since_last_key = self.last_key_time.map(|t| t.elapsed().as_secs_f64());
@@ -962,7 +962,9 @@ impl InputsChannel {
     async fn advance_paste(&mut self) -> Result<()> {
         // Check for cancellation before doing any work.
         {
-            let state = self.paste_state.as_ref().unwrap();
+            let Some(state) = self.paste_state.as_ref() else {
+                return Ok(());
+            };
             if state.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
                 let request_id = state.request_id.clone();
                 let reason = "paste cancelled (client disconnected)".to_string();
@@ -977,7 +979,9 @@ impl InputsChannel {
             }
         }
 
-        let state = self.paste_state.as_mut().unwrap();
+        let Some(state) = self.paste_state.as_mut() else {
+            return Ok(());
+        };
         let key = state.keys[state.index];
 
         match state.sub_step {
@@ -986,7 +990,9 @@ impl InputsChannel {
                     self.send_key_down(0x2A).await?;
                 }
                 self.send_key_down(key.press).await?;
-                let state = self.paste_state.as_mut().unwrap();
+                let Some(state) = self.paste_state.as_mut() else {
+                    return Ok(());
+                };
                 state.sub_step = PasteSubStep::Release;
                 state.next_fire = Instant::now() + state.half_delay;
             }
@@ -996,7 +1002,9 @@ impl InputsChannel {
                     self.send_key_up(0xAA).await?;
                 }
 
-                let state = self.paste_state.as_mut().unwrap();
+                let Some(state) = self.paste_state.as_mut() else {
+                    return Ok(());
+                };
                 state.index += 1;
 
                 if state.index >= state.keys.len() {
@@ -1430,8 +1438,8 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
             c
         };
 
-        // Safe to unwrap: pre-validation guarantees all characters are representable.
-        let (base, shift) = char_to_scancode(effective).unwrap();
+        let (base, shift) = char_to_scancode(effective)
+            .expect("pre-validation guarantees all characters are representable");
         keys.push(PasteKey {
             press: make_scancode(base, false),
             release: make_scancode(base, true),

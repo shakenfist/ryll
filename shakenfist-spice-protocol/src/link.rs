@@ -1,6 +1,6 @@
 /// SPICE link protocol - handshake and authentication
 use anyhow::{anyhow, Result};
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use rand::rngs::OsRng;
 use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
@@ -185,34 +185,34 @@ impl SpiceLinkMess {
         buf.extend_from_slice(SPICE_MAGIC);
 
         // Version
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MAJOR).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MINOR).unwrap();
+        buf.extend_from_slice(&SPICE_VERSION_MAJOR.to_le_bytes());
+        buf.extend_from_slice(&SPICE_VERSION_MINOR.to_le_bytes());
 
         // Size of following data
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, size as u32).unwrap();
+        buf.extend_from_slice(&(size as u32).to_le_bytes());
 
         // Connection ID
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, self.connection_id).unwrap();
+        buf.extend_from_slice(&self.connection_id.to_le_bytes());
 
         // Channel type and ID
-        WriteBytesExt::write_u8(&mut buf, self.channel_type).unwrap();
-        WriteBytesExt::write_u8(&mut buf, self.channel_id).unwrap();
+        buf.push(self.channel_type);
+        buf.push(self.channel_id);
 
         // Number of capabilities
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_common_caps).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_channel_caps).unwrap();
+        buf.extend_from_slice(&num_common_caps.to_le_bytes());
+        buf.extend_from_slice(&num_channel_caps.to_le_bytes());
 
         // Capabilities offset
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, caps_offset).unwrap();
+        buf.extend_from_slice(&caps_offset.to_le_bytes());
 
         // Common capabilities
         for cap in &self.common_caps {
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+            buf.extend_from_slice(&(*cap).to_le_bytes());
         }
 
         // Channel capabilities
         for cap in &self.channel_caps {
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+            buf.extend_from_slice(&(*cap).to_le_bytes());
         }
 
         buf
@@ -426,22 +426,22 @@ impl SpiceLinkReply {
 
         // Header: magic, version, size.
         buf.extend_from_slice(SPICE_MAGIC);
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MAJOR).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, SPICE_VERSION_MINOR).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, size as u32).unwrap();
+        buf.extend_from_slice(&SPICE_VERSION_MAJOR.to_le_bytes());
+        buf.extend_from_slice(&SPICE_VERSION_MINOR.to_le_bytes());
+        buf.extend_from_slice(&(size as u32).to_le_bytes());
 
         // Body.
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, self.error.to_u32()).unwrap();
+        buf.extend_from_slice(&self.error.to_u32().to_le_bytes());
         buf.extend_from_slice(&self.pub_key);
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_common_caps).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, num_channel_caps).unwrap();
-        WriteBytesExt::write_u32::<LittleEndian>(&mut buf, caps_offset).unwrap();
+        buf.extend_from_slice(&num_common_caps.to_le_bytes());
+        buf.extend_from_slice(&num_channel_caps.to_le_bytes());
+        buf.extend_from_slice(&caps_offset.to_le_bytes());
 
         for cap in &self.common_caps {
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+            buf.extend_from_slice(&(*cap).to_le_bytes());
         }
         for cap in &self.channel_caps {
-            WriteBytesExt::write_u32::<LittleEndian>(&mut buf, *cap).unwrap();
+            buf.extend_from_slice(&(*cap).to_le_bytes());
         }
 
         Ok(buf)
@@ -635,9 +635,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     // Send auth mechanism selection
-    let mut auth_select = Vec::new();
-    WriteBytesExt::write_u32::<LittleEndian>(&mut auth_select, AUTH_MECHANISM_SPICE).unwrap();
-    stream.write_all(&auth_select).await?;
+    stream
+        .write_all(&AUTH_MECHANISM_SPICE.to_le_bytes())
+        .await?;
 
     // Send encrypted password (or empty password)
     let encrypted = if let Some(pwd) = password {
@@ -712,7 +712,11 @@ where
     // Declared body size lives in bytes [12..16]. Reject an oversized value
     // before allocating the body buffer (DoS guard), reusing the same cap the
     // parser enforces.
-    let size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    let size = u32::from_le_bytes(
+        header[12..16]
+            .try_into()
+            .expect("4-byte slice of a 16-byte array"),
+    ) as usize;
     if size > MAX_LINK_MESSAGE_SIZE {
         return Err(LinkError::TooLarge {
             what: "link message size",
@@ -853,7 +857,11 @@ mod tests {
         assert_eq!(minor, SPICE_VERSION_MINOR);
 
         // Read the rest of the link message body.
-        let size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+        let size = u32::from_le_bytes(
+            header[12..16]
+                .try_into()
+                .expect("4-byte slice of a 16-byte array"),
+        ) as usize;
         let mut body = vec![0u8; size];
         server
             .read_exact(&mut body)

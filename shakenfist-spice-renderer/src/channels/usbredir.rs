@@ -395,7 +395,8 @@ impl UsbredirChannel {
         }
 
         let compression_type = payload[0];
-        let uncompressed_size = u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize;
+        let uncompressed_size =
+            u32::from_le_bytes(payload[1..5].try_into().expect("length checked above")) as usize;
         let compressed = &payload[5..];
 
         // Cap decompression size to prevent OOM from malicious server

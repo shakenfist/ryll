@@ -4,6 +4,9 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[lints.clippy]
+unwrap_used = "warn"
+
 [dependencies]
 mozjpeg = { version = "=0.10.13", features = ["with_simd"] }
 

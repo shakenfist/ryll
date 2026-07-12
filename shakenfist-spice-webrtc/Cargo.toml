@@ -8,6 +8,9 @@ repository.workspace = true
 description = "WebRTC bridge for the ryll SPICE client: SPICE-encoded video and audio over RTCPeerConnection, with a control datachannel for inputs and cursor overlay."
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 # WebRTC stack (umbrella crate; pinned to 0.17.1 which re-exports
 # rtp = "^0.17.1", matching the rtp = "0.17.1" used in Phase 2

@@ -195,11 +195,9 @@ impl SpiceClient {
         channel_id: u8,
     ) -> Result<SpiceStream> {
         // Determine if we should use TLS
-        let use_tls = self.config.tls_port.is_some();
-        let port = if use_tls {
-            self.config.tls_port.unwrap()
-        } else {
-            self.config.port
+        let (use_tls, port) = match self.config.tls_port {
+            Some(tls_port) => (true, tls_port),
+            None => (false, self.config.port),
         };
 
         let addr = format!("{}:{}", self.config.host, port);

@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), extracted from the ryll SPICE client."
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [features]
 default = ["quic", "glz", "lz", "lz4", "jpeg", "mozjpeg"]
 quic = []

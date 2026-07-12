@@ -215,8 +215,8 @@ pub(crate) fn build_tcp_frame(
         }
         return Vec::new();
     }
-    let mut ipv4 =
-        Ipv4Header::new(ip_payload_len as u16, 64, IpNumber::TCP, src_ip, dst_ip).unwrap();
+    let mut ipv4 = Ipv4Header::new(ip_payload_len as u16, 64, IpNumber::TCP, src_ip, dst_ip)
+        .expect("payload length checked above");
     ipv4.dont_fragment = true;
 
     tcp.checksum = tcp.calc_checksum_ipv4(&ipv4, payload).unwrap_or(0);
@@ -430,14 +430,15 @@ impl VideoWriter {
             }
         };
 
+        let fourcc = |s: &str| str::parse(s).expect("valid fourcc literal");
         let mp4_config = Mp4Config {
-            major_brand: str::parse("isom").unwrap(),
+            major_brand: fourcc("isom"),
             minor_version: 512,
             compatible_brands: vec![
-                str::parse("isom").unwrap(),
-                str::parse("iso2").unwrap(),
-                str::parse("avc1").unwrap(),
-                str::parse("mp41").unwrap(),
+                fourcc("isom"),
+                fourcc("iso2"),
+                fourcc("avc1"),
+                fourcc("mp41"),
             ],
             timescale: 1000,
         };
@@ -799,7 +800,7 @@ impl CaptureSession {
             // and Arc allocation overhead for these channels.
             return true;
         };
-        let tx_guard = self.queue_tx.lock().unwrap();
+        let tx_guard = self.queue_tx.lock().expect("lock poisoned");
         let Some(tx) = tx_guard.as_ref() else {
             // close() has run; treat as drop.
             return false;
@@ -821,7 +822,7 @@ impl CaptureSession {
     /// run on the encoder task; this method only allocates
     /// the `Arc<[u8]>` for the pixel buffer and `try_send`s.
     pub fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool {
-        let tx_guard = self.video_tx.lock().unwrap();
+        let tx_guard = self.video_tx.lock().expect("lock poisoned");
         let Some(tx) = tx_guard.as_ref() else {
             return false; // close() has run
         };
@@ -868,12 +869,12 @@ impl CaptureSession {
             return; // already closed
         }
         // Drop the pcap sender so its writer task drains and exits.
-        drop(self.queue_tx.lock().unwrap().take());
-        let _ = self.writer_handle.lock().unwrap().take();
+        drop(self.queue_tx.lock().expect("lock poisoned").take());
+        let _ = self.writer_handle.lock().expect("lock poisoned").take();
         // Drop the video sender so its encoder task drains,
         // finalises the MP4 (writes the moov atom), and exits.
-        drop(self.video_tx.lock().unwrap().take());
-        let _ = self.video_handle.lock().unwrap().take();
+        drop(self.video_tx.lock().expect("lock poisoned").take());
+        let _ = self.video_handle.lock().expect("lock poisoned").take();
         info!("capture: session closed ({})", self.dir.display());
     }
 }
