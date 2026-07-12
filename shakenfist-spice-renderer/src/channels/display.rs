@@ -2728,7 +2728,7 @@ impl DisplayChannel {
 
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
-        let mut snap = self.snapshot.lock().unwrap();
+        let mut snap = self.snapshot.lock().expect("lock poisoned");
         snap.ack_generation = self.ack_generation;
         snap.ack_window = self.ack_window;
         snap.message_count = self.message_count;

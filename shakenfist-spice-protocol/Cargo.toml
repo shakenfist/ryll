@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Pure-Rust SPICE protocol primitives: constants, wire-format messages, link handshake, SpiceClient, and logging helpers. Extracted from the ryll SPICE client."
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

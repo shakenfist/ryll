@@ -55,7 +55,7 @@ pub fn make_usbredir_message(msg_type: u32, id: u32, payload: &[u8]) -> Vec<u8> 
         length: payload.len() as u32,
         id,
     };
-    header.write(&mut buf).unwrap();
+    header.write(&mut buf).expect("write to Vec cannot fail");
     buf.extend_from_slice(payload);
     buf
 }

@@ -63,16 +63,21 @@ impl GlzDictionary {
     /// May evict the least-recently-used entries to keep total
     /// bytes within the configured cap.
     pub fn insert(&self, image_id: u64, pixels: Vec<u8>) {
-        let outcome = self.images.lock().unwrap().insert(image_id, pixels);
+        let outcome = self
+            .images
+            .lock()
+            .expect("lock poisoned")
+            .insert(image_id, pixels);
         if let crate::byte_bounded_lru::InsertOutcome::InsertedAfterEviction {
             evicted,
             freed_bytes,
         } = outcome
         {
-            let mut logged = self.first_eviction_logged.lock().unwrap();
+            let mut logged = self.first_eviction_logged.lock().expect("lock poisoned");
             if !*logged {
                 *logged = true;
-                let cap_mib = self.images.lock().unwrap().cap_bytes() / (1024 * 1024);
+                let cap_mib =
+                    self.images.lock().expect("lock poisoned").cap_bytes() / (1024 * 1024);
                 tracing::info!(
                     "glz_dictionary: cap {} MiB reached; oldest entries will be evicted",
                     cap_mib,
@@ -87,7 +92,7 @@ impl GlzDictionary {
     /// Remove a specific image from the dictionary.
     /// Returns true if the image was present.
     pub fn remove(&self, image_id: &u64) -> bool {
-        self.images.lock().unwrap().remove(image_id)
+        self.images.lock().expect("lock poisoned").remove(image_id)
     }
 
     /// Evict images with IDs below `oldest_valid`.
@@ -95,51 +100,54 @@ impl GlzDictionary {
     pub fn evict_older_than(&self, oldest_valid: u64) -> usize {
         self.images
             .lock()
-            .unwrap()
+            .expect("lock poisoned")
             .retain_keys(|&id| id >= oldest_valid)
     }
 
     /// Clear all entries.
     pub fn clear(&self) {
-        self.images.lock().unwrap().clear();
+        self.images.lock().expect("lock poisoned").clear();
     }
 
     /// Number of entries.
     pub fn len(&self) -> usize {
-        self.images.lock().unwrap().len()
+        self.images.lock().expect("lock poisoned").len()
     }
 
     /// Whether the dictionary is empty.
     pub fn is_empty(&self) -> bool {
-        self.images.lock().unwrap().is_empty()
+        self.images.lock().expect("lock poisoned").is_empty()
     }
 
     /// Total bytes of pixel data stored.
     pub fn total_bytes(&self) -> usize {
-        self.images.lock().unwrap().bytes()
+        self.images.lock().expect("lock poisoned").bytes()
     }
 
     /// Configured byte cap.
     pub fn cap_bytes(&self) -> usize {
-        self.images.lock().unwrap().cap_bytes()
+        self.images.lock().expect("lock poisoned").cap_bytes()
     }
 
     /// Cumulative count of entries evicted by the byte cap since
     /// the dictionary was constructed.  Server-driven `remove` /
     /// `clear` / `evict_older_than` calls are not counted.
     pub fn evictions_total(&self) -> u64 {
-        self.images.lock().unwrap().evictions_total()
+        self.images.lock().expect("lock poisoned").evictions_total()
     }
 
     /// Cumulative bytes freed by cap-driven evictions since the
     /// dictionary was constructed.
     pub fn evicted_bytes_total(&self) -> u64 {
-        self.images.lock().unwrap().evicted_bytes_total()
+        self.images
+            .lock()
+            .expect("lock poisoned")
+            .evicted_bytes_total()
     }
 
     /// Snapshot all image IDs (sorted) for diagnostics.
     pub fn image_ids(&self) -> Vec<u64> {
-        let dict = self.images.lock().unwrap();
+        let dict = self.images.lock().expect("lock poisoned");
         let mut ids: Vec<u64> = dict.keys().copied().collect();
         ids.sort_unstable();
         ids
@@ -347,7 +355,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 
                 // Try an immediate lookup first (common case).
                 let prev_pixels = {
-                    let mut dict = dictionary.images.lock().unwrap();
+                    let mut dict = dictionary.images.lock().expect("lock poisoned");
                     dict.get(&source_id).cloned()
                 };
 
@@ -374,7 +382,7 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
                                 .await
                             {
                                 Ok(()) => {
-                                    let mut dict = dictionary.images.lock().unwrap();
+                                    let mut dict = dictionary.images.lock().expect("lock poisoned");
                                     if let Some(pixels) = dict.get(&source_id) {
                                         resolved = Some(pixels.clone());
                                         break;

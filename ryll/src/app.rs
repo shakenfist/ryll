@@ -1643,36 +1643,32 @@ impl RyllApp {
                 } => {
                     // Auto-create surface if the server draws before sending
                     // SURFACE_CREATE (QEMU does this for the primary surface).
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        self.surfaces.entry((display_channel_id, surface_id))
-                    {
-                        let surf_w = left + width;
-                        let surf_h = top + height;
-                        info!(
-                            "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
-                            surface_id, surf_w, surf_h, left, top, width, height
-                        );
-                        e.insert(GuiSurface::new(surface_id, surf_w, surf_h));
-                        if is_primary_surface(display_channel_id, surface_id) {
-                            if auto_fit_size_acceptable(surf_w, surf_h) {
-                                self.pending_resize = Some((surf_w as f32, surf_h as f32));
-                                self.pending_resolution_notify =
-                                    Some(((surf_w, surf_h), Instant::now()));
-                            } else {
-                                warn!(
-                                    "app: ignoring oversized auto-created primary surface \
-                                     {}x{} for auto-fit (limit {}px per axis)",
-                                    surf_w, surf_h, MAX_AUTO_FIT_DIMENSION
-                                );
+                    let surface = match self.surfaces.entry((display_channel_id, surface_id)) {
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let surf_w = left + width;
+                            let surf_h = top + height;
+                            info!(
+                                "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
+                                surface_id, surf_w, surf_h, left, top, width, height
+                            );
+                            if is_primary_surface(display_channel_id, surface_id) {
+                                if auto_fit_size_acceptable(surf_w, surf_h) {
+                                    self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                                    self.pending_resolution_notify =
+                                        Some(((surf_w, surf_h), Instant::now()));
+                                } else {
+                                    warn!(
+                                        "app: ignoring oversized auto-created primary surface \
+                                         {}x{} for auto-fit (limit {}px per axis)",
+                                        surf_w, surf_h, MAX_AUTO_FIT_DIMENSION
+                                    );
+                                }
                             }
+                            e.insert(GuiSurface::new(surface_id, surf_w, surf_h))
                         }
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                     }
-
-                    let surface = self
-                        .surfaces
-                        .get_mut(&(display_channel_id, surface_id))
-                        .unwrap()
-                        .surface_mut();
+                    .surface_mut();
                     surface.blit(left, top, width, height, &pixels);
                     self.stats.frames_received += 1;
                     debug!(
@@ -2106,12 +2102,14 @@ impl RyllApp {
 
     /// Sync app-level state to the shared snapshot.
     fn update_app_snapshot(&self) {
-        let mut snap = self.app_snapshot.lock().unwrap();
+        let mut snap = self.app_snapshot.lock().expect("lock poisoned");
 
-        // FPS from sliding-window frame_times
-        snap.fps = if self.stats.frame_times.len() >= 2 {
-            let oldest = self.stats.frame_times.first().unwrap();
-            let newest = self.stats.frame_times.last().unwrap();
+        // FPS from sliding-window frame_times. A single-entry window
+        // yields elapsed == 0.0 and falls through to the 0.0 arm.
+        snap.fps = if let (Some(oldest), Some(newest)) = (
+            self.stats.frame_times.first(),
+            self.stats.frame_times.last(),
+        ) {
             let elapsed = newest.duration_since(*oldest).as_secs_f64();
             if elapsed > 0.0 {
                 (self.stats.frame_times.len() - 1) as f64 / elapsed
@@ -3020,7 +3018,11 @@ impl eframe::App for RyllApp {
         // cool-down elapsed) is pushed before we render so the
         // bell can pick it up on the same frame.
         let (streaming_state, streams_active_for_tooltip) = {
-            let snap = self.channel_snapshots.display.lock().unwrap();
+            let snap = self
+                .channel_snapshots
+                .display
+                .lock()
+                .expect("lock poisoned");
             let (state, notif) = streaming_state::classify(
                 &snap,
                 Instant::now(),
@@ -3078,10 +3080,13 @@ impl eframe::App for RyllApp {
                         ui.separator();
                     }
 
-                    // Sliding-window FPS from DisplayMark timestamps
-                    if self.stats.frame_times.len() >= 2 {
-                        let oldest = self.stats.frame_times.first().unwrap();
-                        let newest = self.stats.frame_times.last().unwrap();
+                    // Sliding-window FPS from DisplayMark timestamps. A
+                    // single-entry window yields elapsed == 0.0 and shows
+                    // no label, like the empty window.
+                    if let (Some(oldest), Some(newest)) = (
+                        self.stats.frame_times.first(),
+                        self.stats.frame_times.last(),
+                    ) {
                         let elapsed = newest.duration_since(*oldest).as_secs_f64();
                         if elapsed > 0.0 {
                             let fps = (self.stats.frame_times.len() - 1) as f64 / elapsed;
@@ -3664,12 +3669,9 @@ impl eframe::App for RyllApp {
                     }
 
                     // Error message with dismiss and bug report buttons
-                    if self.usb_error_message.is_some() {
+                    if let Some(msg) = self.usb_error_message.clone() {
                         ui.separator();
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            self.usb_error_message.as_ref().unwrap(),
-                        );
+                        ui.colored_label(egui::Color32::RED, msg);
                         ui.horizontal(|ui| {
                             if ui.small_button("Dismiss").clicked() {
                                 self.usb_error_message = None;
@@ -3882,12 +3884,9 @@ impl eframe::App for RyllApp {
                     }
 
                     // Error display
-                    if self.webdav_error_message.is_some() {
+                    if let Some(msg) = self.webdav_error_message.clone() {
                         ui.separator();
-                        ui.colored_label(
-                            egui::Color32::RED,
-                            self.webdav_error_message.as_ref().unwrap(),
-                        );
+                        ui.colored_label(egui::Color32::RED, msg);
                         ui.horizontal(|ui| {
                             if ui.small_button("Dismiss").clicked() {
                                 self.webdav_error_message = None;
@@ -3940,11 +3939,8 @@ impl eframe::App for RyllApp {
             .frame(panel_frame)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                if self.error_message.is_some() {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!("Error: {}", self.error_message.as_ref().unwrap()),
-                    );
+                if let Some(msg) = self.error_message.clone() {
+                    ui.colored_label(egui::Color32::RED, format!("Error: {}", msg));
                     ui.horizontal(|ui| {
                         if ui.small_button("Dismiss").clicked() {
                             self.error_message = None;
@@ -4299,9 +4295,11 @@ impl eframe::App for RyllApp {
             }
 
             // Generate report on drag release
-            if region_completed {
-                let (sx, sy) = self.region_drag_start.unwrap();
-                let (ex, ey) = self.region_drag_end.unwrap();
+            if let (true, Some((sx, sy)), Some((ex, ey))) = (
+                region_completed,
+                self.region_drag_start,
+                self.region_drag_end,
+            ) {
                 match validate_region(sx, sy, ex, ey) {
                     Some(region) => {
                         let report_type = self.bug_report_type.clone();

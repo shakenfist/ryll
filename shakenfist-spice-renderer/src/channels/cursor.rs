@@ -484,7 +484,7 @@ impl CursorChannel {
 
     /// Sync local state to the shared snapshot.
     fn update_snapshot(&self) {
-        let mut snap = self.snapshot.lock().unwrap();
+        let mut snap = self.snapshot.lock().expect("lock poisoned");
         snap.cache_entries = self.cursor_cache.len();
         snap.cache_contents = self
             .cursor_cache

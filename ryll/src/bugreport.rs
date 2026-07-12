@@ -363,12 +363,12 @@ impl TrafficBuffers {
     /// changes to accept it.
     pub fn snapshot(&self) -> TrafficBuffers {
         TrafficBuffers {
-            main: Mutex::new(self.main.lock().unwrap().clone()),
-            display: Mutex::new(self.display.lock().unwrap().clone()),
-            inputs: Mutex::new(self.inputs.lock().unwrap().clone()),
-            cursor: Mutex::new(self.cursor.lock().unwrap().clone()),
-            usbredir: Mutex::new(self.usbredir.lock().unwrap().clone()),
-            playback: Mutex::new(self.playback.lock().unwrap().clone()),
+            main: Mutex::new(self.main.lock().expect("lock poisoned").clone()),
+            display: Mutex::new(self.display.lock().expect("lock poisoned").clone()),
+            inputs: Mutex::new(self.inputs.lock().expect("lock poisoned").clone()),
+            cursor: Mutex::new(self.cursor.lock().expect("lock poisoned").clone()),
+            usbredir: Mutex::new(self.usbredir.lock().expect("lock poisoned").clone()),
+            playback: Mutex::new(self.playback.lock().expect("lock poisoned").clone()),
             start: self.start,
         }
     }
@@ -456,7 +456,7 @@ impl TrafficBuffers {
         let wire_size = raw_message.len() as u32;
         let payload_size = wire_size.saturating_sub(6);
 
-        let mut guard = buf.lock().unwrap();
+        let mut guard = buf.lock().expect("lock poisoned");
         let mut frames = self.build_segmented_frames(channel, true, raw_message, &mut guard);
         // segment_payload guarantees ≥1 frame.
         let pcap_frame = frames.remove(0);
@@ -527,7 +527,7 @@ impl TrafficBuffers {
     pub fn log_summary(&self) {
         for name in &CHANNELS {
             if let Some(buf) = self.buffer_for(name) {
-                let guard = buf.lock().unwrap();
+                let guard = buf.lock().expect("lock poisoned");
                 debug!(
                     "bugreport: {} ring buffer: {} entries, {} bytes",
                     name,
@@ -545,7 +545,7 @@ impl TrafficBuffers {
         #[cfg(feature = "capture")]
         {
             let buf = self.buffer_for(channel)?;
-            let guard = buf.lock().unwrap();
+            let guard = buf.lock().expect("lock poisoned");
             let mut output = Vec::new();
             guard.write_pcap_to(&mut output).ok()?;
             Some(output)
@@ -574,7 +574,7 @@ impl TrafficBuffers {
             let mut entries: Vec<(std::time::Duration, Vec<std::sync::Arc<[u8]>>)> = Vec::new();
             for name in &CHANNELS {
                 if let Some(buf) = self.buffer_for(name) {
-                    let guard = buf.lock().unwrap();
+                    let guard = buf.lock().expect("lock poisoned");
                     for entry in guard.entries().iter() {
                         let mut segs: Vec<std::sync::Arc<[u8]>> = vec![entry.pcap_frame.clone()];
                         segs.extend(entry.additional_segments.iter().cloned());
@@ -613,7 +613,7 @@ impl TrafficBuffers {
         let mut all = Vec::new();
         for name in &CHANNELS {
             if let Some(buf) = self.buffer_for(name) {
-                let guard = buf.lock().unwrap();
+                let guard = buf.lock().expect("lock poisoned");
                 for entry in guard.entries().iter().rev().take(max) {
                     all.push(TrafficViewEntry {
                         timestamp: entry.timestamp,
@@ -1347,7 +1347,7 @@ impl BugReport {
         precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<Self> {
         // 1. Session snapshot (AppSnapshot)
-        let mut session = app_snapshot.lock().unwrap().clone();
+        let mut session = app_snapshot.lock().expect("lock poisoned").clone();
         session.uptime_secs = traffic.elapsed().as_secs_f64();
         let session_json = serde_json::to_string_pretty(&session)?;
 

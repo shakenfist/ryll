@@ -305,7 +305,9 @@ impl AudioThread {
         let drain_ring = move |consumer: &mut rtrb::Consumer<i16>, local: &mut VecDeque<i16>| {
             let available = consumer.slots();
             if available > 0 {
-                let chunk = consumer.read_chunk(available).unwrap();
+                let chunk = consumer
+                    .read_chunk(available)
+                    .expect("read_chunk of slots() cannot fail");
                 let (first, second) = chunk.as_slices();
                 local.extend(first.iter().copied());
                 local.extend(second.iter().copied());

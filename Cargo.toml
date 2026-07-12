@@ -9,6 +9,9 @@ members = [
     "shakenfist-spice-webrtc",
 ]
 
+[workspace.lints.clippy]
+unwrap_used = "warn"
+
 [workspace.package]
 version = "0.1.5"
 edition = "2021"

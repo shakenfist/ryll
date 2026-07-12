@@ -874,31 +874,31 @@ impl ChannelSnapshots {
     pub fn snapshot_json_for(&self, channel: &str) -> Option<serde_json::Result<String>> {
         match channel {
             "display" => {
-                let snap = self.display.lock().unwrap().clone();
+                let snap = self.display.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "inputs" => {
-                let snap = self.inputs.lock().unwrap().clone();
+                let snap = self.inputs.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "cursor" => {
-                let snap = self.cursor.lock().unwrap().clone();
+                let snap = self.cursor.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "main" => {
-                let snap = self.main.lock().unwrap().clone();
+                let snap = self.main.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "playback" => {
-                let snap = self.playback.lock().unwrap().clone();
+                let snap = self.playback.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "usbredir" => {
-                let snap = self.usbredir.lock().unwrap().clone();
+                let snap = self.usbredir.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             "webdav" => {
-                let snap = self.webdav.lock().unwrap().clone();
+                let snap = self.webdav.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
             // Phase 5 (auto-snapshot): merge every channel's snapshot
@@ -907,13 +907,13 @@ impl ChannelSnapshots {
             // caller needing to know which channel is "most interesting".
             "all" => {
                 use serde_json::json;
-                let display = self.display.lock().unwrap().clone();
-                let inputs = self.inputs.lock().unwrap().clone();
-                let cursor = self.cursor.lock().unwrap().clone();
-                let main = self.main.lock().unwrap().clone();
-                let playback = self.playback.lock().unwrap().clone();
-                let usbredir = self.usbredir.lock().unwrap().clone();
-                let webdav = self.webdav.lock().unwrap().clone();
+                let display = self.display.lock().expect("lock poisoned").clone();
+                let inputs = self.inputs.lock().expect("lock poisoned").clone();
+                let cursor = self.cursor.lock().expect("lock poisoned").clone();
+                let main = self.main.lock().expect("lock poisoned").clone();
+                let playback = self.playback.lock().expect("lock poisoned").clone();
+                let usbredir = self.usbredir.lock().expect("lock poisoned").clone();
+                let webdav = self.webdav.lock().expect("lock poisoned").clone();
                 let merged = json!({
                     "display": display,
                     "inputs": inputs,

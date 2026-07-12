@@ -1040,7 +1040,7 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
         message_type,
         message_size: payload.len() as u32,
     };
-    header.write(&mut buf).unwrap();
+    header.write(&mut buf).expect("write to Vec cannot fail");
     buf.extend_from_slice(payload);
     buf
 }

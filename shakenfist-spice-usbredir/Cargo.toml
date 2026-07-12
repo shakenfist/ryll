@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Pure-Rust parser and message types for the SPICE USB redirection (usbredir) protocol, extracted from the ryll SPICE client."
 readme = "README.md"
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = "1"
 byteorder = "1"

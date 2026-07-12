@@ -7,6 +7,9 @@ authors.workspace = true
 repository.workspace = true
 description = "A Rust SPICE VDI test client"
 
+[lints]
+workspace = true
+
 [features]
 # `gui`, `audio`, and `capture` are all default-on so production
 # builds (debian package, GUI install) keep their behaviour.
