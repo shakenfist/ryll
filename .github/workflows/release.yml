@@ -10,7 +10,7 @@ permissions: {}
 jobs:
   check-version:
     name: Verify version matches tag
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, static]
     permissions:
       contents: read
       issues: write
@@ -38,10 +38,12 @@ jobs:
           echo "Workspace version: ${ACTUAL}"
 
           if [ "${ACTUAL}" != "${EXPECTED}" ]; then
-            echo "mismatch=true" >> "$GITHUB_OUTPUT"
-            echo "tag=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-            echo "expected=${EXPECTED}" >> "$GITHUB_OUTPUT"
-            echo "actual=${ACTUAL}" >> "$GITHUB_OUTPUT"
+            {
+              echo "mismatch=true"
+              echo "tag=${TAG_NAME}"
+              echo "expected=${EXPECTED}"
+              echo "actual=${ACTUAL}"
+            } >> "$GITHUB_OUTPUT"
             echo "::error::Version mismatch: tag ${TAG_NAME} expects ${EXPECTED} but workspace Cargo.toml has ${ACTUAL}"
             exit 1
           fi
@@ -63,6 +65,48 @@ jobs:
 
           See the [failed workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
 
+  # Linux x86_64 release builds run on a self-hosted runner inside
+  # the devcontainer via the Makefile, so this job's steps differ
+  # enough from the GitHub-hosted matrix below to warrant a
+  # separate job. The debian-12-docker image ships with docker.io
+  # preinstalled (see supply-chain.yml).
+  build-linux:
+    name: Build (Linux x86_64)
+    needs: check-version
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: make release
+
+      - name: Run tests
+        run: make test
+
+      - name: Build .deb package
+        run: make deb
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-deb-x86_64-unknown-linux-gnu
+          path: target/debian/*.deb
+
+      - name: Build .rpm package
+        run: make rpm
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-rpm-x86_64-unknown-linux-gnu
+          path: target/generate-rpm/*.rpm
+
+  # These platforms stay on GitHub-hosted runners: we own no macOS,
+  # Windows, or aarch64 Linux hardware, and this is a public
+  # repository so GitHub-hosted runner minutes are free.
   build:
     name: Build (${{ matrix.name }})
     needs: check-version
@@ -72,23 +116,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux (x86_64)
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            features: ""
           - name: Linux (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted aarch64 Linux hardware
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ""
           - name: macOS (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted macOS hardware
             os: macos-latest
             target: aarch64-apple-darwin
             features: ""
           - name: Windows (x86_64)
+            # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-latest
             target: x86_64-pc-windows-msvc
             features: "--no-default-features"
           - name: Windows (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             features: "--no-default-features"
@@ -206,73 +250,25 @@ jobs:
 
   publish-crates:
     name: Publish workspace crates to crates.io
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [build, build-linux]
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config cmake \
-            libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxcb1-dev \
-            libx11-dev libxkbcommon-dev \
-            libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev \
-            libasound2-dev \
-            libopus-dev
-
-      # Publish in dependency order. cargo publish waits for the
-      # crate to appear in the index before returning, so serial
-      # publishing is safe.
-      #
-      # Dependency graph (→ means "depends on"):
-      #   protocol          (leaf)
-      #   compression       → protocol
-      #   usbredir          → protocol
-      #   renderer          → protocol + compression + usbredir
-      #   webrtc            → renderer
-      #   ryll              → all of the above
-      - name: Publish shakenfist-spice-protocol
+      # tools/publish-crates.sh publishes the six workspace crates
+      # serially in dependency order inside the devcontainer.
+      - name: Publish workspace crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shakenfist-spice-protocol
-
-      - name: Publish shakenfist-spice-compression
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shakenfist-spice-compression
-
-      - name: Publish shakenfist-spice-usbredir
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shakenfist-spice-usbredir
-
-      - name: Publish shakenfist-spice-renderer
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shakenfist-spice-renderer
-
-      - name: Publish shakenfist-spice-webrtc
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p shakenfist-spice-webrtc
-
-      - name: Publish ryll
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish -p ryll
+        run: make publish-crates
 
   github-release:
     name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [build, build-linux]
+    runs-on: [self-hosted, static]
     permissions:
       contents: write
     steps:
@@ -300,7 +296,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew tap
     needs: github-release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, static]
     continue-on-error: true
     permissions:
       contents: read

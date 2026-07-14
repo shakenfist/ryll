@@ -83,14 +83,6 @@ ignore = [
     # Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2026-0192
     "RUSTSEC-2026-0192",
-
-    # Yanked: aes 0.8.4.
-    # Transitive via webrtc -> aes-gcm 0.10.3 -> aes 0.8.4 (and
-    # webrtc-srtp 0.17.1). aes-gcm 0.10.3 pins to aes 0.8.x and
-    # 0.8.4 is the latest in that range, so unblocking requires a
-    # webrtc/aes-gcm major bump. Not introduced by this PR.
-    # Tracked in PLAN-supply-chain-followups.md.
-    "aes@0.8.4",
 ]
 
 [licenses]

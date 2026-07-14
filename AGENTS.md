@@ -645,7 +645,8 @@ Defaults to `target/release/ryll`; `WEB_PORT` env var
 overrides the port (default `18080`). The script creates a
 temporary stub `.vv`, launches ryll, waits 3 seconds,
 SIGTERMs, and asserts clean exit within 5 seconds. CI runs
-this on the Linux matrix entry after `cargo build --release`.
+this in the `build-linux` job via `make web-smoke` and
+`make web-smoke-tls`, inside the devcontainer.
 
 ## Process templates
 
@@ -753,13 +754,18 @@ applies to all future webrtc-rs work:
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
   on Linux (x86_64 + aarch64), macOS (Apple Silicon), and Windows
   (x86_64 + aarch64) on every push to `develop` and on pull requests.
-  Each architecture uses a native github-hosted runner (no
-  cross-compile); arm64 Linux uses `ubuntu-24.04-arm` and arm64
-  Windows uses `windows-11-arm`. CI runs native `cargo` (not Docker).
-  On Linux, CI installs `libopus-dev` so audiopus_sys dynamic-links
-  libopus and the `.deb` declares `libopus0` via cargo-deb's `$auto`;
-  on macOS and Windows audiopus_sys source-builds libopus for a
-  self-contained binary. No system libraries are required at runtime for
+  Linux x86_64 jobs (lint, fuzz, build) run on self-hosted runners
+  (`[self-hosted, vm, debian-12-docker, l]`) with cargo wrapped in
+  the devcontainer via `make lint` / `make release` / `make test`
+  etc. The other architectures use native GitHub-hosted runners (no
+  cross-compile) with native `cargo`: arm64 Linux uses
+  `ubuntu-24.04-arm` and arm64 Windows uses `windows-11-arm`; those
+  runner references carry `audit-ok: github-hosted-runner` markers
+  because we own no matching hardware (see the workflow-standards
+  consistency audit). On Linux the devcontainer includes
+  `libopus-dev` so audiopus_sys dynamic-links libopus and the `.deb`
+  declares `libopus0` via cargo-deb's `$auto`; on macOS and Windows
+  audiopus_sys source-builds libopus for a self-contained binary. No system libraries are required at runtime for
   video decoding (MJPEG/H.264) — libjpeg-turbo is vendored via `mozjpeg`,
   H.264 is decoded via `openh264-sys2` (which builds and links libopenh264
   from source; `cc` compiler is needed at build time), and VA-API is
@@ -898,7 +904,7 @@ partial state.
 | openh264 | H.264 video encoding: in `shakenfist-spice-renderer` for the live encoder pipeline; also in `ryll`'s `capture` feature for `--capture` MP4 output |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
 | webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Pinned at `"0.17.1"` which re-exports `rtp = "^0.17.1"` (used for `H264Payloader` packetisation). |
-| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc` and the `WebOpusSink` passthrough path in `--web` mode. The `audiopus_sys` transitive dep builds libopus from source (via cmake) in the devcontainer if `pkg-config` does not find a system libopus; CI installs `libopus-dev` on Linux so the resulting binary dynamic-links libopus.so.0 and cargo-deb's `$auto` picks up `libopus0` as a runtime dep. Real PCM → Opus encoding for SPICE servers that negotiate uncompressed playback is deferred future work; today the PCM path produces silent audio with a warn-once log line. |
+| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc` and the `WebOpusSink` passthrough path in `--web` mode. The `audiopus_sys` transitive dep builds libopus from source (via cmake) if `pkg-config` does not find a system libopus; the devcontainer and the aarch64 Linux CI runner install `libopus-dev` so the resulting binary dynamic-links libopus.so.0 and cargo-deb's `$auto` picks up `libopus0` as a runtime dep. Real PCM → Opus encoding for SPICE servers that negotiate uncompressed playback is deferred future work; today the PCM path produces silent audio with a warn-once log line. |
 | cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
 | rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |

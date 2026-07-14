@@ -57,6 +57,7 @@ execution.
 | 2026-04-11 | [Opus decoder](PLAN-opus-decoder.md) | Replace the abandoned `audiopus` C-wrapper crate with the pure-Rust `opus-decoder` crate to drop the cmake build dep and remove an unmaintained supply-chain dependency. (Step-based; landed.) |
 | 2026-04-22 | [Crate release](PLAN-crate-release.md) | Publish the workspace's three sub-crates (`shakenfist-spice-protocol`, `-compression`, `-usbredir`) to crates.io alongside ryll on every tagged release. (Single-commit; landed at v0.1.4.) |
 | 2026-06-01 | [Open questions watch-list](OPEN-QUESTIONS.md) | Single review surface for symptoms seen in bug reports that we can't yet characterise. Entries link out to the phase plans that would action them. Reviewed at the start of each session closeout. |
+| 2026-07-14 | [Self-hosted runner migration](PLAN-self-hosted-runners.md) | Move Linux x86_64 CI jobs onto self-hosted runners inside the devcontainer and mark the no-hardware platforms (macOS, Windows, aarch64 Linux) as audit-ok exceptions, resolving the workflow-standards consistency audit (issue #155). |
 
 ## Consolidation plans
 

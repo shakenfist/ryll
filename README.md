@@ -35,7 +35,7 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 - **Bandwidth sparkline** - Real-time bandwidth graph in the status bar showing rolling bytes/sec history
 - **Screenshot capture** - Press F8 or use Menu → Screenshot to save the current display as a PNG via a native file dialog. With multiple monitors, one PNG per surface is saved with `-1`, `-2` suffixes.
 - **Latency sparkline** - Bottom stats panel shows client-observed inter-PING interval from the main channel (lower variance is better; spikes indicate network or server stalls).
-- **Streaming indicator** - Small triangle (▶) glyph in the status bar reflects the live SPICE display-stream state: grey (off), green (active), amber (a stream was destroyed in the last 5 s), red (≥3 destroys in 30 s with mean lifetime <3 s — fires a `Warn` notification once per minute). Hover for per-stream codec, dimensions, and decoded-frame counts. See [docs/troubleshooting.md § Streaming indicator](docs/troubleshooting.md#streaming-indicator).
+- **Streaming indicator** - Small triangle (▶) glyph in the status bar reflects the live SPICE display-stream state: grey (off), green (active), amber (a stream was destroyed in the last 5 s), red (≥3 destroys in 30 s with mean lifetime <3 s — fires a `Warn` notification once per minute). Hover for per-stream codec, dimensions, and decoded-frame counts. See [docs/troubleshooting.md § Streaming indicator](https://github.com/shakenfist/ryll/blob/develop/docs/troubleshooting.md#streaming-indicator).
 - **Protocol-gap counter** - `Gaps: N` button in the status bar tracks the number of distinct protocol edge cases seen this session (unknown opcodes, deferred ops, recoverable decode failures). Highlights red when N > 0; click to open a floating window listing the keys. Complements `--pedantic` mode.
 - **File logging** - Verbose mode writes to `/tmp/ryll.log` for debugging
 - **Graceful Ctrl+C shutdown** - Cross-platform signal handling via `ctrlc` crate; the GUI and headless event loops check a flag and shut down cleanly, ensuring capture files are finalized
@@ -50,23 +50,27 @@ Ryll is intended to be a **multi-modal SPICE client**: every delivery mode is a 
 
 Pre-built `.deb` packages for Debian/Ubuntu are available from
 [GitHub Releases](https://github.com/shakenfist/ryll/releases). See
-[docs/installation.md](docs/installation.md) for all platforms.
+[docs/installation.md](https://github.com/shakenfist/ryll/blob/develop/docs/installation.md) for all platforms.
 
 ## CI and Automation
 
 GitHub Actions CI builds and tests ryll on Linux (x86_64 + aarch64),
 macOS (Apple Silicon), and Windows (x86_64 + aarch64) on every push to
-`develop` and on pull requests. PRs also receive an automated code
-review via Claude Code. Changes that only touch code-review artifacts
-(`REVIEWS.md`, `.vscode/*.weaudit*`, `.vscode/review-scope.toml`) skip
-the CI and CodeQL workflows entirely; the supply-chain content
-scanners still run on them.
+`develop` and on pull requests. Linux x86_64 jobs run on self-hosted
+runners with the build wrapped in the devcontainer (via the same
+Makefile targets used locally); macOS, Windows, and aarch64 Linux use
+GitHub-hosted runners because we own no matching hardware. PRs also
+receive an automated code review via Claude Code. Changes that only
+touch code-review artifacts (`REVIEWS.md`, `.vscode/*.weaudit*`,
+`.vscode/review-scope.toml`) skip the CI and CodeQL workflows
+entirely; the supply-chain content scanners still run on them.
 
 Workflows in `.github/workflows/`:
 
 | Workflow | Purpose |
 |----------|---------|
-| `ci.yml` | Lint, build, test (multi-platform), automated PR review |
+| `ci.yml` | Lint, fuzz smoke, build, test (multi-platform), automated PR review |
+| `manual-build.yml` | On-demand binary builds of arbitrary branches |
 | `release.yml` | Build and publish release artifacts |
 | `codeql-analysis.yml` | CodeQL security scanning |
 | `supply-chain.yml` | Dependency advisories, license policy, secret scanning, bidi/unicode checks |
@@ -170,12 +174,12 @@ out at build time:
 
 The slim test-harness binary is built with
 `cargo build --release --no-default-features -p ryll`.  See
-[docs/control-socket-protocol.md](docs/control-socket-protocol.md)
+[docs/control-socket-protocol.md](https://github.com/shakenfist/ryll/blob/develop/docs/control-socket-protocol.md)
 for the `surface_drawn` and `digest_updated` event shapes.
 
 **macOS** (Apple Silicon): No additional system libraries are needed --
 just Xcode Command Line Tools and Rust. See
-[docs/development-macos.md](docs/development-macos.md) for full setup
+[docs/development-macos.md](https://github.com/shakenfist/ryll/blob/develop/docs/development-macos.md) for full setup
 instructions.
 
 ## Usage
@@ -268,7 +272,7 @@ This writes:
   in Wireshark
 - `display.mp4` — H.264 video of the display surface at real timing
 
-See [STYLEGUIDE.md](STYLEGUIDE.md) for capture conventions.
+See [STYLEGUIDE.md](https://github.com/shakenfist/ryll/blob/develop/STYLEGUIDE.md) for capture conventions.
 
 ### Headless mode
 
@@ -286,9 +290,9 @@ This will:
 
 Headless mode supports a Unix-socket control interface via
 `--control-socket <path>` for driving the session from external
-tools. See [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md)
+tools. See [`docs/control-socket-protocol.md`](https://github.com/shakenfist/ryll/blob/develop/docs/control-socket-protocol.md)
 for the full verb and event reference, and
-[`examples/control-socket-demo.py`](examples/control-socket-demo.py)
+[`examples/control-socket-demo.py`](https://github.com/shakenfist/ryll/blob/develop/examples/control-socket-demo.py)
 for a runnable Python example client.
 
 ### Web frontend (`--web` mode)
@@ -398,7 +402,7 @@ take.
 
 The repository is a Cargo workspace with **6 crates**. The web
 frontend (`--web` mode) shipped across all 8 phases; see
-[docs/plans/PLAN-web-frontend.md](docs/plans/PLAN-web-frontend.md)
+[docs/plans/PLAN-web-frontend.md](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-web-frontend.md)
 for the master plan. All phases (parity audit, renderer
 extraction, encoder pipeline, WebRTC bridge, HTTP server,
 real SPICE wire-up for display/audio/inputs/cursor, reconnect
@@ -414,9 +418,9 @@ native TLS) have landed. Quick-start: `docs/web-frontend.md`.
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
 | `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
 
-See [docs/plans/PLAN-crate-extraction.md](docs/plans/PLAN-crate-extraction.md)
+See [docs/plans/PLAN-crate-extraction.md](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-crate-extraction.md)
 for the earlier extraction work and
-[docs/plans/PLAN-web-frontend-phase-01-extract.md](docs/plans/PLAN-web-frontend-phase-01-extract.md)
+[docs/plans/PLAN-web-frontend-phase-01-extract.md](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-web-frontend-phase-01-extract.md)
 for the Phase 1 renderer extraction.
 
 After Phase 1 the bulk of what was previously under `ryll/src/`
@@ -491,20 +495,20 @@ shakenfist-spice-renderer/src/
 
 Additional documentation is available:
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) - Technical design and data flow
-- [AGENTS.md](AGENTS.md) - Guide for AI coding assistants
-- [STYLEGUIDE.md](STYLEGUIDE.md) - Code conventions and patterns
+- [ARCHITECTURE.md](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) - Technical design and data flow
+- [AGENTS.md](https://github.com/shakenfist/ryll/blob/develop/AGENTS.md) - Guide for AI coding assistants
+- [STYLEGUIDE.md](https://github.com/shakenfist/ryll/blob/develop/STYLEGUIDE.md) - Code conventions and patterns
 
 In the `docs/` directory:
 
-- [Documentation Index](docs/index.md) - What ryll is and why it exists
-- [Installation](docs/installation.md) - Pre-built packages and install instructions
-- [Configuration](docs/configuration.md) - CLI options and .vv file format
-- [Web frontend guide](docs/web-frontend.md) - Operator guide for `--web` mode
-- [macOS Development](docs/development-macos.md) - Build and test locally on macOS
-- [Troubleshooting](docs/troubleshooting.md) - Common issues and debugging
-- [Binary Portability](docs/portability.md) - How to share binaries between machines
-- [Releasing](docs/releasing.md) - How to publish a new release
+- [Documentation Index](https://github.com/shakenfist/ryll/blob/develop/docs/index.md) - What ryll is and why it exists
+- [Installation](https://github.com/shakenfist/ryll/blob/develop/docs/installation.md) - Pre-built packages and install instructions
+- [Configuration](https://github.com/shakenfist/ryll/blob/develop/docs/configuration.md) - CLI options and .vv file format
+- [Web frontend guide](https://github.com/shakenfist/ryll/blob/develop/docs/web-frontend.md) - Operator guide for `--web` mode
+- [macOS Development](https://github.com/shakenfist/ryll/blob/develop/docs/development-macos.md) - Build and test locally on macOS
+- [Troubleshooting](https://github.com/shakenfist/ryll/blob/develop/docs/troubleshooting.md) - Common issues and debugging
+- [Binary Portability](https://github.com/shakenfist/ryll/blob/develop/docs/portability.md) - How to share binaries between machines
+- [Releasing](https://github.com/shakenfist/ryll/blob/develop/docs/releasing.md) - How to publish a new release
 
 ## License
 

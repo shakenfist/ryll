@@ -23,9 +23,10 @@ permissions: {}
 jobs:
   resolve-matrix:
     name: Resolve platforms to build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, static]
     outputs:
       include: ${{ steps.build-matrix.outputs.include }}
+      linux_x86_64: ${{ steps.build-matrix.outputs.linux_x86_64 }}
     steps:
       - id: build-matrix
         env:
@@ -34,30 +35,32 @@ jobs:
           # Build a JSON array of matrix entries from the requested
           # platform list. Each entry needs: name, os runner, target
           # triple, features flags. Keep these definitions in sync
-          # with release.yml's matrix.
+          # with release.yml's matrix. linux-x86_64 builds on a
+          # self-hosted runner in the separate build-linux-x86_64
+          # job, so it is emitted as a flag rather than a matrix
+          # entry; the platforms here stay on GitHub-hosted runners
+          # because we own no macOS, Windows, or aarch64 Linux
+          # hardware.
           python3 - <<'EOF' >> "$GITHUB_OUTPUT"
           import json, os
-          all_platforms = {
-              'linux-x86_64': {
-                  'name': 'Linux (x86_64)',
-                  'os': 'ubuntu-latest',
-                  'target': 'x86_64-unknown-linux-gnu',
-                  'features': '',
-              },
+          hosted_platforms = {
               'linux-aarch64': {
                   'name': 'Linux (aarch64)',
+                  # audit-ok: github-hosted-runner -- no self-hosted aarch64 Linux hardware
                   'os': 'ubuntu-24.04-arm',
                   'target': 'aarch64-unknown-linux-gnu',
                   'features': '',
               },
               'macos-aarch64': {
                   'name': 'macOS (aarch64)',
+                  # audit-ok: github-hosted-runner -- no self-hosted macOS hardware
                   'os': 'macos-latest',
                   'target': 'aarch64-apple-darwin',
                   'features': '',
               },
               'windows-x86_64': {
                   'name': 'Windows (x86_64)',
+                  # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
                   'os': 'windows-latest',
                   'target': 'x86_64-pc-windows-msvc',
                   # Matches release.yml: ryll's `capture` feature
@@ -69,22 +72,55 @@ jobs:
               },
               'windows-aarch64': {
                   'name': 'Windows (aarch64)',
+                  # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
                   'os': 'windows-11-arm',
                   'target': 'aarch64-pc-windows-msvc',
                   'features': '--no-default-features',
               },
           }
+          valid = ['linux-x86_64'] + list(hosted_platforms)
           wanted = [p.strip() for p in os.environ['PLATFORMS'].split(',') if p.strip()]
-          unknown = [p for p in wanted if p not in all_platforms]
+          unknown = [p for p in wanted if p not in valid]
           if unknown:
-              raise SystemExit(f'unknown platforms requested: {unknown}; valid: {list(all_platforms)}')
-          include = [all_platforms[p] for p in wanted]
+              raise SystemExit(f'unknown platforms requested: {unknown}; valid: {valid}')
+          include = [hosted_platforms[p] for p in wanted if p in hosted_platforms]
           print('include=' + json.dumps(include))
+          print('linux_x86_64=' + ('true' if 'linux-x86_64' in wanted else 'false'))
           EOF
+
+  # Linux x86_64 builds on an l-size self-hosted runner inside the
+  # devcontainer (see Makefile), so it is a separate job from the
+  # GitHub-hosted matrix below. The debian-12-docker image ships
+  # with docker.io preinstalled (see supply-chain.yml).
+  build-linux-x86_64:
+    name: Build (Linux x86_64)
+    needs: resolve-matrix
+    if: needs.resolve-matrix.outputs.linux_x86_64 == 'true'
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get short sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: make release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ryll-x86_64-unknown-linux-gnu-${{ env.SHORT_SHA }}
+          path: target/release/ryll
 
   build:
     name: Build (${{ matrix.name }})
     needs: resolve-matrix
+    # Skip entirely when only linux-x86_64 was requested — a matrix
+    # with an empty include list is an error, not a no-op.
+    if: needs.resolve-matrix.outputs.include != '[]'
     permissions:
       contents: read
     strategy:
