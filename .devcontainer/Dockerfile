@@ -12,11 +12,18 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 #   - cmake: Build dependency for aws-lc-sys (via reqwest TLS)
 # Audio:
 #   - libasound2-dev: ALSA headers (cpal audio output)
+#   - libopus-dev: audiopus_sys dynamic-links libopus.so.0 when
+#     pkg-config finds it, so cargo-deb's $auto records libopus0 as
+#     a runtime dep in the generated .deb. Without it audiopus_sys
+#     falls back to source-building the bundled libopus via cmake.
+# Test tooling:
+#   - openssl: tools/web-smoke.sh --tls generates a throwaway cert
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     cmake \
     libasound2-dev \
+    libopus-dev \
     libxcb-render0-dev \
     libxcb-shape0-dev \
     libxcb-xfixes0-dev \
@@ -27,6 +34,7 @@ RUN apt-get update && apt-get install -y \
     libegl1-mesa-dev \
     libwayland-dev \
     libssl-dev \
+    openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a shared build directory that any user can use
@@ -44,6 +52,9 @@ ENV PATH="/build/.cargo/bin:${PATH}"
 
 # Install useful cargo tools
 RUN umask 0000 && rustup component add rustfmt clippy
+
+# Packaging tools used by the deb/rpm Makefile targets and CI.
+RUN umask 0000 && cargo install cargo-deb cargo-generate-rpm --locked
 
 # Verify installation
 RUN rustc --version && cargo --version

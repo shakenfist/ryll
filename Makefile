@@ -2,6 +2,7 @@
 # Build and development targets
 
 RYLL_IMAGE := ryll-dev
+RYLL_FUZZ_IMAGE := ryll-fuzz
 DEVCONTAINER_DIR := .devcontainer
 CARGO_CACHE := .cargo-cache
 
@@ -28,8 +29,24 @@ GID := $(shell id -g)
 RYLL_GIT_SHA := $(shell git rev-parse --short=8 HEAD 2>/dev/null)$(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
 
+# Shared docker-run invocation for working inside the devcontainer.
+# CARGO_BUILD_JOBS is forwarded only when set in the caller's
+# environment, so parallelism can be bounded on small machines
+# (docker omits the variable entirely when it is unset on the
+# host). Targets append extra -e flags and the image name; a later
+# -w flag overrides the default working directory.
+DOCKER_RUN := docker run --rm \
+	-v "$(CURDIR)":/workspace \
+	-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
+	-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
+	-w /workspace \
+	-u $(UID):$(GID) \
+	-e HOME=/build \
+	-e CARGO_BUILD_JOBS
+
 .PHONY: all build release propose-release tag-release clean clean-testdata \
-	devcontainer ensure-cache lint lint-fix test help \
+	devcontainer fuzz-devcontainer ensure-cache lint lint-fix test help \
+	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console
@@ -45,7 +62,15 @@ help:
 	@echo "  make test                   - Run tests"
 	@echo "  make lint                   - Run rustfmt and clippy checks"
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
+	@echo "  make deb                    - Package the release binary as a .deb"
+	@echo "  make rpm                    - Package the release binary as an .rpm"
+	@echo "  make web-smoke              - Smoke-test ryll --web (plain HTTP)"
+	@echo "  make web-smoke-tls          - Smoke-test ryll --web (TLS)"
 	@echo "  make devcontainer           - Build the development container"
+	@echo "  make fuzz-devcontainer      - Build the fuzzing container (nightly + cargo-fuzz)"
+	@echo "  make fuzz-fmt-check         - Format-check the detached fuzz workspace"
+	@echo "  make fuzz-build-TARGET      - Build one cargo-fuzz target"
+	@echo "  make fuzz-smoke-TARGET      - Smoke-run one cargo-fuzz target (~30s)"
 	@echo "  make clean                  - Remove build artifacts"
 	@echo ""
 	@echo "macOS native (run on a Mac, not in the devcontainer):"
@@ -78,13 +103,7 @@ ensure-cache: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 
 # Build debug version
 build: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build -p ryll
@@ -97,13 +116,7 @@ build: ensure-cache
 # to. Used during the K1 hang investigation; will go away when
 # the feature is removed.
 build-tokio-console: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		-e RUSTFLAGS="--cfg tokio_unstable" \
 		$(RYLL_IMAGE) \
@@ -111,13 +124,7 @@ build-tokio-console: ensure-cache
 
 # Build release version
 release: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
@@ -160,39 +167,88 @@ endif
 
 # Run tests
 test: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \
 		cargo test --workspace
 
 # Run linting checks (rustfmt + clippy)
 lint: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \
 		sh -c "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
 
 # Run linting with auto-fix
 lint-fix: ensure-cache
-	docker run --rm \
-		-v "$(CURDIR)":/workspace \
-		-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-		-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
-		-w /workspace \
-		-u $(UID):$(GID) \
-		-e HOME=/build \
+	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \
 		sh -c "cargo fmt --all && cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings"
+
+# Package the release binary as a .deb. cargo-deb is baked into the
+# devcontainer image; --no-build packages the binary produced by
+# `make release`.
+deb: release
+	$(DOCKER_RUN) \
+		$(RYLL_IMAGE) \
+		cargo deb --no-build -p ryll
+
+# Package the release binary as an .rpm.
+rpm: release
+	$(DOCKER_RUN) \
+		$(RYLL_IMAGE) \
+		cargo generate-rpm -p ryll
+
+# Smoke-test `ryll --web` startup/shutdown. Runs inside the
+# devcontainer, which has the runtime libraries the binary links
+# against (the self-hosted CI runners do not).
+web-smoke: release
+	$(DOCKER_RUN) \
+		$(RYLL_IMAGE) \
+		tools/web-smoke.sh target/release/ryll
+
+web-smoke-tls: release
+	$(DOCKER_RUN) \
+		$(RYLL_IMAGE) \
+		tools/web-smoke.sh --tls target/release/ryll
+
+# Build the fuzzing container: the base devcontainer plus the
+# nightly toolchain and cargo-fuzz.
+fuzz-devcontainer: devcontainer
+	docker build -t $(RYLL_FUZZ_IMAGE) \
+		-f $(DEVCONTAINER_DIR)/fuzz/Dockerfile $(DEVCONTAINER_DIR)/fuzz
+
+# The fuzz crate is a detached workspace (see fuzz/Cargo.toml's
+# `[workspace]` table), so the top-level `make lint` does not reach
+# it. Format-check it here.
+fuzz-fmt-check: ensure-cache fuzz-devcontainer
+	$(DOCKER_RUN) \
+		-w /workspace/shakenfist-spice-protocol/fuzz \
+		$(RYLL_FUZZ_IMAGE) \
+		cargo +nightly fmt --check
+
+# Build one cargo-fuzz target, e.g. `make fuzz-build-fuzz_link_mess_parse`.
+fuzz-build-%: ensure-cache fuzz-devcontainer
+	$(DOCKER_RUN) \
+		-w /workspace/shakenfist-spice-protocol \
+		$(RYLL_FUZZ_IMAGE) \
+		cargo +nightly fuzz build $*
+
+# Smoke-run one cargo-fuzz target for a bounded time. This is a
+# build-and-doesn't-panic gate, not a real fuzz campaign — long
+# coverage-guided fuzzing is tracked in shakenfist/ryll#135.
+fuzz-smoke-%: ensure-cache fuzz-devcontainer
+	$(DOCKER_RUN) \
+		-w /workspace/shakenfist-spice-protocol \
+		$(RYLL_FUZZ_IMAGE) \
+		cargo +nightly fuzz run $* -- -max_total_time=30 -runs=100000
+
+# Publish all workspace crates to crates.io in dependency order.
+# Requires CARGO_REGISTRY_TOKEN in the environment; used by the
+# release workflow.
+publish-crates: ensure-cache
+	$(DOCKER_RUN) \
+		-e CARGO_REGISTRY_TOKEN \
+		$(RYLL_IMAGE) \
+		tools/publish-crates.sh
 
 # Native macOS build. Run this on a Mac — the devcontainer can't
 # produce a binary that talks to the host window server, and ryll

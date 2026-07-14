@@ -41,3 +41,4 @@
 - PLAN-macos-runtime-metrics.md: macOS runtime metrics
 - PLAN-ci-platform-matrix.md: CI platform matrix
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics
+- PLAN-self-hosted-runners.md: Self-hosted runner migration

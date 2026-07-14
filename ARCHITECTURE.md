@@ -452,14 +452,17 @@ Key changes:
   are added to the `publish-crates` step in `release.yml`
   in dependency order (renderer after compression; webrtc
   after usbredir; ryll last).
-- `libopus-dev` is installed on the Linux CI runner so the
-  `opus` crate dynamic-links against a system libopus.
-  The deb/rpm packaging metadata records `libopus0` as a
-  runtime dependency. On macOS and Windows the `audiopus_sys`
+- `libopus-dev` is present in the devcontainer (and installed
+  on the aarch64 Linux CI runner) so the `opus` crate
+  dynamic-links against a system libopus. The deb/rpm
+  packaging metadata records `libopus0` as a runtime
+  dependency. On macOS and Windows the `audiopus_sys`
   source-build fallback applies (pkg-config absent → compile
   from source → no runtime dep).
-- `tools/web-smoke.sh` is a CI step on the Linux matrix
-  entry only. It launches `ryll --web` with a stub `.vv`,
+- `tools/web-smoke.sh` is a CI step on the Linux x86_64
+  build job only (`make web-smoke` / `make web-smoke-tls`,
+  run inside the devcontainer). It launches `ryll --web`
+  with a stub `.vv`,
   asserts the process stays alive for 3 seconds, sends
   SIGTERM, and verifies clean exit within 5 seconds.
   macOS and Windows CI verifies the `--web` dependencies

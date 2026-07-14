@@ -31,36 +31,19 @@ permissions:
   issues: write
 
 jobs:
+  # Linux x86_64 jobs run on l-size self-hosted runners with the
+  # build wrapped in the devcontainer (see Makefile), matching the
+  # pattern instar uses. The debian-12-docker image ships with
+  # docker.io preinstalled (see supply-chain.yml).
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config cmake \
-            libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxcb1-dev \
-            libx11-dev libxkbcommon-dev \
-            libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libssl-dev \
-            libasound2-dev \
-            libopus-dev
-
-      - name: Check formatting
-        run: cargo fmt --all --check
-
-      - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Check formatting and run clippy
+        run: make lint
 
   # Builds the cargo-fuzz targets in shakenfist-spice-protocol/fuzz and
   # smoke-runs each for a few seconds. This is a build-and-doesn't-panic
@@ -71,7 +54,8 @@ jobs:
   # `lint` and `build` jobs above.
   fuzz:
     name: Fuzz (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 90
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-fuzz-${{ matrix.target }}
       cancel-in-progress: true
@@ -82,62 +66,85 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # cargo-fuzz needs nightly for coverage-instrumented builds.
-      # rustfmt is requested explicitly for the fuzz-crate format check
-      # below (bare nightly does not include it).
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fuzz-${{ matrix.target }}
-
-      - name: Install Linux dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config cmake libssl-dev
-
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
-      # The fuzz crate is a detached workspace, so the top-level lint job's
+      # The fuzz crate is a detached workspace, so the lint job's
       # `cargo fmt --all --check` does not reach it. Format-check it here.
       - name: Check fuzz formatting
-        working-directory: shakenfist-spice-protocol/fuzz
-        run: cargo +nightly fmt --check
+        run: make fuzz-fmt-check
 
       - name: Build fuzz target
-        working-directory: shakenfist-spice-protocol
-        run: cargo +nightly fuzz build ${{ matrix.target }}
+        run: make fuzz-build-${{ matrix.target }}
 
       - name: Smoke-run fuzz target
-        working-directory: shakenfist-spice-protocol
-        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=30 -runs=100000
+        run: make fuzz-smoke-${{ matrix.target }}
 
+  # Linux x86_64 builds run on a self-hosted runner inside the
+  # devcontainer via the Makefile, so this job's steps differ enough
+  # from the GitHub-hosted matrix below to warrant a separate job.
+  build-linux:
+    name: Build (Linux x86_64)
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build
+        run: make release
+
+      - name: Run --web smoke test
+        run: make web-smoke
+
+      - name: Run --web smoke test (TLS)
+        run: make web-smoke-tls
+
+      - name: Run tests
+        run: make test
+
+      - name: Build .deb package
+        run: make deb
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: deb-package-x86_64-unknown-linux-gnu
+          path: target/debian/*.deb
+          retention-days: 30
+
+      - name: Build .rpm package
+        run: make rpm
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpm-package-x86_64-unknown-linux-gnu
+          path: target/generate-rpm/*.rpm
+          retention-days: 30
+
+  # These platforms stay on GitHub-hosted runners: we own no macOS,
+  # Windows, or aarch64 Linux hardware, and this is a public
+  # repository so GitHub-hosted runner minutes are free.
   build:
     name: Build (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux (x86_64)
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            features: ""
           - name: Linux (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted aarch64 Linux hardware
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             features: ""
           - name: macOS (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted macOS hardware
             os: macos-latest
             target: aarch64-apple-darwin
             features: ""
           - name: Windows (x86_64)
+            # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-latest
             target: x86_64-pc-windows-msvc
             features: "--no-default-features"
           - name: Windows (aarch64)
+            # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
             features: "--no-default-features"
@@ -287,7 +294,7 @@ jobs:
   automated_reviewer:
     name: "Automated reviewer"
     runs-on: [self-hosted, claude-code]
-    needs: [check-bot-commit, lint, build]
+    needs: [check-bot-commit, lint, build, build-linux]
     if: >-
       ${{ github.event_name == 'pull_request' &&
           needs.check-bot-commit.outputs.is_bot != 'true' }}
