@@ -326,3 +326,179 @@ impl SpiceClient {
         Ok(stream)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, DnValue, IsCa, Issuer,
+        KeyPair,
+    };
+
+    // ── Test helpers ────────────────────────────────────────────────
+
+    /// A CryptoProvider for `SpiceCaVerifier::new`. Tests pass it
+    /// directly rather than going through the process-wide
+    /// `CryptoProvider::install_default()`/`get_default()` machinery:
+    /// `SpiceCaVerifier` only uses whatever provider it is handed, and
+    /// none of these tests exercise `SpiceClient::create_tls_connector`
+    /// (the only caller that consults the global default), so a fresh
+    /// instance per test avoids any cross-test install race entirely.
+    fn crypto_provider() -> Arc<CryptoProvider> {
+        Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    fn utf8(s: &str) -> DnValue {
+        DnValue::Utf8String(s.to_string())
+    }
+
+    /// Mint a self-signed CA certificate (DER) with
+    /// `BasicConstraints::Unconstrained`, plus the key pair and params
+    /// needed to sign leaf certificates under it.
+    fn make_ca() -> (Vec<u8>, KeyPair, CertificateParams) {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate().unwrap();
+        let der = params.self_signed(&key).unwrap().der().to_vec();
+        (der, key, params)
+    }
+
+    /// Mint a leaf certificate signed by the given CA, carrying exactly
+    /// the given subject attributes in order and no SAN entries at all
+    /// (real SPICE server certificates typically lack SANs, which is
+    /// exactly what makes hostname verification unusable for them).
+    fn leaf_signed_by(
+        ca_key: &KeyPair,
+        ca_params: &CertificateParams,
+        entries: &[(DnType, DnValue)],
+    ) -> Vec<u8> {
+        let issuer = Issuer::from_params(ca_params, ca_key);
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut dn = DistinguishedName::new();
+        for (ty, value) in entries {
+            dn.push(ty.clone(), value.clone());
+        }
+        params.distinguished_name = dn;
+        let leaf_key = KeyPair::generate().unwrap();
+        params.signed_by(&leaf_key, &issuer).unwrap().der().to_vec()
+    }
+
+    /// Build a root store trusting exactly the given CA DER.
+    fn root_store(ca_der: &[u8]) -> Arc<RootCertStore> {
+        let mut store = RootCertStore::empty();
+        store.add(CertificateDer::from(ca_der.to_vec())).unwrap();
+        Arc::new(store)
+    }
+
+    /// Run `verify_server_cert` on a lone end-entity certificate (no
+    /// intermediates, no OCSP response) against the given server name.
+    fn verify(
+        verifier: &SpiceCaVerifier,
+        leaf_der: &[u8],
+        server_name: &str,
+    ) -> std::result::Result<ServerCertVerified, Error> {
+        let end_entity = CertificateDer::from(leaf_der.to_vec());
+        let name = ServerName::try_from(server_name.to_string()).unwrap();
+        verifier.verify_server_cert(&end_entity, &[], &name, &[], UnixTime::now())
+    }
+
+    // ── SpiceCaVerifier ─────────────────────────────────────────────
+
+    #[test]
+    fn accept_matching_subject() {
+        let (ca_der, ca_key, ca_params) = make_ca();
+        let leaf = leaf_signed_by(
+            &ca_key,
+            &ca_params,
+            &[
+                (DnType::CountryName, utf8("US")),
+                (DnType::OrganizationName, utf8("Kerbside CI")),
+                (DnType::CommonName, utf8("hv1")),
+            ],
+        );
+        let expected = parse_host_subject("C=US,O=Kerbside CI,CN=hv1").unwrap();
+        let verifier =
+            SpiceCaVerifier::new(root_store(&ca_der), crypto_provider(), Some(expected)).unwrap();
+
+        assert!(verify(&verifier, &leaf, "localhost").is_ok());
+    }
+
+    #[test]
+    fn reject_mismatching_subject() {
+        let (ca_der, ca_key, ca_params) = make_ca();
+        let leaf = leaf_signed_by(&ca_key, &ca_params, &[(DnType::CommonName, utf8("other"))]);
+        let expected = parse_host_subject("CN=hv1").unwrap();
+        let verifier =
+            SpiceCaVerifier::new(root_store(&ca_der), crypto_provider(), Some(expected)).unwrap();
+
+        let result = verify(&verifier, &leaf, "localhost");
+        assert!(matches!(
+            result,
+            Err(Error::InvalidCertificate(CertificateError::NotValidForName))
+        ));
+    }
+
+    #[test]
+    fn subject_pin_substitutes_for_hostname() {
+        // Every leaf here has no SAN entries, so webpki's hostname check
+        // always fails and every accept flows through the
+        // NotValidForName arm — the pinned subject is what actually
+        // gates acceptance, exactly as it substitutes for hostname
+        // verification in spice-gtk. Use a server name that cannot
+        // possibly match anything to make that arm unambiguous, and
+        // confirm the pin still lets a subject-matching certificate
+        // through.
+        let (ca_der, ca_key, ca_params) = make_ca();
+        let leaf = leaf_signed_by(&ca_key, &ca_params, &[(DnType::CommonName, utf8("hv1"))]);
+        let expected = parse_host_subject("CN=hv1").unwrap();
+        let verifier =
+            SpiceCaVerifier::new(root_store(&ca_der), crypto_provider(), Some(expected)).unwrap();
+
+        assert!(verify(&verifier, &leaf, "definitely-not-the-cert.example").is_ok());
+    }
+
+    #[test]
+    fn no_pin_preserves_relaxed_behaviour() {
+        // Today's behaviour: with no host_subject configured, a
+        // hostname mismatch against a custom-CA-signed cert is still
+        // accepted (the CA trust is the only identity check).
+        let (ca_der, ca_key, ca_params) = make_ca();
+        let leaf = leaf_signed_by(
+            &ca_key,
+            &ca_params,
+            &[(DnType::CommonName, utf8("whatever"))],
+        );
+        let verifier = SpiceCaVerifier::new(root_store(&ca_der), crypto_provider(), None).unwrap();
+
+        assert!(verify(&verifier, &leaf, "definitely-not-the-cert.example").is_ok());
+    }
+
+    // ── SpiceClient::new ────────────────────────────────────────────
+
+    #[test]
+    fn spice_client_new_rejects_malformed_pin() {
+        let config = ConnectionConfig {
+            host_subject: Some("CN=".into()),
+            tls_port: None,
+            ..Default::default()
+        };
+        // SpiceClient does not derive Debug, so unwrap_err() (which
+        // requires the Ok side to be Debug too) is not available here.
+        let err = match SpiceClient::new(config) {
+            Err(e) => e,
+            Ok(_) => panic!("expected malformed host_subject to be rejected"),
+        };
+        assert!(
+            err.to_string().contains("host_subject"),
+            "error {err} does not mention host_subject"
+        );
+
+        let config = ConnectionConfig {
+            host_subject: None,
+            tls_port: None,
+            ..Default::default()
+        };
+        assert!(SpiceClient::new(config).is_ok());
+    }
+}
