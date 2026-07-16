@@ -197,8 +197,9 @@ ryll --file /path/to/connection.vv
 #### console.vv keys ryll honours
 
 ryll parses the standard `host`, `port`, `tls-port`, `password`,
-`ca`, and `host-subject` keys. It also reads two ticket-related
-keys with ryll-specific behaviour:
+`ca`, and `host-subject` (enforced against the server certificate)
+keys. It also reads two ticket-related keys with ryll-specific
+behaviour:
 
 - **`delete-this-file=1`** — the standard "remove this file
   after reading" hint. ryll additionally treats this as a
