@@ -14,15 +14,20 @@ use tokio_rustls::rustls::{
     CertificateError, ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme,
 };
 use tokio_rustls::TlsConnector;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
+use crate::host_subject::{parse_host_subject, ExpectedSubject};
 use crate::link::{perform_auth, perform_link, SpiceStream};
 use crate::{ChannelType, ConnectionConfig, SpiceError};
 
 /// TLS certificate verifier that trusts a custom CA but skips hostname
 /// verification. SPICE self-signed certificates typically lack SAN
 /// extensions, so standard hostname checking always fails. The CA
-/// trust itself validates the server identity.
+/// trust itself validates the server identity — optionally strengthened
+/// by pinning the certificate subject: when an expected subject is
+/// configured, the end-entity certificate must match it or the
+/// handshake fails (subject pinning substitutes for hostname
+/// verification, exactly as in spice-gtk).
 ///
 /// Signature verification is delegated to the process-wide rustls
 /// [`CryptoProvider`], captured at construction. The embedding process
@@ -34,13 +39,42 @@ use crate::{ChannelType, ConnectionConfig, SpiceError};
 struct SpiceCaVerifier {
     webpki: Arc<WebPkiServerVerifier>,
     provider: Arc<CryptoProvider>,
+    expected_subject: Option<ExpectedSubject>,
 }
 
 impl SpiceCaVerifier {
-    fn new(roots: Arc<RootCertStore>, provider: Arc<CryptoProvider>) -> Result<Self> {
+    fn new(
+        roots: Arc<RootCertStore>,
+        provider: Arc<CryptoProvider>,
+        expected_subject: Option<ExpectedSubject>,
+    ) -> Result<Self> {
         let webpki =
             WebPkiServerVerifier::builder_with_provider(roots, provider.clone()).build()?;
-        Ok(SpiceCaVerifier { webpki, provider })
+        Ok(SpiceCaVerifier {
+            webpki,
+            provider,
+            expected_subject,
+        })
+    }
+
+    /// Enforce the pinned subject, if one is configured, against the
+    /// end-entity certificate. Runs only after the chain has validated;
+    /// any failure (mismatch, undecodable subject) rejects the
+    /// handshake — fail closed, never a skip.
+    fn check_subject(&self, end_entity: &CertificateDer<'_>) -> std::result::Result<(), Error> {
+        let Some(expected) = &self.expected_subject else {
+            return Ok(());
+        };
+        match expected.matches_cert_der(end_entity.as_ref()) {
+            Ok(()) => {
+                debug!("TLS: certificate subject matches pinned host_subject {expected}");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("TLS: rejecting certificate: pinned host_subject {expected}: {e}");
+                Err(Error::InvalidCertificate(CertificateError::NotValidForName))
+            }
+        }
     }
 }
 
@@ -55,6 +89,9 @@ impl ServerCertVerifier for SpiceCaVerifier {
     ) -> std::result::Result<ServerCertVerified, Error> {
         // Verify the certificate chain against our CA roots, but
         // skip hostname checking (SPICE certs lack SAN extensions).
+        // The pinned-subject check (if configured) runs on every
+        // accept path, so it cannot be bypassed by a certificate
+        // that happens to carry a matching SAN.
         match self.webpki.verify_server_cert(
             end_entity,
             intermediates,
@@ -62,12 +99,16 @@ impl ServerCertVerifier for SpiceCaVerifier {
             _ocsp_response,
             now,
         ) {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                self.check_subject(end_entity)?;
+                Ok(v)
+            }
             // webpki only checks the name after the chain has validated,
             // so a hostname mismatch means "valid chain, wrong name".
             Err(Error::InvalidCertificate(
                 CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
             )) => {
+                self.check_subject(end_entity)?;
                 info!("TLS: accepting certificate despite hostname mismatch (custom CA)");
                 Ok(ServerCertVerified::assertion())
             }
@@ -119,10 +160,24 @@ pub struct SpiceClient {
 }
 
 impl SpiceClient {
-    /// Create a new SPICE client from configuration
+    /// Create a new SPICE client from configuration.
+    ///
+    /// Fails if `config.host_subject` is set but malformed: a broken
+    /// pin must refuse to start rather than silently downgrade to an
+    /// unpinned connection. The pin is validated even when no TLS port
+    /// is configured yet, so the error surfaces on the first (possibly
+    /// plaintext) connection attempt, not only after a `need_secured`
+    /// retry upgrades to TLS.
     pub fn new(config: ConnectionConfig) -> Result<Self> {
+        let expected_subject = config
+            .host_subject
+            .as_deref()
+            .map(parse_host_subject)
+            .transpose()
+            .map_err(|e| anyhow!("refusing to connect with a malformed host_subject: {e}"))?;
+
         let tls_connector = if config.tls_port.is_some() {
-            Some(Self::create_tls_connector(&config)?)
+            Some(Self::create_tls_connector(&config, expected_subject)?)
         } else {
             None
         };
@@ -133,8 +188,12 @@ impl SpiceClient {
         })
     }
 
-    /// Create TLS connector with optional CA certificate
-    fn create_tls_connector(config: &ConnectionConfig) -> Result<TlsConnector> {
+    /// Create TLS connector with optional CA certificate and optional
+    /// pinned certificate subject.
+    fn create_tls_connector(
+        config: &ConnectionConfig,
+        expected_subject: Option<ExpectedSubject>,
+    ) -> Result<TlsConnector> {
         let mut root_store = RootCertStore::empty();
 
         // Add system roots
@@ -158,10 +217,13 @@ impl SpiceClient {
             }
         }
 
-        let tls_config = if has_custom_ca {
+        let tls_config = if has_custom_ca || expected_subject.is_some() {
             // SPICE self-signed certs typically lack SAN extensions, so
             // standard hostname verification always fails. Use a custom
-            // verifier that checks the CA chain but allows hostname mismatch.
+            // verifier that checks the CA chain but allows hostname mismatch;
+            // when a host_subject is pinned, the verifier enforces it in
+            // place of the hostname check (so the custom verifier is also
+            // needed when a subject is pinned without a custom CA).
             // The verifier delegates signature checks to the process-wide
             // crypto provider, so one must be installed before we connect.
             let provider = CryptoProvider::get_default()
@@ -173,7 +235,7 @@ impl SpiceClient {
                     )
                 })?
                 .clone();
-            let verifier = SpiceCaVerifier::new(Arc::new(root_store), provider)?;
+            let verifier = SpiceCaVerifier::new(Arc::new(root_store), provider, expected_subject)?;
             ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
