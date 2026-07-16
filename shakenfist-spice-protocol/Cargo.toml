@@ -25,6 +25,12 @@ tracing = "0.1"
 rustls-pemfile = "2"
 socket2 = { version = "0.6", features = ["all"] }
 webpki-roots = "1.0"
+# Certificate subject DN parsing for host_subject pinning. Already in the
+# workspace lockfile transitively (rcgen pulls it), so no new registry entry.
+x509-parser = "0.18"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "net", "macros", "rt"] }
+# Mints certificates with controlled subject DNs for the host_subject
+# matcher tests. Same version the ryll crate uses for its --web TLS tests.
+rcgen = "0.14"

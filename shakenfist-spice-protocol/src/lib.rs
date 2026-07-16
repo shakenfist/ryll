@@ -25,6 +25,10 @@
 //!   safely parsing untrusted wire input (`BoundedReader`,
 //!   `LinkError`). Panic-free bounds- and overflow-checked
 //!   reads for use by handshake and message parsers.
+//! - [`host_subject`] — expected-certificate-subject parsing
+//!   and matching (`parse_host_subject`, `ExpectedSubject`),
+//!   replicating spice-common's `ssl_verify.c` semantics for
+//!   `host-subject` pinning.
 //!
 //! - [`ConnectionConfig`] — SPICE server connection
 //!   parameters (host, port, TLS, credentials). This is the
@@ -43,6 +47,7 @@
 
 pub mod client;
 pub mod constants;
+pub mod host_subject;
 pub mod link;
 pub mod logging;
 pub mod messages;
