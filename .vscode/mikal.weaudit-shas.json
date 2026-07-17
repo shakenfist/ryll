@@ -1,10 +1,6 @@
 {
   "version": 1,
   "files": {
-    "shakenfist-spice-compression/Cargo.toml": {
-      "sha": "9487df07002d9f7a7c2e577a46f772a3ebf7a1dc",
-      "date": "2026-07-10"
-    },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
       "date": "2026-07-10"
@@ -14,8 +10,8 @@
       "date": "2026-07-10"
     },
     "shakenfist-spice-compression/src/glz.rs": {
-      "sha": "6600fc53e28bcfbc4192828037251fb291fe1a8d",
-      "date": "2026-07-05"
+      "sha": "8b71fc9aabc4b6052792472e2513b08e0a9dbde1",
+      "date": "2026-07-17"
     },
     "shakenfist-spice-compression/src/jpeg.rs": {
       "sha": "52daa8310f08e63ea2de77cde8f4d733108ae85c",
@@ -66,8 +62,8 @@
       "date": "2026-07-10"
     },
     "shakenfist-spice-protocol/src/client.rs": {
-      "sha": "10fb879db0d50ac09d11262762cecb6e4536c3f5",
-      "date": "2026-07-10"
+      "sha": "0df1430a3232c7b420842568d5d5172e9e9d9c96",
+      "date": "2026-07-17"
     },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
@@ -78,8 +74,24 @@
       "date": "2026-07-10"
     },
     "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "0577e0eca0253dfc370a839af0fcfd1fc6c270ec",
-      "date": "2026-07-10"
+      "sha": "8bf1ba08dd47059e01c486fccf265a7a1aca4e64",
+      "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/logging.rs": {
+      "sha": "f4a80e3d320f4cd2cf55e528b4911b01932c1dad",
+      "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/messages.rs": {
+      "sha": "b49acc11b8c7b0dc0bd5ca544307f7a1583cbe2a",
+      "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/parse.rs": {
+      "sha": "d203d9a6b371d431247c0037edd3851936369a61",
+      "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/reader.rs": {
+      "sha": "d9953c5499e5f0dbae5bcb1cb5764b8f2715210c",
+      "date": "2026-07-17"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
