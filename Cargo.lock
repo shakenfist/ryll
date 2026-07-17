@@ -6174,6 +6174,7 @@ dependencies = [
  "anyhow",
  "byteorder",
  "rand 0.8.5",
+ "rcgen 0.14.8",
  "rsa",
  "rustls-pemfile",
  "serde",
@@ -6184,6 +6185,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "webpki-roots",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]

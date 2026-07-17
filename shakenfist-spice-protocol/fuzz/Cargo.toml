@@ -44,3 +44,10 @@ path = "fuzz_targets/fuzz_decrypt_password.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_parse_host_subject"
+path = "fuzz_targets/fuzz_parse_host_subject.rs"
+test = false
+doc = false
+bench = false

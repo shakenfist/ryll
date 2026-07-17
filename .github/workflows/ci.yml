@@ -62,7 +62,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password]
+        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password, fuzz_parse_host_subject]
     steps:
       - uses: actions/checkout@v7
 

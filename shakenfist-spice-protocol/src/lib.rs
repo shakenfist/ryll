@@ -25,6 +25,10 @@
 //!   safely parsing untrusted wire input (`BoundedReader`,
 //!   `LinkError`). Panic-free bounds- and overflow-checked
 //!   reads for use by handshake and message parsers.
+//! - [`host_subject`] — expected-certificate-subject parsing
+//!   and matching (`parse_host_subject`, `ExpectedSubject`),
+//!   replicating spice-common's `ssl_verify.c` semantics for
+//!   `host-subject` pinning.
 //!
 //! - [`ConnectionConfig`] — SPICE server connection
 //!   parameters (host, port, TLS, credentials). This is the
@@ -43,6 +47,7 @@
 
 pub mod client;
 pub mod constants;
+pub mod host_subject;
 pub mod link;
 pub mod logging;
 pub mod messages;
@@ -85,10 +90,20 @@ pub struct ConnectionConfig {
     pub password: Option<String>,
     /// PEM-encoded CA certificate for TLS. When present,
     /// hostname verification is relaxed (SPICE servers
-    /// commonly use self-signed certs without SAN extensions).
+    /// commonly use self-signed certs without SAN
+    /// extensions); pin `host_subject` to verify the
+    /// server's identity instead.
     pub ca_cert: Option<String>,
-    /// Expected certificate subject. Currently informational
-    /// only — SPICE servers commonly omit SAN extensions, so
-    /// subject matching is not enforced.
+    /// Expected certificate subject, e.g.
+    /// `C=US,O=Acme,CN=hv1`. When set, the TLS handshake
+    /// fails unless the server's end-entity certificate
+    /// subject matches it under spice-common's rules (see
+    /// the [`host_subject`] module) — subject pinning
+    /// substitutes for hostname verification, exactly as
+    /// spice-gtk treats `cert-subject`. A malformed value
+    /// fails [`SpiceClient::new`] rather than silently
+    /// downgrading to an unpinned connection. `None`
+    /// preserves the relaxed behaviour described on
+    /// `ca_cert`.
     pub host_subject: Option<String>,
 }
