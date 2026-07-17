@@ -56,7 +56,7 @@ tracing = "0.1"
 
 # LZ4 compression/decompression for general data (webdav, usbredir).
 # SPICE image LZ4 lives in shakenfist-spice-compression below.
-lz4_flex = "0.13"
+lz4_flex = "0.14"
 
 # Extracted SPICE codecs. Path+version dual-spec: cargo uses the
 # path when building locally and the published crate when resolving

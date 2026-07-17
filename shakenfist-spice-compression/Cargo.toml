@@ -32,7 +32,7 @@ byteorder = "1"
 thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
-lz4_flex = { version = "0.13", optional = true }
+lz4_flex = { version = "0.14", optional = true }
 # Byte-bounded LRU shared by the GLZ dictionary (this crate) and
 # the renderer's image_cache wrapper.  Same version pin as the
 # renderer's previous `lru` dep.
