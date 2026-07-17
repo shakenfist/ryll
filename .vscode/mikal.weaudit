@@ -122,6 +122,26 @@
     {
       "path": "shakenfist-spice-protocol/src/reader.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/host_subject.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
