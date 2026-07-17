@@ -806,6 +806,17 @@ and clippy via `ci.yml`, the remaining three via
 does not bypass enforcement — it only defers the failure to
 CI.
 
+### Review tracking
+
+The whole-file review state (`REVIEWS.md`, `.vscode/*.weaudit*`,
+`.vscode/*.weaudit-shas.json`) is maintained manually with
+`tools/review-tracking.sh` (subcommands `stamp`, `prune`, `regen`,
+`next`), which wraps `scripts/review-tracking.py` from a local
+clone of the shakenfist/development repository. These are
+deliberately *not* wired into git hooks — they run only when
+invoked explicitly. `REVIEWS.md` is generated; never edit it by
+hand.
+
 ## Security scanners
 
 ryll runs five deterministic scanners on every PR in

@@ -130,6 +130,17 @@ The pre-commit hooks run:
 - **clippy** - Linting with warnings as errors
 - **shellcheck** - Shell script linting
 
+### Review tracking
+
+Whole-file human review state (`REVIEWS.md`, `.vscode/*.weaudit*`)
+is maintained with `tools/review-tracking.sh`, a wrapper around the
+shared helper in the
+[shakenfist/development](https://github.com/shakenfist/development/blob/main/docs/code-review-tracking.md)
+repository. It is run by hand, not from git hooks: `prune` after a
+pull to discard reviews of files that have since changed, `stamp`
+before committing new review marks, `regen` to rebuild `REVIEWS.md`,
+and `next` to pick an unreviewed file.
+
 ### Using local Rust installation
 
 If you have Rust installed locally with the required dependencies:
