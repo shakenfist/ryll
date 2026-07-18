@@ -4035,7 +4035,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
  "smallvec",
  "zeroize",
 ]
@@ -5216,9 +5216,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -5875,7 +5875,7 @@ dependencies = [
  "nusb",
  "pcap-file",
  "png",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rcgen 0.14.8",
  "reqwest",
  "rfd",
@@ -6162,7 +6162,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "byteorder",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rcgen 0.14.8",
  "rsa",
  "rustls-pemfile",
@@ -6199,7 +6199,7 @@ dependencies = [
  "nusb",
  "openh264",
  "opus-decoder",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rsa",
  "rtp",
  "rtrb",
@@ -6236,7 +6236,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "opus",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rustls",
  "shakenfist-spice-renderer",
  "thiserror 2.0.18",
