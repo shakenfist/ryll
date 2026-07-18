@@ -1874,7 +1874,7 @@ dependencies = [
  "p256",
  "p384",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "rand_core 0.6.4",
  "rcgen 0.13.2",
  "ring",
@@ -2831,8 +2831,6 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "allocator-api2",
- "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -3312,7 +3310,7 @@ dependencies = [
  "futures",
  "log",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "rtcp",
  "rtp",
  "thiserror 1.0.69",
@@ -3631,15 +3629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
 dependencies = [
  "imgref",
-]
-
-[[package]]
-name = "lru"
-version = "0.12.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
-dependencies = [
- "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -4046,7 +4035,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.5",
+ "rand 0.8.6",
  "smallvec",
  "zeroize",
 ]
@@ -5169,7 +5158,7 @@ dependencies = [
  "bytes",
  "getrandom 0.3.4",
  "lru-slab",
- "rand 0.9.2",
+ "rand 0.9.3",
  "ring",
  "rustc-hash 2.1.2",
  "rustls",
@@ -5227,9 +5216,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -5238,9 +5227,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.9.2"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
+checksum = "7ec095654a25171c2124e9e3393a930bddbffdc939556c914957a4c3e0a87166"
 dependencies = [
  "rand_chacha 0.9.0",
  "rand_core 0.9.5",
@@ -5317,7 +5306,7 @@ dependencies = [
  "num-traits",
  "paste",
  "profiling",
- "rand 0.9.2",
+ "rand 0.9.3",
  "rand_chacha 0.9.0",
  "simd_helpers",
  "thiserror 2.0.18",
@@ -5645,13 +5634,13 @@ dependencies = [
 
 [[package]]
 name = "rqrr"
-version = "0.9.3"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2260da7f69877ba68c49a0c2d9946829848236c708dd40d2a6baf8c868ee887"
+checksum = "ffbe87d9e8db95652c25ded2418150e00b08c2fde09e23ec15896d2c470c6631"
 dependencies = [
  "g2p",
  "image",
- "lru 0.12.5",
+ "lru 0.16.3",
 ]
 
 [[package]]
@@ -5694,7 +5683,7 @@ dependencies = [
  "bytes",
  "memchr",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "serde",
  "thiserror 1.0.69",
  "webrtc-util",
@@ -5886,7 +5875,7 @@ dependencies = [
  "nusb",
  "pcap-file",
  "png",
- "rand 0.8.5",
+ "rand 0.8.6",
  "rcgen 0.14.8",
  "reqwest",
  "rfd",
@@ -5981,7 +5970,7 @@ version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22c3b0257608d7de4de4c4ea650ccc2e6e3e45e3cd80039fcdee768bcb449253"
 dependencies = [
- "rand 0.9.2",
+ "rand 0.9.3",
  "substring",
  "thiserror 1.0.69",
  "url",
@@ -6173,7 +6162,7 @@ version = "0.1.5"
 dependencies = [
  "anyhow",
  "byteorder",
- "rand 0.8.5",
+ "rand 0.8.6",
  "rcgen 0.14.8",
  "rsa",
  "rustls-pemfile",
@@ -6210,7 +6199,7 @@ dependencies = [
  "nusb",
  "openh264",
  "opus-decoder",
- "rand 0.8.5",
+ "rand 0.8.6",
  "rsa",
  "rtp",
  "rtrb",
@@ -6247,7 +6236,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "opus",
- "rand 0.8.5",
+ "rand 0.8.6",
  "rustls",
  "shakenfist-spice-renderer",
  "thiserror 2.0.18",
@@ -6259,7 +6248,7 @@ dependencies = [
 [[package]]
 name = "shakenfist-visual-digest"
 version = "0.0.1"
-source = "git+https://github.com/shakenfist/visual-digest-rust.git#87631814594904673e3950f16e3e951a807c7716"
+source = "git+https://github.com/shakenfist/visual-digest-rust.git#4dfff9e9ef6240bf09e3ae51b4f38748c29c6e44"
 dependencies = [
  "crc",
  "image",
@@ -6525,7 +6514,7 @@ dependencies = [
  "crc",
  "lazy_static",
  "md-5",
- "rand 0.9.2",
+ "rand 0.9.3",
  "ring",
  "subtle",
  "thiserror 1.0.69",
@@ -7066,7 +7055,7 @@ dependencies = [
  "log",
  "md-5",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "ring",
  "stun",
  "thiserror 1.0.69",
@@ -7603,7 +7592,7 @@ dependencies = [
  "lazy_static",
  "log",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "rcgen 0.13.2",
  "regex",
  "ring",
@@ -7656,7 +7645,7 @@ dependencies = [
  "crc",
  "log",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "serde",
  "serde_json",
  "stun",
@@ -7691,7 +7680,7 @@ checksum = "a9a28290bd0cdda196f8bf5c6f7dddaef18cc913ee0702cd1ea237bad203e337"
 dependencies = [
  "byteorder",
  "bytes",
- "rand 0.9.2",
+ "rand 0.9.3",
  "rtp",
  "thiserror 1.0.69",
 ]
@@ -7708,7 +7697,7 @@ dependencies = [
  "crc",
  "log",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "thiserror 1.0.69",
  "tokio",
  "webrtc-util",
@@ -7751,7 +7740,7 @@ dependencies = [
  "log",
  "nix 0.26.4",
  "portable-atomic",
- "rand 0.9.2",
+ "rand 0.9.3",
  "thiserror 1.0.69",
  "tokio",
  "winapi",
