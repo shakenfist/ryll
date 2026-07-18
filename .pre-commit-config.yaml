@@ -1,11 +1,3 @@
-# The review tracking hooks need more than the default pre-commit
-# stage; make a plain "pre-commit install" set them all up.
-default_install_hook_types:
-  - pre-commit
-  - post-merge
-  - post-checkout
-  - post-rewrite
-
 repos:
   - repo: local
     hooks:
@@ -37,8 +29,5 @@ repos:
         language: script
         pass_filenames: true
 
-  - repo: https://github.com/shakenfist/development
-    rev: ee6d4eab7cc341d5b48e3ea36c57ab87b209d3db
-    hooks:
-      - id: review-stamp
-      - id: review-prune
+# The review tracking helpers (stamp, prune, regen, next) are run by
+# hand via tools/review-tracking.sh, not from git hooks.
