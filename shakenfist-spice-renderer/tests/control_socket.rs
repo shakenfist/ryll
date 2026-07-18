@@ -452,7 +452,8 @@ async fn send_key_translates_to_input_events() {
         ev
     );
 
-    // "up" → one KeyUp
+    // "up" with the make code → one KeyUp carrying the AT set-1
+    // release code (make | 0x80).
     send_request(
         &mut w,
         3,
@@ -463,15 +464,34 @@ async fn send_key_translates_to_input_events() {
     let _resp = recv_line(&mut r).await;
     let ev = inputs.input_rx.recv().await.expect("KeyUp event");
     assert!(
-        matches!(ev, InputEvent::KeyUp(sc) if sc == 0x1E_u32),
-        "expected KeyUp(0x1E), got {:?}",
+        matches!(ev, InputEvent::KeyUp(sc) if sc == 0x9E_u32),
+        "expected KeyUp(0x9E), got {:?}",
         ev
     );
 
-    // "press" → KeyDown then KeyUp
+    // "up" with an explicit release code → unchanged (the release
+    // bit is not double-applied), so clients that pre-set it stay
+    // correct.
     send_request(
         &mut w,
         4,
+        "send_key",
+        serde_json::json!({ "scancode": 0x9E, "state": "up" }),
+    )
+    .await;
+    let _resp = recv_line(&mut r).await;
+    let ev = inputs.input_rx.recv().await.expect("KeyUp event");
+    assert!(
+        matches!(ev, InputEvent::KeyUp(sc) if sc == 0x9E_u32),
+        "expected KeyUp(0x9E), got {:?}",
+        ev
+    );
+
+    // "press" → KeyDown with the make code, then KeyUp with the
+    // release code.  A single press must type exactly one character.
+    send_request(
+        &mut w,
+        5,
         "send_key",
         serde_json::json!({ "scancode": 0x1E, "state": "press" }),
     )
@@ -480,12 +500,35 @@ async fn send_key_translates_to_input_events() {
     let ev1 = inputs.input_rx.recv().await.expect("KeyDown for press");
     let ev2 = inputs.input_rx.recv().await.expect("KeyUp for press");
     assert!(matches!(ev1, InputEvent::KeyDown(sc) if sc == 0x1E_u32));
-    assert!(matches!(ev2, InputEvent::KeyUp(sc) if sc == 0x1E_u32));
+    assert!(matches!(ev2, InputEvent::KeyUp(sc) if sc == 0x9E_u32));
+
+    // Extended key (0xE0-prefixed, left arrow): the release bit lands
+    // on the low byte of the packed value.
+    send_request(
+        &mut w,
+        6,
+        "send_key",
+        serde_json::json!({ "scancode": 0xE04B, "state": "press" }),
+    )
+    .await;
+    let _resp = recv_line(&mut r).await;
+    let ev1 = inputs
+        .input_rx
+        .recv()
+        .await
+        .expect("KeyDown for extended press");
+    let ev2 = inputs
+        .input_rx
+        .recv()
+        .await
+        .expect("KeyUp for extended press");
+    assert!(matches!(ev1, InputEvent::KeyDown(sc) if sc == 0xE04B_u32));
+    assert!(matches!(ev2, InputEvent::KeyUp(sc) if sc == 0xE0CB_u32));
 
     // "sideways" → bad_state error; no InputEvent enqueued.
     send_request(
         &mut w,
-        5,
+        7,
         "send_key",
         serde_json::json!({ "scancode": 0x1E, "state": "sideways" }),
     )

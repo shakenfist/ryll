@@ -906,9 +906,11 @@ struct PasteParams {
 ///
 /// Translates the `state` field into one or two `InputEvent`s:
 /// - `"down"` → `InputEvent::KeyDown(scancode)`.
-/// - `"up"` → `InputEvent::KeyUp(scancode)`.
+/// - `"up"` → `InputEvent::KeyUp` carrying the AT set-1 release code
+///   (`scancode | 0x80`); the caller may supply either the make code
+///   or the release code.
 /// - `"press"` → `InputEvent::KeyDown(scancode)` followed immediately
-///   by `InputEvent::KeyUp(scancode)` (two separate sends).
+///   by the same `InputEvent::KeyUp` as `"up"` (two separate sends).
 ///
 /// Returns `{}` on success.  The two sends for `"press"` are
 /// non-atomic from the inputs channel's perspective, but they arrive
@@ -932,6 +934,14 @@ fn handle_send_key(
     };
 
     let scancode = p.scancode as u32;
+    // `InputEvent::KeyUp` carries the AT set-1 release code: the make
+    // code with bit 7 set (every other producer — GUI, cadence —
+    // already passes it that way).  For 0xE0-prefixed extended codes
+    // the release bit belongs on the second byte, which is the low
+    // byte of the packed u16 value, so the same OR covers both.
+    // OR-ing an already-set bit is a no-op, keeping clients that
+    // supply an explicit release code correct.
+    let release = scancode | 0x80;
 
     match p.state.as_str() {
         "down" => {
@@ -940,7 +950,7 @@ fn handle_send_key(
             }
         }
         "up" => {
-            if input_tx.try_send(InputEvent::KeyUp(scancode)).is_err() {
+            if input_tx.try_send(InputEvent::KeyUp(release)).is_err() {
                 return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
             }
         }
@@ -950,7 +960,7 @@ fn handle_send_key(
             if input_tx.try_send(InputEvent::KeyDown(scancode)).is_err() {
                 return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
             }
-            if input_tx.try_send(InputEvent::KeyUp(scancode)).is_err() {
+            if input_tx.try_send(InputEvent::KeyUp(release)).is_err() {
                 return Response::err(
                     id,
                     ErrorCode::InternalError,
