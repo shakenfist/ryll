@@ -389,8 +389,17 @@ Params:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `scancode` | u16 | The AT-set 1 scancode to send. Extended scancodes (0xE0 prefix) should be supplied as the full 16-bit value with the prefix byte in the high byte, e.g. `0xE04B` for left arrow. |
+| `scancode` | u16 | The AT-set 1 **make** code to send. Extended scancodes (0xE0 prefix) should be supplied as the full 16-bit value with the prefix byte in the high byte, e.g. `0xE04B` for left arrow. |
 | `state` | string | One of `"down"`, `"up"`, or `"press"`. `"press"` sends a down event immediately followed by an up event in a single operation. |
+
+The server applies the AT-set 1 release encoding itself: for `"up"`
+(and the up half of `"press"`) it sets the release bit
+(`scancode | 0x80`, which for extended scancodes lands on the low
+byte, after the 0xE0 prefix) before injecting the event. Clients
+supply the make code for every state. A client that passes an
+already-encoded release code for `"up"` still works — the release
+bit is not double-applied — but this is a compatibility affordance,
+not the documented interface.
 
 Result on success: `{}`
 
