@@ -60,23 +60,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/fuzz/.gitignore",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/fuzz/Cargo.lock",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/fuzz",
       "author": "mikal"
     },
     {
@@ -112,19 +96,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/glz.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-compression/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/client.rs",
       "author": "mikal"
     },
     {
@@ -148,7 +124,23 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src",
+      "path": "shakenfist-spice-protocol/src/host_subject.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/display.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
       "author": "mikal"
     }
   ],

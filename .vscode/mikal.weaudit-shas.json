@@ -41,14 +41,6 @@
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
     },
-    "shakenfist-spice-protocol/fuzz/Cargo.lock": {
-      "sha": "7971af05644f04854da2ab10073659529485c7e0",
-      "date": "2026-07-10"
-    },
-    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
-      "sha": "52f49d3f0be2bd6945ef6032a51b45f4eef692ad",
-      "date": "2026-07-10"
-    },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
       "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
       "date": "2026-07-10"
@@ -61,17 +53,17 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
-    "shakenfist-spice-protocol/src/client.rs": {
-      "sha": "0df1430a3232c7b420842568d5d5172e9e9d9c96",
-      "date": "2026-07-17"
-    },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/src/host_subject.rs": {
+      "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
+      "date": "2026-07-18"
+    },
     "shakenfist-spice-protocol/src/lib.rs": {
-      "sha": "de3032807f77b0cfa26ee82a179462f39ff72ca3",
-      "date": "2026-07-10"
+      "sha": "e50652f535aefca3d1ad527a69ce45f491612a6f",
+      "date": "2026-07-18"
     },
     "shakenfist-spice-protocol/src/link.rs": {
       "sha": "8bf1ba08dd47059e01c486fccf265a7a1aca4e64",
@@ -92,6 +84,18 @@
     "shakenfist-spice-protocol/src/reader.rs": {
       "sha": "d9953c5499e5f0dbae5bcb1cb5764b8f2715210c",
       "date": "2026-07-17"
+    },
+    "shakenfist-spice-renderer/src/channels/cursor.rs": {
+      "sha": "d119d8d9bb029b3200b3a4477a294e725326f1c4",
+      "date": "2026-07-18"
+    },
+    "shakenfist-spice-renderer/src/channels/display.rs": {
+      "sha": "829bdc44838acc1a85321b97d8f360ac23d01efb",
+      "date": "2026-07-18"
+    },
+    "shakenfist-spice-renderer/src/channels/inputs.rs": {
+      "sha": "0a348f92200b5b3a3092cab7c1ce16c87ad382c4",
+      "date": "2026-07-18"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
