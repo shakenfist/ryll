@@ -53,6 +53,10 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "3fbede8f4b6eab8e3057ffd2146c00b62c55c9b0",
+      "date": "2026-07-19"
+    },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
       "date": "2026-07-10"
@@ -96,6 +100,42 @@
     "shakenfist-spice-renderer/src/channels/inputs.rs": {
       "sha": "0a348f92200b5b3a3092cab7c1ce16c87ad382c4",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
+      "sha": "96687566c03f82f8860db66b9772fb7202dedb09",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/channels/mod.rs": {
+      "sha": "f78293cf000996c117ba7d19b62da987c34d9eb8",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/channels/playback.rs": {
+      "sha": "21c30e471574d0995608706a4d1374eff4f348e2",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
+      "sha": "3aa17524fcf93724c8e9d2eacc2abcf397035b0f",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/channels/volume.rs": {
+      "sha": "7bdfcb6c3add013748b3df150f799b169c7c65c8",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/channels/webdav.rs": {
+      "sha": "87e755272e72750366f5832d9f140b198300ae15",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/control/mod.rs": {
+      "sha": "e5d17a3a8dcd9c28de519ced1d31b502a1639fcd",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/control/protocol.rs": {
+      "sha": "b0317b156c0ea511f42d3da53ac41de41c0f810d",
+      "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/control/server.rs": {
+      "sha": "bba7179d0e3d005460e2157e16a46f9fd60acacf",
+      "date": "2026-07-19"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
