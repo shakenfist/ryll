@@ -52,6 +52,40 @@ Pre-built `.deb` packages for Debian/Ubuntu are available from
 [GitHub Releases](https://github.com/shakenfist/ryll/releases). See
 [docs/installation.md](https://github.com/shakenfist/ryll/blob/develop/docs/installation.md) for all platforms.
 
+### Installing via pip
+
+`pip install ryll` (typically pulled in automatically via
+`pip install shakenfist-client[vdi]`, phase 4 of the VDI console-tokens
+plan) puts a `ryll` executable straight on the venv's `PATH`. The wheel
+is a per-architecture manylinux build (`maturin` with `bindings = "bin"`)
+that already contains the compiled ryll GUI binary — there is no
+runtime download, no cache, and no launcher shim. It works offline
+immediately after install.
+
+Wheels are published for Linux `x86_64` and `aarch64` with glibc >=
+2.28 (built in the `manylinux_2_28` container). On other platforms —
+macOS, Windows, musl libc, or older glibc — there is no wheel; install
+ryll from a system package, a release artifact, or build from source
+instead (see above).
+
+The binary is still the same GUI application described above, so it
+needs the underlying GUI/audio system libraries at runtime, which pip
+cannot install:
+
+```bash
+sudo apt-get install -y libxcb1 libwayland-client0 libxkbcommon0 \
+    libasound2 libopus0 libgl1
+```
+
+If one is missing, ryll fails to start with a dynamic-loader or
+GUI-initialisation error naming the library; install the packages above
+to resolve it. `remote-viewer` is the fallback whenever ryll can't be
+installed or run on a given platform.
+
+See
+[docs/plans/PLAN-pip-distribution.md](https://github.com/shakenfist/ryll/blob/develop/docs/plans/PLAN-pip-distribution.md)
+for the full design rationale.
+
 ## CI and Automation
 
 GitHub Actions CI builds and tests ryll on Linux (x86_64 + aarch64),

@@ -1,0 +1,44 @@
+# Packaging manifest for the `ryll` PyPI wheel.
+#
+# This wheel EMBEDS the compiled ryll GUI binary: maturin with
+# bindings = "bin" lays the `ryll` executable into the wheel's
+# *.data/scripts/ directory, which pip installs onto PATH. So
+# `pip install ryll` puts a working `ryll` on PATH with no runtime
+# download (unlike a fetch-on-first-run launcher). Because it carries a
+# compiled binary the wheel is platform-tagged, one per arch
+# (manylinux_2_28_x86_64 / _aarch64); see tools/build-ryll-wheel.sh and
+# docs/plans/PLAN-pip-distribution.md for the build recipe and why the
+# manylinux_2_28 tag is honest (the GUI/audio libraries are dlopen'd at
+# runtime, not DT_NEEDED, and the glibc floor is 2.28).
+#
+# The version is inherited from the crate (version.workspace = true, so
+# whatever the release tag stamped into [workspace.package]) via
+# dynamic = ["version"] -- no separate stamping step is needed, and the
+# release workflow's check-version job already enforces tag == version.
+
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ryll"
+description = "A Rust SPICE VDI client (GUI)"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: System :: Networking",
+]
+
+[project.urls]
+"Homepage" = "https://shakenfist.com"
+"Source" = "https://github.com/shakenfist/ryll"
+"Bug Tracker" = "https://github.com/shakenfist/ryll/issues"
+
+[tool.maturin]
+# Package the [[bin]] target (not a Python extension module) into the
+# wheel's *.data/scripts/ directory, which pip installs onto PATH.
+bindings = "bin"

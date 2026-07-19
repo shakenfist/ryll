@@ -248,9 +248,75 @@ jobs:
           name: release-windows-${{ matrix.target }}
           path: target/release/ryll-*.zip
 
+  # Builds the per-arch `ryll` PyPI wheels (maturin bindings=bin; the
+  # wheel embeds the compiled ryll GUI binary, see
+  # tools/build-ryll-wheel.sh and docs/plans/PLAN-pip-distribution.md).
+  # Each leg must build natively on a runner matching its arch (no
+  # QEMU), so it only needs check-version and can build in parallel
+  # with the Rust jobs above.
+  build-ryll-wheels:
+    name: Build ryll wheel (${{ matrix.arch }})
+    needs: check-version
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: [self-hosted, vm, debian-12-docker, l]
+          - arch: aarch64
+            # audit-ok: github-hosted-runner -- no self-hosted aarch64
+            # Linux hardware, and the arm wheel must build natively,
+            # not under QEMU
+            runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build wheel
+        run: tools/build-ryll-wheel.sh ${{ matrix.arch }}
+
+      - name: Upload ryll wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ryll-wheel-${{ matrix.arch }}
+          path: target/wheels/*.whl
+
+  # Keyless Sigstore-sign the release tag, gated on the `release`
+  # environment's manual approval, mirroring kerbside's sign-tag job.
+  # EVERY publishing job below needs this one, so the (approved) signed
+  # tag exists before anything is published -- crates.io, the GitHub
+  # release, and the ryll PyPI wheels alike. Gate on all artifact
+  # builds so signing never becomes eligible (and the tag is never
+  # force-pushed) while a build is still running or has failed.
+  sign-tag:
+    name: Sign release tag with Sigstore
+    needs: [build, build-linux, build-ryll-wheels]
+    # audit-ok: github-hosted-runner -- ephemeral runner for tag
+    # signing; installs gitsign via sudo and writes global git config,
+    # so it must be throwaway rather than the shared self-hosted pool
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Sign and push release tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          tools/sign-release-tag.sh
+          "${GITHUB_REF#refs/tags/}" "${GITHUB_SHA}"
+
   publish-crates:
     name: Publish workspace crates to crates.io
-    needs: [build, build-linux]
+    needs: [build, build-linux, sign-tag]
     runs-on: [self-hosted, vm, debian-12-docker, l]
     timeout-minutes: 120
     permissions:
@@ -267,7 +333,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [build, build-linux]
+    needs: [build, build-linux, sign-tag]
     runs-on: [self-hosted, static]
     permissions:
       contents: write
@@ -292,6 +358,70 @@ jobs:
             *.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Staged on TestPyPI first (open question 8: validate the whole
+  # publish flow before touching real PyPI, mirroring how kerbside
+  # staged the proxy wheel setup). Both this job and publish-ryll-pypi
+  # use PyPI Trusted Publishers (OIDC `id-token: write`), the same
+  # token-free auth mechanism kerbside's release.yml uses for
+  # `publish-proxy-pypi`/`publish-pypi` -- see
+  # https://github.com/shakenfist/kerbside/blob/develop/.github/workflows/release.yml
+  # and that repo's RELEASE-SETUP.md. This requires a `ryll`
+  # trusted-publisher entry on test.pypi.org (separate from the one on
+  # pypi.org below); see the Report for exact one-time setup steps.
+  #
+  # Publishes both per-arch wheels built by build-ryll-wheels. Ordered
+  # after github-release (needs:) so the release binaries are already
+  # public before this version becomes `pip install`-able anywhere
+  # (open questions 4-6).
+  publish-ryll-testpypi:
+    name: Publish ryll to TestPyPI
+    needs: [build-ryll-wheels, github-release, sign-tag]
+    runs-on: [self-hosted, static]
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - name: Download ryll wheel artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ryll-wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Idempotent republish: a re-run after a partial failure must
+          # not hard-error on a file TestPyPI already has.
+          skip-existing: true
+
+  publish-ryll-pypi:
+    name: Publish ryll to PyPI
+    needs: publish-ryll-testpypi
+    runs-on: [self-hosted, static]
+    environment: release
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download ryll wheel artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ryll-wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate attestations for artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*'
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   update-homebrew:
     name: Update Homebrew tap

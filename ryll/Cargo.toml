@@ -7,6 +7,13 @@ authors.workspace = true
 repository.workspace = true
 description = "A Rust SPICE VDI test client"
 
+# Explicit bin target so maturin's bindings = "bin" (see pyproject.toml)
+# packages a binary named exactly `ryll`. Cargo would auto-discover
+# src/main.rs as a bin of the package name anyway; this pins it.
+[[bin]]
+name = "ryll"
+path = "src/main.rs"
+
 [lints]
 workspace = true
 
