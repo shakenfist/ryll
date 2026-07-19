@@ -142,6 +142,58 @@
     {
       "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/volume.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/webdav.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/protocol.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/control",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
