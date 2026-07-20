@@ -89,6 +89,10 @@
       "sha": "d9953c5499e5f0dbae5bcb1cb5764b8f2715210c",
       "date": "2026-07-17"
     },
+    "shakenfist-spice-renderer/src/audio_sink.rs": {
+      "sha": "5f9c415b50f2ea3b0b2e2edf31e4b78faec2b5e8",
+      "date": "2026-07-21"
+    },
     "shakenfist-spice-renderer/src/channels/cursor.rs": {
       "sha": "d119d8d9bb029b3200b3a4477a294e725326f1c4",
       "date": "2026-07-18"
@@ -136,6 +140,14 @@
     "shakenfist-spice-renderer/src/control/server.rs": {
       "sha": "bba7179d0e3d005460e2157e16a46f9fd60acacf",
       "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/display/mod.rs": {
+      "sha": "970f2a1daf31ac2804c4e949e1e6f46258ba7bec",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/display/surface.rs": {
+      "sha": "9457c8de4686abc792bef017c2ac1456655f3cc7",
+      "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
