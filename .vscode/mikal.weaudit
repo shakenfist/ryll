@@ -194,6 +194,22 @@
     {
       "path": "shakenfist-spice-renderer/src/control",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display/surface.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/display",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/audio_sink.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
