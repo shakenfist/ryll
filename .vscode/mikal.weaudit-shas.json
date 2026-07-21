@@ -93,6 +93,14 @@
       "sha": "5f9c415b50f2ea3b0b2e2edf31e4b78faec2b5e8",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/src/byte_counter.rs": {
+      "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/capture_sink.rs": {
+      "sha": "12b7bbbcb5256fac59d1b9912ba026dc5593f072",
+      "date": "2026-07-21"
+    },
     "shakenfist-spice-renderer/src/channels/cursor.rs": {
       "sha": "d119d8d9bb029b3200b3a4477a294e725326f1c4",
       "date": "2026-07-18"
@@ -129,6 +137,10 @@
       "sha": "87e755272e72750366f5832d9f140b198300ae15",
       "date": "2026-07-19"
     },
+    "shakenfist-spice-renderer/src/clipboard.rs": {
+      "sha": "e8455ec05c19196d6583abc8eccc79308a78580b",
+      "date": "2026-07-21"
+    },
     "shakenfist-spice-renderer/src/control/mod.rs": {
       "sha": "e5d17a3a8dcd9c28de519ced1d31b502a1639fcd",
       "date": "2026-07-19"
@@ -140,6 +152,14 @@
     "shakenfist-spice-renderer/src/control/server.rs": {
       "sha": "bba7179d0e3d005460e2157e16a46f9fd60acacf",
       "date": "2026-07-19"
+    },
+    "shakenfist-spice-renderer/src/device_config.rs": {
+      "sha": "908c55fe61f547a541546bf450d3835820e76370",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/digest.rs": {
+      "sha": "f41cafcdc21215475802d72d67a54bdac37685f0",
+      "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/display/mod.rs": {
       "sha": "970f2a1daf31ac2804c4e949e1e6f46258ba7bec",
@@ -163,6 +183,50 @@
     },
     "shakenfist-spice-renderer/src/encoder/task.rs": {
       "sha": "df4f32c7567e9dbd328863e3d272582b3c980356",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/image_cache.rs": {
+      "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/lib.rs": {
+      "sha": "f9a7c59108d3c6f7b8ad3221d714e9082e311d73",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/log_config.rs": {
+      "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/metrics.rs": {
+      "sha": "9842c52afcd1ebb1072873a82b60bcfd0a5e73f4",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/mm_clock.rs": {
+      "sha": "2e747d368e8c97208019aa890cab8e5b6cfafc9e",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/notification.rs": {
+      "sha": "c3014ea50282a0c1af6324c11bf18a3481e86850",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/notification_sink.rs": {
+      "sha": "f7aabbf2ebb263ec595353d3d4bfe6e2397241d0",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/session.rs": {
+      "sha": "71938a56734669fdad226769dfa3b9831aa3ccf3",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/snapshots.rs": {
+      "sha": "d3a9cd8fea85161702ed0bfe45c47c32f25b337d",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/surface_mirror.rs": {
+      "sha": "896a0b88832e80822e5477814e25ec44eb48edb6",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/traffic.rs": {
+      "sha": "ef5d6e5db8499bf3eddb2beaeb0419d18c3e522c",
       "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
