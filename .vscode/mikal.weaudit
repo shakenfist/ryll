@@ -334,6 +334,18 @@
     {
       "path": "shakenfist-spice-usbredir/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
