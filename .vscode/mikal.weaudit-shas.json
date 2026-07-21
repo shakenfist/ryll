@@ -252,6 +252,30 @@
     "shakenfist-spice-renderer/src/webdav/server.rs": {
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
+    },
+    "shakenfist-spice-usbredir/src/constants.rs": {
+      "sha": "7a3e00e10a9f7ed2f3d81531a13e8d01b721f7e8",
+      "date": "2026-07-22"
+    },
+    "shakenfist-spice-usbredir/src/lib.rs": {
+      "sha": "cad9883642ef2bddad4f2e88c5eb6045bfb6155f",
+      "date": "2026-07-22"
+    },
+    "shakenfist-spice-usbredir/src/messages.rs": {
+      "sha": "9d72e8d19b7facfe71c4f31270bdf493d6721857",
+      "date": "2026-07-22"
+    },
+    "shakenfist-spice-usbredir/src/parser.rs": {
+      "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
+      "date": "2026-07-22"
+    },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "cbb55448b315c4820ee5c9b1ba63f075b49d403a",
+      "date": "2026-07-22"
+    },
+    "shakenfist-spice-webrtc/src/lib.rs": {
+      "sha": "438d42efcdebf9c4b3747cb504fea07891b1de73",
+      "date": "2026-07-22"
     }
   }
 }
