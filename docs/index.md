@@ -79,6 +79,7 @@ both ends of the traffic through the proxy. This would allow:
 
 ## Documentation Index
 
+- [Installation](installation.md) - Pre-built packages, pip, and building from source
 - [Binary Portability](portability.md) - How to share built binaries
 - [Channel Diagnostics Audit](channel-diagnostics-audit.md) - Per-channel observability checklist
 - [Configuration](configuration.md) - CLI options and .vv file format
