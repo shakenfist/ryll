@@ -377,7 +377,10 @@ jobs:
   publish-ryll-testpypi:
     name: Publish ryll to TestPyPI
     needs: [build-ryll-wheels, github-release, sign-tag]
-    runs-on: [self-hosted, static]
+    # pypa/gh-action-pypi-publish is a Docker container action, so it must run
+    # on a Docker-capable runner (matching publish-crates), not the static
+    # runner used by the JS-action jobs (github-release, update-homebrew).
+    runs-on: [self-hosted, vm, debian-12-docker, l]
     environment: release
     permissions:
       id-token: write
@@ -400,7 +403,8 @@ jobs:
   publish-ryll-pypi:
     name: Publish ryll to PyPI
     needs: publish-ryll-testpypi
-    runs-on: [self-hosted, static]
+    # Docker container action (see publish-ryll-testpypi); needs Docker.
+    runs-on: [self-hosted, vm, debian-12-docker, l]
     environment: release
     permissions:
       id-token: write

@@ -77,6 +77,10 @@ sudo apt-get install -y libxcb1 libwayland-client0 libxkbcommon0 \
     libasound2 libopus0 libgl1
 ```
 
+On newer distributions (Debian trixie, Ubuntu 24.04+) the ALSA runtime
+package was renamed `libasound2t64` as part of the 64-bit `time_t`
+transition, so install `libasound2t64` in place of `libasound2` there.
+
 If one is missing, ryll fails to start with a dynamic-loader or
 GUI-initialisation error naming the library; install the packages above
 to resolve it. `remote-viewer` is the fallback whenever ryll can't be
