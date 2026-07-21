@@ -110,11 +110,11 @@ lz4_flex = "0.14"
 # path when building locally and the published crate when resolving
 # from crates.io. Versions are kept in lockstep with ryll via
 # cargo-release; see tools/cut-release.sh.
-shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.5" }
-shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.5" }
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.5", default-features = false }
-shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.5" }
-shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.5" }
+shakenfist-spice-compression = { path = "../shakenfist-spice-compression", version = "0.1.6" }
+shakenfist-spice-protocol = { path = "../shakenfist-spice-protocol", version = "0.1.6" }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.6", default-features = false }
+shakenfist-spice-usbredir = { path = "../shakenfist-spice-usbredir", version = "0.1.6" }
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.6" }
 
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107)
 flate2 = "1"
