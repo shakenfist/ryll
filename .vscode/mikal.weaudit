@@ -314,6 +314,26 @@
     {
       "path": "shakenfist-spice-renderer/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src/messages.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src/parser.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
