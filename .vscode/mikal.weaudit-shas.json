@@ -149,6 +149,22 @@
       "sha": "9457c8de4686abc792bef017c2ac1456655f3cc7",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
+      "sha": "f7ebd1659b4fd7239df78d418be8ede3f393a52e",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/encoder/h264.rs": {
+      "sha": "06365ddb3615588f32f60c478a8f5891bb501979",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/encoder/mod.rs": {
+      "sha": "4e9e0a2fffcff1f2882a4af6b4de551ed31e7053",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/encoder/task.rs": {
+      "sha": "df4f32c7567e9dbd328863e3d272582b3c980356",
+      "date": "2026-07-21"
+    },
     "shakenfist-spice-renderer/src/usb/mod.rs": {
       "sha": "bfaf0cf51cd44937514e9a3dbfcb4ab2f4a69e19",
       "date": "2026-07-09"
@@ -160,6 +176,18 @@
     "shakenfist-spice-renderer/src/usb/virtual_msc.rs": {
       "sha": "5818f326e3b839325e43aeff70c77fc1ac5e0393",
       "date": "2026-07-09"
+    },
+    "shakenfist-spice-renderer/src/webdav/mod.rs": {
+      "sha": "3e11750e4b684a523a2dc0d1ab48b3a2f6f59218",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/webdav/mux.rs": {
+      "sha": "3fe28c88f8ee04eefc53ec48270e7bace468b2b3",
+      "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/webdav/server.rs": {
+      "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
+      "date": "2026-07-21"
     }
   }
 }

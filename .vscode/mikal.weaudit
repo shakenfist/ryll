@@ -210,6 +210,42 @@
     {
       "path": "shakenfist-spice-renderer/src/audio_sink.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/frame_source.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/task.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/webdav/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/webdav/mux.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/webdav/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/webdav",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
