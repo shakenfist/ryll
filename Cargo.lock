@@ -5845,7 +5845,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ryll"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6137,7 +6137,7 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-spice-compression"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -6158,7 +6158,7 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-spice-protocol"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -6179,7 +6179,7 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-spice-renderer"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -6223,7 +6223,7 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-spice-usbredir"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -6231,7 +6231,7 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-spice-webrtc"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "bytes",
