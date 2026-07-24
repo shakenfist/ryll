@@ -359,51 +359,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Staged on TestPyPI first (open question 8: validate the whole
-  # publish flow before touching real PyPI, mirroring how kerbside
-  # staged the proxy wheel setup). Both this job and publish-ryll-pypi
-  # use PyPI Trusted Publishers (OIDC `id-token: write`), the same
-  # token-free auth mechanism kerbside's release.yml uses for
+  # Publishes both per-arch wheels built by build-ryll-wheels to PyPI
+  # via a Trusted Publisher (OIDC `id-token: write`), the same token-free
+  # auth mechanism kerbside's release.yml uses for
   # `publish-proxy-pypi`/`publish-pypi` -- see
   # https://github.com/shakenfist/kerbside/blob/develop/.github/workflows/release.yml
   # and that repo's RELEASE-SETUP.md. This requires a `ryll`
-  # trusted-publisher entry on test.pypi.org (separate from the one on
-  # pypi.org below); see the Report for exact one-time setup steps.
+  # trusted-publisher entry on pypi.org. Ordered after github-release
+  # (needs:) so the release binaries are already public before this
+  # version becomes `pip install`-able.
   #
-  # Publishes both per-arch wheels built by build-ryll-wheels. Ordered
-  # after github-release (needs:) so the release binaries are already
-  # public before this version becomes `pip install`-able anywhere
-  # (open questions 4-6).
-  publish-ryll-testpypi:
-    name: Publish ryll to TestPyPI
-    needs: [build-ryll-wheels, github-release, sign-tag]
-    # pypa/gh-action-pypi-publish is a Docker container action, so it must run
-    # on a Docker-capable runner (matching publish-crates), not the static
-    # runner used by the JS-action jobs (github-release, update-homebrew).
-    runs-on: [self-hosted, vm, debian-12-docker, l]
-    environment: release
-    permissions:
-      id-token: write
-    steps:
-      - name: Download ryll wheel artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: ryll-wheel-*
-          path: dist/
-          merge-multiple: true
-
-      - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          # Idempotent republish: a re-run after a partial failure must
-          # not hard-error on a file TestPyPI already has.
-          skip-existing: true
-
+  # We publish straight to PyPI with no TestPyPI staging, matching every
+  # other Shaken Fist Python package. The wheel is already built and its
+  # metadata validated at build time; a TestPyPI stage needs a second,
+  # independent trusted-publisher config and, as a hard gate on the prod
+  # publish, only adds a failure surface without de-risking the prod
+  # path (different index, different config).
   publish-ryll-pypi:
     name: Publish ryll to PyPI
-    needs: publish-ryll-testpypi
-    # Docker container action (see publish-ryll-testpypi); needs Docker.
+    needs: [build-ryll-wheels, github-release, sign-tag]
+    # pypa/gh-action-pypi-publish is a Docker container action, so it must
+    # run on a Docker-capable runner (matching publish-crates), not the
+    # static runner used by the JS-action jobs (github-release,
+    # update-homebrew).
     runs-on: [self-hosted, vm, debian-12-docker, l]
     environment: release
     permissions:
