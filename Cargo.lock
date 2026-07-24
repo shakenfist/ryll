@@ -6247,8 +6247,9 @@ dependencies = [
 
 [[package]]
 name = "shakenfist-visual-digest"
-version = "0.0.1"
-source = "git+https://github.com/shakenfist/visual-digest-rust.git#4dfff9e9ef6240bf09e3ae51b4f38748c29c6e44"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0924d293a3ea3709ccfb078c92ca9a59a7964f54e73ea00ab4c6da3d33b3854"
 dependencies = [
  "crc",
  "image",
