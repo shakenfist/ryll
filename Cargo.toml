@@ -13,7 +13,7 @@ members = [
 unwrap_used = "warn"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]

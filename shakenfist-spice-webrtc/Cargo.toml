@@ -44,7 +44,7 @@ opus = "0.3"
 # Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
 # H264Encoder, and SyntheticFrameSource used for the Phase 3 pumps
 # and integration test.
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.6", default-features = false }
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7", default-features = false }
 
 # rustls 0.23 dropped the implicit default CryptoProvider; the
 # DTLS handshake inside webrtc-rs needs one installed before the
