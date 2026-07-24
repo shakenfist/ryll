@@ -114,7 +114,7 @@ openh264 = "0.9"
 # and the `decode()` parser; `serde` makes `Digest`/`Event` JSON-
 # serialisable for the control-socket wire event.  See phase 6
 # step 6c of the kerbside test-harness plan.
-shakenfist-visual-digest = { git = "https://github.com/shakenfist/visual-digest-rust.git", features = ["qr", "serde"], optional = true }
+shakenfist-visual-digest = { version = "0.1.1", features = ["qr", "serde"], optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
 dav-server = { version = "0.11", default-features = false, features = ["localfs"] }
