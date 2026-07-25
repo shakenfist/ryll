@@ -1,6 +1,90 @@
 {
   "version": 1,
   "files": {
+    "ryll/build.rs": {
+      "sha": "b0803d125978073b943df8c6a6207879c41f5157",
+      "date": "2026-07-26"
+    },
+    "ryll/src/app.rs": {
+      "sha": "ef2d5550c7e14ec394b82a9a2547a6161d13740f",
+      "date": "2026-07-26"
+    },
+    "ryll/src/auto_snapshot.rs": {
+      "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
+      "date": "2026-07-26"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "0416d16c95da4b9d983edec8d25e0bbf72c7d87a",
+      "date": "2026-07-26"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
+      "date": "2026-07-26"
+    },
+    "ryll/src/clipboard_arboard.rs": {
+      "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
+      "date": "2026-07-26"
+    },
+    "ryll/src/config.rs": {
+      "sha": "8f38014469105164ed1137bf47ccf8e613187245",
+      "date": "2026-07-26"
+    },
+    "ryll/src/display_gui.rs": {
+      "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
+      "date": "2026-07-26"
+    },
+    "ryll/src/input_egui.rs": {
+      "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
+      "date": "2026-07-26"
+    },
+    "ryll/src/main.rs": {
+      "sha": "5fa07ccf979bdc4c585d3398bceeec68fcfba648",
+      "date": "2026-07-26"
+    },
+    "ryll/src/notifications.rs": {
+      "sha": "288c18f9f3f8422fbbe3bedc35b88207449f5e07",
+      "date": "2026-07-26"
+    },
+    "ryll/src/settings.rs": {
+      "sha": "3c9cfb5286bd15ebbf735f7f95b2f58745978e58",
+      "date": "2026-07-26"
+    },
+    "ryll/src/streaming_state.rs": {
+      "sha": "8e6b91140f23fc40168a9642536f2b9568de40c2",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/assets.rs": {
+      "sha": "c2543638db787927d711673e33b0729d9374cc8c",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/audio.rs": {
+      "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/cursor.rs": {
+      "sha": "23e6f0acd4364fbc078e158303ed63764016d1de",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/inputs.rs": {
+      "sha": "bbef6a32df50ba89d4555daee7fde1d7bfda6683",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "48dee2f630bd4e2248484b1c706eb33110e29b67",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/mod.rs": {
+      "sha": "71e9e32f4b98b11df6a457c74425127db1ac180c",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "c4fbca1dd4d372882a4a55361c4fd983a1319021",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "28e251a020f026e8d85ceb3be5304b0a8e4451ed",
+      "date": "2026-07-26"
+    },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
       "date": "2026-07-10"
