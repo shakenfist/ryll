@@ -360,6 +360,86 @@
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "438d42efcdebf9c4b3747cb504fea07891b1de73",
       "date": "2026-07-22"
+    },
+    "tools/address-comments-with-claude.sh": {
+      "sha": "175c7d1e1bad47d5e8dc39cabb1675db4b44b964",
+      "date": "2026-07-26"
+    },
+    "tools/audit/wave1.sh": {
+      "sha": "762ff45d4578058f40910d9575ffd34aa94cdf8a",
+      "date": "2026-07-26"
+    },
+    "tools/audit/wave2-mechanical.sh": {
+      "sha": "ee82df1ca6731d5be3ab1fee6071979587a61174",
+      "date": "2026-07-26"
+    },
+    "tools/build-ryll-wheel-in-container.sh": {
+      "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
+      "date": "2026-07-26"
+    },
+    "tools/build-ryll-wheel.sh": {
+      "sha": "d60ed8ba56332b8cf39097d12df55c93318e0167",
+      "date": "2026-07-26"
+    },
+    "tools/check-bidi.sh": {
+      "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
+      "date": "2026-07-26"
+    },
+    "tools/gen-swatches-jpeg/src/main.rs": {
+      "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
+      "date": "2026-07-26"
+    },
+    "tools/homebrew-formula.rb": {
+      "sha": "26ce1bd96b77c2ec92d14f443523863e16fcef0e",
+      "date": "2026-07-26"
+    },
+    "tools/pcap-inspect.py": {
+      "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
+      "date": "2026-07-26"
+    },
+    "tools/propose-release.sh": {
+      "sha": "6b1d0df103866e020ff3860521aa2101d35501a7",
+      "date": "2026-07-26"
+    },
+    "tools/publish-crates.sh": {
+      "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
+      "date": "2026-07-26"
+    },
+    "tools/render-review.py": {
+      "sha": "7a1b41fb41c9947bbedfed0faee4b3de28ee29db",
+      "date": "2026-07-26"
+    },
+    "tools/review-tracking.sh": {
+      "sha": "97fe51a56859637fdda9b3ea6362f5f467c3cb6f",
+      "date": "2026-07-26"
+    },
+    "tools/run-shellcheck.sh": {
+      "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
+      "date": "2026-07-26"
+    },
+    "tools/sign-release-tag.sh": {
+      "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
+      "date": "2026-07-26"
+    },
+    "tools/tag-release.sh": {
+      "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",
+      "date": "2026-07-26"
+    },
+    "tools/test-k1-idle.sh": {
+      "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
+      "date": "2026-07-26"
+    },
+    "tools/test-usb-disk.sh": {
+      "sha": "6291194d54fb64259540757263974c4afc7c89e0",
+      "date": "2026-07-26"
+    },
+    "tools/test_click.py": {
+      "sha": "d7d0c9274bc1b9bc0d90a35c574bcd6960f904f0",
+      "date": "2026-07-26"
+    },
+    "tools/web-smoke.sh": {
+      "sha": "2140f1e6ff60e1f17205e83c3ed5681843dea5c4",
+      "date": "2026-07-26"
     }
   }
 }

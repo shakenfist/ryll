@@ -430,6 +430,94 @@
     {
       "path": "ryll/build.rs",
       "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave1.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave2-mechanical.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/address-comments-with-claude.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel-in-container.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-bidi.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/homebrew-formula.rb",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/pcap-inspect.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/publish-crates.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/render-review.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/run-shellcheck.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/sign-release-tag.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/tag-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test_click.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-k1-idle.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-usb-disk.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-smoke.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
