@@ -125,7 +125,7 @@ jpeg-decoder = "0.3"
 
 # Capture mode (--capture) — optional, disabled on Windows
 pcap-file = { version = "2", optional = true }
-etherparse = { version = "0.20", optional = true }
+etherparse = { version = "0.21", optional = true }
 mp4 = { version = "0.14", optional = true }
 
 # Clipboard access (host <-> guest copy/paste).  Gated behind
