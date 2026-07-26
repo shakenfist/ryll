@@ -103,7 +103,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Base64 encoding for the control socket's `screenshot` verb (3e):
 # image bytes (PNG or raw RGBA) are emitted as a base64 string in
 # the NDJSON response.
-base64 = "0.22"
+base64 = "0.23"
 
 # H.264 encoding for the web frontend encoder pipeline (Phase 2+)
 openh264 = "0.9"
