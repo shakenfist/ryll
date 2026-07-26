@@ -346,6 +346,178 @@
     {
       "path": "shakenfist-spice-webrtc/src",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/auto_snapshot.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/clipboard_arboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/display_gui.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/input_egui.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/notifications.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/settings.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/streaming_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/build.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave1.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave2-mechanical.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/address-comments-with-claude.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel-in-container.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/build-ryll-wheel.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/check-bidi.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/homebrew-formula.rb",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/pcap-inspect.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/publish-crates.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/render-review.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/run-shellcheck.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/sign-release-tag.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/tag-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test_click.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-k1-idle.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-usb-disk.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-smoke.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

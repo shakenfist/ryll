@@ -1,6 +1,90 @@
 {
   "version": 1,
   "files": {
+    "ryll/build.rs": {
+      "sha": "b0803d125978073b943df8c6a6207879c41f5157",
+      "date": "2026-07-26"
+    },
+    "ryll/src/app.rs": {
+      "sha": "ef2d5550c7e14ec394b82a9a2547a6161d13740f",
+      "date": "2026-07-26"
+    },
+    "ryll/src/auto_snapshot.rs": {
+      "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
+      "date": "2026-07-26"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "0416d16c95da4b9d983edec8d25e0bbf72c7d87a",
+      "date": "2026-07-26"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
+      "date": "2026-07-26"
+    },
+    "ryll/src/clipboard_arboard.rs": {
+      "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
+      "date": "2026-07-26"
+    },
+    "ryll/src/config.rs": {
+      "sha": "8f38014469105164ed1137bf47ccf8e613187245",
+      "date": "2026-07-26"
+    },
+    "ryll/src/display_gui.rs": {
+      "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
+      "date": "2026-07-26"
+    },
+    "ryll/src/input_egui.rs": {
+      "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
+      "date": "2026-07-26"
+    },
+    "ryll/src/main.rs": {
+      "sha": "5fa07ccf979bdc4c585d3398bceeec68fcfba648",
+      "date": "2026-07-26"
+    },
+    "ryll/src/notifications.rs": {
+      "sha": "288c18f9f3f8422fbbe3bedc35b88207449f5e07",
+      "date": "2026-07-26"
+    },
+    "ryll/src/settings.rs": {
+      "sha": "3c9cfb5286bd15ebbf735f7f95b2f58745978e58",
+      "date": "2026-07-26"
+    },
+    "ryll/src/streaming_state.rs": {
+      "sha": "8e6b91140f23fc40168a9642536f2b9568de40c2",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/assets.rs": {
+      "sha": "c2543638db787927d711673e33b0729d9374cc8c",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/audio.rs": {
+      "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/cursor.rs": {
+      "sha": "23e6f0acd4364fbc078e158303ed63764016d1de",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/inputs.rs": {
+      "sha": "bbef6a32df50ba89d4555daee7fde1d7bfda6683",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "48dee2f630bd4e2248484b1c706eb33110e29b67",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/mod.rs": {
+      "sha": "71e9e32f4b98b11df6a457c74425127db1ac180c",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "c4fbca1dd4d372882a4a55361c4fd983a1319021",
+      "date": "2026-07-26"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "28e251a020f026e8d85ceb3be5304b0a8e4451ed",
+      "date": "2026-07-26"
+    },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
       "date": "2026-07-10"
@@ -276,6 +360,86 @@
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "438d42efcdebf9c4b3747cb504fea07891b1de73",
       "date": "2026-07-22"
+    },
+    "tools/address-comments-with-claude.sh": {
+      "sha": "175c7d1e1bad47d5e8dc39cabb1675db4b44b964",
+      "date": "2026-07-26"
+    },
+    "tools/audit/wave1.sh": {
+      "sha": "762ff45d4578058f40910d9575ffd34aa94cdf8a",
+      "date": "2026-07-26"
+    },
+    "tools/audit/wave2-mechanical.sh": {
+      "sha": "ee82df1ca6731d5be3ab1fee6071979587a61174",
+      "date": "2026-07-26"
+    },
+    "tools/build-ryll-wheel-in-container.sh": {
+      "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
+      "date": "2026-07-26"
+    },
+    "tools/build-ryll-wheel.sh": {
+      "sha": "d60ed8ba56332b8cf39097d12df55c93318e0167",
+      "date": "2026-07-26"
+    },
+    "tools/check-bidi.sh": {
+      "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
+      "date": "2026-07-26"
+    },
+    "tools/gen-swatches-jpeg/src/main.rs": {
+      "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
+      "date": "2026-07-26"
+    },
+    "tools/homebrew-formula.rb": {
+      "sha": "26ce1bd96b77c2ec92d14f443523863e16fcef0e",
+      "date": "2026-07-26"
+    },
+    "tools/pcap-inspect.py": {
+      "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
+      "date": "2026-07-26"
+    },
+    "tools/propose-release.sh": {
+      "sha": "6b1d0df103866e020ff3860521aa2101d35501a7",
+      "date": "2026-07-26"
+    },
+    "tools/publish-crates.sh": {
+      "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
+      "date": "2026-07-26"
+    },
+    "tools/render-review.py": {
+      "sha": "7a1b41fb41c9947bbedfed0faee4b3de28ee29db",
+      "date": "2026-07-26"
+    },
+    "tools/review-tracking.sh": {
+      "sha": "97fe51a56859637fdda9b3ea6362f5f467c3cb6f",
+      "date": "2026-07-26"
+    },
+    "tools/run-shellcheck.sh": {
+      "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
+      "date": "2026-07-26"
+    },
+    "tools/sign-release-tag.sh": {
+      "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
+      "date": "2026-07-26"
+    },
+    "tools/tag-release.sh": {
+      "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",
+      "date": "2026-07-26"
+    },
+    "tools/test-k1-idle.sh": {
+      "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
+      "date": "2026-07-26"
+    },
+    "tools/test-usb-disk.sh": {
+      "sha": "6291194d54fb64259540757263974c4afc7c89e0",
+      "date": "2026-07-26"
+    },
+    "tools/test_click.py": {
+      "sha": "d7d0c9274bc1b9bc0d90a35c574bcd6960f904f0",
+      "date": "2026-07-26"
+    },
+    "tools/web-smoke.sh": {
+      "sha": "2140f1e6ff60e1f17205e83c3ed5681843dea5c4",
+      "date": "2026-07-26"
     }
   }
 }
