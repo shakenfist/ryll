@@ -280,7 +280,7 @@ what the feature needs.
 **Brief for sub-agent:**
 
 Security review of the diff (`git diff develop...HEAD`).
-This is the same brief as PUSH-TEMPLATE.md section 2d,
+This is the same brief as PUSH-AUDIT.md section 2d,
 with the added lens of "this code came from an external
 contributor, so assume less context than our own code".
 
@@ -364,7 +364,7 @@ blocking (audibly/visibly wrong behaviour) or advisory
 
 **Brief for sub-agent:**
 
-Same brief as PUSH-TEMPLATE.md section 1b, but applied to
+Same brief as PUSH-AUDIT.md section 1b, but applied to
 external code. Report a short list of violations.
 
 ### 2c. Test coverage
@@ -377,7 +377,7 @@ external code. Report a short list of violations.
 
 **Brief for sub-agent:**
 
-Same brief as PUSH-TEMPLATE.md section 2b. External
+Same brief as PUSH-AUDIT.md section 2b. External
 contributors may not know our test conventions —
 explicitly note any new public functions or channel
 handlers that ship without tests.
@@ -392,7 +392,7 @@ handlers that ship without tests.
 
 **Brief for sub-agent:**
 
-Same brief as PUSH-TEMPLATE.md section 2c. For external
+Same brief as PUSH-AUDIT.md section 2c. For external
 PRs, note specifically whether `ARCHITECTURE.md`,
 `README.md`, `AGENTS.md`, or any `docs/` content needs
 updating — external contributors rarely update these, so

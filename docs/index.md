@@ -79,13 +79,18 @@ both ends of the traffic through the proxy. This would allow:
 
 ## Documentation Index
 
+- [Features](features.md) - The detailed feature catalogue and mode guides
 - [Installation](installation.md) - Pre-built packages, pip, and building from source
-- [Binary Portability](portability.md) - How to share built binaries
-- [Channel Diagnostics Audit](channel-diagnostics-audit.md) - Per-channel observability checklist
 - [Configuration](configuration.md) - CLI options and .vv file format
-- [Libvirt / SPICE Server Recommendations](libvirt-spice-recommendations.md) - Guest XML settings for best display responsiveness
+- [Web frontend](web-frontend.md) - Operator guide for `--web` mode
+- [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools
+- [Development](development.md) - Building, testing, CI, and contributing
 - [macOS Development](development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](troubleshooting.md) - Common issues and debugging
+- [Binary Portability](portability.md) - How to share built binaries
+- [Releasing](releasing.md) - How to publish a new release
+- [Channel Diagnostics Audit](channel-diagnostics-audit.md) - Per-channel observability checklist
+- [Libvirt / SPICE Server Recommendations](libvirt-spice-recommendations.md) - Guest XML settings for best display responsiveness
 
 ## Project Files
 

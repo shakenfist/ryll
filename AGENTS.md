@@ -648,18 +648,20 @@ SIGTERMs, and asserts clean exit within 5 seconds. CI runs
 this in the `build-linux` job via `make web-smoke` and
 `make web-smoke-tls`, inside the devcontainer.
 
-## Process templates
+## Process documents
 
-Four templates at the repo root capture the workflows we
-use repeatedly. Read the template before starting one of
-these activities so the resulting plan/PR follows the
-established structure.
+Four process documents at the repo root capture the
+workflows we use repeatedly. Read the relevant document
+before starting one of these activities so the resulting
+plan/PR follows the established structure. (`-TEMPLATE`
+names are true templates that get copied; `PUSH-AUDIT.md`
+is a runbook followed in place.)
 
 - **`PLAN-TEMPLATE.md`** — used as the starting point for
   new plan files in `docs/plans/`. Defines the prompt
   preamble, situation/mission/execution sections, and the
   sub-agent execution model.
-- **`PUSH-TEMPLATE.md`** — pre-push audit for our own
+- **`PUSH-AUDIT.md`** — pre-push audit for our own
   branches. Two-wave parallel sub-agent review (build /
   style, then code quality / tests / docs / security).
 - **`MERGE-TEMPLATE.md`** — review and merge process for
