@@ -518,6 +518,30 @@
     {
       "path": "tools/gen-swatches-jpeg/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/control_socket.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/encoder_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-TEMPLATE.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
