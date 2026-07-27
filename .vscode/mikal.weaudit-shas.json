@@ -1,6 +1,14 @@
 {
   "version": 1,
   "files": {
+    "PLAN-TEMPLATE.md": {
+      "sha": "66c7ee9e755d02afff4c8cb072acaa3d062cc1ae",
+      "date": "2026-07-27"
+    },
+    "PUSH-TEMPLATE.md": {
+      "sha": "68c494f9fd786e982fe9ea89e6e882164dc5e1b0",
+      "date": "2026-07-27"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
@@ -336,6 +344,18 @@
     "shakenfist-spice-renderer/src/webdav/server.rs": {
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/tests/control_socket.rs": {
+      "sha": "a5ae5409b7c1682b5bf4c521202abf1c9287f9ff",
+      "date": "2026-07-27"
+    },
+    "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
+      "sha": "989da3054ef4383e0726b6a4e73ed786694a9fe2",
+      "date": "2026-07-27"
+    },
+    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
+      "sha": "da7fb947a225857ed9d05cde2e2685eb5dcf3aa5",
+      "date": "2026-07-27"
     },
     "shakenfist-spice-usbredir/src/constants.rs": {
       "sha": "7a3e00e10a9f7ed2f3d81531a13e8d01b721f7e8",
