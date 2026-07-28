@@ -14,7 +14,7 @@ use tracing::warn;
 // the path-validation helpers.
 pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskConfig};
 
-/// Ryll - A Rust SPICE VDI test client
+/// Ryll - A Rust SPICE VDI client
 #[derive(Parser, Debug)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("RYLL_GIT_SHA"), ")"), about, long_about = None)]
 pub struct Args {

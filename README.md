@@ -1,11 +1,13 @@
-# Ryll - A Rust SPICE VDI Test Client
+# Ryll - A Rust SPICE VDI Client
 
 Ryll is a Rust implementation of a SPICE (Simple Protocol for Independent
-Computing Environments) client, designed for testing the
-[Kerbside](https://github.com/shakenfist/kerbside) SPICE proxy. SPICE is
-one of the two virtual desktop (VDI) protocols supported by qemu / KVM on
-Linux, so a SPICE client will mostly be of interest to people looking for
-ways to access Linux virtual machines running graphical environments.
+Computing Environments) client. SPICE is one of the two virtual desktop
+(VDI) protocols supported by qemu / KVM on Linux, so a SPICE client will
+mostly be of interest to people looking for ways to access Linux virtual
+machines running graphical environments. Ryll began life as a test
+client for the [Kerbside](https://github.com/shakenfist/kerbside) SPICE
+proxy, and it retains deep instrumentation from that heritage, but it is
+now a client for everyday use as well.
 
 Ryll is intended to be a **multi-modal SPICE client**: every delivery
 mode is a first-class citizen and shares as much functionality as the
@@ -22,7 +24,7 @@ installing software.
   playback, USB redirection, and WebDAV folder sharing channels, with
   LZ / GLZ / LZ4 / JPEG / QUIC image decompression and hardware-accelerated
   MJPEG streaming.
-- Built for testing: headless and cadence modes, latency and bandwidth
+- Built for automation and testing: headless and cadence modes, latency and bandwidth
   instrumentation, per-channel pcap capture, and a Unix-socket control
   interface for driving sessions from external tools.
 - Deep diagnostics: one-keystroke bug-report zips, a live protocol

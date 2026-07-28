@@ -4,14 +4,15 @@ This file helps AI coding assistants understand the ryll project.
 
 ## Project Purpose
 
-Ryll is a Rust SPICE VDI test client designed specifically for **performance testing
-the Kerbside SPICE proxy** (shakenfist/kerbside). It is not intended to be a
-general-purpose SPICE client - it exists to:
+Ryll is a multi-modal Rust SPICE VDI client. It began as a client for
+**performance testing the Kerbside SPICE proxy** (shakenfist/kerbside) and is
+now also intended for general-purpose interactive use. Its goals are to:
 
-1. Generate controlled SPICE traffic as a client
-2. Be instrumented to gather performance metrics
-3. Measure latency from input events to display updates
-4. Run in headless mode for automated benchmarking
+1. Be a usable day-to-day SPICE client across its GUI, headless, and web modes
+2. Generate controlled SPICE traffic as a client
+3. Be instrumented to gather performance metrics
+4. Measure latency from input events to display updates
+5. Run in headless mode for automated benchmarking
 
 ## Related Projects
 
@@ -40,7 +41,7 @@ local source trees are available for reference:
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
 │   ryll      │────▶│   kerbside   │────▶│ SPICE server│
-│ (test client)│     │   (proxy)    │     │  (QEMU)     │
+│   (client)  │     │   (proxy)    │     │  (QEMU)     │
 └─────────────┘     └──────────────┘     └─────────────┘
 ```
 
