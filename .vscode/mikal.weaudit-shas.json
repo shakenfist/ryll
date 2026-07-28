@@ -1,13 +1,37 @@
 {
   "version": 1,
   "files": {
+    "AGENTS.md": {
+      "sha": "deff5e2efbbbd94b346f1dc37be0561dcda14100",
+      "date": "2026-07-29"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
+      "date": "2026-07-29"
+    },
+    "MERGE-TEMPLATE.md": {
+      "sha": "f0926fbfe0808d692bb7a9a1a4689bf5ba6ed6a6",
+      "date": "2026-07-29"
+    },
     "PLAN-TEMPLATE.md": {
       "sha": "66c7ee9e755d02afff4c8cb072acaa3d062cc1ae",
       "date": "2026-07-27"
     },
-    "PUSH-TEMPLATE.md": {
-      "sha": "68c494f9fd786e982fe9ea89e6e882164dc5e1b0",
-      "date": "2026-07-27"
+    "PUSH-AUDIT.md": {
+      "sha": "821a8967fe2708d47ad1a38c4708fd2c76a33962",
+      "date": "2026-07-29"
+    },
+    "README.md": {
+      "sha": "edb9696cc2d1e94dcc22e020057c0f5033ee9335",
+      "date": "2026-07-29"
+    },
+    "REVIEW-STATE-TEMPLATE.md": {
+      "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
+      "date": "2026-07-29"
+    },
+    "STYLEGUIDE.md": {
+      "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
+      "date": "2026-07-29"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
@@ -31,10 +55,6 @@
     },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
-      "date": "2026-07-26"
-    },
-    "ryll/src/config.rs": {
-      "sha": "8f38014469105164ed1137bf47ccf8e613187245",
       "date": "2026-07-26"
     },
     "ryll/src/display_gui.rs": {
@@ -381,14 +401,6 @@
       "sha": "438d42efcdebf9c4b3747cb504fea07891b1de73",
       "date": "2026-07-22"
     },
-    "tools/address-comments-with-claude.sh": {
-      "sha": "175c7d1e1bad47d5e8dc39cabb1675db4b44b964",
-      "date": "2026-07-26"
-    },
-    "tools/audit/wave1.sh": {
-      "sha": "762ff45d4578058f40910d9575ffd34aa94cdf8a",
-      "date": "2026-07-26"
-    },
     "tools/audit/wave2-mechanical.sh": {
       "sha": "ee82df1ca6731d5be3ab1fee6071979587a61174",
       "date": "2026-07-26"
@@ -407,10 +419,6 @@
     },
     "tools/gen-swatches-jpeg/src/main.rs": {
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
-      "date": "2026-07-26"
-    },
-    "tools/homebrew-formula.rb": {
-      "sha": "26ce1bd96b77c2ec92d14f443523863e16fcef0e",
       "date": "2026-07-26"
     },
     "tools/pcap-inspect.py": {
