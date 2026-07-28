@@ -51,8 +51,24 @@
         "rand_core"
       ],
       "allowedVersions": "<0.10"
+    },
+    {
+      "description": "Skip in-range (lockfile-only) patch bumps of webrtc. webrtc-rs releases its sibling crates (webrtc-util, webrtc-sctp, webrtc-ice, webrtc-srtp, webrtc-data, webrtc-media, webrtc-mdns) in lockstep but declares loose version ranges on them, so bumping only webrtc's lock entry can yield an inconsistent set — webrtc 0.17.2 sets the mtu field on webrtc_sctp Config, which only exists in webrtc-sctp 0.17.2, breaking the build against the still-locked 0.17.1 (shakenfist/ryll#215). The siblings are transitive deps that Renovate cannot bump via grouping, so in-range webrtc patches instead arrive through lock file maintenance, whose full `cargo update` advances the whole family together. Minor/major webrtc updates rewrite Cargo.toml and re-resolve properly, so they stay enabled.",
+      "matchPackageNames": [
+        "webrtc"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "enabled": false
     }
   ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 4am on monday"
+    ]
+  },
   "minimumReleaseAge": "3 days",
   "rollbackPrs": true
 }
