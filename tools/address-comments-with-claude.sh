@@ -415,7 +415,7 @@ for i in $(seq 1 "${item_count}"); do
 
     # Build Claude prompt for this specific item
     cat > "${output_dir}/claude-prompt-${i}.txt" << PROMPT_EOF
-You are addressing a specific review comment on PR #${pr_number} for the ryll project (a Rust SPICE VDI test client).
+You are addressing a specific review comment on PR #${pr_number} for the ryll project (a Rust SPICE VDI client).
 
 ## Context
 

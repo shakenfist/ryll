@@ -16,7 +16,7 @@
 # actual GitHub Release asset URL and checksum.
 
 class Ryll < Formula
-  desc "A Rust SPICE VDI test client"
+  desc "A Rust SPICE VDI client"
   homepage "https://github.com/shakenfist/ryll"
   version "0.1.0"
   license "Apache-2.0"
