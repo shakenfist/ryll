@@ -653,8 +653,10 @@ has subscribed to. All events share the same envelope shape:
 
 Emitted on every PING/PONG return path through the SPICE main channel.
 The latency is the round-trip time from when Ryll sent the PING to when
-it received the PONG, measured in milliseconds. This is the same metric
-the `--latency-file` flag writes to disk in headless mode.
+it received the PONG, measured in milliseconds. (The `--latency-file`
+flag was intended to write this metric to disk in headless mode, but
+is currently declared and unused — this event stream is the working
+way to collect latency samples.)
 
 High-frequency callers (the phase 4 loadtest) should subscribe to this
 event and accumulate samples client-side rather than polling with
