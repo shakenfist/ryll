@@ -400,10 +400,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/display_gui.rs",
       "author": "mikal"
     },
@@ -432,19 +428,7 @@
       "author": "mikal"
     },
     {
-      "path": "tools/audit/wave1.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/audit/wave2-mechanical.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/audit",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/address-comments-with-claude.sh",
       "author": "mikal"
     },
     {
@@ -457,10 +441,6 @@
     },
     {
       "path": "tools/check-bidi.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/homebrew-formula.rb",
       "author": "mikal"
     },
     {
@@ -540,7 +520,31 @@
       "author": "mikal"
     },
     {
-      "path": "PUSH-TEMPLATE.md",
+      "path": "README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "MERGE-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
+    },
+    {
+      "path": "REVIEW-STATE-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
       "author": "mikal"
     }
   ],
