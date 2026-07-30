@@ -1361,12 +1361,11 @@ impl BugReport {
         //     state into a single JSON object — gives the full
         //     session picture in one zip.
         // TODO: Connection reports (BugReportType::Connection) today only
-        // include MainSnapshot. Now that PlaybackSnapshot, UsbredirSnapshot,
-        // and WebdavSnapshot have diagnostic fields, consider whether a
-        // Connection report should also surface those if a record/playback/
-        // usbredir/webdav channel disconnect was implicated. This is a UI
-        // decision best deferred to the operator (Phase 4F: Haiku via Sonnet
-        // review).
+        // include MainSnapshot. PlaybackSnapshot, UsbredirSnapshot, and
+        // WebdavSnapshot all carry diagnostic fields now, so a Connection
+        // report could also surface those when a playback/usbredir/webdav
+        // channel disconnect was implicated. Whether to do so is a UI
+        // decision deferred to the operator.
         let channel_state_json = match &report_type {
             BugReportType::Usb => "{}".to_string(),
             _ => {
