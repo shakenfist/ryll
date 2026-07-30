@@ -50,8 +50,8 @@
       "date": "2026-07-30"
     },
     "docs/index.md": {
-      "sha": "cc164646d4bdd370ea36d9362d478e66d825fc83",
-      "date": "2026-07-30"
+      "sha": "1d093c6e0093c34fdd595af6b2a6a93a42aa8ea2",
+      "date": "2026-07-31"
     },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
@@ -64,6 +64,26 @@
     "docs/macos-metrics-verification.md": {
       "sha": "dc3a3a12905493063b172344165b43ad9c1d3316",
       "date": "2026-07-30"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "524c1c26ff6c1be672f54a8b79c6f1b49dc53741",
+      "date": "2026-07-31"
+    },
+    "docs/portability.md": {
+      "sha": "90130e736cb79aee967252b5155d489ee3d96317",
+      "date": "2026-07-31"
+    },
+    "docs/releasing.md": {
+      "sha": "7d02d9354ef0989c0eaf80eadeb82beba6c87831",
+      "date": "2026-07-31"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "37aa916829a44cbd6b5ea79ab6d8725fe9309ec2",
+      "date": "2026-07-31"
+    },
+    "docs/web-frontend.md": {
+      "sha": "00394a57e07fdb70a219b1fc2808e407078d4afa",
+      "date": "2026-07-31"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
