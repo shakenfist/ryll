@@ -546,6 +546,38 @@
     {
       "path": "ARCHITECTURE.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development-macos.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/macos-metrics-verification.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/features.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/installation.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/libvirt-spice-recommendations.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

@@ -33,6 +33,38 @@
       "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
       "date": "2026-07-29"
     },
+    "docs/configuration.md": {
+      "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
+      "date": "2026-07-30"
+    },
+    "docs/development-macos.md": {
+      "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
+      "date": "2026-07-30"
+    },
+    "docs/development.md": {
+      "sha": "13379e43aaecf172563bedb8dd36ce9d978442e8",
+      "date": "2026-07-30"
+    },
+    "docs/features.md": {
+      "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
+      "date": "2026-07-30"
+    },
+    "docs/index.md": {
+      "sha": "cc164646d4bdd370ea36d9362d478e66d825fc83",
+      "date": "2026-07-30"
+    },
+    "docs/installation.md": {
+      "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
+      "date": "2026-07-30"
+    },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "a18f9162579defcb1123635acc7207325c3e1001",
+      "date": "2026-07-30"
+    },
+    "docs/macos-metrics-verification.md": {
+      "sha": "dc3a3a12905493063b172344165b43ad9c1d3316",
+      "date": "2026-07-30"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
