@@ -91,6 +91,7 @@ both ends of the traffic through the proxy. This would allow:
 - [Configuration](configuration.md) - CLI options and .vv file format
 - [Web frontend](web-frontend.md) - Operator guide for `--web` mode
 - [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools
+- [Multi-mode feature parity](multi-mode-parity.md) - Which features work in GUI, headless, and web modes
 - [Development](development.md) - Building, testing, CI, and contributing
 - [macOS Development](development-macos.md) - Build and test locally on macOS
 - [Troubleshooting](troubleshooting.md) - Common issues and debugging
