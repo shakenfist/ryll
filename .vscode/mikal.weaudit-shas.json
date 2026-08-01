@@ -33,9 +33,21 @@
       "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
       "date": "2026-07-29"
     },
+    "docs/TOKIO-WEDGING.md": {
+      "sha": "a099b1ccc7bcdc33c6d13d9911fc7c46421d62a2",
+      "date": "2026-08-02"
+    },
+    "docs/channel-diagnostics-audit.md": {
+      "sha": "1a1be1ad76d6044da2d33514a8834efa3977c149",
+      "date": "2026-08-02"
+    },
     "docs/configuration.md": {
       "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
       "date": "2026-07-30"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "fe14ff67aad2ed156c5b9a5217d3bf22744143ca",
+      "date": "2026-08-02"
     },
     "docs/development-macos.md": {
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",

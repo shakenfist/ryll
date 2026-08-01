@@ -576,6 +576,14 @@
       "author": "mikal"
     },
     {
+      "path": "docs/channel-diagnostics-audit.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/control-socket-protocol.md",
+      "author": "mikal"
+    },
+    {
       "path": "docs/index.md",
       "author": "mikal"
     },
@@ -589,6 +597,10 @@
     },
     {
       "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/TOKIO-WEDGING.md",
       "author": "mikal"
     },
     {
