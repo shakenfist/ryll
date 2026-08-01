@@ -610,6 +610,82 @@
     {
       "path": "docs/web-frontend.md",
       "author": "mikal"
+    },
+    {
+      "path": "examples/control-socket-demo.py",
+      "author": "mikal"
+    },
+    {
+      "path": "examples/ryll-web.service",
+      "author": "mikal"
+    },
+    {
+      "path": "examples",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-usbredir/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_host_subject.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/address-comments-with-claude.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "scripts/replay_draw_copy.py",
+      "author": "mikal"
+    },
+    {
+      "path": "scripts/check-rust.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "scripts",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave1.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

@@ -97,6 +97,14 @@
       "sha": "00394a57e07fdb70a219b1fc2808e407078d4afa",
       "date": "2026-07-31"
     },
+    "examples/control-socket-demo.py": {
+      "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
+      "date": "2026-08-02"
+    },
+    "examples/ryll-web.service": {
+      "sha": "a55c1b607f576ff8e34421401b6e692d9da43052",
+      "date": "2026-08-02"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
@@ -120,6 +128,10 @@
     "ryll/src/clipboard_arboard.rs": {
       "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
       "date": "2026-07-26"
+    },
+    "ryll/src/config.rs": {
+      "sha": "a2dc713690c96528e4d3bf75f7898f4351202c33",
+      "date": "2026-08-02"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -177,6 +189,14 @@
       "sha": "28e251a020f026e8d85ceb3be5304b0a8e4451ed",
       "date": "2026-07-26"
     },
+    "scripts/check-rust.sh": {
+      "sha": "6b134226743b654c751c04352cc9072f20476bb9",
+      "date": "2026-08-02"
+    },
+    "scripts/replay_draw_copy.py": {
+      "sha": "ed18e13bae620b5e684caf735f361982d52b32fb",
+      "date": "2026-08-02"
+    },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
       "date": "2026-07-10"
@@ -213,6 +233,10 @@
       "sha": "aa15b7c1965b4bf21a4d353cea043634e62298b4",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/README.md": {
+      "sha": "0932e63d327eeafd2b32059859f0af1443d15dfa",
+      "date": "2026-08-02"
+    },
     "shakenfist-spice-protocol/fuzz/.gitignore": {
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
@@ -228,6 +252,10 @@
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_link_reply_parse.rs": {
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_host_subject.rs": {
+      "sha": "a98e2c2d16d4db8c5c4bfdad0b5670d7b1e558ea",
+      "date": "2026-08-02"
     },
     "shakenfist-spice-protocol/src/client.rs": {
       "sha": "3fbede8f4b6eab8e3057ffd2146c00b62c55c9b0",
@@ -264,6 +292,10 @@
     "shakenfist-spice-protocol/src/reader.rs": {
       "sha": "d9953c5499e5f0dbae5bcb1cb5764b8f2715210c",
       "date": "2026-07-17"
+    },
+    "shakenfist-spice-renderer/README.md": {
+      "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
+      "date": "2026-08-02"
     },
     "shakenfist-spice-renderer/src/audio_sink.rs": {
       "sha": "5f9c415b50f2ea3b0b2e2edf31e4b78faec2b5e8",
@@ -441,6 +473,10 @@
       "sha": "da7fb947a225857ed9d05cde2e2685eb5dcf3aa5",
       "date": "2026-07-27"
     },
+    "shakenfist-spice-usbredir/README.md": {
+      "sha": "0187a350db60c8203eb81818b207d89bc35ea77d",
+      "date": "2026-08-02"
+    },
     "shakenfist-spice-usbredir/src/constants.rs": {
       "sha": "7a3e00e10a9f7ed2f3d81531a13e8d01b721f7e8",
       "date": "2026-07-22"
@@ -457,6 +493,10 @@
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
     },
+    "shakenfist-spice-webrtc/README.md": {
+      "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
+      "date": "2026-08-02"
+    },
     "shakenfist-spice-webrtc/src/bridge.rs": {
       "sha": "cbb55448b315c4820ee5c9b1ba63f075b49d403a",
       "date": "2026-07-22"
@@ -464,6 +504,22 @@
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "438d42efcdebf9c4b3747cb504fea07891b1de73",
       "date": "2026-07-22"
+    },
+    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
+      "sha": "8745244de49e10dc55182f3fa600a92cc30691e9",
+      "date": "2026-08-02"
+    },
+    "shakenfist-spice-webrtc/tests/loopback.rs": {
+      "sha": "bc076f349f62028d215053504221a778a06e1873",
+      "date": "2026-08-02"
+    },
+    "tools/address-comments-with-claude.sh": {
+      "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
+      "date": "2026-08-02"
+    },
+    "tools/audit/wave1.sh": {
+      "sha": "3b52c62321b89a308f7cff4da0d463d73d48cd30",
+      "date": "2026-08-02"
     },
     "tools/audit/wave2-mechanical.sh": {
       "sha": "ee82df1ca6731d5be3ab1fee6071979587a61174",
