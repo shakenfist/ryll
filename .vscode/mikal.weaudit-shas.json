@@ -33,28 +33,12 @@
       "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
       "date": "2026-07-29"
     },
-    "docs/TOKIO-WEDGING.md": {
-      "sha": "a099b1ccc7bcdc33c6d13d9911fc7c46421d62a2",
-      "date": "2026-08-02"
-    },
-    "docs/channel-diagnostics-audit.md": {
-      "sha": "1a1be1ad76d6044da2d33514a8834efa3977c149",
-      "date": "2026-08-02"
-    },
     "docs/configuration.md": {
       "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
       "date": "2026-07-30"
     },
-    "docs/control-socket-protocol.md": {
-      "sha": "fe14ff67aad2ed156c5b9a5217d3bf22744143ca",
-      "date": "2026-08-02"
-    },
     "docs/development-macos.md": {
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
-      "date": "2026-07-30"
-    },
-    "docs/development.md": {
-      "sha": "13379e43aaecf172563bedb8dd36ce9d978442e8",
       "date": "2026-07-30"
     },
     "docs/features.md": {
@@ -89,10 +73,6 @@
       "sha": "7d02d9354ef0989c0eaf80eadeb82beba6c87831",
       "date": "2026-07-31"
     },
-    "docs/troubleshooting.md": {
-      "sha": "37aa916829a44cbd6b5ea79ab6d8725fe9309ec2",
-      "date": "2026-07-31"
-    },
     "docs/web-frontend.md": {
       "sha": "00394a57e07fdb70a219b1fc2808e407078d4afa",
       "date": "2026-07-31"
@@ -115,10 +95,6 @@
     },
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
-      "date": "2026-07-26"
-    },
-    "ryll/src/bugreport.rs": {
-      "sha": "0416d16c95da4b9d983edec8d25e0bbf72c7d87a",
       "date": "2026-07-26"
     },
     "ryll/src/capture.rs": {

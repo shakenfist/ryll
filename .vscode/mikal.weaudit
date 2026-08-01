@@ -388,10 +388,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/bugreport.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/capture.rs",
       "author": "mikal"
     },
@@ -560,10 +556,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/features.md",
       "author": "mikal"
     },
@@ -573,14 +565,6 @@
     },
     {
       "path": "docs/libvirt-spice-recommendations.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/control-socket-protocol.md",
       "author": "mikal"
     },
     {
@@ -597,14 +581,6 @@
     },
     {
       "path": "docs/releasing.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/TOKIO-WEDGING.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/troubleshooting.md",
       "author": "mikal"
     },
     {
@@ -685,6 +661,26 @@
     },
     {
       "path": "tools/audit",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/channel-diagnostics-audit.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/control-socket-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
       "author": "mikal"
     }
   ],
