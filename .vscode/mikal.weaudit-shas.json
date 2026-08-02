@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    "AGENTS.md": {
+      "sha": "4a629ebb1f18dc05d331e94e73c45c31c37addec",
+      "date": "2026-08-03"
+    },
     "ARCHITECTURE.md": {
       "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
       "date": "2026-07-29"
@@ -29,13 +33,25 @@
       "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
       "date": "2026-07-29"
     },
+    "docs/channel-diagnostics-audit.md": {
+      "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
+      "date": "2026-08-03"
+    },
     "docs/configuration.md": {
       "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
       "date": "2026-07-30"
     },
+    "docs/control-socket-protocol.md": {
+      "sha": "41a99e15b127d4083aafc411bce4fa1fc37127b0",
+      "date": "2026-08-03"
+    },
     "docs/development-macos.md": {
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
       "date": "2026-07-30"
+    },
+    "docs/development.md": {
+      "sha": "8bc9868c28dcfa2c98b4af84d45a87eb42eb1079",
+      "date": "2026-08-03"
     },
     "docs/features.md": {
       "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
@@ -69,6 +85,10 @@
       "sha": "7d02d9354ef0989c0eaf80eadeb82beba6c87831",
       "date": "2026-07-31"
     },
+    "docs/troubleshooting.md": {
+      "sha": "6b61c89775782a3d18d646cd22aab9567ac85ecd",
+      "date": "2026-08-03"
+    },
     "docs/web-frontend.md": {
       "sha": "00394a57e07fdb70a219b1fc2808e407078d4afa",
       "date": "2026-07-31"
@@ -92,6 +112,10 @@
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
       "date": "2026-07-26"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "d8ac1f0838ae816970c7ae77200c11ab5c33f874",
+      "date": "2026-08-03"
     },
     "ryll/src/capture.rs": {
       "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
@@ -509,6 +533,10 @@
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
     },
+    "tools/ci-prune-reviews.sh": {
+      "sha": "6daef1e07eb05d46b0a13745d5338cf1aea23cd8",
+      "date": "2026-08-03"
+    },
     "tools/gen-swatches-jpeg/src/main.rs": {
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
       "date": "2026-07-26"
@@ -528,6 +556,10 @@
     "tools/render-review.py": {
       "sha": "7a1b41fb41c9947bbedfed0faee4b3de28ee29db",
       "date": "2026-07-26"
+    },
+    "tools/review-tracking.sh": {
+      "sha": "e63705ac5c57fd6d9fd0da21e18f399e3f88e4a4",
+      "date": "2026-08-03"
     },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",

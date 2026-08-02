@@ -674,6 +674,18 @@
     {
       "path": "docs/development.md",
       "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/ci-prune-reviews.sh",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
