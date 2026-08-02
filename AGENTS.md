@@ -812,13 +812,19 @@ CI.
 ### Review tracking
 
 The whole-file review state (`REVIEWS.md`, `.vscode/*.weaudit*`,
-`.vscode/*.weaudit-shas.json`) is maintained manually with
+`.vscode/*.weaudit-shas.json`) is maintained with
 `tools/review-tracking.sh` (subcommands `stamp`, `prune`, `regen`,
-`next`), which wraps `scripts/review-tracking.py` from a local
-clone of the shakenfist/development repository. These are
-deliberately *not* wired into git hooks — they run only when
-invoked explicitly. `REVIEWS.md` is generated; never edit it by
-hand.
+`next`, `status`), which wraps `scripts/review-tracking.py` from a
+local clone of the shakenfist/development repository. These are
+deliberately *not* wired into git hooks — in a clone they run only
+when invoked explicitly. On develop itself, the `prune-reviews`
+workflow (`.github/workflows/prune-reviews.yml`, via
+`tools/ci-prune-reviews.sh`) runs `prune` after every push and
+commits the result back as shakenfist-bot, so stale marks are
+dropped as PRs merge; the daily consistency audit in
+shakenfist/development files a `Consistency: Human review coverage`
+issue when five or more in-scope files need review. `REVIEWS.md` is
+generated; never edit it by hand.
 
 ## Security scanners
 

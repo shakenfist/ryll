@@ -6,13 +6,16 @@
 #   prune   drop review marks for files changed since review, regen
 #   regen   regenerate REVIEWS.md from current state
 #   next    pick a random unreviewed in-scope file and open it
+#   status  report effective review coverage against HEAD (read-only)
 #
 # These used to run automatically from git hooks (pre-commit,
 # post-merge, post-checkout, post-rewrite), which made them fire
-# confusingly in the middle of other git operations; now they only run
-# when invoked explicitly. Typical session: "prune" after a pull,
-# "stamp" before committing review marks. The implementation lives in
-# the shakenfist/development repository; see
+# confusingly in the middle of other git operations; in a clone they
+# only run when invoked explicitly. Typical session: "prune" after a
+# pull, "stamp" before committing review marks. On develop itself the
+# prune-reviews workflow runs prune automatically after every push
+# (via tools/ci-prune-reviews.sh). The implementation lives in the
+# shakenfist/development repository; see
 # https://github.com/shakenfist/development/blob/main/docs/code-review-tracking.md
 
 set -e
