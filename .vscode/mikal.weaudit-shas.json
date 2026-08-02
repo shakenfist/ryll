@@ -1,10 +1,6 @@
 {
   "version": 1,
   "files": {
-    "AGENTS.md": {
-      "sha": "deff5e2efbbbd94b346f1dc37be0561dcda14100",
-      "date": "2026-07-29"
-    },
     "ARCHITECTURE.md": {
       "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
       "date": "2026-07-29"
@@ -531,10 +527,6 @@
     },
     "tools/render-review.py": {
       "sha": "7a1b41fb41c9947bbedfed0faee4b3de28ee29db",
-      "date": "2026-07-26"
-    },
-    "tools/review-tracking.sh": {
-      "sha": "97fe51a56859637fdda9b3ea6362f5f467c3cb6f",
       "date": "2026-07-26"
     },
     "tools/run-shellcheck.sh": {
