@@ -95,6 +95,96 @@ const AUDIO_TONE_HZ: f64 = 440.0;
 /// comfortable listening level.
 const AUDIO_TONE_AMPLITUDE: f64 = 0.3;
 
+/// The bridge's reaction to everything the peer connection tells it.
+///
+/// Every method here is registered as a webrtc-rs callback in
+/// [`WebrtcBridge::new`]. They are gathered into one type rather than
+/// written inline for two reasons: the closures were capturing four
+/// pieces of shared state between them and the clone dance obscured
+/// what they actually did, and webrtc-rs 0.20 replaces the per-object
+/// callback registration with a single `PeerConnectionEventHandler`
+/// trait implemented on exactly this shape. When the port lands, this
+/// type grows an `impl` and the closures in `new` go away; the bodies
+/// below do not move again.
+///
+/// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
+/// step 1e.
+struct BridgeEvents {
+    /// Ask the encoder for an IDR whenever a viewer attaches.
+    encoder_control: mpsc::Sender<EncoderControl>,
+    /// Fired once when the PC reaches a terminal state.
+    dead: Arc<Notify>,
+    /// Sticky companion to `dead`; see [`WebrtcBridge::dead_flag`].
+    dead_flag: Arc<AtomicBool>,
+    /// Fan-in for control-datachannel messages, from either the DC
+    /// this bridge created or one the remote peer opened.
+    incoming_tx: mpsc::Sender<Vec<u8>>,
+    /// Latest peer connection state. Shadowed here because
+    /// `RTCPeerConnection::connection_state` does not survive the
+    /// 0.20 port, while this callback does.
+    state: Arc<Mutex<RTCPeerConnectionState>>,
+}
+
+impl BridgeEvents {
+    /// Peer connection state transition.
+    ///
+    /// Two jobs. On `Connected`, ask the encoder for a fresh IDR so
+    /// the viewer can decode immediately rather than waiting for the
+    /// next periodic keyframe. On a terminal state, signal `dead` so
+    /// the server-side reaper can tear the bridge and encoder down
+    /// proactively.
+    async fn on_state_change(&self, state: RTCPeerConnectionState) {
+        if let Ok(mut shadow) = self.state.lock() {
+            *shadow = state;
+        }
+
+        match state {
+            RTCPeerConnectionState::Connected => {
+                if let Err(err) = self
+                    .encoder_control
+                    .send(EncoderControl::RequestKeyframe)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        "WebrtcBridge: failed to request keyframe on Connected",
+                    );
+                } else {
+                    tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                }
+            }
+            // `swap(true)` returns the previous value; the guard
+            // fires only on the very first terminal transition so
+            // subsequent state changes (e.g. Disconnected → Closed)
+            // do not re-notify.
+            RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Disconnected
+            | RTCPeerConnectionState::Closed
+                if !self.dead_flag.swap(true, Ordering::SeqCst) =>
+            {
+                tracing::info!(
+                    ?state,
+                    "WebrtcBridge: PC reached terminal state, signalling dead",
+                );
+                self.dead.notify_waiters();
+            }
+            _ => {}
+        }
+    }
+
+    /// A message arrived on a control datachannel — either the one
+    /// this bridge created or one the remote peer opened. Both fan in
+    /// here so `control_rx()` sees messages from either direction.
+    async fn on_control_message(&self, data: Vec<u8>, source: &'static str) {
+        if self.incoming_tx.send(data).await.is_err() {
+            tracing::debug!(
+                source,
+                "WebrtcBridge: control_rx receiver dropped, message lost"
+            );
+        }
+    }
+}
+
 /// Configuration for [`WebrtcBridge::new`].
 pub struct WebrtcBridgeConfig {
     /// ICE servers (STUN). Empty by default; the LAN-only assumption
@@ -156,6 +246,19 @@ pub struct WebrtcBridge {
     /// [`WebrtcBridge::wait_for_dead`] when the bridge already
     /// died before they began awaiting.
     dead_flag: Arc<AtomicBool>,
+    /// Latest peer connection state, shadowed by [`BridgeEvents`].
+    /// Read by the `#[cfg(test)]` `connection_state` accessor rather
+    /// than asking the peer connection, because
+    /// `RTCPeerConnection::connection_state` does not survive the
+    /// webrtc-rs 0.20 port.
+    ///
+    /// Only that accessor reads it, so outside a `cfg(test)` build of
+    /// this crate the field is genuinely unused. It is kept
+    /// unconditionally anyway: `BridgeEvents` writes to it on every
+    /// transition regardless, and making the field itself conditional
+    /// would mean two shapes of `WebrtcBridge` to keep in step.
+    #[cfg_attr(not(test), allow(dead_code))]
+    state: Arc<Mutex<RTCPeerConnectionState>>,
 }
 
 impl WebrtcBridge {
@@ -247,54 +350,10 @@ impl WebrtcBridge {
         let dead = Arc::new(Notify::new());
         let dead_flag = Arc::new(AtomicBool::new(false));
 
-        // Keyframe-on-attach: whenever the PC reaches Connected, ask
-        // the encoder for a fresh IDR so the viewer can decode
-        // immediately rather than waiting for the next periodic
-        // keyframe. Also signals "dead" on terminal states so the
-        // server-side reaper can tear the bridge down proactively.
-        let on_connected_tx = config.encoder_control.clone();
-        let dead_cb = dead.clone();
-        let dead_flag_cb = dead_flag.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let tx = on_connected_tx.clone();
-            let dead = dead_cb.clone();
-            let dead_flag = dead_flag_cb.clone();
-            Box::pin(async move {
-                match state {
-                    RTCPeerConnectionState::Connected => {
-                        if let Err(err) = tx.send(EncoderControl::RequestKeyframe).await {
-                            tracing::warn!(
-                                error = %err,
-                                "WebrtcBridge: failed to request keyframe on Connected",
-                            );
-                        } else {
-                            tracing::debug!("WebrtcBridge: requested keyframe on Connected");
-                        }
-                    }
-                    // `swap(true)` returns the previous value;
-                    // the guard fires only on the very first
-                    // terminal transition so subsequent state
-                    // changes (e.g. Disconnected → Closed) do
-                    // not re-notify.
-                    RTCPeerConnectionState::Failed
-                    | RTCPeerConnectionState::Disconnected
-                    | RTCPeerConnectionState::Closed
-                        if !dead_flag.swap(true, Ordering::SeqCst) =>
-                    {
-                        tracing::info!(
-                            ?state,
-                            "WebrtcBridge: PC reached terminal state, signalling dead",
-                        );
-                        dead.notify_waiters();
-                    }
-                    _ => {}
-                }
-            })
-        }));
-
-        // Control DC incoming message fan-in: the on_message callback
-        // pushes raw bytes onto a bounded mpsc channel. The consumer
-        // takes the Receiver once via `control_rx()`.
+        // Control DC incoming message fan-in: both the DC this bridge
+        // created and any DC the remote peer opens push raw bytes
+        // onto one bounded mpsc channel. The consumer takes the
+        // Receiver once via `control_rx()`.
         //
         // Two DCs are involved in a two-bridge loopback scenario:
         //   1. This bridge's own `control_dc` (created above) — used
@@ -304,45 +363,47 @@ impl WebrtcBridge {
         //      acts as the answerer (`on_data_channel` callback) —
         //      this carries messages sent by the remote peer on its
         //      own created DC.
-        // Both are wired to the same `incoming_tx` so `control_rx()`
-        // delivers messages from either direction.
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
 
-        let incoming_tx_clone = incoming_tx.clone();
-        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let tx = incoming_tx_clone.clone();
-            Box::pin(async move {
-                let bytes = msg.data.to_vec();
-                if tx.send(bytes).await.is_err() {
-                    tracing::debug!("WebrtcBridge: control_rx receiver dropped, message lost");
-                }
-            })
+        let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
+        let events = Arc::new(BridgeEvents {
+            encoder_control: config.encoder_control.clone(),
+            dead: dead.clone(),
+            dead_flag: dead_flag.clone(),
+            incoming_tx,
+            state: state.clone(),
+        });
+
+        // Everything below is a delegation to `BridgeEvents`. In
+        // webrtc-rs 0.20 these three registrations collapse into a
+        // single `.with_handler(events)` on the builder.
+        let ev = events.clone();
+        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_state_change(state).await })
         }));
 
-        // Also handle DCs initiated by the remote peer. When this
-        // bridge acts as the answerer in an SDP exchange, the offerer's
-        // DC arrives here via `on_data_channel`. Wire its `on_message`
-        // to the same channel so `control_rx()` sees all incoming
-        // messages regardless of which side initiated the DC.
-        let incoming_tx_dc = incoming_tx.clone();
+        let ev = events.clone();
+        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_control_message(msg.data.to_vec(), "local-dc").await })
+        }));
+
+        // DCs initiated by the remote peer. When this bridge acts as
+        // the answerer, the offerer's DC arrives here.
+        let ev = events.clone();
         pc.on_data_channel(Box::new(move |remote_dc: Arc<RTCDataChannel>| {
-            let tx = incoming_tx_dc.clone();
+            let ev = ev.clone();
             Box::pin(async move {
                 tracing::debug!(
                     label = %remote_dc.label(),
                     "WebrtcBridge: remote DC received via on_data_channel"
                 );
                 remote_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let tx = tx.clone();
-                    Box::pin(async move {
-                        let bytes = msg.data.to_vec();
-                        if tx.send(bytes).await.is_err() {
-                            tracing::debug!(
-                                "WebrtcBridge: control_rx receiver dropped, \
-                                 remote-DC message lost"
-                            );
-                        }
-                    })
+                    let ev = ev.clone();
+                    Box::pin(
+                        async move { ev.on_control_message(msg.data.to_vec(), "remote-dc").await },
+                    )
                 }));
             })
         }));
@@ -358,6 +419,7 @@ impl WebrtcBridge {
             incoming_control,
             dead,
             dead_flag,
+            state,
         })
     }
 
@@ -856,12 +918,19 @@ impl WebrtcBridge {
         Ok(())
     }
 
-    /// Return the current peer connection state. Used in tests to
-    /// poll until both sides reach `Connected`.
-    pub(crate) fn connection_state(
-        &self,
-    ) -> webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState {
-        self.pc.connection_state()
+    /// Return the most recent peer connection state observed by
+    /// [`BridgeEvents::on_state_change`]. Used in tests to poll until
+    /// both sides reach `Connected`.
+    ///
+    /// Reads the shadow rather than the peer connection: the
+    /// inherent `RTCPeerConnection::connection_state` does not
+    /// survive the webrtc-rs 0.20 port, whereas the state-change
+    /// callback that feeds this does.
+    pub(crate) fn connection_state(&self) -> RTCPeerConnectionState {
+        self.state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(RTCPeerConnectionState::Unspecified)
     }
 }
 
