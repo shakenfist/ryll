@@ -395,13 +395,17 @@ never tears the bridge down.
 `wait_for_gathering`, added in step 1f, avoids this by calling
 `Notified::enable()` before the flag check, which registers up
 front so a notification landing in the window is still delivered.
-`wait_for_dead` should get the same treatment.
 
-Deliberately left for its own commit rather than folded into 1f:
-it is a behaviour fix in a different code path, with its own test
-implications (`tests/lifecycle.rs` asserts both the notify path
-and the late-subscriber fast path), and burying it inside the
-gathering work would make both harder to review.
+**Fixed**, in its own commit after 1f rather than folded into it:
+`WebrtcBridge::wait_for_dead` and the reaper's inline equivalent
+in `ryll/src/web/lifecycle.rs` both now `enable()` before checking
+the flag. The reaper case is the one with teeth — a lost wakeup
+there leaves a dead bridge and its encoder pipeline running until
+the process exits.
+
+This is a genuine production bug fix that happens to have been
+found by porting work, not a refactor. It is called out here so
+it is not mistaken for one.
 
 ### The notify path versus the fast path
 

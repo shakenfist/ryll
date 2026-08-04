@@ -484,11 +484,25 @@ impl WebrtcBridge {
     /// `notified().await` is cancellation-safe: dropping the
     /// awaiting future does not leak any state inside the
     /// `Notify`.
+    ///
+    /// The `enable()` before the flag check is load-bearing.
+    /// `Notified` does not register interest until it is first
+    /// polled, so checking the flag and *then* awaiting leaves a
+    /// window: the peer connection can reach a terminal state
+    /// between the two, `notify_waiters()` fires with nobody
+    /// registered, and the await blocks forever — leaving the reaper
+    /// waiting on a bridge that already died. Registering up front
+    /// means a notification landing in that window is still
+    /// delivered.
     pub async fn wait_for_dead(&self) {
+        let notified = self.dead.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         if self.dead_flag.load(Ordering::SeqCst) {
             return;
         }
-        self.dead.notified().await;
+        notified.await;
     }
 
     /// Return a clone of the `Arc<Notify>` that fires once when
