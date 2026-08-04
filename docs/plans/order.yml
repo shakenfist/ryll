@@ -43,3 +43,4 @@
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics
 - PLAN-self-hosted-runners.md: Self-hosted runner migration
 - PLAN-pip-distribution.md: Pip-installable ryll
+- PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade
