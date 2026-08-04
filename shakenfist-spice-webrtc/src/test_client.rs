@@ -32,15 +32,17 @@
 //! no gain. Reach through [`TestPeer::pc`] for anything this module
 //! does not cover.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -136,6 +138,26 @@ impl TestPeerBuilder {
             })
         }));
 
+        // ICE gathering completion, on the same sticky
+        // Notify + AtomicBool pattern the bridge uses, and for the
+        // same reason: `gathering_complete_promise` does not exist in
+        // webrtc-rs 0.20, but this callback survives the port.
+        let gathered = Arc::new(Notify::new());
+        let gathered_flag = Arc::new(AtomicBool::new(false));
+        let gathered_cb = gathered.clone();
+        let gathered_flag_cb = gathered_flag.clone();
+        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
+            let gathered = gathered_cb.clone();
+            let gathered_flag = gathered_flag_cb.clone();
+            Box::pin(async move {
+                if state == RTCIceGathererState::Complete
+                    && !gathered_flag.swap(true, Ordering::SeqCst)
+                {
+                    gathered.notify_waiters();
+                }
+            })
+        }));
+
         for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
@@ -162,6 +184,8 @@ impl TestPeerBuilder {
             pc,
             _seed_dc: seed_dc,
             state,
+            gathered,
+            gathered_flag,
         })
     }
 }
@@ -177,6 +201,10 @@ pub struct TestPeer {
     /// comment where it is registered for why this is shadowed
     /// rather than read from the peer connection.
     state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Fires once when ICE gathering completes; `gathered_flag` is
+    /// the sticky companion that lets a late waiter skip the wait.
+    gathered: Arc<Notify>,
+    gathered_flag: Arc<AtomicBool>,
 }
 
 impl TestPeer {
@@ -216,8 +244,16 @@ impl TestPeer {
     pub async fn offer_and_gather(&self) -> Result<String> {
         self.create_offer().await?;
 
-        let mut gather_complete = self.pc.gathering_complete_promise().await;
-        let _ = gather_complete.recv().await;
+        // `enable()` before the flag check closes the window where
+        // gathering completes between the two and the notification
+        // lands with nobody registered. See
+        // `WebrtcBridge::wait_for_gathering` for the full reasoning.
+        let notified = self.gathered.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.gathered_flag.load(Ordering::SeqCst) {
+            notified.await;
+        }
 
         let local = self
             .pc

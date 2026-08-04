@@ -39,6 +39,7 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -123,6 +124,14 @@ struct BridgeEvents {
     /// `RTCPeerConnection::connection_state` does not survive the
     /// 0.20 port, while this callback does.
     state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Fired once when ICE gathering completes. See
+    /// [`BridgeEvents::on_ice_gathering_state_change`].
+    gathered: Arc<Notify>,
+    /// Sticky companion to `gathered`, for the same reason
+    /// `dead_flag` accompanies `dead`: `Notify` does not queue a
+    /// notification for a waiter that subscribes afterwards, and a
+    /// late `accept_offer` would otherwise wait forever.
+    gathered_flag: Arc<AtomicBool>,
 }
 
 impl BridgeEvents {
@@ -169,6 +178,26 @@ impl BridgeEvents {
                 self.dead.notify_waiters();
             }
             _ => {}
+        }
+    }
+
+    /// ICE gathering state transition.
+    ///
+    /// Raises the sticky `gathered` signal on `Complete`, which is
+    /// what `accept_offer` waits on before reading the local
+    /// description. Replaces `gathering_complete_promise()`, which
+    /// does not exist in webrtc-rs 0.20.
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGathererState) {
+        if state != RTCIceGathererState::Complete {
+            return;
+        }
+        // Sticky, and fired once: `swap(true)` returning false means
+        // this is the first Complete, so late waiters can take the
+        // flag fast-path instead of blocking on a notification that
+        // already happened.
+        if !self.gathered_flag.swap(true, Ordering::SeqCst) {
+            tracing::debug!("WebrtcBridge: ICE gathering complete");
+            self.gathered.notify_waiters();
         }
     }
 
@@ -259,6 +288,11 @@ pub struct WebrtcBridge {
     /// would mean two shapes of `WebrtcBridge` to keep in step.
     #[cfg_attr(not(test), allow(dead_code))]
     state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Fires once when ICE gathering completes; `gathered_flag` is
+    /// the sticky companion that lets a late waiter skip the wait.
+    /// Awaited by [`WebrtcBridge::wait_for_gathering`].
+    gathered: Arc<Notify>,
+    gathered_flag: Arc<AtomicBool>,
 }
 
 impl WebrtcBridge {
@@ -366,12 +400,16 @@ impl WebrtcBridge {
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
 
         let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
+        let gathered = Arc::new(Notify::new());
+        let gathered_flag = Arc::new(AtomicBool::new(false));
         let events = Arc::new(BridgeEvents {
             encoder_control: config.encoder_control.clone(),
             dead: dead.clone(),
             dead_flag: dead_flag.clone(),
             incoming_tx,
             state: state.clone(),
+            gathered: gathered.clone(),
+            gathered_flag: gathered_flag.clone(),
         });
 
         // Everything below is a delegation to `BridgeEvents`. In
@@ -381,6 +419,12 @@ impl WebrtcBridge {
         pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
             let ev = ev.clone();
             Box::pin(async move { ev.on_state_change(state).await })
+        }));
+
+        let ev = events.clone();
+        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_ice_gathering_state_change(state).await })
         }));
 
         let ev = events.clone();
@@ -420,6 +464,8 @@ impl WebrtcBridge {
             dead,
             dead_flag,
             state,
+            gathered,
+            gathered_flag,
         })
     }
 
@@ -486,10 +532,7 @@ impl WebrtcBridge {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        // Block until ICE gathering finishes. `gathering_complete_promise`
-        // returns a oneshot-style receiver in webrtc-rs 0.17.
-        let mut gather_complete = self.pc.gathering_complete_promise().await;
-        let _ = gather_complete.recv().await;
+        self.wait_for_gathering().await;
 
         let local_desc = self
             .pc
@@ -497,6 +540,39 @@ impl WebrtcBridge {
             .await
             .ok_or_else(|| anyhow!("local description missing after ICE gathering"))?;
         Ok(local_desc.sdp)
+    }
+
+    /// Wait until ICE gathering has completed.
+    ///
+    /// Backed by [`BridgeEvents::on_ice_gathering_state_change`]
+    /// rather than `RTCPeerConnection::gathering_complete_promise`,
+    /// which does not exist in webrtc-rs 0.20. The sticky
+    /// `gathered_flag` gives a late caller — one that arrives after
+    /// gathering already finished — a fast-path return, exactly as
+    /// `dead_flag` does for [`Self::wait_for_dead`]. Without it a
+    /// late `accept_offer` would block forever, because `Notify` does
+    /// not queue notifications for waiters that subscribe after
+    /// `notify_waiters()`.
+    ///
+    /// The `enable()` before the flag check is what makes the
+    /// fast-path race-free. `Notified` does not register interest
+    /// until it is first polled, so the naive
+    /// "check the flag, then await" ordering has a window: gathering
+    /// can complete between the load and the first poll, firing
+    /// `notify_waiters()` with nobody registered, and the await then
+    /// blocks forever. `enable()` registers up front, so a
+    /// notification landing in that window is still delivered.
+    /// 0.17's `gathering_complete_promise` was a oneshot and had no
+    /// such window; this keeps the replacement equally safe.
+    async fn wait_for_gathering(&self) {
+        let notified = self.gathered.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        if self.gathered_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
     }
 
     /// Spawn the video pump task: consume [`EncodedFrame`]s from
@@ -900,8 +976,7 @@ impl WebrtcBridge {
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        let mut gather = self.pc.gathering_complete_promise().await;
-        let _ = gather.recv().await;
+        self.wait_for_gathering().await;
         let local = self
             .pc
             .local_description()
@@ -1235,6 +1310,127 @@ mod tests {
 
         server.close().await.expect("server close");
         client.close().await.expect("client close");
+    }
+
+    /// `accept_offer` must return an answer carrying every gathered
+    /// candidate, run after run.
+    ///
+    /// This is the acceptance test for replacing
+    /// `gathering_complete_promise()` with the sticky
+    /// `on_ice_gathering_state_change` signal. The failure mode being
+    /// guarded against is subtle and nasty: a signal that fires
+    /// slightly too early yields an answer that is missing
+    /// candidates, which still parses, still completes a handshake on
+    /// loopback, and only fails on networks where the dropped
+    /// candidate was the one that mattered. Counting candidates
+    /// across repeated runs is what makes an early signal visible.
+    ///
+    /// Twenty iterations because a race that shows up one time in
+    /// five would otherwise sail through a single-run test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accept_offer_answer_carries_all_candidates() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut counts = Vec::new();
+        for i in 0..20 {
+            let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+            let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+                ice_servers: vec![],
+                encoder_control: tx,
+            })
+            .await
+            .expect("bridge");
+
+            let client = TestPeer::builder()
+                .seed_data_channel("client-seed")
+                .build()
+                .await
+                .expect("client peer");
+            let offer_sdp = client.offer_and_gather().await.expect("client offer");
+            let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
+
+            let candidates = answer_sdp
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .count();
+            assert!(
+                candidates > 0,
+                "iteration {i}: answer carried no ICE candidates, so the \
+                 gathering signal fired before any were gathered:\n{answer_sdp}"
+            );
+            counts.push(candidates);
+
+            client.close().await.expect("client close");
+            bridge.close().await.expect("bridge close");
+        }
+
+        let first = counts[0];
+        assert!(
+            counts.iter().all(|&c| c == first),
+            "answer candidate count varied across runs, which means the \
+             gathering signal is racing: {counts:?}"
+        );
+    }
+
+    /// The gathering signal must not fire before the local
+    /// description actually carries the candidates.
+    ///
+    /// `accept_offer` reads `local_description()` immediately after
+    /// waiting, so if `on_ice_gathering_state_change(Complete)` can
+    /// be observed before the description is updated, the answer goes
+    /// out short. Asserting the description is populated the instant
+    /// the wait returns pins that ordering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gathering_signal_fires_after_local_description_is_populated() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge");
+
+        let client = TestPeer::builder()
+            .seed_data_channel("client-seed")
+            .build()
+            .await
+            .expect("client peer");
+        let offer_sdp = client.offer_and_gather().await.expect("client offer");
+
+        let offer = RTCSessionDescription::offer(offer_sdp).expect("offer");
+        bridge.pc.set_remote_description(offer).await.expect("srd");
+        let answer = bridge.pc.create_answer(None).await.expect("answer");
+        bridge.pc.set_local_description(answer).await.expect("sld");
+
+        bridge.wait_for_gathering().await;
+
+        let local = bridge
+            .pc
+            .local_description()
+            .await
+            .expect("local description must exist once gathering completed");
+        assert!(
+            local.sdp.contains("a=candidate:"),
+            "gathering reported complete but the local description \
+             carries no candidates yet:\n{}",
+            local.sdp
+        );
+
+        // Gathering has definitely completed by now, so this second
+        // call must take the sticky-flag fast path. Whether the first
+        // call above blocked on the notification or already found the
+        // flag set depends on timing, so this is what guarantees the
+        // late-subscriber path is covered at all — without it a
+        // regression that made `wait_for_gathering` hang for late
+        // callers could pass the suite.
+        tokio::time::timeout(Duration::from_millis(100), bridge.wait_for_gathering())
+            .await
+            .expect("a late wait_for_gathering must return via the sticky flag");
+
+        client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

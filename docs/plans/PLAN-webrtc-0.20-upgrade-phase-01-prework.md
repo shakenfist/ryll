@@ -345,12 +345,17 @@ come down by at least as much, and its risk comes down more.
 
 ## Open questions
 
-1. **Does `on_ice_gathering_state_change` fire `Complete` before
-   `local_description()` carries the candidates in 0.17?** Step
-   1f's proof is designed to answer this. If the ordering is not
-   guaranteed, the sticky-signal design needs a second condition
-   (poll `local_description()` for a non-empty candidate set) and
-   phase 02's estimate goes up.
+1. ~~**Does `on_ice_gathering_state_change` fire `Complete` before
+   `local_description()` carries the candidates in 0.17?**~~
+   **Answered: no, the ordering is safe.** Step 1f landed and
+   `gathering_signal_fires_after_local_description_is_populated`
+   asserts the local description carries `a=candidate:` lines the
+   instant `wait_for_gathering` returns.
+   `accept_offer_answer_carries_all_candidates` additionally runs
+   the full exchange 20 times and asserts a non-zero, invariant
+   candidate count. The sticky-signal design needs no second
+   condition, and this open question no longer inflates phase 02's
+   estimate.
 
 2. **Should `test-support` be a feature or a separate crate?** A
    feature is lighter and matches the workspace, but it means
@@ -364,3 +369,47 @@ come down by at least as much, and its risk comes down more.
    helper?** It is currently the only site with it, so the plan
    leaves it local. If phase 02 or a later plan adds a second
    consumer, revisit rather than generalising speculatively.
+
+## Found during execution
+
+### `wait_for_dead` has a lost-wakeup race
+
+Not introduced by this phase, but directly adjacent to it and
+worth fixing before someone copies the pattern again.
+
+`WebrtcBridge::wait_for_dead` (and the equivalent inline logic in
+`ryll/src/web/lifecycle.rs`) does:
+
+```rust
+if self.dead_flag.load(Ordering::SeqCst) { return; }
+self.dead.notified().await;
+```
+
+`Notify::notified()` does not register interest until the future
+is first polled, so there is a window between the flag load and
+the first poll. If the peer connection reaches a terminal state
+inside that window, `notify_waiters()` fires with nobody
+registered, and the subsequent await blocks forever — the reaper
+never tears the bridge down.
+
+`wait_for_gathering`, added in step 1f, avoids this by calling
+`Notified::enable()` before the flag check, which registers up
+front so a notification landing in the window is still delivered.
+`wait_for_dead` should get the same treatment.
+
+Deliberately left for its own commit rather than folded into 1f:
+it is a behaviour fix in a different code path, with its own test
+implications (`tests/lifecycle.rs` asserts both the notify path
+and the late-subscriber fast path), and burying it inside the
+gathering work would make both harder to review.
+
+### The notify path versus the fast path
+
+Whether `wait_for_gathering`'s first call blocks on the
+notification or finds the flag already set is timing-dependent,
+so the acceptance tests cannot control which path they exercise.
+`gathering_signal_fires_after_local_description_is_populated`
+therefore calls it a second time, after gathering has certainly
+finished, to guarantee the sticky fast path is covered at all.
+Without that, a regression making late callers hang could pass
+the suite.
