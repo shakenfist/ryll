@@ -738,6 +738,10 @@
     {
       "path": "PUSH-AUDIT.md",
       "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
