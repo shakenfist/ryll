@@ -271,7 +271,7 @@ minutes.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Planned |
+| 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Code landed; 0.17 baseline soak (1a/1g) outstanding |
 | 2. Atomic bump to 0.20 | PLAN-webrtc-0.20-upgrade-phase-02-bump.md | Not started |
 | 3. Socket binding configuration | PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md | Not started |
 | 4. Soak validation and docs | PLAN-webrtc-0.20-upgrade-phase-04-soak.md | Not started |

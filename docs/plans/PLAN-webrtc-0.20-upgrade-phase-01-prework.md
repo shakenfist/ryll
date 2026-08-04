@@ -315,6 +315,47 @@ the phase is not done.
 Dependencies: 1a first. 1c before 1d and before 1f. 1e before 1f.
 1b is independent and can go any time. 1g last.
 
+## Status
+
+| Step | State |
+|------|-------|
+| 1a — 0.17.2 baseline | **Outstanding** — needs a real soak, see below |
+| 1b — `rtp` direct dependency | Done |
+| 1c — shared `TestPeer` | Done |
+| 1d — state shadow in `TestPeer` | Done |
+| 1e — `BridgeEvents` | Done |
+| 1f — handler-driven gathering | Done |
+| 1g — re-measure | **Outstanding** — blocked on 1a |
+
+Plus one unplanned commit: the `wait_for_dead` lost-wakeup fix
+described under "Found during execution".
+
+### Why 1a and 1g are still open
+
+They are the two steps that cannot be done from a terminal. The
+measurement wanted is a real browser attached to a real `--web`
+session against a real SPICE guest, held at steady state for
+twenty minutes, with RSS, per-thread CPU, the latency HUD
+distribution and the video pump's drop count recorded.
+
+`testdata/uefi-latency-guest.qcow2` exists, so the guest is not
+the obstacle. The obstacle is that a baseline is only worth
+anything if it is captured under the same conditions as the
+measurement it will later be compared against — and phase 04's
+comparison is against a real session with a real viewer. A
+twenty-minute idle soak with nobody driving the guest would
+produce numbers that look like a baseline and are not one, which
+is worse than having none, because phase 04 would then compare
+against them in good faith.
+
+So: capture it by hand, on the 0.17 tip (this branch's parent, or
+any commit before phase 02 lands), and paste the numbers into a
+"Baseline" section here. Then run 1g the same way on the phase-01
+tip. Everything else in the phase is behaviour-preserving, so the
+two should agree within noise; if they do not, something in
+1b–1f changed behaviour and wants investigating before phase 02
+starts.
+
 ## Effort
 
 Two days, up from the one day the master plan estimated. The
