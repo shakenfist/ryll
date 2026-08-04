@@ -12,10 +12,20 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-# WebRTC stack (umbrella crate; pinned to 0.17.1 which re-exports
-# rtp = "^0.17.1", matching the rtp = "0.17.1" used in Phase 2
-# step 2e's H264Payloader pre-flight).
+# WebRTC stack (umbrella crate). Held below 0.18 by a Renovate
+# rule; 0.20 re-homes the crate on a sans-io core and needs a
+# port of src/bridge.rs rather than a version bump. Tracked in
+# docs/plans/PLAN-webrtc-0.20-upgrade.md.
 webrtc = "0.17.1"
+
+# RTP packet types and payloaders (H264Payloader, OpusPayloader,
+# Header, Packet). `webrtc` re-exports this crate as
+# `webrtc::rtp`, but that re-export is gone in 0.20, and
+# shakenfist-spice-renderer already depends on it directly for
+# tests/webrtc_h264_smoke.rs. Depending on it by name here keeps
+# both crates on one declaration and takes the re-export off the
+# 0.20 port's critical path (phase 01 step 1b).
+rtp = "0.17"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -28,6 +28,11 @@ use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
+use rtp::codecs::h264::H264Payloader;
+use rtp::codecs::opus::OpusPayloader;
+use rtp::header::Header;
+use rtp::packet::Packet;
+use rtp::packetizer::Payloader;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::APIBuilder;
@@ -40,11 +45,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp::codecs::h264::H264Payloader;
-use webrtc::rtp::codecs::opus::OpusPayloader;
-use webrtc::rtp::header::Header;
-use webrtc::rtp::packet::Packet;
-use webrtc::rtp::packetizer::Payloader;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };

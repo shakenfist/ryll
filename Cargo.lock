@@ -6269,6 +6269,7 @@ dependencies = [
  "bytes",
  "opus",
  "rand 0.8.7",
+ "rtp",
  "rustls",
  "shakenfist-spice-renderer",
  "thiserror 2.0.20",
