@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -113,6 +114,28 @@ impl TestPeerBuilder {
 
         let pc = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
 
+        // Shadow the connection state rather than asking the peer
+        // connection for it. `RTCPeerConnection::connection_state`
+        // is an inherent method in 0.17 but moves onto a trait that
+        // does not carry it in 0.20, whereas the state-change
+        // callback survives the port as a handler method. Observing
+        // transitions here means `wait_until_connected` needs no
+        // change when the port lands.
+        //
+        // Starts at `New`, the state a fresh peer connection reports
+        // before anything happens — asserted in this module's tests,
+        // because a shadow that defaulted to `Connected` would make
+        // every `wait_until_connected` return instantly and quietly
+        // gut the tests that rely on it.
+        let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
+        let state_cb = state.clone();
+        pc.on_peer_connection_state_change(Box::new(move |next: RTCPeerConnectionState| {
+            let state = state_cb.clone();
+            Box::pin(async move {
+                *state.lock().await = next;
+            })
+        }));
+
         for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
@@ -138,6 +161,7 @@ impl TestPeerBuilder {
         Ok(TestPeer {
             pc,
             _seed_dc: seed_dc,
+            state,
         })
     }
 }
@@ -149,6 +173,10 @@ pub struct TestPeer {
     /// the peer. Never read — its job was done when the offer was
     /// generated with an `m=application` section.
     _seed_dc: Option<Arc<RTCDataChannel>>,
+    /// Latest state seen by the state-change callback. See the
+    /// comment where it is registered for why this is shadowed
+    /// rather than read from the peer connection.
+    state: Arc<Mutex<RTCPeerConnectionState>>,
 }
 
 impl TestPeer {
@@ -207,9 +235,10 @@ impl TestPeer {
         Ok(())
     }
 
-    /// The current peer connection state.
-    pub fn connection_state(&self) -> RTCPeerConnectionState {
-        self.pc.connection_state()
+    /// The most recent peer connection state observed by the
+    /// state-change callback.
+    pub async fn connection_state(&self) -> RTCPeerConnectionState {
+        *self.state.lock().await
     }
 
     /// Poll until the peer reaches `Connected`, or `timeout` elapses.
@@ -225,7 +254,7 @@ impl TestPeer {
     pub async fn wait_until_connected(&self, timeout: Duration) -> Result<()> {
         let outcome = tokio::time::timeout(timeout, async {
             loop {
-                if self.connection_state() == RTCPeerConnectionState::Connected {
+                if self.connection_state().await == RTCPeerConnectionState::Connected {
                     return;
                 }
                 tokio::time::sleep(CONNECT_POLL_INTERVAL).await;
@@ -238,7 +267,7 @@ impl TestPeer {
             Err(_) => Err(anyhow!(
                 "peer did not reach Connected within {:?} (state={:?})",
                 timeout,
-                self.connection_state(),
+                self.connection_state().await,
             )),
         }
     }
@@ -331,6 +360,38 @@ mod tests {
 
         transceivers_first.close().await.expect("close a");
         pc.close().await.expect("close b");
+    }
+
+    /// The shadowed state has to start at `New`, not `Connected`.
+    ///
+    /// If it defaulted to `Connected`, every `wait_until_connected`
+    /// in the suite would return instantly and the loopback and
+    /// lifecycle tests would pass without ever completing a
+    /// handshake — the worst kind of green.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shadowed_state_starts_at_new() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let peer = TestPeer::builder().build().await.expect("peer");
+        assert_eq!(
+            peer.connection_state().await,
+            RTCPeerConnectionState::New,
+            "a freshly built peer must report New",
+        );
+
+        // And a peer that never connects must actually time out
+        // rather than sailing through.
+        let err = peer
+            .wait_until_connected(Duration::from_millis(200))
+            .await
+            .expect_err("an unconnected peer must not report Connected");
+        assert!(
+            err.to_string().contains("did not reach Connected"),
+            "unexpected error: {}",
+            err
+        );
+
+        peer.close().await.expect("close");
     }
 
     /// Codec lines from an SDP, in order.
