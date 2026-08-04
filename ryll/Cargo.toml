@@ -206,11 +206,19 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 # Self-signed cert generation for the --web TLS integration tests.
 rcgen = "0.14"
-# Phase 4 step 4c uses a real webrtc-rs client PC to drive an
-# SDP offer through the in-process axum router. rustls is
-# pinned to ring because both aws-lc-rs and ring are pulled in
-# transitively and rustls 0.23 requires an explicit choice.
-webrtc = "0.17.1"
+# Phase 4 step 4c drives an SDP offer through the in-process axum
+# router from a real client peer connection. That peer now comes
+# from shakenfist-spice-webrtc's `test-support` feature rather than
+# a hand-rolled RTCPeerConnection here, so ryll no longer depends on
+# the `webrtc` crate directly at all -- one fewer manifest for the
+# 0.20 port to touch.
+shakenfist-spice-webrtc = { path = "../shakenfist-spice-webrtc", version = "0.1.7", features = [
+    "test-support",
+] }
+# rustls is pinned to ring because both aws-lc-rs and ring are
+# pulled in transitively and rustls 0.23 requires an explicit
+# choice. Still needed here: the test installs the provider before
+# the DTLS handshake starts.
 rustls = { version = "0.23", features = ["ring"] }
 
 [package.metadata.deb]

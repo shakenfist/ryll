@@ -11,6 +11,14 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+# Exposes `test_client::TestPeer`, the client-side peer connection
+# used to drive the browser half of a bridge exchange in tests. Off
+# by default so it stays out of the production surface; enabled by
+# this crate's own integration tests (via the self dev-dependency
+# below) and by ryll's dev-dependency for the /offer signalling test.
+test-support = []
+
 [dependencies]
 # WebRTC stack (umbrella crate). Held below 0.18 by a Renovate
 # rule; 0.20 re-homes the crate on a sans-io core and needs a
@@ -62,3 +70,11 @@ shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "
 # 0.17.1 pulls in transitively; "ring" feature ensures the ring
 # backend is compiled in so install_default() succeeds.
 rustls = { version = "0.23", features = ["ring"] }
+
+[dev-dependencies]
+# Self dev-dependency purely to turn on `test-support` for this
+# crate's integration tests. Files in tests/ link the crate the way
+# an external consumer does, so they cannot see a `#[cfg(test)]`
+# module and cannot enable a feature on themselves any other way.
+# Cargo supports this specifically for the case.
+shakenfist-spice-webrtc = { path = ".", features = ["test-support"] }

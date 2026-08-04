@@ -139,10 +139,10 @@ behind an optional `test-support` feature, exposing a
 `TestPeer` type that covers the union of what the four call sites
 need:
 
-- `TestPeer::builder()` with opt-in H.264 registration, opt-in
-  seed datachannel, and a choice of transceiver directions —
-  the sites differ in these, so the builder has to express the
-  differences rather than flatten them.
+- `TestPeer::builder()` with an opt-in seed datachannel. The
+  sites also differ in whether they register H.264 — but that
+  turned out to be unobservable (see "What landed" below), so
+  the builder does not expose it.
 - `offer_and_gather() -> Result<String>` — create offer, set
   local, wait for gathering, return the resolved SDP.
 - `set_remote_answer(sdp)`.
@@ -152,9 +152,7 @@ need:
   `on_track` counters) can still reach through.
 
 `shakenfist-spice-webrtc` gets `test-support = []` in
-`[features]`; `ryll` enables it on its dev-dependency. The
-existing `#[cfg(test)]` impl block at `bridge.rs:832-866` should
-fold into the helper and disappear.
+`[features]`; `ryll` enables it on its dev-dependency.
 
 Migrate all four call sites. `loopback.rs` keeps its `on_track`
 counter wiring and DC echo handler locally — those are genuinely
@@ -170,6 +168,44 @@ general that every call site passes a different combination of
 flags, it has failed — prefer two small helpers over one
 parameterised one.
 
+#### What landed, and how it differed from this plan
+
+Two things were wrong in the sketch above.
+
+**The `#[cfg(test)]` impl on `WebrtcBridge` does not fold away.**
+It serves a different purpose than client-PC emulation:
+`control_datachannel_roundtrips_messages` drives a *bridge-to-
+bridge* exchange, so `create_offer_and_gather`, `set_remote_answer`
+and `connection_state` are needed on the bridge itself. It stays.
+That means `WebrtcBridge::connection_state` still calls
+`RTCPeerConnection::connection_state`, and step 1d cannot retire
+that call on its own — step 1e picks it up instead, reading the
+`BridgeEvents` shadow.
+
+**The H.264 registration knob is unobservable, so it does not
+exist.** Three sites registered H.264 explicitly and ryll's
+signalling test did not, which looked like a genuine difference
+worth a builder flag. It is not: `register_default_codecs()`
+already registers H.264 at PT 102, and webrtc-rs drops
+`register_h264`'s explicit re-registration as a duplicate payload
+type. The two offers are byte-identical, asserted by
+`register_h264_is_redundant_with_default_codecs`. The builder
+therefore has exactly one knob — the seed datachannel — and
+`TestPeer` always mirrors the bridge's registration.
+
+That test also records a related discrepancy found on the way,
+deliberately left alone: the default PT 102 entry carries
+`profile-level-id=42001f` while `register_h264` asks for
+`42e01f`, so the bridge negotiates one profile-level and its
+encoder emits another. Browsers tolerate the constraint-set
+difference. It predates this work and is not the port's problem,
+but it is worth someone's attention eventually.
+
+One further simplification fell out: with `signalling.rs` off
+its hand-rolled peer, `ryll` has no direct `webrtc::` reference
+left at all, so its `webrtc = "0.17.1"` dev-dependency is gone.
+Phase 02 now has one manifest to bump instead of two.
+
 ### 1d — Shadow connection state in the helper
 
 With 1c landed there is one place to change. Register
@@ -178,15 +214,17 @@ keep the latest state in an `Arc<Mutex<RTCPeerConnectionState>>`
 (or an `AtomicU8` with a conversion, if clippy prefers it), and
 have `wait_until_connected` read the shadow.
 
-After this step, `RTCPeerConnection::connection_state()` should
-have zero call sites in the workspace. That retires one of the
-four "no direct replacement" items in the master plan outright.
+Behaviour proof: tests still pass, and — important — still
+actually *wait*, rather than passing because the shadow defaults
+to `Connected`. Assert the shadow starts at `New`.
 
-Behaviour proof: `grep -rn "\.connection_state()" --include="*.rs"`
-returns only the helper's own shadow accessor. Tests still pass,
-and — important — still actually *wait*, rather than passing
-because the shadow defaults to `Connected`. Assert the shadow
-starts at `New`.
+Note that this does **not** by itself retire
+`RTCPeerConnection::connection_state()` from the workspace, as
+this plan originally claimed. `WebrtcBridge::connection_state`
+(the `#[cfg(test)]` one, used by the bridge-to-bridge roundtrip
+test) still calls it. Step 1e retires that one by reading the
+`BridgeEvents` shadow, so the "no call sites remain" check
+belongs at the end of 1e rather than here.
 
 ### 1e — Collapse the bridge's three callbacks into one struct
 

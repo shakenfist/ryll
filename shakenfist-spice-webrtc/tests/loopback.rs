@@ -25,23 +25,14 @@ use std::time::Duration;
 use bytes::Bytes;
 use shakenfist_spice_renderer::{EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource};
 use tokio::sync::mpsc;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
-use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::rtp_transceiver::rtp_codec::{
-    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
-};
+use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
-use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::{RTCRtpTransceiver, RTCRtpTransceiverInit};
+use webrtc::rtp_transceiver::RTCRtpTransceiver;
 use webrtc::track::track_remote::TrackRemote;
 
+use shakenfist_spice_webrtc::test_client::TestPeer;
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -62,7 +53,7 @@ async fn loopback_video_audio_datachannel() {
     .await
     .expect("server bridge");
 
-    // ── Client: hand-rolled RTCPeerConnection ───────────────────
+    // ── Client: TestPeer ────────────────────────────────────────
     //
     // The bridge's surface area is "I send video + audio + own a
     // control DC"; the receiving side needs `on_track` and
@@ -70,44 +61,17 @@ async fn loopback_video_audio_datachannel() {
     // Driving the client side directly keeps the bridge's public
     // API focused on its production (server) role.
     //
-    // Codec registration mirrors the server bridge: default codecs
-    // (Opus, VP8, several H.264 profiles, ...) plus an explicit
-    // H.264 PT 102 with `profile-level-id=42e01f` and
-    // `packetization-mode=1` — the same fmtp line the bridge uses.
-    // Mirroring the registration on both ends guarantees the
-    // SDP offer/answer converges on PT 102 and that the
-    // track-to-codec binding picks the same entry on both sides.
-    let mut media_engine = MediaEngine::default();
-    media_engine
-        .register_default_codecs()
-        .expect("default codecs");
-    let h264 = RTCRtpCodecParameters {
-        capability: RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90_000,
-            channels: 0,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                .to_owned(),
-            rtcp_feedback: vec![],
-        },
-        payload_type: 102,
-        ..Default::default()
-    };
-    media_engine
-        .register_codec(h264, RTPCodecType::Video)
-        .expect("client h264");
-
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine).expect("interceptors");
-    let api = APIBuilder::new()
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build();
-    let client_pc = Arc::new(
-        api.new_peer_connection(RTCConfiguration::default())
-            .await
-            .expect("client pc"),
-    );
+    // `TestPeer` handles the codec registration (default codecs plus
+    // the bridge's H.264 PT 102), the recvonly transceivers, and the
+    // seed datachannel that puts an m=application section in the
+    // offer. The `on_track` / `on_data_channel` wiring below is
+    // specific to this test, so it reaches through to the raw PC.
+    let client = TestPeer::builder()
+        .seed_data_channel("client-seed")
+        .build()
+        .await
+        .expect("client peer");
+    let client_pc = client.pc().clone();
 
     // Counters for incoming RTP packets, by track kind.
     let video_count = Arc::new(AtomicUsize::new(0));
@@ -165,63 +129,15 @@ async fn loopback_video_audio_datachannel() {
         })
     }));
 
-    // Add recv-only video and audio transceivers so the offer
-    // carries m=video and m=audio sections.
-    let _ = client_pc
-        .add_transceiver_from_kind(
-            RTPCodecType::Video,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                send_encodings: vec![],
-            }),
-        )
-        .await
-        .expect("video transceiver");
-    let _ = client_pc
-        .add_transceiver_from_kind(
-            RTPCodecType::Audio,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                send_encodings: vec![],
-            }),
-        )
-        .await
-        .expect("audio transceiver");
-
-    // The client also needs a data channel so the offer carries an
-    // m=application section. Without one, the answer cannot
-    // negotiate the server's control DC (you can only answer what
-    // was offered) and the SCTP association never opens. The
-    // bridge's `on_data_channel` callback then never fires on
-    // either side. We never use this client-side DC directly — the
-    // server's DC + the client's `on_data_channel` callback handle
-    // ping/pong — but creating it here forces SCTP into the offer.
-    let _client_seed_dc = client_pc
-        .create_data_channel("client-seed", None)
-        .await
-        .expect("client seed dc");
-
     // ── SDP exchange: client offers, server answers ─────────────
-    let offer = client_pc.create_offer(None).await.expect("offer");
-    client_pc
-        .set_local_description(offer)
-        .await
-        .expect("client lsd");
-    let mut gather = client_pc.gathering_complete_promise().await;
-    let _ = gather.recv().await;
-    let final_offer_sdp = client_pc
-        .local_description()
-        .await
-        .expect("client local description")
-        .sdp;
+    let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
 
     let answer_sdp = server
         .accept_offer(final_offer_sdp)
         .await
         .expect("server accept");
-    let answer = RTCSessionDescription::answer(answer_sdp).expect("answer");
-    client_pc
-        .set_remote_description(answer)
+    client
+        .set_remote_answer(answer_sdp)
         .await
         .expect("client rsd");
 
@@ -233,20 +149,10 @@ async fn loopback_video_audio_datachannel() {
     // server's PC state is not exposed on `WebrtcBridge`'s public
     // API; polling the client side is sufficient for a loopback
     // test where both peers run in the same process.
-    let connected = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if client_pc.connection_state() == RTCPeerConnectionState::Connected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-    assert!(
-        connected.is_ok(),
-        "client PC did not reach Connected within 20s (state={:?})",
-        client_pc.connection_state(),
-    );
+    client
+        .wait_until_connected(Duration::from_secs(20))
+        .await
+        .expect("client PC did not reach Connected");
 
     // ── Server-side encoder pipeline + pumps ────────────────────
     //
@@ -308,5 +214,5 @@ async fn loopback_video_audio_datachannel() {
 
     // ── Cleanup ─────────────────────────────────────────────────
     server.close().await.expect("server close");
-    client_pc.close().await.expect("client close");
+    client.close().await.expect("client close");
 }

@@ -548,7 +548,7 @@ impl WebrtcBridge {
 /// The default-codecs register call may or may not include H.264
 /// depending on the webrtc-rs build features. Registering manually
 /// guarantees the answer SDP advertises H.264.
-fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
+pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
     let h264 = RTCRtpCodecParameters {
         capability: RTCRtpCodecCapability {
             mime_type: MIME_TYPE_H264.to_owned(),
@@ -873,8 +873,8 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-    use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+
+    use crate::test_client::TestPeer;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_constructs_with_empty_ice_servers() {
@@ -898,54 +898,14 @@ mod tests {
         .await
         .expect("bridge");
 
-        // Build a separate "client" PC to generate an offer that the
-        // bridge can answer. The client adds recvonly video + audio
-        // transceivers so its offer has m=video and m=audio sections.
-        let mut client_me = MediaEngine::default();
-        client_me
-            .register_default_codecs()
-            .expect("client default codecs");
-        register_h264(&mut client_me).expect("client h264");
-        let mut client_reg = Registry::new();
-        client_reg =
-            register_default_interceptors(client_reg, &mut client_me).expect("client interceptors");
-        let client_api = APIBuilder::new()
-            .with_media_engine(client_me)
-            .with_interceptor_registry(client_reg)
-            .build();
-        let client_pc = client_api
-            .new_peer_connection(RTCConfiguration::default())
-            .await
-            .expect("client pc");
+        // A separate "client" peer generates an offer for the bridge
+        // to answer. No seed datachannel and no gathering wait: this
+        // test only inspects the answer's codec advertisement, so it
+        // never completes a handshake.
+        let client = TestPeer::builder().build().await.expect("client peer");
+        let offer_sdp = client.create_offer().await.expect("offer");
 
-        let _video_tx = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Video,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("video transceiver");
-        let _audio_tx = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Audio,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("audio transceiver");
-
-        let offer = client_pc.create_offer(None).await.expect("offer");
-        client_pc
-            .set_local_description(offer.clone())
-            .await
-            .expect("client lsd");
-
-        let answer_sdp = bridge.accept_offer(offer.sdp).await.expect("accept_offer");
+        let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
 
         // The answer SDP should advertise both H.264 and Opus. Match
         // case-insensitively because SDP capitalisation is not
@@ -962,7 +922,7 @@ mod tests {
             answer_sdp
         );
 
-        client_pc.close().await.expect("client close");
+        client.close().await.expect("client close");
         bridge.close().await.expect("bridge close");
     }
 

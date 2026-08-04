@@ -5923,7 +5923,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "webpki-roots",
- "webrtc",
  "zip",
 ]
 
@@ -6272,6 +6271,7 @@ dependencies = [
  "rtp",
  "rustls",
  "shakenfist-spice-renderer",
+ "shakenfist-spice-webrtc",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
