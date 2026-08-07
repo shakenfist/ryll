@@ -209,6 +209,14 @@
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
     },
+    "ryll/src/web/assets/app.js": {
+      "sha": "d8a02a95d1ce091ba822c286772829dd0ab2a06b",
+      "date": "2026-08-08"
+    },
+    "ryll/src/web/assets/index.html": {
+      "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
+      "date": "2026-08-08"
+    },
     "ryll/src/web/audio.rs": {
       "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
       "date": "2026-07-26"
