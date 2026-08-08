@@ -175,7 +175,7 @@ non-required workflow (matching shakenfist).
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Two-tier ci.yml | [PLAN-two-stage-ci-phase-01-workflow-tiers.md](PLAN-two-stage-ci-phase-01-workflow-tiers.md) | Planned |
+| 1. Two-tier ci.yml | [PLAN-two-stage-ci-phase-01-workflow-tiers.md](PLAN-two-stage-ci-phase-01-workflow-tiers.md) | Implemented; CI validation pending push |
 | 2. Windows cross-check spike | PLAN-two-stage-ci-phase-02-windows-check.md | Not started |
 | 3. Merge queue enablement | PLAN-two-stage-ci-phase-03-merge-queue.md | Not started |
 | 4. Documentation | PLAN-two-stage-ci-phase-04-docs.md | Not started |
@@ -439,6 +439,12 @@ because the following statements will be true:
 * Consider automating cargo-deny advisory-drift handling (the
   weekly cron currently just fails; a bot-filed issue with the
   advisory details would be friendlier).
+* Add an actionlint hook to `.pre-commit-config.yaml`: the repo
+  carries a `.github/actionlint.yaml` config but nothing in-repo
+  invokes actionlint (phase 1 validated the workflow edits by
+  running `rhysd/actionlint` via Docker by hand). Possibly a
+  fleet-wide gap worth a shakenfist/development consistency
+  audit.
 * If merge-queue ejections for Windows breakage become common
   and the phase-2 spike failed, revisit a Windows-native smoke
   job (e.g. `cargo check` on a GitHub-hosted Windows runner,
