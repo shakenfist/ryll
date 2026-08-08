@@ -175,7 +175,7 @@ non-required workflow (matching shakenfist).
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Two-tier ci.yml | PLAN-two-stage-ci-phase-01-workflow-tiers.md | Not started |
+| 1. Two-tier ci.yml | [PLAN-two-stage-ci-phase-01-workflow-tiers.md](PLAN-two-stage-ci-phase-01-workflow-tiers.md) | Planned |
 | 2. Windows cross-check spike | PLAN-two-stage-ci-phase-02-windows-check.md | Not started |
 | 3. Merge queue enablement | PLAN-two-stage-ci-phase-03-merge-queue.md | Not started |
 | 4. Documentation | PLAN-two-stage-ci-phase-04-docs.md | Not started |
