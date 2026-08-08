@@ -742,6 +742,14 @@
     {
       "path": "ryll/src/web/assets/index.html",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
