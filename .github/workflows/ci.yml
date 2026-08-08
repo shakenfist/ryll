@@ -1,28 +1,23 @@
 name: CI
 
+# CI runs in two tiers. The smoke tier (lint, build-linux, and the
+# supply-chain scanners) runs on pull_request and gates the "Can
+# enqueue" status check. The merge tier (fuzz and the GitHub-hosted
+# build matrix) runs on merge_group and gates "Can merge", so the
+# expensive cross-platform jobs only run against the exact commit that
+# is about to land. workflow_dispatch deliberately runs both tiers, so
+# pr-retest.yml's `gh workflow run ci.yml` stays a full retest and the
+# merge tier can be exercised on a branch.
+#
 # Review-only changes (weaudit annotations and the rendered REVIEWS.md)
-# cannot affect the build, so skip this workflow for them. Keep this
-# list in sync with the .vscode whitelist in .gitignore and with
-# codeql-analysis.yml. Safe because no status checks are required by
-# branch protection — skipped workflows do not leave "expected" checks
-# blocking the merge. The supply-chain workflow still runs: gitleaks
-# and the bidi/zero-width scan check content, and review text is a
-# place secrets or unicode smuggling could land.
+# cannot affect the build, so the check_paths job below skips every
+# tier job for them. The gates still pass: their jq treats a skipped
+# dependency as success. Keep check_paths' skip list in sync with the
+# .vscode whitelist in .gitignore and with codeql-analysis.yml.
 on:
-  push:
-    branches: [develop]
-    paths-ignore:
-      - 'REVIEWS.md'
-      - '.vscode/*.weaudit'
-      - '.vscode/*.weaudit-shas.json'
-      - '.vscode/review-scope.toml'
   pull_request:
     branches: [develop]
-    paths-ignore:
-      - 'REVIEWS.md'
-      - '.vscode/*.weaudit'
-      - '.vscode/*.weaudit-shas.json'
-      - '.vscode/review-scope.toml'
+  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -31,6 +26,39 @@ permissions:
   issues: write
 
 jobs:
+  # Detect review-only changes so the tier jobs can skip them. For
+  # workflow_dispatch the filter step is skipped and the output defaults
+  # to code_changed=true so everything runs.
+  check_paths:
+    name: "Check paths"
+    runs-on: [self-hosted, static]
+    timeout-minutes: 10
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code || 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name != 'workflow_dispatch'
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        with:
+          # By default a file matches the filter if it matches ANY listed
+          # pattern, which makes '**' match everything and silently
+          # defeats the '!REVIEWS.md' style exclusions. 'every' requires a
+          # file to match ALL patterns, which is the correct semantics for
+          # an "everything except the review artefacts" filter.
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '**'
+              - '!REVIEWS.md'
+              - '!.vscode/*.weaudit'
+              - '!.vscode/*.weaudit-shas.json'
+              - '!.vscode/review-scope.toml'
+
+  # Smoke tier: everything below here runs on pull_request (and on
+  # workflow_dispatch) and gates "Can enqueue".
+
   # Linux x86_64 jobs run on l-size self-hosted runners with the
   # build wrapped in the devcontainer (see Makefile), matching the
   # pattern instar uses. The debian-12-docker image ships with
@@ -39,43 +67,15 @@ jobs:
     name: Lint
     runs-on: [self-hosted, vm, debian-12-docker, l]
     timeout-minutes: 45
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
     steps:
       - uses: actions/checkout@v7
 
       - name: Check formatting and run clippy
         run: make lint
-
-  # Builds the cargo-fuzz targets in shakenfist-spice-protocol/fuzz and
-  # smoke-runs each for a few seconds. This is a build-and-doesn't-panic
-  # gate, not a real fuzz campaign -- long-running coverage-guided fuzzing
-  # is tracked separately in shakenfist/ryll#135. The fuzz crate is its own
-  # detached workspace (see fuzz/Cargo.toml's `[workspace]` table) so it
-  # needs its own toolchain/cache/dependency install, independent of the
-  # `lint` and `build` jobs above.
-  fuzz:
-    name: Fuzz (${{ matrix.target }})
-    runs-on: [self-hosted, vm, debian-12-docker, l]
-    timeout-minutes: 90
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-fuzz-${{ matrix.target }}
-      cancel-in-progress: true
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password, fuzz_parse_host_subject]
-    steps:
-      - uses: actions/checkout@v7
-
-      # The fuzz crate is a detached workspace, so the lint job's
-      # `cargo fmt --all --check` does not reach it. Format-check it here.
-      - name: Check fuzz formatting
-        run: make fuzz-fmt-check
-
-      - name: Build fuzz target
-        run: make fuzz-build-${{ matrix.target }}
-
-      - name: Smoke-run fuzz target
-        run: make fuzz-smoke-${{ matrix.target }}
 
   # Linux x86_64 builds run on a self-hosted runner inside the
   # devcontainer via the Makefile, so this job's steps differ enough
@@ -84,6 +84,10 @@ jobs:
     name: Build (Linux x86_64)
     runs-on: [self-hosted, vm, debian-12-docker, l]
     timeout-minutes: 120
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
     steps:
       - uses: actions/checkout@v7
 
@@ -119,11 +123,180 @@ jobs:
           path: target/generate-rpm/*.rpm
           retention-days: 30
 
+  # The five scanner jobs below are the PR-time half of the
+  # supply-chain scanning design (docs/plans/PLAN-supply-chain-scanning.md,
+  # and deny.toml for the cargo-deny policy). supply-chain.yml keeps
+  # cargo-audit and cargo-deny on a weekly cron to catch advisory drift
+  # against develop between PRs. All of them run on self-hosted VM
+  # runners (the `vm` label excludes bare-metal runners which have
+  # different OSes and no passwordless sudo) at size `s` (2 vCPU, 4 GB
+  # RAM) — these scanners are I/O-bound and do not benefit from a
+  # larger runner.
+
+  # cargo-audit needs cargo on PATH. The static runner is minimal
+  # (git only), so we run on debian-12 and install the stable rust
+  # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
+  # for the toolchain itself).
+  cargo-audit:
+    name: cargo audit
+    runs-on: [self-hosted, vm, debian-12, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-audit
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # cargo-deny-action runs cargo-deny inside a Docker
+  # container, so this job needs the debian-12-docker image
+  # which ships with docker.io preinstalled.
+  cargo-deny:
+    name: cargo deny
+    runs-on: [self-hosted, vm, debian-12-docker, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-cargo-deny
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  # gitleaks-action@v2 refuses to run on organization repos
+  # without a paid licence. We invoke the upstream gitleaks
+  # binary directly instead, which has no such restriction.
+  # gitleaks is only packaged from Debian 13 (trixie) onward
+  # — bookworm has no gitleaks package — so this job runs on
+  # debian-13.
+  gitleaks:
+    name: gitleaks
+    runs-on: [self-hosted, vm, debian-13, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: sudo apt-get update && sudo apt-get install -y gitleaks
+
+      - name: Run gitleaks
+        run: gitleaks detect --source . --redact --verbose --no-banner
+
+  # shellcheck is packaged in Debian 12, so apt-install and run.
+  shellcheck:
+    name: shellcheck
+    runs-on: [self-hosted, vm, debian-12, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-shellcheck
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Run shellcheck
+        run: ./tools/run-shellcheck.sh
+
+  bidi-check:
+    name: bidi and zero-width
+    runs-on: [self-hosted, vm, debian-12, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan tree for bidi and zero-width characters
+        run: ./tools/check-bidi.sh
+
+  # Merge tier: the two jobs below run on merge_group (and on
+  # workflow_dispatch) and gate "Can merge". They are the expensive
+  # ones, so they run against the commit that is actually landing
+  # rather than on every push to a PR.
+
+  # Builds the cargo-fuzz targets in shakenfist-spice-protocol/fuzz and
+  # smoke-runs each for a few seconds. This is a build-and-doesn't-panic
+  # gate, not a real fuzz campaign -- long-running coverage-guided fuzzing
+  # is tracked separately in shakenfist/ryll#135. The fuzz crate is its own
+  # detached workspace (see fuzz/Cargo.toml's `[workspace]` table) so it
+  # needs its own toolchain/cache/dependency install, independent of the
+  # `lint` and `build` jobs above.
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 90
+    needs: [check_paths]
+    if: >-
+      (github.event_name == 'merge_group'
+       || github.event_name == 'workflow_dispatch')
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-fuzz-${{ matrix.target }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password, fuzz_parse_host_subject]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The fuzz crate is a detached workspace, so the lint job's
+      # `cargo fmt --all --check` does not reach it. Format-check it here.
+      - name: Check fuzz formatting
+        run: make fuzz-fmt-check
+
+      - name: Build fuzz target
+        run: make fuzz-build-${{ matrix.target }}
+
+      - name: Smoke-run fuzz target
+        run: make fuzz-smoke-${{ matrix.target }}
+
   # These platforms stay on GitHub-hosted runners: we own no macOS,
   # Windows, or aarch64 Linux hardware, and this is a public
   # repository so GitHub-hosted runner minutes are free.
   build:
     name: Build (${{ matrix.name }})
+    needs: [check_paths]
+    if: >-
+      (github.event_name == 'merge_group'
+       || github.event_name == 'workflow_dispatch')
+      && needs.check_paths.outputs.code_changed != 'false'
     strategy:
       fail-fast: false
       matrix:
@@ -269,11 +442,13 @@ jobs:
     name: "Automated reviewer"
     # The needs: list is the "review only once CI has passed" gate:
     # a job skipped because a dependency failed never starts the
-    # reusable workflow. Everything else about the reviewer --
-    # runner, timeout, fork restriction, bot-commit check --
-    # lives in the shared workflow so it stays in step with the
-    # rest of the fleet.
-    needs: [lint, build, build-linux]
+    # reusable workflow. It lists the smoke tier only -- the merge
+    # tier never runs on a pull_request, so depending on it would
+    # leave the reviewer permanently skipped. Everything else about
+    # the reviewer -- runner, timeout, fork restriction, bot-commit
+    # check -- lives in the shared workflow so it stays in step with
+    # the rest of the fleet.
+    needs: [lint, build-linux, cargo-audit, cargo-deny, gitleaks, shellcheck, bidi-check]
     # A cross-repository reusable workflow cannot grant itself more
     # token scope than its caller has, so the permissions go here.
     permissions:
@@ -282,3 +457,67 @@ jobs:
       issues: write
     uses: shakenfist/actions/.github/workflows/pr-auto-review.yml@main
     secrets: inherit
+
+  # The gates. "Can enqueue" and "Can merge" are the status checks the
+  # branch ruleset requires; "Can see status" proves the ruleset can see
+  # this workflow's checks at all. Each gate uses always() so it still
+  # runs when a dependency failed or was skipped, and its jq maps every
+  # dependency to "success or skipped" and requires all of them. That is
+  # what lets a review-only change (where check_paths skips the whole
+  # tier) pass; a cancelled or failed dependency fails the gate.
+
+  can_see_status:
+    name: "Can see status"
+    runs-on: [self-hosted, static]
+    # Runs "true", so five minutes is generous even on a busy runner.
+    timeout-minutes: 5
+    steps:
+      - name: "Immediate success"
+        run: true
+
+  can_enqueue:
+    name: "Can enqueue"
+    needs:
+      - check_paths
+      - lint
+      - build-linux
+      - cargo-audit
+      - cargo-deny
+      - gitleaks
+      - shellcheck
+      - bidi-check
+    if: always() && github.event_name != 'merge_group'
+    permissions:
+      actions: read
+    runs-on: [self-hosted, static]
+    # A jq expression over the needs context.
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS_JSON: "${{toJSON(needs)}}"
+        name: Transform outcomes
+        run: |
+          echo "ALL_SUCCESS=$(echo "$NEEDS_JSON" | jq '. | to_entries | map([.value.result == "success", .value.result == "skipped"] | any) | all')" >>$GITHUB_ENV
+      - name: Check outcomes
+        run: "[ $ALL_SUCCESS == true ]"
+
+  can_merge:
+    name: "Can merge"
+    needs:
+      - check_paths
+      - fuzz
+      - build
+    if: always() && github.event_name == 'merge_group'
+    permissions:
+      actions: read
+    runs-on: [self-hosted, static]
+    # A jq expression over the needs context.
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS_JSON: "${{toJSON(needs)}}"
+        name: Transform outcomes
+        run: |
+          echo "ALL_SUCCESS=$(echo "$NEEDS_JSON" | jq '. | to_entries | map([.value.result == "success", .value.result == "skipped"] | any) | all')" >>$GITHUB_ENV
+      - name: Check outcomes
+        run: "[ $ALL_SUCCESS == true ]"
