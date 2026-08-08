@@ -1,24 +1,28 @@
-# Supply-chain and prompt-injection scanners.
+# Supply-chain advisory drift scanner.
 #
-# Runs on every PR to develop and on pushes to develop, plus a weekly
-# cron to catch advisory drift. All jobs run on self-hosted VM runners
-# (the `vm` label excludes bare-metal runners which have different
-# OSes and no passwordless sudo). Most jobs target `debian-12` with
-# size `s` (2 vCPU, 4 GB RAM) — these scanners are I/O-bound and do
-# not benefit from a larger runner. The gitleaks job targets
-# `debian-13` because gitleaks is not packaged in bookworm, and the
-# cargo-deny job targets `debian-12-docker` because
-# cargo-deny-action runs its check inside a Docker container. See
-# docs/plans/PLAN-supply-chain-scanning.md for the design rationale,
-# and deny.toml for the policy enforced by cargo-deny.
+# This workflow's PR-time and push-time triggers were removed once
+# ci.yml's smoke tier picked up all five scanners (cargo-audit,
+# cargo-deny, gitleaks, shellcheck, bidi-check) on every pull
+# request. What remains here is the weekly cron: it catches advisory
+# drift (new RustSec advisories, cargo-deny policy violations)
+# against develop in the gaps between PRs, when no smoke-tier run
+# would otherwise notice. gitleaks, shellcheck, and the bidi/zero-width
+# scan are dropped from this workflow entirely — their output only
+# changes when the tree changes, and PR-time scanning for them now
+# lives in ci.yml's smoke tier.
+#
+# The two remaining jobs run on self-hosted VM runners (the `vm`
+# label excludes bare-metal runners which have different OSes and no
+# passwordless sudo), targeting `debian-12` with size `s` (2 vCPU,
+# 4 GB RAM) — these scanners are I/O-bound and do not benefit from a
+# larger runner. cargo-deny instead targets `debian-12-docker`
+# because cargo-deny-action runs its check inside a Docker container.
+# See docs/plans/PLAN-supply-chain-scanning.md for the design
+# rationale, and deny.toml for the policy enforced by cargo-deny.
 
 name: Supply chain
 
 on:
-  pull_request:
-    branches: [develop]
-  push:
-    branches: [develop]
   schedule:
     # Weekly at 09:00 UTC on Monday. Catches advisory drift against
     # develop even when no PR has run recently.
@@ -66,54 +70,3 @@ jobs:
         with:
           command: check
           arguments: --all-features
-
-  # gitleaks-action@v2 refuses to run on organization repos
-  # without a paid licence. We invoke the upstream gitleaks
-  # binary directly instead, which has no such restriction.
-  # gitleaks is only packaged from Debian 13 (trixie) onward
-  # — bookworm has no gitleaks package — so this job runs on
-  # debian-13.
-  gitleaks:
-    name: gitleaks
-    runs-on: [self-hosted, vm, debian-13, s]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Install gitleaks
-        run: sudo apt-get update && sudo apt-get install -y gitleaks
-
-      - name: Run gitleaks
-        run: gitleaks detect --source . --redact --verbose --no-banner
-
-  # shellcheck is packaged in Debian 12, so apt-install and run.
-  shellcheck:
-    name: shellcheck
-    runs-on: [self-hosted, vm, debian-12, s]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-shellcheck
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: Run shellcheck
-        run: ./tools/run-shellcheck.sh
-
-  bidi-check:
-    name: bidi and zero-width
-    runs-on: [self-hosted, vm, debian-12, s]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
-      cancel-in-progress: true
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Scan tree for bidi and zero-width characters
-        run: ./tools/check-bidi.sh
