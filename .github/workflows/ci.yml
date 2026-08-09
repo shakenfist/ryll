@@ -63,6 +63,12 @@ jobs:
   # build wrapped in the devcontainer (see Makefile), matching the
   # pattern instar uses. The debian-12-docker image ships with
   # docker.io preinstalled (see supply-chain.yml).
+  #
+  # The l pool is the scarcest resource on the fleet (MAX_WORKERS = 6
+  # across every repo), so these three jobs carry the concurrency
+  # block AGENTS.md requires of anything a pull request can trigger:
+  # without it a superseded run holds an l slot for up to 45 minutes
+  # while its replacement queues behind it.
   lint:
     name: Lint
     runs-on: [self-hosted, vm, debian-12-docker, l]
@@ -71,11 +77,44 @@ jobs:
     if: >-
       github.event_name != 'merge_group'
       && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-lint
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
 
       - name: Check formatting and run clippy
         run: make lint
+
+  # A cheap proxy for the Windows builds in the merge tier: a cargo
+  # check against the x86_64-pc-windows-gnu triple, cross-compiled from
+  # the devcontainer (see
+  # docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md for why the
+  # msvc triple CI actually builds cannot be checked this way).
+  #
+  # This is its own job rather than a step in build-linux. Measured on
+  # PR #256, folding it into build-linux added about three minutes to
+  # the longest smoke job — a cold registry compiles the whole graph
+  # for the Windows target, and mingw-w64 adds to the image build — so
+  # it sat directly on pull request feedback latency. As a separate job
+  # it runs concurrently and costs a second devcontainer image build on
+  # another runner instead.
+  check-windows:
+    name: Cross-check Windows
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 45
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-check-windows
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cross-check the Windows (gnu) target
+        run: make check-windows
 
   # Linux x86_64 builds run on a self-hosted runner inside the
   # devcontainer via the Makefile, so this job's steps differ enough
@@ -88,15 +127,11 @@ jobs:
     if: >-
       github.event_name != 'merge_group'
       && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-build-linux
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
-
-      # Placed first so Windows-only breakage (see
-      # docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md) fails
-      # fast in about two minutes rather than after the nine-minute
-      # build below.
-      - name: Cross-check Windows target
-        run: make check-windows
 
       - name: Build
         run: make release
@@ -466,7 +501,15 @@ jobs:
     # the reviewer -- runner, timeout, fork restriction, bot-commit
     # check -- lives in the shared workflow so it stays in step with
     # the rest of the fleet.
-    needs: [lint, build-linux, cargo-audit, cargo-deny, gitleaks, shellcheck, bidi-check]
+    needs:
+      - lint
+      - build-linux
+      - check-windows
+      - cargo-audit
+      - cargo-deny
+      - gitleaks
+      - shellcheck
+      - bidi-check
     # A cross-repository reusable workflow cannot grant itself more
     # token scope than its caller has, so the permissions go here.
     permissions:
@@ -499,6 +542,7 @@ jobs:
       - check_paths
       - lint
       - build-linux
+      - check-windows
       - cargo-audit
       - cargo-deny
       - gitleaks
