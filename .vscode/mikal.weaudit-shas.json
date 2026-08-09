@@ -5,10 +5,6 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "8062440280c9860df440c943c6175395fcd0d8cf",
-      "date": "2026-08-10"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
