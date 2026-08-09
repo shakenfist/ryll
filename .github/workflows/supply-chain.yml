@@ -29,8 +29,12 @@ on:
     - cron: '0 9 * * 1'
   workflow_dispatch:
 
+# rustsec/audit-check creates a check run to report findings, which
+# needs `checks: write`; on scheduled runs it files issues instead,
+# hence `issues: write`.
 permissions:
   contents: read
+  checks: write
   issues: write
   pull-requests: write
 
