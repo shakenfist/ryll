@@ -688,14 +688,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/codeql-analysis.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/export-repo-config.yml",
       "author": "mikal"
     },
@@ -720,10 +712,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/supply-chain.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/actionlint.yaml",
       "author": "mikal"
     },
@@ -745,10 +733,6 @@
     },
     {
       "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     }
   ],
