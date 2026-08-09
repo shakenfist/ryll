@@ -5,6 +5,10 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "c7efeb760662a8c9eced0ce04aa55017c8dc56ed",
+      "date": "2026-08-10"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
@@ -49,6 +53,10 @@
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
     },
+    "AGENTS.md": {
+      "sha": "1d8100414a78fe2e1a9ec9693d64f90385a738dc",
+      "date": "2026-08-10"
+    },
     "ARCHITECTURE.md": {
       "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
       "date": "2026-07-29"
@@ -92,6 +100,10 @@
     "docs/development-macos.md": {
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
       "date": "2026-07-30"
+    },
+    "docs/development.md": {
+      "sha": "e7855725038db4d5e55ef3b971cd77e5d2d58845",
+      "date": "2026-08-10"
     },
     "docs/features.md": {
       "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
