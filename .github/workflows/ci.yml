@@ -91,6 +91,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Placed first so Windows-only breakage (see
+      # docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md) fails
+      # fast in about two minutes rather than after the nine-minute
+      # build below.
+      - name: Cross-check Windows target
+        run: make check-windows
+
       - name: Build
         run: make release
 
@@ -137,10 +144,21 @@ jobs:
   # (git only), so we run on debian-12 and install the stable rust
   # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
   # for the toolchain itself).
+  #
+  # rustsec/audit-check reports its findings by creating a check run,
+  # which needs `checks: write`. The workflow-level permissions above
+  # do not grant it, and job-level permissions replace rather than
+  # extend them, so this job restates the `contents: read` it needs
+  # for the checkout. Without this the action fails with "Resource not
+  # accessible by integration" — but only on runs where it actually
+  # has something to report, so a clean audit hides the problem.
   cargo-audit:
     name: cargo audit
     runs-on: [self-hosted, vm, debian-12, s]
     timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
     needs: [check_paths]
     if: >-
       github.event_name != 'merge_group'
