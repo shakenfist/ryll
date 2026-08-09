@@ -2,8 +2,11 @@ name: CodeQL
 
 permissions: {}
 
-# Review-only changes cannot affect code analysis; skip them. Keep the
-# path list in sync with ci.yml and the .vscode whitelist in .gitignore.
+# Review-only changes cannot affect code analysis; skip them. CodeQL is
+# not part of ci.yml's gate scheme and is not a required check, so it
+# keeps a workflow-level paths-ignore rather than a check_paths job.
+# Keep the path list in sync with ci.yml's check_paths filter and the
+# .vscode whitelist in .gitignore.
 on:
   push:
     branches: [develop]
