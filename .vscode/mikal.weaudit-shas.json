@@ -5,6 +5,14 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "8062440280c9860df440c943c6175395fcd0d8cf",
+      "date": "2026-08-10"
+    },
+    ".github/workflows/codeql-analysis.yml": {
+      "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
+      "date": "2026-08-10"
+    },
     ".github/workflows/export-repo-config.yml": {
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
@@ -36,6 +44,10 @@
     ".github/workflows/renovate.yml": {
       "sha": "bf84d27263a5b42878cee79558720be7ca474f77",
       "date": "2026-08-09"
+    },
+    ".github/workflows/supply-chain.yml": {
+      "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
+      "date": "2026-08-10"
     },
     ".pre-commit-config.yaml": {
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
