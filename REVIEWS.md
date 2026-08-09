@@ -30,7 +30,6 @@ for how this works, including how to verify the attestations.
 | .github/workflows/renovate.yml | mikal | 2026-08-09 | bf84d27263a5 |
 | .github/workflows/supply-chain.yml | mikal | 2026-08-10 | 382bbe63ac57 |
 | .pre-commit-config.yaml | mikal | 2026-08-05 | 74ce9e676d00 |
-| AGENTS.md | mikal | 2026-08-03 | 4a629ebb1f18 |
 | ARCHITECTURE.md | mikal | 2026-07-29 | 1665f6b3bfb0 |
 | MERGE-TEMPLATE.md | mikal | 2026-07-29 | f0926fbfe080 |
 | PLAN-TEMPLATE.md | mikal | 2026-07-27 | 66c7ee9e755d |
@@ -42,7 +41,6 @@ for how this works, including how to verify the attestations.
 | docs/configuration.md | mikal | 2026-07-30 | d6c99efc2d57 |
 | docs/control-socket-protocol.md | mikal | 2026-08-03 | 41a99e15b127 |
 | docs/development-macos.md | mikal | 2026-07-30 | 342ead8ac23b |
-| docs/development.md | mikal | 2026-08-03 | 8bc9868c28dc |
 | docs/features.md | mikal | 2026-07-30 | cc431660fe25 |
 | docs/index.md | mikal | 2026-07-31 | 1d093c6e0093 |
 | docs/installation.md | mikal | 2026-07-30 | 0f95f14fdb04 |

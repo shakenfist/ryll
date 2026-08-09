@@ -53,10 +53,6 @@
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
     },
-    "AGENTS.md": {
-      "sha": "4a629ebb1f18dc05d331e94e73c45c31c37addec",
-      "date": "2026-08-03"
-    },
     "ARCHITECTURE.md": {
       "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
       "date": "2026-07-29"
@@ -100,10 +96,6 @@
     "docs/development-macos.md": {
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
       "date": "2026-07-30"
-    },
-    "docs/development.md": {
-      "sha": "8bc9868c28dcfa2c98b4af84d45a87eb42eb1079",
-      "date": "2026-08-03"
     },
     "docs/features.md": {
       "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
