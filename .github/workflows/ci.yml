@@ -91,6 +91,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Placed first so Windows-only breakage (see
+      # docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md) fails
+      # fast in about two minutes rather than after the nine-minute
+      # build below.
+      - name: Cross-check Windows target
+        run: make check-windows
+
       - name: Build
         run: make release
 

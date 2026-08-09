@@ -49,7 +49,7 @@ DOCKER_RUN := docker run --rm \
 	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
-	build-tokio-console
+	build-tokio-console check-windows
 
 all: build
 
@@ -62,6 +62,7 @@ help:
 	@echo "  make test                   - Run tests"
 	@echo "  make lint                   - Run rustfmt and clippy checks"
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
+	@echo "  make check-windows          - Cross-check the Windows (gnu) target"
 	@echo "  make deb                    - Package the release binary as a .deb"
 	@echo "  make rpm                    - Package the release binary as an .rpm"
 	@echo "  make web-smoke              - Smoke-test ryll --web (plain HTTP)"
@@ -128,6 +129,19 @@ release: ensure-cache
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
 		cargo build --release -p ryll
+
+# Cheap smoke-tier proxy for the Windows builds that run in the merge
+# tier: `cargo check` against the gnu triple, which mingw-w64 lets us
+# cross-compile from Linux. The msvc triples CI actually builds
+# cannot be cross-checked this way -- aws-lc-sys needs an MSVC
+# toolchain to compile its vendored BoringSSL C sources -- but the
+# gnu triple shares the cfg(windows)/windows-sys surface with msvc,
+# so it catches the common case cheaply. See
+# docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md.
+check-windows: ensure-cache
+	$(DOCKER_RUN) \
+		$(RYLL_IMAGE) \
+		cargo check --target x86_64-pc-windows-gnu --no-default-features -p ryll
 
 # Cutting a release is a two-phase operation so the version bump
 # goes through the normal PR review gate rather than landing

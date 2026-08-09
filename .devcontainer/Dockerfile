@@ -18,6 +18,9 @@ FROM mcr.microsoft.com/devcontainers/base:debian
 #     falls back to source-building the bundled libopus via cmake.
 # Test tooling:
 #   - openssl: tools/web-smoke.sh --tls generates a throwaway cert
+# Windows cross-check: gcc-mingw-w64-x86-64, g++-mingw-w64-x86-64 let
+#   `make check-windows` cross-check the x86_64-pc-windows-gnu target
+#   from Linux.
 RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
@@ -35,6 +38,8 @@ RUN apt-get update && apt-get install -y \
     libwayland-dev \
     libssl-dev \
     openssl \
+    gcc-mingw-w64-x86-64 \
+    g++-mingw-w64-x86-64 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a shared build directory that any user can use
@@ -52,6 +57,12 @@ ENV PATH="/build/.cargo/bin:${PATH}"
 
 # Install useful cargo tools
 RUN umask 0000 && rustup component add rustfmt clippy
+
+# Bake in the x86_64-pc-windows-gnu target for `make check-windows`.
+# RUSTUP_HOME lives in the image, not a volume mount, so an ad-hoc
+# `rustup target add` at check time would re-download the target on
+# every container run instead of persisting.
+RUN umask 0000 && rustup target add x86_64-pc-windows-gnu
 
 # Packaging tools used by the deb/rpm Makefile targets and CI.
 RUN umask 0000 && cargo install cargo-deb cargo-generate-rpm --locked
