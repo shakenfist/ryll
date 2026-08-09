@@ -756,11 +756,19 @@ applies to all future webrtc-rs work:
 - **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
 - **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
   on Linux (x86_64 + aarch64), macOS (Apple Silicon), and Windows
-  (x86_64 + aarch64) on every push to `develop` and on pull requests.
-  Linux x86_64 jobs (lint, fuzz, build) run on self-hosted runners
+  (x86_64 + aarch64) in two tiers: a smoke tier on pull requests
+  (lint, the Linux x86_64 build, the Windows cross-check and the
+  supply-chain scanners) and a merge tier on `merge_group` (fuzz and
+  the cross-platform build matrix). Linux x86_64 jobs (lint,
+  check-windows, build, fuzz) run on self-hosted runners
   (`[self-hosted, vm, debian-12-docker, l]`) with cargo wrapped in
   the devcontainer via `make lint` / `make release` / `make test`
-  etc. The other architectures use native GitHub-hosted runners (no
+  etc. `make check-windows` cross-compiles the
+  `x86_64-pc-windows-gnu` triple from the devcontainer as a cheap
+  smoke-tier proxy for the merge tier's msvc Windows builds; it
+  catches `cfg(windows)` and windows-sys breakage, not msvc-specific
+  or link-time breakage. The other architectures use native
+  GitHub-hosted runners (no
   cross-compile) with native `cargo`: arm64 Linux uses
   `ubuntu-24.04-arm` and arm64 Windows uses `windows-11-arm`; those
   runner references carry `audit-ok: github-hosted-runner` markers

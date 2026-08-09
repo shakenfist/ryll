@@ -63,6 +63,12 @@ jobs:
   # build wrapped in the devcontainer (see Makefile), matching the
   # pattern instar uses. The debian-12-docker image ships with
   # docker.io preinstalled (see supply-chain.yml).
+  #
+  # The l pool is the scarcest resource on the fleet (MAX_WORKERS = 6
+  # across every repo), so these three jobs carry the concurrency
+  # block AGENTS.md requires of anything a pull request can trigger:
+  # without it a superseded run holds an l slot for up to 45 minutes
+  # while its replacement queues behind it.
   lint:
     name: Lint
     runs-on: [self-hosted, vm, debian-12-docker, l]
@@ -71,6 +77,9 @@ jobs:
     if: >-
       github.event_name != 'merge_group'
       && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-lint
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
 
@@ -98,6 +107,9 @@ jobs:
     if: >-
       github.event_name != 'merge_group'
       && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-check-windows
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
 
@@ -115,6 +127,9 @@ jobs:
     if: >-
       github.event_name != 'merge_group'
       && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-build-linux
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
 
