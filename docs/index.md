@@ -92,8 +92,9 @@ both ends of the traffic through the proxy. This would allow:
 - [Web frontend](web-frontend.md) - Operator guide for `--web` mode
 - [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools
 - [Multi-mode feature parity](multi-mode-parity.md) - Which features work in GUI, headless, and web modes
-- [Development](development.md) - Building, testing, CI, and contributing
+- [Development](development.md) - Building, testing, and contributing
 - [macOS Development](development-macos.md) - Build and test locally on macOS
+- [Continuous integration](ci.md) - The two CI tiers, the merge queue, and where binaries come from
 - [Troubleshooting](troubleshooting.md) - Common issues and debugging
 - [Binary Portability](portability.md) - How to share built binaries
 - [Releasing](releasing.md) - How to publish a new release

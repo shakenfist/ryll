@@ -788,8 +788,9 @@ applies to all future webrtc-rs work:
   verify `--web` mode startup and graceful shutdown. PRs also receive an
   automated code review via the shared `shakenfist/actions/review-pr-with-claude`
   action. Review-only changes (`REVIEWS.md`, `.vscode/*.weaudit*`,
-  `.vscode/review-scope.toml`) skip the CI and CodeQL workflows via
-  `paths-ignore`; the supply-chain content scanners still run on them.
+  `.vscode/review-scope.toml`) skip every job in both tiers: `ci.yml`
+  detects them in its `check_paths` job, and `codeql-analysis.yml`
+  still uses `paths-ignore`. `docs/ci.md` is the full CI reference.
 - **Bot-triggered workflows** for PR automation:
   `@shakenfist-bot please re-review`, `please address comments`,
   `please retest`
@@ -913,6 +914,42 @@ Scheduled, push-to-default, and release workflows should
 **not** enable `cancel-in-progress`. Cancelling a release
 mid-publish or a renovate run mid-PR-creation leaves
 partial state.
+
+## The two CI tiers and the merge queue
+
+`ci.yml` is split into a smoke tier that runs on
+`pull_request` and a merge tier that runs on `merge_group`,
+and `develop` is behind a merge queue. `docs/ci.md` is the
+reference; the parts that constrain how you edit CI are:
+
+- **A new job is not required until a gate depends on it.**
+  The ruleset requires only `Can see status`, `Can enqueue`
+  and `Can merge`. Add smoke-tier jobs to `can_enqueue.needs`
+  and merge-tier jobs to `can_merge.needs`, or they can fail
+  without blocking anything. Add smoke-tier jobs to
+  `automated_reviewer.needs` too if the reviewer should wait
+  for them.
+- **Never add a merge-tier job to `automated_reviewer` or
+  `can_enqueue`.** Merge-tier jobs never run on a pull
+  request, so a `needs` on one leaves the dependent job
+  permanently skipped.
+- **Every tier job carries the same two-clause `if:`** — an
+  event test plus
+  `needs.check_paths.outputs.code_changed != 'false'`. Copy
+  the pattern from a neighbouring job in the same tier rather
+  than inventing a condition.
+- **The gates rely on skipped-counts-as-success.** Their jq
+  maps each dependency to "success or skipped"; that is what
+  lets review-only changes through. Do not "tighten" it to
+  require success.
+- **`workflow_dispatch` runs both tiers** so
+  `@shakenfist-bot please retest` stays a full retest. Keep
+  the trigger, and keep merge-tier `if:` conditions accepting
+  `workflow_dispatch`.
+- **Do not push to `develop`.** The ruleset requires a pull
+  request, and merging enqueues rather than merges. The one
+  exception is `prune-reviews.yml`, which pushes as
+  `shakenfist-bot` through a team bypass actor.
 
 ## Dependencies to Know
 
