@@ -132,20 +132,27 @@ own automation is locked out of the branch it maintains.
 
 | Step | Effort | Model | Isolation | Brief |
 |------|--------|-------|-----------|-------|
-| 3a | low | sonnet | none | Point `prune-reviews.yml`'s checkout at `DEPENDENCIES_TOKEN` and rewrite the header comment to match kerbside's. Done in this branch. |
-| 3b | — | — | — | Operator step: `gh workflow run prune-reviews.yml --ref merge-queue` and confirm the run is green. Dispatch runs the branch's copy of the file, so this exercises the token with the ruleset still untouched. |
-| 3c | — | — | — | Merge this branch's PR the normal way, before the ruleset changes. |
+| 3a | low | sonnet | none | Point `prune-reviews.yml`'s checkout at `DEPENDENCIES_TOKEN`, guard the job to `refs/heads/develop`, and rewrite the header comment to match kerbside's. Done in this branch. |
+| 3b | — | — | — | Merge this branch's PR the normal way, while the ruleset is still permissive. The merge fires `prune-reviews` on develop with the new token, and that run has real work to do (editing `prune-reviews.yml` stales the `.github/workflows` directory mark), so it exercises `git push origin develop` as shakenfist-bot for real. |
+| 3c | — | — | — | Confirm that post-merge run is green before going near the ruleset. If the PAT lacks write scope it fails here, with the branch still unlocked and `GITHUB_TOKEN` pushes still legal. |
 | 3d | medium | opus | none | Operator approves and runs the `gh api` call above, then re-reads the ruleset to confirm it round-tripped. |
 | 3e | low | sonnet | none | Trigger `export-repo-config.yml` so the ruleset lands under `.github/exported-config/` and the consistency audit sees it. |
 
 ## Validation
 
-* Step 3b proves the token authenticates. It does **not** prove the
-  push path: there are no stale review marks as of 2026-08-10, so
-  `ci-prune-reviews.sh` exits at its "No stale review marks to prune"
-  guard before reaching `git push`. A bad token still fails loudly,
-  because `actions/checkout` fails outright. To prove the push too,
-  run the dispatch after a merge that actually staled some marks.
+* The token was partly proven on 2026-08-10 by dispatching
+  `prune-reviews` on this branch: `actions/checkout` and the
+  development clone both succeeded, so the PAT is valid and can read.
+  That dispatch then failed, and the failure is why the job now
+  carries a `refs/heads/develop` guard — see below. Write scope
+  remains unproven until step 3b.
+* Do **not** try to prove the token by dispatching this workflow on a
+  branch. `ci-prune-reviews.sh` rebases onto develop and pushes to
+  develop regardless of the checked-out ref, so a dispatch on a
+  branch attempts to push that branch's unmerged commits to develop.
+  On 2026-08-10 only an add/add rebase conflict stopped exactly that
+  from happening. The job's `if:` guard now makes such a dispatch a
+  no-op, and step 3b uses the ordinary post-merge run instead.
 * After 3d, a trivial PR should: run the smoke tier, go green on
   `Can enqueue`, enqueue, run the merge tier in the queue, go green
   on `Can merge`, and merge.
@@ -174,3 +181,10 @@ own automation is locked out of the branch it maintains.
   when the base moves. With `max_entries_to_build: 1` and a single
   developer this is mostly harmless, but it is the thing to watch if
   queue rebuild churn shows up later.
+* The push-to-develop-from-any-ref hazard fixed here by a job guard
+  exists in kerbside's copy of this workflow too, and the underlying
+  `git push origin develop` lives in a script that mirrors one in
+  shakenfist/development. Fixing it fleet-wide — most likely in the
+  script rather than in each workflow — is worth raising separately;
+  it is deliberately not done here to avoid diverging ryll's copy of
+  a shared script mid-phase.

@@ -28,6 +28,14 @@ concurrency:
 jobs:
   prune:
     name: Prune stale review marks
+    # ci-prune-reviews.sh rebases onto develop and pushes to develop
+    # unconditionally, whatever ref was checked out. Dispatched on a
+    # branch it would therefore try to push that branch's unmerged
+    # commits straight to develop, skipping review entirely -- observed
+    # on 2026-08-10, where only a rebase conflict prevented it. The
+    # push trigger already only fires on develop; this guard makes
+    # workflow_dispatch match.
+    if: github.ref == 'refs/heads/develop'
     runs-on: [self-hosted, static]
     permissions:
       contents: write
