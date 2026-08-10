@@ -33,10 +33,6 @@
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
     },
-    ".github/workflows/prune-reviews.yml": {
-      "sha": "525c1387aef03128e73aedf883a16b262f87a866",
-      "date": "2026-08-05"
-    },
     ".github/workflows/release.yml": {
       "sha": "c899fbea321c1de86e3de21e6c0dd3e6f02db177",
       "date": "2026-08-05"
