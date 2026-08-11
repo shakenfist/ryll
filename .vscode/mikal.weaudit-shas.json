@@ -53,6 +53,10 @@
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
     },
+    "AGENTS.md": {
+      "sha": "37a2d718045ef65617be871b40b8a8d34de5eae2",
+      "date": "2026-08-12"
+    },
     "ARCHITECTURE.md": {
       "sha": "1665f6b3bfb0d94d59f7cc73472e4978aa17199c",
       "date": "2026-07-29"
@@ -85,6 +89,10 @@
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
+    "docs/ci.md": {
+      "sha": "68fc6eb3e28f7dcbc54eff4ccc170ae263a9911e",
+      "date": "2026-08-12"
+    },
     "docs/configuration.md": {
       "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
       "date": "2026-07-30"
@@ -97,9 +105,17 @@
       "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
       "date": "2026-07-30"
     },
+    "docs/development.md": {
+      "sha": "e3a56fef991cec909814c25e51870c6952371c49",
+      "date": "2026-08-12"
+    },
     "docs/features.md": {
       "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
       "date": "2026-07-30"
+    },
+    "docs/index.md": {
+      "sha": "506980b2618978f7fe23a861e6285f9de361de89",
+      "date": "2026-08-12"
     },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
