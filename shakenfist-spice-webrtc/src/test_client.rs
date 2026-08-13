@@ -30,14 +30,13 @@
 //! the tests that need them — only `tests/loopback.rs` does, and
 //! generalising a single use would make this type harder to read for
 //! no gain. Reach through [`TestPeer::pc`] for anything this module
-//! does not cover.
+//! does not cover — but note that two callback slots are already
+//! claimed; see [`TestPeer::pc`]'s docs before registering handlers.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use tokio::sync::{Mutex, Notify};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -53,6 +52,7 @@ use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirecti
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 
 use crate::bridge::register_h264;
+use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -129,31 +129,38 @@ impl TestPeerBuilder {
         // because a shadow that defaulted to `Connected` would make
         // every `wait_until_connected` return instantly and quietly
         // gut the tests that rely on it.
+        //
+        // A `std::sync::Mutex`, matching `WebrtcBridge`'s shadow of
+        // the same state, so the two shadows stay the same shape for
+        // the 0.20 port and `connection_state()` stays synchronous.
+        // The guard is only ever held across a single assignment or
+        // read of a `Copy` enum, never across an await.
         let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
         let state_cb = state.clone();
         pc.on_peer_connection_state_change(Box::new(move |next: RTCPeerConnectionState| {
             let state = state_cb.clone();
             Box::pin(async move {
-                *state.lock().await = next;
+                // `into_inner` on poison: a single `Copy` assignment
+                // cannot leave the value inconsistent, and dropping
+                // the write would strand `wait_until_connected` on a
+                // stale state with no hint as to why.
+                *state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
             })
         }));
 
-        // ICE gathering completion, on the same sticky
-        // Notify + AtomicBool pattern the bridge uses, and for the
-        // same reason: `gathering_complete_promise` does not exist in
-        // webrtc-rs 0.20, but this callback survives the port.
-        let gathered = Arc::new(Notify::new());
-        let gathered_flag = Arc::new(AtomicBool::new(false));
+        // ICE gathering completion, on the same [`StickySignal`] the
+        // bridge uses, and for the same reason:
+        // `gathering_complete_promise` does not exist in webrtc-rs
+        // 0.20, but this callback survives the port.
+        let gathered = Arc::new(StickySignal::new());
         let gathered_cb = gathered.clone();
-        let gathered_flag_cb = gathered_flag.clone();
         pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
             let gathered = gathered_cb.clone();
-            let gathered_flag = gathered_flag_cb.clone();
             Box::pin(async move {
-                if state == RTCIceGathererState::Complete
-                    && !gathered_flag.swap(true, Ordering::SeqCst)
-                {
-                    gathered.notify_waiters();
+                if state == RTCIceGathererState::Complete {
+                    gathered.raise();
                 }
             })
         }));
@@ -185,7 +192,6 @@ impl TestPeerBuilder {
             _seed_dc: seed_dc,
             state,
             gathered,
-            gathered_flag,
         })
     }
 }
@@ -201,10 +207,9 @@ pub struct TestPeer {
     /// comment where it is registered for why this is shadowed
     /// rather than read from the peer connection.
     state: Arc<Mutex<RTCPeerConnectionState>>,
-    /// Fires once when ICE gathering completes; `gathered_flag` is
-    /// the sticky companion that lets a late waiter skip the wait.
-    gathered: Arc<Notify>,
-    gathered_flag: Arc<AtomicBool>,
+    /// Raised once when ICE gathering completes; sticky so a late
+    /// waiter returns immediately.
+    gathered: Arc<StickySignal>,
 }
 
 impl TestPeer {
@@ -215,6 +220,16 @@ impl TestPeer {
 
     /// The underlying peer connection, for anything this type does
     /// not wrap — `on_track`, `on_data_channel`, statistics.
+    ///
+    /// Two callback slots are already claimed:
+    /// `on_peer_connection_state_change` and
+    /// `on_ice_gathering_state_change` are registered by
+    /// [`TestPeerBuilder::build`] and are what back
+    /// [`Self::wait_until_connected`] and [`Self::offer_and_gather`].
+    /// webrtc-rs callback registration is last-writer-wins, so
+    /// re-registering either through this accessor silently breaks
+    /// those methods — the symptom is a `wait_until_connected` that
+    /// spins to its full timeout with the shadow stuck at `New`.
     pub fn pc(&self) -> &Arc<RTCPeerConnection> {
         &self.pc
     }
@@ -241,19 +256,17 @@ impl TestPeer {
     /// gathering wait is what makes the offer carry every candidate,
     /// which the non-trickle exchange the bridge implements depends
     /// on.
+    ///
+    /// One exchange per peer: the gathering signal is sticky and
+    /// never resets, so a second call on the same `TestPeer` would
+    /// not wait for a re-gathering round. Renegotiation needs a fresh
+    /// peer — the same constraint as `WebrtcBridge::accept_offer`.
     pub async fn offer_and_gather(&self) -> Result<String> {
         self.create_offer().await?;
 
-        // `enable()` before the flag check closes the window where
-        // gathering completes between the two and the notification
-        // lands with nobody registered. See
-        // `WebrtcBridge::wait_for_gathering` for the full reasoning.
-        let notified = self.gathered.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if !self.gathered_flag.load(Ordering::SeqCst) {
-            notified.await;
-        }
+        // Sticky wait; see `StickySignal` for the lost-wakeup
+        // reasoning this encapsulates.
+        self.gathered.wait().await;
 
         let local = self
             .pc
@@ -273,8 +286,14 @@ impl TestPeer {
 
     /// The most recent peer connection state observed by the
     /// state-change callback.
-    pub async fn connection_state(&self) -> RTCPeerConnectionState {
-        *self.state.lock().await
+    pub fn connection_state(&self) -> RTCPeerConnectionState {
+        // `into_inner` on poison for the same reason as the writer:
+        // a `Copy` enum can never be left inconsistent, and the real
+        // value beats a made-up one.
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Poll until the peer reaches `Connected`, or `timeout` elapses.
@@ -284,14 +303,21 @@ impl TestPeer {
     /// handshake. Polling one end is sufficient for an in-process
     /// loopback.
     ///
-    /// Returns the state observed on timeout in the error, because
-    /// "did not connect" and "connected then failed" want different
-    /// debugging.
+    /// A peer that reaches `Failed` or `Closed` without ever
+    /// connecting errors immediately rather than burning the full
+    /// timeout — in CI that turns a 20-second dead wait into a
+    /// sub-second failure with the right diagnosis. The timeout path
+    /// still reports the state it saw, because "did not connect" and
+    /// "connected then failed" want different debugging.
     pub async fn wait_until_connected(&self, timeout: Duration) -> Result<()> {
         let outcome = tokio::time::timeout(timeout, async {
             loop {
-                if self.connection_state().await == RTCPeerConnectionState::Connected {
-                    return;
+                match self.connection_state() {
+                    RTCPeerConnectionState::Connected => return Ok(()),
+                    state @ (RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) => {
+                        return Err(anyhow!("peer reached {state:?} without ever connecting"));
+                    }
+                    _ => {}
                 }
                 tokio::time::sleep(CONNECT_POLL_INTERVAL).await;
             }
@@ -299,11 +325,11 @@ impl TestPeer {
         .await;
 
         match outcome {
-            Ok(()) => Ok(()),
+            Ok(result) => result,
             Err(_) => Err(anyhow!(
                 "peer did not reach Connected within {:?} (state={:?})",
                 timeout,
-                self.connection_state().await,
+                self.connection_state(),
             )),
         }
     }
@@ -410,7 +436,7 @@ mod tests {
 
         let peer = TestPeer::builder().build().await.expect("peer");
         assert_eq!(
-            peer.connection_state().await,
+            peer.connection_state(),
             RTCPeerConnectionState::New,
             "a freshly built peer must report New",
         );
