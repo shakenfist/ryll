@@ -319,42 +319,96 @@ Dependencies: 1a first. 1c before 1d and before 1f. 1e before 1f.
 
 | Step | State |
 |------|-------|
-| 1a — 0.17.2 baseline | **Outstanding** — needs a real soak, see below |
+| 1a — 0.17.2 baseline | Done — see "Baseline" below |
 | 1b — `rtp` direct dependency | Done |
 | 1c — shared `TestPeer` | Done |
 | 1d — state shadow in `TestPeer` | Done |
 | 1e — `BridgeEvents` | Done |
 | 1f — handler-driven gathering | Done |
-| 1g — re-measure | **Outstanding** — blocked on 1a |
+| 1g — re-measure | Done — agrees with 1a within noise |
 
 Plus one unplanned commit: the `wait_for_dead` lost-wakeup fix
 described under "Found during execution".
 
-### Why 1a and 1g are still open
+## Baseline
 
-They are the two steps that cannot be done from a terminal. The
-measurement wanted is a real browser attached to a real `--web`
-session against a real SPICE guest, held at steady state for
-twenty minutes, with RSS, per-thread CPU, the latency HUD
-distribution and the video pump's drop count recorded.
+Captured 2026-08-13. Two 20-minute soaks under identical
+conditions: 1a on the 0.17 tip (develop `ce740e26`, which
+resolves webrtc 0.17.2 via lockfile maintenance; the manifest
+still says 0.17.1), 1g on the phase-01 tip (`9ea7cfb0`). Phase 04
+must reproduce these conditions to compare against these numbers.
 
-`testdata/uefi-latency-guest.qcow2` exists, so the guest is not
-the obstacle. The obstacle is that a baseline is only worth
-anything if it is captured under the same conditions as the
-measurement it will later be compared against — and phase 04's
-comparison is against a real session with a real viewer. A
-twenty-minute idle soak with nobody driving the guest would
-produce numbers that look like a baseline and are not one, which
-is worse than having none, because phase 04 would then compare
-against them in good faith.
+| Metric | 1a (`ce740e26`) | 1g (`9ea7cfb0`) |
+|--------|-----------------|-----------------|
+| RSS start → end | 154 → 215 MB | 161 → 197 MB |
+| RSS max | 226 MB | 197 MB |
+| CPU, all threads, whole run | ~1.4% of one core | ~0.9% of one core |
+| Video pump drops | 0 | 0 |
+| Audio pump drops | 0 | 0 |
+| Reaper events | 0 | 0 |
+| ryll alive at end | yes | yes |
+| Host CPU busy%, mean (max) | 8.3 (9) | 10.4 (29) |
 
-So: capture it by hand, on the 0.17 tip (this branch's parent, or
-any commit before phase 02 lands), and paste the numbers into a
-"Baseline" section here. Then run 1g the same way on the phase-01
-tip. Everything else in the phase is behaviour-preserving, so the
-two should agree within noise; if they do not, something in
-1b–1f changed behaviour and wants investigating before phase 02
-starts.
+**Verdict: no regression.** The phase-01 tip is at-or-below the
+baseline on both memory and CPU, and the differences are within
+run-to-run noise at this load. Both runs show RSS growing through
+the run (plausibly ring buffers and caches filling to their
+caps); the growth is common to both and is itself part of the
+baseline shape phase 04 should expect.
+
+### Conditions
+
+- Guest: `testdata/uefi-latency-guest.qcow2` under
+  `qemu-system-x86_64` (q35, 128 MB, OVMF, QXL, `-display
+  none`), SPICE on `localhost:5900` with ticketing disabled,
+  fixed at 1280x800. Booted once and reused for both runs.
+- Guest behaviour (discovered during 1a): *any* keypress
+  advances a fixed 8-colour cycle — teal, red, magenta, yellow,
+  grey, black, blue, green — as a full-screen repaint,
+  sometimes via a full video-mode reset (SPICE surface destroy →
+  640x480 → recreate 1280x800). One step in eight is black, so
+  the viewer legitimately shows ~30 s of black every 4 minutes.
+- Driver: one QMP `sendkey` every 30 s; the guest was stepped to
+  teal before each run so both runs start at the same cycle
+  position. A 5 s cadence does not work: the mode-set churn
+  outruns the stream's few-second recovery and the viewer stays
+  black permanently (see "Found during execution").
+- Viewer: Debian Chromium on the same host, fresh profile,
+  `--disable-features=WebRtcHideLocalIpsWithMdns` and
+  `--autoplay-policy=no-user-gesture-required`, signalling over
+  loopback. Firefox 140 ESR could not establish ICE in this
+  environment at all (its offers carried no usable candidates,
+  with or without the mDNS-obfuscation and loopback prefs) and
+  cannot be the phase-04 viewer on this host.
+- ryll: `--web --direct localhost:5900`, dev-profile build via
+  `make build`,
+  `RUST_LOG=info,shakenfist_spice_webrtc=debug,ryll=debug`
+  (the drop counters only log at debug). Encoder negotiated
+  1280x800@30fps in both runs.
+- Sampling: RSS (`/proc/<pid>/status`) and per-thread CPU
+  (`/proc/<pid>/task/*/stat`) every 30 s, with whole-host CPU
+  busy% and load average recorded per sample so contamination
+  from other workloads on the shared machine is visible in the
+  record. The host stayed quiet through 1a; 1g saw one brief
+  external spike (max 29% busy on 16 cores), not enough to move
+  the numbers.
+
+### Deviations from the step brief
+
+The brief asked for "per-thread CPU from the runtime metrics"
+and "the latency HUD's distribution". Both are GUI-mode-only:
+the auto-snapshot loop is spawned from `app.rs` and the web
+shell has no latency HUD, so neither exists under `--web`.
+Substituted: external `/proc` sampling as above, and no latency
+distribution (RTT over loopback is ~0 and browser-side WebRTC
+stats were not scraped). Phase 04 must measure the same way for
+the comparison to hold.
+
+This is also a light workload — a solid-colour full-screen
+repaint every 30 s is nearer idle-with-bursts than a busy
+desktop (compare the 0.2–50 Mbit/s range seen in real test
+sessions). It is what is reproducible unattended; treat the
+numbers as a floor-shape baseline, not a stress result.
 
 ## Effort
 
@@ -458,3 +512,18 @@ therefore calls it a second time, after gathering has certainly
 finished, to guarantee the sticky fast path is covered at all.
 Without that, a regression making late callers hang could pass
 the suite.
+
+### Sustained surface churn wedges the web stream (pre-existing)
+
+Found while running the baseline soaks, not introduced by this
+phase. The uefi-latency-guest performs a full video-mode reset
+(SPICE surface destroy → 640x480 → recreate 1280x800) when its
+colour changes, and the browser stream takes a few seconds to
+recover from each one. Driving a colour change every 5 s churns
+faster than recovery, and the viewer then shows black
+*permanently* — it never resurfaces even though ryll's logs show
+the surfaces cycling and the encoder restarting. At a 30 s
+cadence recovery completes every time. Real desktops rarely
+mode-set repeatedly, so this is a robustness gap rather than a
+dogfooding blocker, but it is worth a standalone issue: the
+encoder/stream should survive surface churn at any cadence.
