@@ -441,12 +441,21 @@ shakenfist-spice-renderer/src/
 └── traffic.rs           # TrafficSink trait
 
 shakenfist-spice-webrtc/src/
-└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
-                         #   Phase 6 public API:
-                         #     wait_for_dead() — resolves when PC
-                         #       reaches Failed/Disconnected/Closed
-                         #     dead_handle() → Arc<Notify>
-                         #     dead_flag_handle() → Arc<AtomicBool>
+├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
+│                        #   BridgeEvents gathers the PC callbacks
+│                        #   (shaped for 0.20's handler trait);
+│                        #   Phase 6 public API:
+│                        #     wait_for_dead() — resolves when PC
+│                        #       reaches Failed/Disconnected/Closed
+│                        #     dead_signal() → Arc<StickySignal>
+├── sticky.rs            # StickySignal: one-shot level-triggered
+│                        #   Notify + sticky AtomicBool; see the
+│                        #   WebRTC Conventions section below
+└── test_client.rs       # TestPeer/TestPeerBuilder: client-side PC
+                         #   for tests driving the browser half of a
+                         #   bridge exchange. Compiled for this
+                         #   crate's own tests and for consumers
+                         #   enabling the `test-support` feature
 ```
 
 ## Control socket
@@ -694,8 +703,8 @@ file first.
 
 ## WebRTC Conventions
 
-The following convention was discovered during Phase 3 and
-applies to all future webrtc-rs work:
+The following conventions were discovered during Phase 3 and the
+webrtc-0.20 pre-work, and apply to all future webrtc-rs work:
 
 - **`on_track` must spawn a task for `read_rtp` loops.**
   webrtc-rs serialises `on_track` firings on the future returned
@@ -707,6 +716,20 @@ applies to all future webrtc-rs work:
   return immediately. This differs from what intuition suggests
   and from many webrtc-rs examples; document it explicitly
   whenever writing receiver-side WebRTC code.
+
+- **One-shot lifecycle events use `StickySignal`, never a bare
+  `Notify`.** `Notify::notify_waiters()` wakes only the waiters
+  registered at that instant — a waiter that subscribes afterwards
+  blocks forever, and `Notified` does not even register interest
+  until it is first polled, so the naive "check a flag, then
+  await" ordering has a lost-wakeup window (this was a real
+  production bug in the bridge reaper, fixed in phase 01 of the
+  webrtc-0.20 plan). `shakenfist_spice_webrtc::StickySignal`
+  packages the correct pattern — `Notified::enable()` before the
+  flag check on the wait side, `notify_waiters()` (never
+  `notify_one()`, which would leak a permit) on the raise side —
+  and is unit-tested against the lost-wakeup schedule. Do not
+  hand-roll a fifth copy; that is how the original bug got in.
 
 ## Testing
 
@@ -968,7 +991,8 @@ reference; the parts that constrain how you edit CI are:
 | etherparse | Fake TCP/IP header construction for pcap (optional, `capture` feature) |
 | openh264 | H.264 video encoding: in `shakenfist-spice-renderer` for the live encoder pipeline; also in `ryll`'s `capture` feature for `--capture` MP4 output |
 | mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
-| webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Pinned at `"0.17.1"` which re-exports `rtp = "^0.17.1"` (used for `H264Payloader` packetisation). |
+| webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Held below 0.18 by a Renovate rule: 0.20 re-homes the crate on a sans-io core and needs a port of `bridge.rs` rather than a version bump. See `docs/plans/PLAN-webrtc-0.20-upgrade.md`. |
+| rtp | RTP packet types and payloaders (`H264Payloader`, `OpusPayloader`, `Header`, `Packet`). A direct dependency of `shakenfist-spice-webrtc` and `shakenfist-spice-renderer`; `webrtc` 0.17 re-exports it, but that re-export is gone in 0.20. |
 | opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc` and the `WebOpusSink` passthrough path in `--web` mode. The `audiopus_sys` transitive dep builds libopus from source (via cmake) if `pkg-config` does not find a system libopus; the devcontainer and the aarch64 Linux CI runner install `libopus-dev` so the resulting binary dynamic-links libopus.so.0 and cargo-deb's `$auto` picks up `libopus0` as a runtime dep. Real PCM → Opus encoding for SPICE servers that negotiate uncompressed playback is deferred future work; today the PCM path produces silent audio with a warn-once log line. |
 | cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
 | opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |

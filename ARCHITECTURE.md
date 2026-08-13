@@ -180,8 +180,22 @@ Wraps an `RTCPeerConnection` and owns:
 Construction via `WebrtcBridge::new(WebrtcBridgeConfig)`:
 builds the PC via webrtc-rs's `APIBuilder` + `MediaEngine`
 pattern, registers H.264 and Opus codecs, creates both tracks,
-adds them to the PC, creates the control DC, and registers the
-connection-state-change handler.
+adds them to the PC, creates the control DC, and registers three
+callbacks — connection state change, ICE gathering state change,
+and control-DC message — all delegating to one `BridgeEvents`
+struct. `BridgeEvents` is deliberately the shape of webrtc-rs
+0.20's `PeerConnectionEventHandler` trait, so the 0.20 port adds
+an `impl` and deletes the closures without the bodies moving.
+
+The state-change handler shadows the latest
+`RTCPeerConnectionState` (the inherent accessor does not survive
+the 0.20 port) and raises the sticky `dead` signal on the first
+terminal transition. The gathering handler raises the sticky
+`gathered` signal on `Complete`. Both signals are
+`StickySignal`s (`sticky.rs`): a `Notify` + sticky `AtomicBool`
+pair giving level-triggered, raise-exactly-once semantics — see
+the WebRTC Conventions section of AGENTS.md for why a bare
+`Notify` is not safe here.
 
 `WebrtcBridgeConfig` carries the ICE server list (empty for
 LAN-only use) and the `EncoderControl` sender.
@@ -193,12 +207,17 @@ entry point for Phase 4's HTTP `/offer` handler. It:
 1. Sets the remote description (browser's offer).
 2. Creates an answer.
 3. Sets the local description.
-4. Waits for ICE gathering to complete.
+4. Waits for ICE gathering to complete, by awaiting the sticky
+   `gathered` signal raised by `BridgeEvents` (webrtc-rs 0.17's
+   `gathering_complete_promise()` does not exist in 0.20).
 5. Returns the fully-resolved answer SDP.
 
 ICE gathering completion is awaited so the answer already
 contains all host candidates — trickle ICE is not needed for
-the LAN-only MVP.
+the LAN-only MVP. Because the gathering signal is sticky and
+never resets, a `WebrtcBridge` handles exactly one offer/answer
+exchange; renegotiation requires a new bridge, and the web
+frontend constructs one per `POST /offer`.
 
 ### Video pump
 
@@ -546,9 +565,12 @@ shakenfist-spice-renderer/src/
 └── byte_counter.rs      # ByteCounter
 
 shakenfist-spice-webrtc/src/
-└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
-                         #   Phase 6: wait_for_dead(), dead_handle(),
-                         #   dead_flag_handle()
+├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig,
+│                        #   BridgeEvents; Phase 6:
+│                        #   wait_for_dead(), dead_signal()
+├── sticky.rs            # StickySignal (Notify + sticky AtomicBool)
+└── test_client.rs       # TestPeer client-side PC for tests
+                         #   (`test-support` feature)
 ```
 
 ## Concurrency Model
