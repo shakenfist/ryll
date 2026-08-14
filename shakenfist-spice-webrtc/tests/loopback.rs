@@ -65,69 +65,83 @@ async fn loopback_video_audio_datachannel() {
     // the bridge's H.264 PT 102), the recvonly transceivers, and the
     // seed datachannel that puts an m=application section in the
     // offer. The `on_track` / `on_data_channel` wiring below is
-    // specific to this test, so it reaches through to the raw PC.
-    let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
-        .build()
-        .await
-        .expect("client peer");
-    let client_pc = client.pc().clone();
-
-    // Counters for incoming RTP packets, by track kind.
+    // specific to this test, so it is supplied to the builder rather
+    // than registered by reaching through the raw PC afterwards —
+    // registration has to happen before the offer/answer exchange
+    // starts (a track or datachannel that arrives before the handler
+    // is installed fires nothing), and `TestPeerBuilder::build`
+    // guarantees that ordering. It is also the shape webrtc-rs 0.20
+    // requires: the handler is supplied to the builder before the
+    // peer connection exists, so a post-construction registration
+    // through `TestPeer::pc()` would have nowhere to go.
+    //
+    // Counters for incoming RTP packets, by track kind. Created
+    // before the peer so they can be cloned into the builder hooks
+    // below.
     let video_count = Arc::new(AtomicUsize::new(0));
     let audio_count = Arc::new(AtomicUsize::new(0));
 
-    // on_track: spawn a per-track reader loop that increments the
-    // appropriate counter for each successfully decoded RTP packet.
-    //
-    // The read loop runs in a `tokio::spawn`-ed task rather than
-    // directly inside the on_track callback. webrtc-rs awaits the
-    // returned future before firing on_track for the *next* track,
-    // so a long-lived `read_rtp` loop inside the callback would
-    // pin the event loop on the first track (audio) and prevent
-    // on_track from ever firing for video. Spawning lets the
-    // callback return immediately and both kinds receive packets.
-    {
-        let video_count = video_count.clone();
-        let audio_count = audio_count.clone();
-        client_pc.on_track(Box::new(
-            move |track: Arc<TrackRemote>,
-                  _receiver: Arc<RTCRtpReceiver>,
-                  _transceiver: Arc<RTCRtpTransceiver>| {
-                let video_count = video_count.clone();
-                let audio_count = audio_count.clone();
-                Box::pin(async move {
-                    let kind = track.kind();
-                    let counter = match kind {
-                        RTPCodecType::Video => video_count,
-                        RTPCodecType::Audio => audio_count,
-                        _ => return,
-                    };
-                    tokio::spawn(async move {
-                        while track.read_rtp().await.is_ok() {
-                            counter.fetch_add(1, Ordering::Relaxed);
-                        }
-                    });
-                })
-            },
-        ));
-    }
-
-    // on_data_channel: when the server's control DC arrives, install
-    // an on_message handler that echoes "ping" back as "pong".
-    client_pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-        Box::pin(async move {
-            let dc_for_send = dc.clone();
-            dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                let dc = dc_for_send.clone();
-                Box::pin(async move {
-                    if msg.data.as_ref() == b"ping" {
-                        let _ = dc.send(&Bytes::from_static(b"pong")).await;
-                    }
-                })
-            }));
+    let client = TestPeer::builder()
+        .seed_data_channel("client-seed")
+        .on_track_hook({
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
+            // on_track: spawn a per-track reader loop that increments
+            // the appropriate counter for each successfully decoded
+            // RTP packet.
+            //
+            // The read loop runs in a `tokio::spawn`-ed task rather
+            // than directly inside the on_track callback. webrtc-rs
+            // awaits the returned future before firing on_track for
+            // the *next* track, so a long-lived `read_rtp` loop
+            // inside the callback would pin the event loop on the
+            // first track (audio) and prevent on_track from ever
+            // firing for video. Spawning lets the callback return
+            // immediately and both kinds receive packets. This is
+            // not a 0.17 quirk: 0.20's driver loop awaits handler
+            // methods inline too, so the same reasoning carries
+            // forward unchanged.
+            Box::new(
+                move |track: Arc<TrackRemote>,
+                      _receiver: Arc<RTCRtpReceiver>,
+                      _transceiver: Arc<RTCRtpTransceiver>| {
+                    let video_count = video_count.clone();
+                    let audio_count = audio_count.clone();
+                    Box::pin(async move {
+                        let kind = track.kind();
+                        let counter = match kind {
+                            RTPCodecType::Video => video_count,
+                            RTPCodecType::Audio => audio_count,
+                            _ => return,
+                        };
+                        tokio::spawn(async move {
+                            while track.read_rtp().await.is_ok() {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        });
+                    })
+                },
+            )
         })
-    }));
+        // on_data_channel: when the server's control DC arrives,
+        // install an on_message handler that echoes "ping" back as
+        // "pong".
+        .on_data_channel_hook(Box::new(move |dc: Arc<RTCDataChannel>| {
+            Box::pin(async move {
+                let dc_for_send = dc.clone();
+                dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let dc = dc_for_send.clone();
+                    Box::pin(async move {
+                        if msg.data.as_ref() == b"ping" {
+                            let _ = dc.send(&Bytes::from_static(b"pong")).await;
+                        }
+                    })
+                }));
+            })
+        }))
+        .build()
+        .await
+        .expect("client peer");
 
     // ── SDP exchange: client offers, server answers ─────────────
     let final_offer_sdp = client.offer_and_gather().await.expect("client offer");

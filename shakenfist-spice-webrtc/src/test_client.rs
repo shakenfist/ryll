@@ -26,12 +26,16 @@
 //!
 //! ## What is deliberately not here
 //!
-//! `on_track` packet counting and datachannel echo handlers live in
-//! the tests that need them — only `tests/loopback.rs` does, and
-//! generalising a single use would make this type harder to read for
-//! no gain. Reach through [`TestPeer::pc`] for anything this module
-//! does not cover — but note that two callback slots are already
-//! claimed; see [`TestPeer::pc`]'s docs before registering handlers.
+//! `on_track` packet counting and datachannel echo handler *bodies*
+//! live in the tests that need them — only `tests/loopback.rs` does,
+//! and generalising a single use would make this type harder to read
+//! for no gain. [`TestPeerBuilder::on_track_hook`] and
+//! [`TestPeerBuilder::on_data_channel_hook`] accept those bodies and
+//! register them at build time, which is where webrtc-rs 0.20 also
+//! requires them to be supplied. Reach through [`TestPeer::pc`] for
+//! anything neither hook nor this module covers — but note that four
+//! callback slots are already claimed; see [`TestPeer::pc`]'s docs
+//! before registering handlers.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -46,7 +50,7 @@ use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
+use webrtc::peer_connection::{OnDataChannelHdlrFn, OnTrackHdlrFn, RTCPeerConnection};
 use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
@@ -56,6 +60,22 @@ use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
 const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The type [`TestPeerBuilder::on_track_hook`] accepts.
+///
+/// A bare alias for webrtc-rs 0.17's own [`OnTrackHdlrFn`] rather than
+/// a new name, so the boxed-closure shape callers write does not
+/// change. The point of the alias is the 0.20 port: `on_track` moves
+/// from a registration function to a
+/// `PeerConnectionEventHandler::on_track` method with a different
+/// signature, and this is the one place that has to change to
+/// re-target it — every call site here and in `tests/loopback.rs`
+/// stays as-is.
+pub type OnTrackHook = OnTrackHdlrFn;
+
+/// The type [`TestPeerBuilder::on_data_channel_hook`] accepts. See
+/// [`OnTrackHook`] for why this is an alias rather than a new shape.
+pub type OnDataChannelHook = OnDataChannelHdlrFn;
 
 /// Builder for [`TestPeer`].
 ///
@@ -67,6 +87,8 @@ const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Default)]
 pub struct TestPeerBuilder {
     seed_data_channel: Option<String>,
+    on_track: Option<OnTrackHook>,
+    on_data_channel: Option<OnDataChannelHook>,
 }
 
 impl TestPeerBuilder {
@@ -87,6 +109,30 @@ impl TestPeerBuilder {
     /// this. Found the hard way in phase 3 step 3f.
     pub fn seed_data_channel(mut self, label: &str) -> Self {
         self.seed_data_channel = Some(label.to_owned());
+        self
+    }
+
+    /// Register a callback for incoming remote tracks, at build time.
+    ///
+    /// webrtc-rs 0.20 hands the event handler to the builder before
+    /// the peer connection exists, so any test that needs `on_track`
+    /// behaviour has to supply it here rather than reaching through
+    /// [`TestPeer::pc`] after construction — that reach-through still
+    /// compiles on 0.17, but has nowhere to go once the port lands,
+    /// and [`TestPeer::pc`]'s docs warn against it now for that
+    /// reason. See `tests/loopback.rs` for the shape callers want:
+    /// spawn a per-track reader rather than looping inline in the
+    /// callback body.
+    pub fn on_track_hook(mut self, f: OnTrackHook) -> Self {
+        self.on_track = Some(f);
+        self
+    }
+
+    /// Register a callback for incoming datachannels, at build time.
+    /// See [`Self::on_track_hook`] for why build time rather than a
+    /// post-construction reach-through.
+    pub fn on_data_channel_hook(mut self, f: OnDataChannelHook) -> Self {
+        self.on_data_channel = Some(f);
         self
     }
 
@@ -165,6 +211,20 @@ impl TestPeerBuilder {
             })
         }));
 
+        // Caller-supplied on_track / on_data_channel hooks, registered
+        // here rather than left for the caller to add through `pc()`
+        // after `build()` returns. Registration must happen before the
+        // SDP exchange starts — a track or datachannel that arrives
+        // before the handler is installed fires nothing — and `build`
+        // is the only place that can guarantee that ordering, since it
+        // runs before the offer is even created.
+        if let Some(f) = self.on_track {
+            pc.on_track(f);
+        }
+        if let Some(f) = self.on_data_channel {
+            pc.on_data_channel(f);
+        }
+
         for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
@@ -219,17 +279,23 @@ impl TestPeer {
     }
 
     /// The underlying peer connection, for anything this type does
-    /// not wrap — `on_track`, `on_data_channel`, statistics.
+    /// not wrap — statistics, ICE restarts, and the like.
     ///
-    /// Two callback slots are already claimed:
+    /// Four callback slots are already claimed:
     /// `on_peer_connection_state_change` and
     /// `on_ice_gathering_state_change` are registered by
     /// [`TestPeerBuilder::build`] and are what back
-    /// [`Self::wait_until_connected`] and [`Self::offer_and_gather`].
-    /// webrtc-rs callback registration is last-writer-wins, so
-    /// re-registering either through this accessor silently breaks
-    /// those methods — the symptom is a `wait_until_connected` that
-    /// spins to its full timeout with the shadow stuck at `New`.
+    /// [`Self::wait_until_connected`] and [`Self::offer_and_gather`];
+    /// `on_track` and `on_data_channel` are also registered by
+    /// `build` whenever [`TestPeerBuilder::on_track_hook`] or
+    /// [`TestPeerBuilder::on_data_channel_hook`] was called. webrtc-rs
+    /// callback registration is last-writer-wins, so re-registering
+    /// any of the four through this accessor silently breaks whichever
+    /// of the above depends on it — for the state and gathering
+    /// callbacks, the symptom is a `wait_until_connected` that spins
+    /// to its full timeout with the shadow stuck at `New`. Callers
+    /// that need on-track or on-data-channel behaviour should use the
+    /// builder hooks instead of reaching through here.
     pub fn pc(&self) -> &Arc<RTCPeerConnection> {
         &self.pc
     }
