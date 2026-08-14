@@ -223,16 +223,24 @@ pattern.
 >
 > Consequences:
 >
-> - **ryll's UDP port range must be reachable from the
->   browser.** Open the relevant firewall ports on ryll's
->   host. The ephemeral RTP port range is chosen by the OS
->   (typically 32768–60999 on Linux).
-> - **Bind ryll to the public-facing IP, not loopback,**
->   when the proxy listens on a different IP. Use
->   `--web-host 0.0.0.0` or the specific public IP.
->   If ryll is bound to `127.0.0.1`, the ICE candidates
->   it advertises will be loopback-only and the browser
->   cannot reach them.
+> - **ryll's UDP ports must be reachable from the browser.**
+>   At startup ryll enumerates the host's non-loopback
+>   network interface addresses and binds one ephemeral UDP
+>   socket per address; the OS assigns the actual port per
+>   socket (typically from 32768–60999 on Linux). Open the
+>   relevant firewall ports on ryll's host. Pinning a specific
+>   port is not configurable yet — that lands in a later
+>   phase, so a static firewall rule currently has to open the
+>   OS's whole ephemeral range rather than a single port.
+> - **ryll advertises a candidate for every non-loopback
+>   interface address on the host, independent of
+>   `--web-host`.** `--web-host` controls only the HTTP/HTTPS
+>   signalling listener (`GET /`, `POST /offer`); it has no
+>   effect on which addresses WebRTC binds or advertises. If
+>   the host has more than one non-loopback interface (for
+>   example a public IP and a private LAN IP), ryll binds and
+>   advertises candidates for all of them — there is currently
+>   no way to select or restrict which addresses are used.
 
 ## Troubleshooting
 
