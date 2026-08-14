@@ -91,6 +91,13 @@ both ends of the traffic through the proxy. This would allow:
 - [Configuration](configuration.md) - CLI options and .vv file format
 - [Web frontend](web-frontend.md) - Operator guide for `--web` mode
 - [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools
+- [Key design decisions](design-decisions.md) - Why ryll is shaped the way it is
+- [SPICE protocol handling](spice-protocol.md) - Channels, handshake, image encodings, scancodes
+- [Rendering and audio pipeline](rendering-pipeline.md) - Surfaces, window sizing, multi-monitor, audio, notifications
+- [Device redirection](device-redirection.md) - USB, WebDAV folder sharing, paste-as-keystrokes
+- [Diagnostics and instrumentation](diagnostics.md) - Capture, statistics, snapshots, bug reports
+- [Session lifecycle](session-lifecycle.md) - Reconnection and graceful shutdown
+- [Web mode internals](web-mode-internals.md) - Encoder, WebRTC bridge, and the `--web` relays
 - [Multi-mode feature parity](multi-mode-parity.md) - Which features work in GUI, headless, and web modes
 - [Development](development.md) - Building, testing, and contributing
 - [macOS Development](development-macos.md) - Build and test locally on macOS
@@ -104,5 +111,5 @@ both ends of the traffic through the proxy. This would allow:
 ## Project Files
 
 - [README](../README.md) - Quick start and usage
-- [ARCHITECTURE](../ARCHITECTURE.md) - Technical design details
+- [ARCHITECTURE](../ARCHITECTURE.md) - The crate map, code organisation, and concurrency model
 - [AGENTS](../AGENTS.md) - Guide for AI coding assistants

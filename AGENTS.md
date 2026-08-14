@@ -1,8 +1,10 @@
 # AGENTS.md - Guide for AI Coding Assistants
 
-This file helps AI coding assistants understand the ryll project.
+Conventions and gotchas for working in ryll that you cannot infer by
+reading the code. Everything else is documented elsewhere; this file
+points you there rather than restating it.
 
-## Project Purpose
+## What ryll is
 
 Ryll is a multi-modal Rust SPICE VDI client. It began as a client for
 **performance testing the Kerbside SPICE proxy** (shakenfist/kerbside) and is
@@ -14,13 +16,29 @@ now also intended for general-purpose interactive use. Its goals are to:
 4. Measure latency from input events to display updates
 5. Run in headless mode for automated benchmarking
 
-## Related Projects
+Related repositories:
 
-- **shakenfist/kerbside** - The SPICE protocol native proxy being tested
-- **shakenfist/kerbside-patches** - OpenStack integration patches for kerbside
-- **shakenfist/kerbside/testclient** - The original Python version of ryll
+- **shakenfist/kerbside** — the SPICE protocol native proxy being tested
+- **shakenfist/kerbside-patches** — OpenStack integration patches for kerbside
+- **shakenfist/kerbside/testclient** — the original Python version of ryll
 
-## Protocol Reference Sources
+## Where the documentation lives
+
+| Question | Document |
+|----------|----------|
+| What are the crates, and how do they fit together? | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Why is it built this way? | [`docs/design-decisions.md`](docs/design-decisions.md) |
+| How do I build, test and debug it? | [`docs/development.md`](docs/development.md) |
+| How does CI work, and what gates a PR? | [`docs/ci.md`](docs/ci.md) |
+| What does the SPICE wire protocol handling do? | [`docs/spice-protocol.md`](docs/spice-protocol.md) |
+| How does `--web` mode work internally? | [`docs/web-mode-internals.md`](docs/web-mode-internals.md) |
+| What is the control socket contract? | [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md) |
+| Which features work in which mode? | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |
+| How do I cut a release? | [`docs/releasing.md`](docs/releasing.md) |
+
+`docs/index.md` is the full index.
+
+## Protocol reference sources
 
 When working on SPICE protocol implementation details, these
 local source trees are available for reference:
@@ -36,558 +54,26 @@ local source trees are available for reference:
 | QEMU | `/srv/src-reference/qemu/qemu/` | Server-side SPICE implementation in `ui/spice-*` |
 | Linux kernel | `/srv/src-reference/torvalds/linux/` | QXL driver in `drivers/gpu/drm/qxl/` |
 
-## Architecture Overview
+## Multi-mode parity is a requirement, not an aspiration
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   ryll      │────▶│   kerbside   │────▶│ SPICE server│
-│   (client)  │     │   (proxy)    │     │  (QEMU)     │
-└─────────────┘     └──────────────┘     └─────────────┘
-```
+A feature is not complete when it works in only one of the GUI,
+headless and web modes. Every feature should be reachable from every
+mode that can physically support it; intrinsic mode-specific features
+(egui-only UI panels, browser-only clipboard APIs) must be documented
+as such in [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) so
+the gaps stay visible. Adding a feature to one mode without updating
+that table is an incomplete change.
 
-Ryll uses:
-- **Tokio** for async networking (one task per SPICE channel)
-- **egui/eframe** for immediate-mode GUI rendering
-- **mpsc channels** for inter-task communication
-
-## Key Design Decisions
-
-1. **Immediate mode rendering** - egui was chosen because SPICE sends bitmap
-   tiles to blit onto surfaces. Retained-mode GUIs (like tkinter) accumulate
-   objects, causing memory issues. egui just redraws the current surface state
-   each frame.
-
-2. **Async over threads** - The Python version used threads with queues. Rust
-   uses tokio async tasks with mpsc channels, which is more idiomatic and
-   efficient.
-
-3. **Headless mode** - Essential for automated testing. Runs the full protocol
-   stack without GUI overhead. Headless is also the first evidence of the
-   project's broader **multi-modal client** stance: the SPICE stack is
-   frontend-agnostic, and additional frontends (`--web` browser mode shipped
-   end-to-end via `docs/plans/PLAN-web-frontend.md`) are first-class peers of
-   the GUI rather than retrofits. When you add or modify a feature, ask which
-   modes it should be reachable from; if a mode physically cannot host the
-   feature, say so in the docs rather than leaving the gap unstated.
-
-4. **Cadence mode** - Sends automatic keystrokes every 2 seconds to generate
-   predictable input→display latency measurements.
-
-5. **Graceful Ctrl+C shutdown** - A SIGINT handler in `main.rs` sets a global
-   `SHUTDOWN_REQUESTED` AtomicBool. The eframe update loop (`app.rs`) and the
-   headless tokio select loop both poll this flag and shut down cleanly,
-   ensuring capture sessions are finalized.
-
-6. **Unbuffered capture I/O on dedicated tasks** - Pcap and MP4 writers in
-   `capture.rs` write directly to `File` (no `BufWriter`), so written bytes are
-   always on disk and survive SIGINT without explicit flush. Both writers run
-   on **dedicated tokio tasks** (`pcap_writer_task`, `video_writer_task`); the
-   channel handlers and the egui frame loop enqueue via non-blocking `try_send`
-   so slow disk cannot back-pressure the SPICE socket or stall the GUI. Queue
-   caps `PCAP_QUEUE_CAPACITY = 1024` and `VIDEO_QUEUE_CAPACITY = 8`; drops are
-   counted in per-channel `writer_dropped_count` (channels) and
-   `AppSnapshot::video_drop_count` (video). MP4 finalisation runs on the
-   encoder task after the sender drops, so a bug report assembled within
-   milliseconds of `CaptureSession::close()` may see an unfinalised MP4 — see
-   the phase-3 plan for the trade-off.
-
-7. **Display channel capabilities** - Ryll advertises COMPOSITE,
-   MONITORS_CONFIG, SIZED_STREAM, A8_SURFACE, plus seven more added by the
-   stream-caps-and-flap plan: STREAM_REPORT (4), LZ4_COMPRESSION (5),
-   PREF_COMPRESSION (6), MULTI_CODEC (8), CODEC_MJPEG (9), CODEC_H264 (11),
-   and PREF_VIDEO_CODEC_TYPE (12). Without COMPOSITE, the guest QXL driver
-   falls back to a slow software rendering path that sends only raw Pixmap
-   data via `draw_copy`, making keyboard input appear to have no effect
-   because the client is overwhelmed with uncompressed frames. The newer
-   caps cover stream-report feedback to the server's encoder, LZ4-compressed
-   images, multi-codec video (H.264 plus the legacy MJPEG fallback), and
-   per-codec / per-compression preference messages sent at link-up. See
-   `ARCHITECTURE.md`'s "Display channel capabilities" table for the full
-   bit list.
-
-8. **GLZ win_head_dist eviction** - The GLZ dictionary evicts cached images
-   based on the `win_head_dist` field from each GLZ header, rather than using
-   a fixed cache size. This matches the server's reference window and prevents
-   both premature eviction (corrupting cross-frame references) and unbounded
-   memory growth.
-
-9. **Pcap TCP segmentation** - Large SPICE messages are split into multiple
-   TCP segments in the pcap writer to avoid exceeding the IPv4 maximum packet
-   length (65535 bytes), which would panic in the header construction code.
-
-10. **USB panel uses identity-based commands** - The GUI sends device identity
-    (bus/address for physical, path/read-only for virtual) rather than
-    pre-opened device handles via `UsbCommand`. The channel handler does async
-    device lookup and open in its tokio context. This avoids async operations
-    in the synchronous egui render loop and keeps device lifecycle management
-    co-located in the channel handler. Physical USB device support
-    (`RealDevice`, `DeviceSource::Physical`, `UsbCommand::ConnectPhysical`)
-    is gated with `#[cfg(target_os = "linux")]` — on macOS/Windows only
-    virtual disk devices are available. The file picker for adding virtual disks
-    also runs on a background thread with results polled via `try_recv()`.
-
-11. **WebDAV shares local directory via embedded HTTP server** - Each mux
-    client gets a `tokio::io::DuplexStream`; hyper parses HTTP/1.1 and
-    dav-server handles WebDAV operations against the local filesystem.
-    Response data flows back to the main loop via `mpsc::Sender<MuxResponse>`,
-    the same pattern used by usbredir's interrupt polling tasks. The Folders
-    UI panel mirrors the USB panel structure.
-
-12. **QUIC decoder is a bespoke pure-Rust port** - SPICE QUIC is a
-    proprietary image codec (not the IETF QUIC network protocol). No
-    pre-existing Rust crate provides SPICE QUIC decoding, so the
-    decoder was ported from the canonical C source in
-    `spice-common/common/quic.c`. Constant tables (TABRAND_CHAOS,
-    BESTTRIGTAB, J) have been verified against the C reference.
-    Golomb coding parameters are clamped to safe bounds before use
-    to prevent out-of-bounds panics on malformed data.
-
-13. **Multi-monitor via agent infrastructure** - Multiple display channels
-    are opened (one per `--monitors N`) and the main channel sends
-    `VDAgentMonitorsConfig` to the guest via the VDI port agent protocol.
-    The GLZ dictionary is shared across display channels via a
-    `GlzDictionary` struct (with notify-based cross-frame reference
-    resolution). Surfaces are keyed by `(display_channel_id,
-    surface_id)` to prevent cross-channel collisions.
-
-14. **Dedicated audio thread with lock-free ring buffer** - The cpal audio
-    output stream runs on a dedicated `std::thread`, not in the tokio
-    runtime. This avoids the `unsafe impl Send` that was previously needed
-    (cpal streams are `!Send` on macOS/Windows). The tokio network task
-    pushes decoded PCM samples into an `rtrb` single-producer
-    single-consumer ring buffer; the audio thread drains it into a local
-    `VecDeque` for the resampler. This eliminates mutex contention in the
-    real-time cpal callback.
-
-15. **Paste-as-keystrokes: cooperative state machine in the select! loop** -
-    The paste feature translates text to US-QWERTY scancodes and types them
-    as synthetic key events. A `PasteState` struct tracks the current
-    character index and sub-step (Press/Release). A conditional third arm in
-    the inputs channel's `select!` loop uses `tokio::time::sleep_until` to
-    fire at the right moment; between firings the other two arms (server reads
-    and UI events) run normally. The `advance_paste` method sends one sub-step
-    per invocation and updates the next-fire time. Modifier keys (Ctrl, Shift,
-    Alt) are tracked via `KeyDown`/`KeyUp` observations and saved/restored
-    around the paste. The `send_key_down`/`send_key_up` helpers bypass event
-    recording and modifier tracking for synthetic paste events. Public API:
-    `translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError>`,
-    `PasteKey` (struct with press, release, shift fields), `PasteError`
-    (enum with Unrepresentable variant).
-
-16. **Mouse mode negotiation** - On session init, ryll requests client mouse
-    mode (absolute positioning) via `MOUSE_MODE_REQUEST` if the server
-    supports it. If the server remains in server mode (e.g. no SPICE agent),
-    ryll sends relative `MOUSE_MOTION` messages instead of absolute
-    `MOUSE_POSITION`. The mode is checked on every pointer move in app.rs.
-
-17. **Event-driven egui repaints via `repaint_notify`** - egui only repaints
-    when something asks it to. Channel handlers run on the tokio runtime
-    and have no direct access to `egui::Context`. Every channel handler
-    therefore holds an `Arc<tokio::sync::Notify>` (`repaint_notify`)
-    alongside its `event_tx: mpsc::Sender<ChannelEvent>`, and a small
-    "repaint bridge" tokio task (spawned from `RyllApp::new`) waits on
-    `notify.notified().await` and calls `ctx.request_repaint()` whenever
-    a notification arrives. **Convention: every `event_tx.send(...)` call
-    in a channel handler must be immediately followed by
-    `repaint_notify.notify_one()`.** A 1 Hz fallback in `update()` covers
-    time-based UI like the bandwidth and latency sparklines. New channel
-    handlers must accept `Arc<tokio::sync::Notify>` in their constructor
-    and follow this pairing convention or idle CPU will silently regress.
-
-18. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
-    skipped** - Every implemented `DRAW_*` opcode on the display channel
-    follows the same shape: a pure `fn decode_<op>(payload) ->
-    io::Result<<Op>Outcome>` classifier that parses the phase-1 wire
-    struct and returns an Outcome enum describing what to do (`Paint`,
-    `SkipNonOpPut { rop }`, etc.), then an `async fn handle_<op>` shim
-    that destructures the outcome, fires `warn_once!` on each skip
-    variant, and emits a typed `ChannelEvent`. Any feature the handler
-    deliberately ignores (non-`OP_PUT` ROP descriptors, non-solid
-    brushes, non-null `SpiceQMask`, non-zero `alpha_flags`, etc.) must
-    fire `warn_once!` with a stable colon-delimited static key so the
-    gap enters the process-global warn_once registry. Unknown opcodes
-    use `log_unknown_once` which registers the same way but includes a
-    first-occurrence hex dump. See STYLEGUIDE.md §"warn_once for
-    protocol gaps" for the full convention (key format, test
-    discipline, append-only contract).
-
-19. **Colour conversion in the channel, not the surface** - SPICE
-    colour fields (brush colours, chroma keys, BGRX image pixels) are
-    BGRX on the wire; `DisplaySurface` stores pixels as RGBA. The
-    conversion lives exclusively in the channel handler (before event
-    emission) so surface helpers trust their inputs are already RGBA.
-    Concretely: `FillRect.colour`, `ImageReadyChroma.chroma_rgba`, and
-    every `ImageReady*.pixels` buffer reach `app.rs` pre-converted.
-    The idiom at the channel site is `[(c>>16)&0xff, (c>>8)&0xff,
-    c&0xff, 0xff]` for a wire `u32` colour. Do NOT add BGRX handling
-    inside `DisplaySurface` — surfaces are RGBA-only.
-
-20. **`--pedantic` mode: registry observer pattern** - The warn_once
-    registry is a process-global `HashSet<&'static str>` with a
-    `register_gap_observer(Fn(&'static str))` hook. The observer fires
-    once per newly-inserted key (with replay-on-late-registration so
-    observers don't miss keys fired before they registered). Two
-    layers sit on top today: an always-visible `Gaps: N` status-bar
-    widget that polls `warn_once_count()` each frame (no observer
-    needed), and `--pedantic` mode which registers an observer that
-    spawns a tokio task per new gap to write a bug-report zip via
-    `BugReport::write_pedantic`. The observer is registered inside
-    `RyllApp::new` / `run_headless` so it captures live
-    `TrafficBuffers` and `ChannelSnapshots` rather than stubs — this
-    matters because the traffic pcap is what makes a pedantic report
-    actionable for debugging.
-
-20b. **Auto-disconnect snapshots and the bug-report directory chain** -
-    Every `ChannelEvent::Error` / `ChannelEvent::Disconnected` calls
-    `RyllApp::maybe_write_disconnect_snapshot`, which builds a
-    `bugreport::DisconnectCause` (channel name, error message,
-    keepalive-timeout flag from `MainSnapshot`, session uptime,
-    per-channel diagnostics map) and invokes
-    `BugReport::write_disconnect`. The fire-on-every-channel scope
-    is deliberate: under ticket-based deployments (oVirt, Kerbside)
-    every channel disconnect is permanent, so the data must be
-    captured at the moment of failure. A 60 s cooldown is enforced
-    via `RyllApp::last_disconnect_report_at` and is updated even on
-    write failure to avoid retry storms. Output directory resolution
-    (shared with the manual F8 button via `manual_bug_report_dir`):
-    `--bug-report-dir` → `<--capture>/bug-reports/` → CWD. The
-    `--pedantic-dir` flag falls back through the same chain when
-    unspecified: `--pedantic-dir` → `--bug-report-dir` →
-    `./ryll-pedantic-reports/`. Runtime metrics are deliberately
-    `RuntimeMetrics::unavailable(...)` here — sampling on the GUI
-    thread blocks the render loop for ~1 s.
-
-21. **Notifications go through the unified store, not direct UI
-    calls** - The notification store at `ryll/src/notifications.rs`
-    is the single producer boundary. Channel handlers, the bug-report
-    writer, the screenshot dialog, and the gap observer all push
-    `NotificationEntry` values via `Arc<Mutex<NotificationStore>>`; the
-    GUI side panel and the status-bar bell read from the same store.
-    Adding a new notification producer means: build a
-    `NotificationEntry::new(severity, source, message)` (optionally
-    `.with_visibility(v)`), then `notifications.lock().push(entry)`.
-    New `NotificationSource` variants are added to the enum in
-    `notifications.rs`; the side panel's `NotificationSource::label()`
-    impl dictates how the new variant renders. Bug-report zips
-    automatically include any new entries via `notifications.json`.
-    Current source inventory: `Gap`, `BugReport`, `Spice {channel,
-    what}`, `Internal`, `Connection` (Phase 09 / F1 — every
-    connection-state transition, pushed via the
-    `RyllApp::push_connection_event` helper).
-
-    Prefer `RyllApp::push_notification` over a bare
-    `notifications.lock().push(entry)` from inside `RyllApp`:
-    the wrapper *also* captures a `TrafficBuffers` snapshot
-    keyed by the new entry's id (Phase 10 / F2). That
-    snapshot is what the "File…" button on each
-    notification row consumes to produce an at-fire bug
-    report. Producers outside `RyllApp` (channel handlers,
-    pedantic observer) still go through the raw store —
-    they don't have access to the snapshot store, and the
-    button falls back gracefully to post-event-only when
-    no snapshot exists.
-
-22. **Auto-reconnect: pure state-machine transition, side effects
-    at the call site** - The `ReconnectState` enum on `RyllApp`
-    (`ryll/src/app.rs`) replaces the old `show_disconnect_dialog`
-    boolean. `Idle` / `Pending { attempt, next_at, latest_error }` /
-    `Modal(ModalVariant)`. The transition function
-    `ReconnectState::on_disconnect()` is pure — it takes the current
-    state, an `awaiting_outcome` bool, the cluster-reset timestamp,
-    the wall clock, a `ReconnectPolicy`, and the latest error
-    string, and returns the next state (or `None` for a duplicate
-    storm event to ignore). Side effects — pushing notifications,
-    bumping `auto_reconnect_count`, writing the disconnect snapshot,
-    logging clock-skew warnings — live at the call site in
-    `RyllApp::handle_critical_disconnect`, never inside the
-    transition function. This keeps the state machine unit-testable
-    (see `app.rs::tests::reconnect_*` and `ticket_*` tests) without
-    building a full `RyllApp`. When extending: pure transitions add
-    branches to `on_disconnect`; side effects go in the handler. The
-    `awaiting_reconnect_outcome` flag on `RyllApp` is the gate that
-    distinguishes "the in-flight retry just failed" from "another
-    channel in the same storm just dropped" — set when the
-    GUI-tick poll calls `reconnect()`, cleared on the next event.
-    Three modal variants exist (`Generic { latest_error }`,
-    `OneShotConsumed`, `TicketExpired { expired_at }`) driven by
-    `ReconnectPolicy` derived from the `.vv` file's
-    `delete-this-file` and `ticket-valid-until` keys; the policy
-    short-circuits the state machine straight to the matching
-    Modal when retry would be doomed.
-
-## Code Organisation
-
-The repository is a Cargo workspace with **6 crates**. Cargo
-invocations from the workspace root should use `-p ryll` to
-target the ryll package specifically (e.g. `cargo build -p ryll`,
-`cargo deb --no-build -p ryll`), or `--workspace` to act on
-every member (e.g. `cargo test --workspace`).
-
-After Phase 1 of the web-frontend plan
-(`docs/plans/PLAN-web-frontend-phase-01-extract.md`), the bulk
-of what used to live in `ryll/src/` now lives in
-`shakenfist-spice-renderer/src/`. The `ryll/src/` tree is thin:
-
-```
-ryll/src/
-├── main.rs              # CLI entry, mode selection, SIGINT handler
-├── app.rs               # egui App, event loop, headless runner,
-│                        #   GUI panels (traffic viewer, USB,
-│                        #   Folders, Notifications), bug report
-│                        #   dialog, reconnect, thin trait impls
-├── auto_snapshot.rs     # Phase 5 auto-snapshot mode: AutoSnapshotState,
-│                        #   run_auto_snapshot_loop, auto_snapshot_filename,
-│                        #   prune_to_cap (rolling cap enforcement)
-├── bugreport.rs         # Traffic ring buffer (TrafficEntry,
-│                        #   TrafficRingBuffer, TrafficBuffers —
-│                        #   implements TrafficSink), bug report
-│                        #   assembly (BugReport, BugReportType,
-│                        #   ReportMetadata), traffic viewer
-│                        #   (TrafficViewEntry)
-├── capture.rs           # Pcap + MP4 capture (PcapChannelWriter,
-│                        #   VideoWriter, CaptureSession —
-│                        #   implements CaptureSink); stub when
-│                        #   the `capture` feature is disabled
-├── clipboard_arboard.rs # Host clipboard via arboard
-│                        #   (implements ClipboardBackend)
-├── config.rs            # .vv file parsing, CLI args
-├── display_gui.rs       # GuiSurface: egui TextureHandle wrapper
-│                        #   around renderer's DisplaySurface
-├── input_egui.rs        # egui::Key → LogicalKey adapter; composed
-│                        #   with renderer's scancode_for_logical_key
-├── notifications.rs     # NotificationStore (in-app store) +
-│                        #   NotificationStoreSink (implements
-│                        #   NotificationSink)
-├── settings.rs          # is_verbose() gate
-└── web/                 # --web mode (Phase 4–6 of PLAN-web-frontend.md)
-    ├── mod.rs           # run_web() entry point, HTTP server,
-    │                    #   SDP /offer endpoint, token auth,
-    │                    #   EncoderInfra::stop() helper
-    ├── audio.rs         # WebOpusSink (implements OpusPacketSink);
-    │                    #   routes Opus packets to WebRTC audio track
-    ├── cursor.rs        # Cursor relay: ChannelEvent → PNG data-URL
-    │                    #   → control datachannel → browser <img>
-    │                    #   overlay; uses base64 = "0.22"
-    ├── inputs.rs        # Input relay: control datachannel → JSON
-    │                    #   parse → InputEvent + resize events into
-    │                    #   the renderer's inputs channel handler
-    └── lifecycle.rs     # run_bridge_reaper: watches WebrtcBridge's
-                         #   dead signal (wait_for_dead / dead_signal),
-                         #   reaps bridge + calls EncoderInfra::stop
-                         #   + clears opus_active_tx when PC dies
-```
-
-The SPICE substrate (channels, display, encoder, session) lives
-in `shakenfist-spice-renderer/src/`:
-
-```
-shakenfist-spice-renderer/src/
-├── channels/            # Per-channel handlers
-│   ├── main_channel.rs  # Session init, ping/pong
-│   ├── display.rs       # Surface management, image decoding,
-│   │                    #   GLZ dictionary eviction
-│   ├── cursor.rs        # Cursor position tracking
-│   ├── inputs.rs        # Keyboard scancodes (E0 extended prefix),
-│   │                    #   mouse events, motion coalescing,
-│   │                    #   paste-as-keystrokes, LogicalKey enum,
-│   │                    #   scancode_for_logical_key table
-│   ├── playback.rs      # Audio playback (PCM/Opus → rtrb → cpal)
-│   ├── usbredir.rs      # USB redirection (SpiceVMC transport)
-│   └── webdav.rs        # WebDAV folder sharing (SpiceVMC transport)
-├── display/
-│   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
-├── encoder/
-│   ├── mod.rs           # Re-exports
-│   ├── frame_source.rs  # FrameSource trait, FrameRef struct,
-│   │                    #   SyntheticFrameSource (test/CI),
-│   │                    #   RealFrameSource (Phase 5b; reads from
-│   │                    #   SurfaceMirror under try_lock,
-│   │                    #   skips tick on contention or clean frame)
-│   ├── h264.rs          # H264Encoder (openh264 wrapper),
-│   │                    #   EncodedFrame, Annex-B NAL output
-│   └── task.rs          # EncoderTask async driver,
-│                        #   EncoderControl (RequestKeyframe/Stop)
-├── usb/                 # USB device backends
-│   ├── mod.rs           # UsbBackend trait, device enumeration
-│   ├── real.rs          # RealDevice (nusb, Linux only)
-│   └── virtual_msc.rs   # VirtualMsc (RAW disk images)
-├── usbredir/            # usbredir protocol parser
-│   ├── constants.rs     # Message types, capabilities, status codes
-│   ├── messages.rs      # Wire format structs, read/write
-│   └── parser.rs        # Byte-stream parser, unit tests
-├── webdav/              # WebDAV module
-│   ├── mod.rs           # WebdavBackend trait
-│   ├── mux.rs           # Mux protocol (client multiplexing)
-│   └── server.rs        # Embedded WebDAV server (dav-server + hyper)
-├── session.rs           # run_connection / run_headless orchestrators
-├── byte_counter.rs      # ByteCounter (per-channel byte/packet counts)
-├── capture_sink.rs      # CaptureSink trait
-├── clipboard.rs         # ClipboardBackend trait
-├── device_config.rs     # VirtualDiskConfig, ShareDirConfig
-├── log_config.rs        # LogConfig value type
-├── metrics.rs           # /proc-based runtime metrics sampler
-├── notification.rs      # NotificationEntry, NotificationSource
-│                        #   (data types; store lives in ryll)
-├── notification_sink.rs # NotificationSink trait
-├── snapshots.rs         # Channel-state snapshot types
-│                        #   (DisplaySnapshot, InputsSnapshot, etc.)
-├── surface_mirror.rs    # SurfaceMirror: subscribes to broadcast
-│                        #   ChannelEvent, maintains
-│                        #   HashMap<(u8,u32), DisplaySurface>
-│                        #   for the --web encoder path (Phase 5b)
-├── audio_sink.rs        # OpusPacketSink trait: pre-decode tap on
-│                        #   the playback channel for Opus passthrough
-│                        #   to the WebRTC audio track (Phase 5e)
-└── traffic.rs           # TrafficSink trait
-
-shakenfist-spice-webrtc/src/
-├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
-│                        #   BridgeEvents gathers the PC callbacks
-│                        #   (shaped for 0.20's handler trait);
-│                        #   Phase 6 public API:
-│                        #     wait_for_dead() — resolves when PC
-│                        #       reaches Failed/Disconnected/Closed
-│                        #     dead_signal() → Arc<StickySignal>
-├── sticky.rs            # StickySignal: one-shot level-triggered
-│                        #   Notify + sticky AtomicBool; see the
-│                        #   WebRTC Conventions section below
-└── test_client.rs       # TestPeer/TestPeerBuilder: client-side PC
-                         #   for tests driving the browser half of a
-                         #   bridge exchange. Compiled for this
-                         #   crate's own tests and for consumers
-                         #   enabling the `test-support` feature
-```
-
-## Control socket
-
-### Module home
-
-`shakenfist-spice-renderer/src/control/` — three files:
-
-| File | Role |
-|------|------|
-| `mod.rs` | Public re-exports (`Server`, `StatusProvider`) |
-| `protocol.rs` | Wire types: `Request`, `Response`, `Event`, verb params / result structs |
-| `server.rs` | `Server::run` — tokio task, socket lifecycle, verb dispatch, per-client writer task |
-
-### Wire-protocol spec
-
-`docs/control-socket-protocol.md` is the canonical,
-version-controlled contract for the Unix-domain control socket.
-**Any sub-agent extending the control surface MUST update this
-spec in lockstep with the code.** The protocol doc is
-load-bearing: the phase 4 latency loadtest port, the phase 6
-`digest_updated` event, and the phase 7 Sextant scenario test all
-implement against it. Changing verb signatures or event shapes
-without updating the spec will break those downstream consumers.
-
-### Phase plan
-
-Phase 3 of the kerbside automated-SPICE-test-harness plan
-introduced this interface:
-`shakenfist/kerbside/docs/plans/PLAN-test-harness-phase-03-control-socket.md`.
-Per the cross-repo single-home rule, that plan lives in
-kerbside even though the implementation commits land in ryll.
-
-### `Server::run` signature sketch
-
-```rust
-pub async fn run(
-    broadcast_rx: broadcast::Receiver<ChannelEvent>,
-    input_tx: mpsc::Sender<InputEvent>,
-    surface_mirror: Arc<Mutex<SurfaceMirror>>,
-    status: Arc<dyn StatusProvider>,
-    cancel: CancellationToken,
-    socket_path: PathBuf,
-)
-```
-
-The server owns the `UnixListener` lifetime. It accepts one client,
-runs the per-client dispatch loop to completion, then loops back to
-accept the next client — all inside the cancellation token scope.
-
-### Integration tests
-
-`shakenfist-spice-renderer/tests/control_socket.rs` exercises
-every v1 verb and event without spinning a real SPICE session. New
-verbs or events **SHOULD** ship with a matching test in that file.
-The test harness uses a stub `StatusProvider` and an in-process
-broadcast channel so no QEMU or network is required.
-
-### Example client
-
-`examples/control-socket-demo.py` — a stdlib-only Python script,
-runnable directly, that demonstrates the full hello → status →
-subscribe → send_key → paste → screenshot → disconnect sequence.
-Use it as the starting point for downstream test-harness drivers.
-
-### Cross-repo commit discipline
-
-Commits on the ryll feature branch that implement or extend the
-control socket include a `Plan:` trailer pointing back to the
-kerbside phase-3 plan path, so the trail between implementation
-and design is explicit in `git log`.
-
-## Trait / Observer Scheme
-
-Phase 1 introduced a trait surface that lets channel handlers
-(now in the renderer crate) call into host-side concerns without
-importing `ryll`-side modules. Understanding this scheme is
-important when adding new channels or extending existing ones.
-
-### Traits defined in `shakenfist-spice-renderer`
-
-| Trait | What it abstracts | `ryll` impl |
-|-------|-------------------|-------------|
-| `TrafficSink` | Per-channel raw-byte ring buffer for bug reports and the live traffic viewer | `bugreport::TrafficBuffers` |
-| `CaptureSink` | pcap + MP4 frame recording. After phases 2–3, `packet_sent`, `packet_received`, and `frame` all return `bool` (`true` = enqueued, `false` = dropped because the writer task's bounded queue was full). Callers are expected to count drops in their snapshot (per-channel `writer_dropped_count`; `AppSnapshot::video_drop_count` for frames). The no-op stub returns `true` unconditionally when the `capture` feature is disabled. | `capture::CaptureSession` |
-| `NotificationSink` | Pushes `NotificationEntry` into the in-app notification store | `notifications::NotificationStoreSink` |
-| `ClipboardBackend` | Host clipboard read/write | `clipboard_arboard` (via `arboard`) |
-| `UsbBackend` | USB host-side device attachment | Implemented by `usb::RealDevice` (Linux only) and `usb::VirtualMsc` |
-| `WebdavBackend` | WebDAV directory share lifecycle | `webdav::MuxDemuxer` + `webdav::WebdavServer` |
-| `OpusPacketSink` | Pre-decode tap on the SPICE playback channel; delivers raw Opus packets for WebRTC audio passthrough (Phase 5e) | `web::audio::WebOpusSink` in `ryll/src/web/audio.rs` |
-
-### Dual-spec Cargo dep convention
-
-All extracted crates use the `path + version` dual-spec pattern:
-
-```toml
-shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.4" }
-```
-
-This supports both local development (path wins) and crates.io
-publication readiness (version is required for publishing). All
-extracted crates are at `version.workspace = true` which
-resolves to the single workspace version in the root
-`Cargo.toml`.
-
-### ChannelEvent vs trait: when to use each
-
-- **Use a `ChannelEvent` variant** when the concern is
-  event-shaped: a one-shot notification, a surface lifecycle
-  signal, a latency sample, an image arrival. These are
-  low-frequency, ordered, and the frontend decides what to do.
-- **Use a trait** when the concern is a long-lived sink that
-  the channel writes to continuously (traffic recording, capture
-  frames) or a two-way interface (clipboard, USB I/O). Traits
-  are injected at construction time via `Arc<dyn Trait>`.
-
-Adding a new ryll-side concern that channels need to call into:
-1. Define the trait in `shakenfist-spice-renderer/src/`.
-2. Implement it in `ryll/src/`.
-3. Add the `Arc<dyn YourTrait>` parameter to the relevant
-   channel constructor(s).
-4. Wire up the impl at session start in `session.rs` or the
-   channel's creation site in `run_connection`.
-
-## Common Tasks
+## Common tasks
 
 ### Adding a new CLI option
+
 1. Add to `Args` struct in `ryll/src/config.rs`
 2. Pass through to relevant code in `ryll/src/main.rs` or
    `ryll/src/app.rs`
 
 ### Adding a new statistic
+
 1. Add variant to `ChannelEvent` enum in
    `shakenfist-spice-renderer/src/channels/mod.rs`
 2. Send from relevant channel handler in
@@ -595,6 +81,7 @@ Adding a new ryll-side concern that channels need to call into:
 3. Handle in `process_events()` in `ryll/src/app.rs`
 
 ### Modifying protocol handling
+
 1. Message definitions in
    `shakenfist-spice-protocol/src/messages.rs`
 2. Constants/enums in
@@ -616,47 +103,81 @@ Adding a new ryll-side concern that channels need to call into:
    shakenfist/ryll#135 (broaden coverage) and #136 (retrofit
    existing parsers onto `BoundedReader`).
 
-### Inspecting a `--capture` pcap
+Helper tooling for these tasks (`tools/pcap-inspect.py`,
+`tools/web-smoke.sh`, `examples/control-socket-demo.py`) is documented
+in [`docs/development.md`](docs/development.md).
 
-`tools/pcap-inspect.py` is a pure-Python helper (no tshark
-or scapy dependency) for sifting through a ryll capture.
-Three subcommands:
+## ChannelEvent versus a trait
 
-```
-tools/pcap-inspect.py opcodes   <path>                 # histogram of SPICE message types
-tools/pcap-inspect.py draw-copy <path>                 # DRAW_COPY breakdown by surface / image type
-tools/pcap-inspect.py timeline  <path> [--since-last N]  # server-side messages in order
-```
+Prefer a `ChannelEvent` variant when the concern is event-shaped (a
+one-shot notification, a surface lifecycle signal, a latency sample).
+Prefer a trait when the concern is a long-lived sink the channel writes
+to continuously (traffic recording, capture frames). This keeps the
+event channel lightweight and the trait surface minimal. The trait
+inventory is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-Typical use: when investigating a rendering artefact,
-`opcodes` tells you whether the problem window even
-contains the draw ops you thought it did (phase-3 found
-that a "static" artefact was 100% DRAW_COPY, not missing
-draw ops); `draw-copy` narrows further to the image types
-involved; `timeline --since-last 5` dumps the last five
-seconds of traffic when the user has pressed F8 right
-after seeing the artefact.
+The renderer crate is **egui-free** — no `eframe` or `egui` types in
+its source. Reaching for one is always the wrong answer; the frontend
+adapts to the renderer, not the other way round.
 
-ryll's pcap files are big-endian libpcap format carrying
-synthetic TCP frames around the raw post-link SPICE
-stream. The helper handles that without any extra flags.
+## Control socket
 
-### Smoke-testing `--web` mode
+[`docs/control-socket-protocol.md`](docs/control-socket-protocol.md) is
+the canonical, version-controlled contract for the Unix-domain control
+socket. **Any change to the control surface MUST update that spec in
+lockstep with the code.** The spec is load-bearing: the latency
+loadtest port, the `digest_updated` event and the Sextant scenario test
+all implement against it, and changing a verb signature or event shape
+without updating it breaks those consumers silently.
 
-`tools/web-smoke.sh` verifies that `ryll --web` starts,
-binds the HTTP server, and shuts down cleanly on SIGTERM.
-Usage:
+New verbs or events **SHOULD** ship with a matching test in
+`shakenfist-spice-renderer/tests/control_socket.rs`.
 
-```
-tools/web-smoke.sh [path-to-ryll-binary]
-```
+The control socket was designed in kerbside, not here. Per the
+cross-repo single-home rule its plan lives at
+`shakenfist/kerbside/docs/plans/PLAN-test-harness.md` even though the
+implementation commits land in ryll; commits implementing or extending
+it carry a `Plan:` trailer pointing back at that plan so the trail
+between design and implementation is explicit in `git log`.
 
-Defaults to `target/release/ryll`; `WEB_PORT` env var
-overrides the port (default `18080`). The script creates a
-temporary stub `.vv`, launches ryll, waits 3 seconds,
-SIGTERMs, and asserts clean exit within 5 seconds. CI runs
-this in the `build-linux` job via `make web-smoke` and
-`make web-smoke-tls`, inside the devcontainer.
+## WebRTC conventions
+
+Both of these were learned the hard way and apply to all webrtc-rs work:
+
+- **`on_track` must spawn a task for `read_rtp` loops.**
+  webrtc-rs serialises `on_track` firings on the future returned
+  by each callback. A long-lived `loop { track.read_rtp().await
+  }` inside `on_track` blocks the machinery from firing
+  subsequent callbacks (e.g. the audio track never fires because
+  the video track's callback never returns). Always
+  `tokio::spawn` the `read_rtp` loop inside `on_track` and
+  return immediately. This differs from what intuition suggests
+  and from many webrtc-rs examples; document it explicitly
+  whenever writing receiver-side WebRTC code.
+
+- **One-shot lifecycle events use `StickySignal`, never a bare
+  `Notify`.** `Notify::notify_waiters()` wakes only the waiters
+  registered at that instant — a waiter that subscribes afterwards
+  blocks forever, and `Notified` does not even register interest
+  until it is first polled, so the naive "check a flag, then
+  await" ordering has a lost-wakeup window. This was a real
+  production bug in the bridge reaper.
+  `shakenfist_spice_webrtc::StickySignal` packages the correct
+  pattern — `Notified::enable()` before the flag check on the wait
+  side, `notify_waiters()` (never `notify_one()`, which would leak
+  a permit) on the raise side — and is unit-tested against the
+  lost-wakeup schedule. Do not hand-roll a fifth copy; that is how
+  the original bug got in.
+
+## Cargo feature gating
+
+The `ryll` binary ships four features: `gui`, `audio` and `capture`
+default-on, `digest-decode` default-off. The kerbside loadtest and
+direct-qemu CI build with `--no-default-features`. When adding code
+that needs a GUI, audio, capture or digest type, **gate the import at
+the use site** — an ungated import breaks the no-default-features
+build, which only some CI lanes exercise. The feature list and what
+each pulls in is in [`docs/development.md`](docs/development.md).
 
 ## Process documents
 
@@ -667,7 +188,7 @@ plan/PR follows the established structure. (`-TEMPLATE`
 names are true templates that get copied; `PUSH-AUDIT.md`
 is a runbook followed in place.)
 
-- **`PLAN-TEMPLATE.md`** — used as the starting point for
+- **`PLAN-TEMPLATE.md`** — the starting point for
   new plan files in `docs/plans/`. Defines the prompt
   preamble, situation/mission/execution sections, and the
   sub-agent execution model.
@@ -691,325 +212,12 @@ is a runbook followed in place.)
 `docs/plans/OPEN-QUESTIONS.md` is a thin, single-page
 review surface for symptoms we have seen in bug reports
 but cannot yet characterise — entries link out to the
-phase plans that would action them. Check it at the
+plans that would action them. Check it at the
 start of each session closeout (after landing the work
 from a new test-session bundle) and ask whether the
 bundle moves any open question. If it does, move the
-evidence into the linked phase plan and either close
+evidence into the linked plan and either close
 the entry or sharpen it. Add a new entry when a fresh
 symptom doesn't fit anywhere actionable; read the
 "When to add a new entry" guidance at the foot of the
 file first.
-
-## WebRTC Conventions
-
-The following conventions were discovered during Phase 3 and the
-webrtc-0.20 pre-work, and apply to all future webrtc-rs work:
-
-- **`on_track` must spawn a task for `read_rtp` loops.**
-  webrtc-rs serialises `on_track` firings on the future returned
-  by each callback. A long-lived `loop { track.read_rtp().await
-  }` inside `on_track` blocks the machinery from firing
-  subsequent callbacks (e.g. the audio track never fires because
-  the video track's callback never returns). Always
-  `tokio::spawn` the `read_rtp` loop inside `on_track` and
-  return immediately. This differs from what intuition suggests
-  and from many webrtc-rs examples; document it explicitly
-  whenever writing receiver-side WebRTC code.
-
-- **One-shot lifecycle events use `StickySignal`, never a bare
-  `Notify`.** `Notify::notify_waiters()` wakes only the waiters
-  registered at that instant — a waiter that subscribes afterwards
-  blocks forever, and `Notified` does not even register interest
-  until it is first polled, so the naive "check a flag, then
-  await" ordering has a lost-wakeup window (this was a real
-  production bug in the bridge reaper, fixed in phase 01 of the
-  webrtc-0.20 plan). `shakenfist_spice_webrtc::StickySignal`
-  packages the correct pattern — `Notified::enable()` before the
-  flag check on the wait side, `notify_waiters()` (never
-  `notify_one()`, which would leak a permit) on the raise side —
-  and is unit-tested against the lost-wakeup schedule. Do not
-  hand-roll a fifth copy; that is how the original bug got in.
-
-## Testing
-
-- Unit tests exist for decompression algorithms
-- The encoder smoke test (`shakenfist-spice-renderer/tests/
-  encoder_smoke.rs`) runs for ~3 seconds and writes
-  `target/encoder_smoke.h264`; run `ffplay target/encoder_smoke.h264`
-  to visually verify the encoder output after `make test`
-- The WebRTC H.264 packetiser test (`shakenfist-spice-renderer/
-  tests/webrtc_h264_smoke.rs`) verifies `H264Payloader` accepts
-  the encoder's Annex-B NAL output
-- The loopback integration test (`shakenfist-spice-webrtc/tests/
-  loopback.rs`) creates two in-process `RTCPeerConnection`s and
-  asserts video + audio + datachannel all flow end-to-end
-- `RYLL_GATHERING_SOAK=1 make test` runs the 20-iteration
-  invariant-candidate-count soak in
-  `accept_offer_answer_carries_all_candidates`. Off by default
-  because exact cross-run candidate-count equality is coupled to
-  host interface churn (docker/veth appearing, IPv6 temporary
-  addresses rotating). Run it on a quiet host when touching the
-  ICE gathering signal
-- Integration testing requires a real SPICE server
-- `make test-qemu` starts a local QEMU instance with SPICE on port 5900
-  running the UEFI latency guest (keystrokes change screen colour) for testing
-- `make test-qemu-stop` cleans it up
-- Headless mode can be used in CI for protocol-level testing
-
-## Build System
-
-- **Cargo features**.  The top-level binary crate (`ryll`) ships
-  four features, all but `digest-decode` on by default:
-  - `gui` (default-on) — eframe, egui, arboard, rfd.
-  - `audio` (default-on) — wires through to
-    `shakenfist-spice-renderer/audio` for cpal / opus-decoder
-    / rtrb and the `channels::playback` module.
-  - `capture` (default-on) — pcap-file / etherparse / mp4 for
-    `--capture`.
-  - `digest-decode` (default-off) — pulls
-    `shakenfist-visual-digest` (git, `qr` + `serde`) and
-    enables the polling task at `crate::digest` plus the
-    `digest_updated` control-socket event.
-  The kerbside loadtest + direct-qemu CI build with
-  `--no-default-features` (then opt in to `digest-decode`
-  when phase 7's Sextant scenarios land).  See the
-  Cargo features section in `README.md` for the user-facing
-  story.  When adding new code that needs a GUI / audio /
-  digest type, gate the import at the use site and update the
-  verification matrix in
-  `kerbside/docs/plans/PLAN-test-harness-phase-06-digest-decoding.md`
-  before merging.
-- **Devcontainer** for consistent local builds (`.devcontainer/`)
-- **Makefile** for common local operations
-- Cargo cache persisted in `.cargo-cache/` for faster rebuilds
-- **Pre-commit hooks** for code quality (rustfmt, clippy, shellcheck)
-- **GitHub Actions CI** (`.github/workflows/ci.yml`) builds and tests
-  on Linux (x86_64 + aarch64), macOS (Apple Silicon), and Windows
-  (x86_64 + aarch64) in two tiers: a smoke tier on pull requests
-  (lint, the Linux x86_64 build, the Windows cross-check and the
-  supply-chain scanners) and a merge tier on `merge_group` (fuzz and
-  the cross-platform build matrix). Linux x86_64 jobs (lint,
-  check-windows, build, fuzz) run on self-hosted runners
-  (`[self-hosted, vm, debian-12-docker, l]`) with cargo wrapped in
-  the devcontainer via `make lint` / `make release` / `make test`
-  etc. `make check-windows` cross-compiles the
-  `x86_64-pc-windows-gnu` triple from the devcontainer as a cheap
-  smoke-tier proxy for the merge tier's msvc Windows builds; it
-  catches `cfg(windows)` and windows-sys breakage, not msvc-specific
-  or link-time breakage. The other architectures use native
-  GitHub-hosted runners (no
-  cross-compile) with native `cargo`: arm64 Linux uses
-  `ubuntu-24.04-arm` and arm64 Windows uses `windows-11-arm`; those
-  runner references carry `audit-ok: github-hosted-runner` markers
-  because we own no matching hardware (see the workflow-standards
-  consistency audit). On Linux the devcontainer includes
-  `libopus-dev` so audiopus_sys dynamic-links libopus and the `.deb`
-  declares `libopus0` via cargo-deb's `$auto`; on macOS and Windows
-  audiopus_sys source-builds libopus for a self-contained binary. No system libraries are required at runtime for
-  video decoding (MJPEG/H.264) — libjpeg-turbo is vendored via `mozjpeg`,
-  H.264 is decoded via `openh264-sys2` (which builds and links libopenh264
-  from source; `cc` compiler is needed at build time), and VA-API is
-  probed dynamically via `dlopen` on Linux, gracefully absent if the system
-  lacks libva or GPU hardware. To enable VA-API hardware acceleration on
-  Linux systems with compatible GPUs, install `libva-dev` (or distro
-  equivalent) and ensure a render node is available at `/dev/dri/renderD128`.
-  CI also runs `tools/web-smoke.sh` (plain + `--tls` variants) on Linux to
-  verify `--web` mode startup and graceful shutdown. PRs also receive an
-  automated code review via the shared `shakenfist/actions/review-pr-with-claude`
-  action. Review-only changes (`REVIEWS.md`, `.vscode/*.weaudit*`,
-  `.vscode/review-scope.toml`) skip every job in both tiers: `ci.yml`
-  detects them in its `check_paths` job, and `codeql-analysis.yml`
-  still uses `paths-ignore`. `docs/ci.md` is the full CI reference.
-- **Bot-triggered workflows** for PR automation:
-  `@shakenfist-bot please re-review`, `please address comments`,
-  `please retest`
-- **Renovate** for automated dependency updates (`renovate.json`)
-- **CodeQL** for security scanning (`.github/workflows/codeql-analysis.yml`)
-- **macOS native development** -- see `docs/development-macos.md` for
-  building and testing locally on macOS without Docker or Homebrew
-
-### Pre-commit
-
-Run `pre-commit install` after cloning. The hooks check:
-- Code formatting (rustfmt)
-- Linting (clippy with `-D warnings`)
-- Shell script quality (shellcheck, applied to `scripts/` and `tools/`)
-- Committed credentials (gitleaks)
-- Bidi and zero-width Unicode control characters
-  (`tools/check-bidi.sh`, guards against Trojan Source —
-  CVE-2021-42574)
-
-Use `./scripts/check-rust.sh fix` to auto-fix issues.
-
-All five pre-commit hooks are also enforced in CI (rustfmt
-and clippy via `ci.yml`, the remaining three via
-`supply-chain.yml`). Skipping pre-commit locally therefore
-does not bypass enforcement — it only defers the failure to
-CI.
-
-### Review tracking
-
-The whole-file review state (`REVIEWS.md`, `.vscode/*.weaudit*`,
-`.vscode/*.weaudit-shas.json`) is maintained with
-`tools/review-tracking.sh` (subcommands `stamp`, `prune`, `regen`,
-`next`, `status`), which wraps `scripts/review-tracking.py` from a
-local clone of the shakenfist/development repository. These are
-deliberately *not* wired into git hooks — in a clone they run only
-when invoked explicitly. On develop itself, the `prune-reviews`
-workflow (`.github/workflows/prune-reviews.yml`, via
-`tools/ci-prune-reviews.sh`) runs `prune` after every push and
-commits the result back as shakenfist-bot, so stale marks are
-dropped as PRs merge; the daily consistency audit in
-shakenfist/development files a `Consistency: Human review coverage`
-issue when five or more in-scope files need review. `REVIEWS.md` is
-generated; never edit it by hand.
-
-## Security scanners
-
-ryll runs five deterministic scanners on every PR in
-addition to the LLM-driven automated reviewer. They are
-defined in `.github/workflows/supply-chain.yml`. All jobs
-run on self-hosted VM runners with the `s` size label
-(2 vCPU / 4 GB RAM; the scanners are I/O-bound).
-`cargo-audit`, `shellcheck`, and `bidi-check` run on
-`[self-hosted, vm, debian-12, s]`; `gitleaks` runs on
-`[self-hosted, vm, debian-13, s]` because gitleaks is
-only packaged from Debian 13 (trixie) onward — bookworm
-has no gitleaks package; `cargo-deny` runs on
-`[self-hosted, vm, debian-12-docker, s]` because the
-`cargo-deny-action` wrapper runs cargo-deny inside a
-Docker container and needs a runner image with docker
-preinstalled. The `vm` label matters — bare-metal runners
-have different OSes and no passwordless sudo.
-
-| Scanner | What it checks | Policy location |
-|---------|----------------|-----------------|
-| `cargo audit` | RustSec advisories against `Cargo.lock` (plus a weekly cron on `develop` to catch drift) | `.cargo/audit.toml` — ignore list mirrors `deny.toml` |
-| `cargo deny` | License allowlist, dependency sources, version bans, advisory ignores | `deny.toml` at repo root |
-| `gitleaks` | Credential-like patterns in the diff (upstream binary invoked directly; the `gitleaks-action` wrapper requires a paid licence for org repos) | Upstream default ruleset; add a `.gitleaksignore` if a legitimate pattern needs to be suppressed (include a comment explaining why) |
-| `shellcheck` | Shell-script lint across `scripts/` and `tools/` (invoked via `tools/run-shellcheck.sh`) | Per-script `# shellcheck` directives as needed |
-| `tools/check-bidi.sh` | Bidi and zero-width Unicode codepoints (CVE-2021-42574 Trojan Source) | The script itself; PCRE character class at the top |
-
-Policy maintenance:
-
-- **Adding a new license** to `deny.toml` requires
-  confirming the licence is permissive and listing it in
-  the `allow` array. Only add `[[licenses.exceptions]]`
-  for crates that declare non-SPDX identifiers (see the
-  `epaint_default_fonts` / UFL-1.0 entry as the canonical
-  example).
-- **Ignoring a new advisory** requires adding the RustSec
-  ID to *both* `deny.toml` and `.cargo/audit.toml`, with
-  an inline comment on each entry linking to a rationale
-  section in `docs/plans/PLAN-supply-chain-followups.md`.
-  The two ignore lists must stay in sync — CI runs both
-  scanners and both must pass. Ignores are debt and should
-  not accumulate silently.
-- **Suppressing a gitleaks false positive** goes in a
-  `.gitleaksignore` file with a comment explaining the
-  pattern and why it is safe.
-
-## CI workflow conventions
-
-Every job in a workflow that can be triggered by a pull
-request or PR comment MUST declare a `concurrency:` block
-that cancels superseded runs. Without it, pushing a fixup
-commit (or re-commenting `@shakenfist-bot please retest`)
-leaves the old run consuming a self-hosted runner slot
-while the new run waits behind it. With `MAX_WORKERS = 6`
-on the runner fleet, a handful of stale runs can starve
-the queue for every other repo.
-
-Use the job-level form (not workflow-level) so unrelated
-jobs in the same workflow do not cancel each other:
-
-```yaml
-jobs:
-  my-job:
-    runs-on: [self-hosted, vm, debian-12, s]
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-my-job
-      cancel-in-progress: true
-```
-
-For comment-triggered workflows (`pr-retest`,
-`pr-re-review`, etc.) use
-`group: <workflow-name>-${{ github.event.issue.number }}`
-instead so the PR number — not `github.ref`, which points
-at the default branch for `issue_comment` events — scopes
-the group.
-
-Scheduled, push-to-default, and release workflows should
-**not** enable `cancel-in-progress`. Cancelling a release
-mid-publish or a renovate run mid-PR-creation leaves
-partial state.
-
-## The two CI tiers and the merge queue
-
-`ci.yml` is split into a smoke tier that runs on
-`pull_request` and a merge tier that runs on `merge_group`,
-and `develop` is behind a merge queue. `docs/ci.md` is the
-reference; the parts that constrain how you edit CI are:
-
-- **A new job is not required until a gate depends on it.**
-  The ruleset requires only `Can see status`, `Can enqueue`
-  and `Can merge`. Add smoke-tier jobs to `can_enqueue.needs`
-  and merge-tier jobs to `can_merge.needs`, or they can fail
-  without blocking anything. Add smoke-tier jobs to
-  `automated_reviewer.needs` too if the reviewer should wait
-  for them.
-- **Never add a merge-tier job to `automated_reviewer` or
-  `can_enqueue`.** Merge-tier jobs never run on a pull
-  request, so a `needs` on one leaves the dependent job
-  permanently skipped.
-- **Every tier job carries the same two-clause `if:`** — an
-  event test plus
-  `needs.check_paths.outputs.code_changed != 'false'`. Copy
-  the pattern from a neighbouring job in the same tier rather
-  than inventing a condition.
-- **The gates rely on skipped-counts-as-success.** Their jq
-  maps each dependency to "success or skipped"; that is what
-  lets review-only changes through. Do not "tighten" it to
-  require success.
-- **`workflow_dispatch` runs both tiers** so
-  `@shakenfist-bot please retest` stays a full retest. Keep
-  the trigger, and keep merge-tier `if:` conditions accepting
-  `workflow_dispatch`.
-- **Do not push to `develop`.** The ruleset requires a pull
-  request, and merging enqueues rather than merges. The one
-  exception is `prune-reviews.yml`, which pushes as
-  `shakenfist-bot` through a team bypass actor.
-
-## Dependencies to Know
-
-| Crate | Purpose |
-|-------|---------|
-| eframe | egui application framework |
-| tokio | Async runtime |
-| tokio-rustls | TLS connections |
-| clap | CLI argument parsing |
-| rsa | RSA-OAEP for SPICE auth |
-| byteorder | Binary protocol parsing |
-| lz4_flex | LZ4 decompression (image type 109) |
-| flate2 | Zlib decompression (ZLIB_GLZ_RGB, type 107) |
-| tracing-appender | File logging to /tmp/ryll.log |
-| pcap-file | Pcap file writing for --capture mode (optional, `capture` feature) |
-| etherparse | Fake TCP/IP header construction for pcap (optional, `capture` feature) |
-| openh264 | H.264 video encoding: in `shakenfist-spice-renderer` for the live encoder pipeline; also in `ryll`'s `capture` feature for `--capture` MP4 output |
-| mp4 | MP4 container writing for --capture mode (optional, `capture` feature) |
-| webrtc | WebRTC stack (DTLS/SRTP/ICE/SCTP/STUN) in `shakenfist-spice-webrtc`. Held below 0.18 by a Renovate rule: 0.20 re-homes the crate on a sans-io core and needs a port of `bridge.rs` rather than a version bump. See `docs/plans/PLAN-webrtc-0.20-upgrade.md`. |
-| rtp | RTP packet types and payloaders (`H264Payloader`, `OpusPayloader`, `Header`, `Packet`). A direct dependency of `shakenfist-spice-webrtc` and `shakenfist-spice-renderer`; `webrtc` 0.17 re-exports it, but that re-export is gone in 0.20. |
-| opus | libopus bindings for the synthetic Opus pump in `shakenfist-spice-webrtc` and the `WebOpusSink` passthrough path in `--web` mode. The `audiopus_sys` transitive dep builds libopus from source (via cmake) if `pkg-config` does not find a system libopus; the devcontainer and the aarch64 Linux CI runner install `libopus-dev` so the resulting binary dynamic-links libopus.so.0 and cargo-deb's `$auto` picks up `libopus0` as a runtime dep. Real PCM → Opus encoding for SPICE servers that negotiate uncompressed playback is deferred future work; today the PCM path produces silent audio with a warn-once log line. |
-| cpal | Cross-platform audio output (ALSA on Linux, CoreAudio on macOS, WASAPI on Windows). Runs on a dedicated audio thread. |
-| opus-decoder | Pure-Rust Opus audio decoder (RFC 8251 conformant) |
-| rtrb | Lock-free single-producer single-consumer ring buffer for audio sample transfer between the tokio network task and the cpal audio thread |
-| image | JPEG decoding (with `jpeg` feature only) |
-| mozjpeg | Vendored libjpeg-turbo for cross-platform MJPEG decoding. No runtime system dependency; built as part of the ryll binary. Used as fallback when OS-native decoders (ImageIO/WIC/VA-API) are unavailable. |
-| serde / serde_json | JSON serialisation of channel state snapshots for bug reports |
-| zip | Zip file output for bug reports |
-| png | PNG encoding for bug report screenshots |
-| ctrlc | Cross-platform Ctrl+C handler for graceful shutdown |
-| libc | POSIX bindings; `sysconf(_SC_CLK_TCK)` for the runtime metrics module that reads `/proc/self/*` for bug reports |
-| rfd | Native file dialogs for the screenshot save flow and bug-report save |
-| base64 = "0.22" | Base64 encoding for cursor PNG data-URLs sent over the control datachannel (Phase 5d; `ryll/src/web/cursor.rs`) |
