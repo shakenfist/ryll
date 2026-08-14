@@ -4,10 +4,10 @@
 //! [`WebrtcBridge`] (the production type) and runs the H.264 video
 //! pump (driven by a real `H264Encoder` + `EncoderTask` +
 //! `SyntheticFrameSource`) and the synthetic Opus audio pump. The
-//! "client" peer is a hand-rolled `RTCPeerConnection`: the bridge's
-//! API is shaped for the *server* role (sending video + audio,
-//! owning the control DC), so to verify "incoming RTP packets" and
-//! the ping/pong round-trip we drive the client side directly.
+//! "client" peer is a `TestPeer`: the bridge's API is shaped for the
+//! *server* role (sending video + audio, owning the control DC), so
+//! to verify "incoming RTP packets" and the ping/pong round-trip we
+//! drive the client side directly.
 //!
 //! Asserts:
 //! * >= 10 video RTP packets received within ~3 seconds.
@@ -22,28 +22,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::BytesMut;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use shakenfist_spice_renderer::{EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource};
 use tokio::sync::mpsc;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
-use webrtc::rtp_transceiver::RTCRtpTransceiver;
-use webrtc::track::track_remote::TrackRemote;
+use webrtc::data_channel::DataChannelEvent;
+use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
 use shakenfist_spice_webrtc::test_client::TestPeer;
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loopback_video_audio_datachannel() {
-    // rustls CryptoProvider: webrtc 0.17.1 pulls both ring and
-    // aws-lc-rs into the dependency graph through rustls 0.23, so
-    // rustls cannot auto-select. Install ring explicitly. The 3e
-    // unit test does the same; `install_default` is idempotent
-    // (returns Err if already set; we ignore the result).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     // ── Server: production WebrtcBridge ──────────────────────────
     let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
     let server = WebrtcBridge::new(WebrtcBridgeConfig {
@@ -64,16 +54,15 @@ async fn loopback_video_audio_datachannel() {
     // `TestPeer` handles the codec registration (default codecs plus
     // the bridge's H.264 PT 102), the recvonly transceivers, and the
     // seed datachannel that puts an m=application section in the
-    // offer. The `on_track` / `on_data_channel` wiring below is
-    // specific to this test, so it is supplied to the builder rather
-    // than registered by reaching through the raw PC afterwards —
-    // registration has to happen before the offer/answer exchange
-    // starts (a track or datachannel that arrives before the handler
-    // is installed fires nothing), and `TestPeerBuilder::build`
-    // guarantees that ordering. It is also the shape webrtc-rs 0.20
-    // requires: the handler is supplied to the builder before the
-    // peer connection exists, so a post-construction registration
-    // through `TestPeer::pc()` would have nowhere to go.
+    // offer. The `on_track` wiring below is specific to this test, so
+    // it is supplied to the builder: 0.20 hands the event handler to
+    // the builder before the peer connection exists, so there is no
+    // post-construction registration to reach through `TestPeer::pc()`
+    // for. That is also the ordering an on-track hook always needed —
+    // a track that arrives before its handler is installed fires
+    // nothing. The datachannel side is handled after `build()`
+    // instead; see the echo below for why that is both possible and
+    // necessary now.
     //
     // Counters for incoming RTP packets, by track kind. Created
     // before the peer so they can be cloned into the builder hooks
@@ -87,61 +76,82 @@ async fn loopback_video_audio_datachannel() {
             let video_count = video_count.clone();
             let audio_count = audio_count.clone();
             // on_track: spawn a per-track reader loop that increments
-            // the appropriate counter for each successfully decoded
-            // RTP packet.
+            // the appropriate counter for each RTP packet the track
+            // yields.
             //
             // The read loop runs in a `tokio::spawn`-ed task rather
-            // than directly inside the on_track callback. webrtc-rs
-            // awaits the returned future before firing on_track for
-            // the *next* track, so a long-lived `read_rtp` loop
-            // inside the callback would pin the event loop on the
-            // first track (audio) and prevent on_track from ever
-            // firing for video. Spawning lets the callback return
-            // immediately and both kinds receive packets. This is
-            // not a 0.17 quirk: 0.20's driver loop awaits handler
-            // methods inline too, so the same reasoning carries
-            // forward unchanged.
-            Box::new(
-                move |track: Arc<TrackRemote>,
-                      _receiver: Arc<RTCRtpReceiver>,
-                      _transceiver: Arc<RTCRtpTransceiver>| {
-                    let video_count = video_count.clone();
-                    let audio_count = audio_count.clone();
-                    Box::pin(async move {
-                        let kind = track.kind();
-                        let counter = match kind {
-                            RTPCodecType::Video => video_count,
-                            RTPCodecType::Audio => audio_count,
-                            _ => return,
-                        };
-                        tokio::spawn(async move {
-                            while track.read_rtp().await.is_ok() {
+            // than directly inside the hook body. webrtc-rs awaits
+            // the returned future before firing on_track for the
+            // *next* track, so a long-lived poll loop inside the hook
+            // would pin the driver's event loop on the first track
+            // (audio) and prevent on_track from ever firing for
+            // video. Spawning lets the hook return immediately and
+            // both kinds receive packets. This reasoning is unchanged
+            // from 0.17 — 0.20's driver loop awaits handler methods
+            // inline too — but the mechanics are not: `read_rtp()` is
+            // gone, and a remote track is now polled for events of
+            // which RTP packets are one variant.
+            Box::new(move |track: Arc<dyn TrackRemote>| {
+                let video_count = video_count.clone();
+                let audio_count = audio_count.clone();
+                Box::pin(async move {
+                    // `kind()` is async in 0.20. Awaiting it here is
+                    // fine: once per track, not once per packet.
+                    let counter = match track.kind().await {
+                        RtpCodecKind::Video => video_count,
+                        RtpCodecKind::Audio => audio_count,
+                        RtpCodecKind::Unspecified => return,
+                    };
+                    tokio::spawn(async move {
+                        while let Some(event) = track.poll().await {
+                            if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
                                 counter.fetch_add(1, Ordering::Relaxed);
                             }
-                        });
-                    })
-                },
-            )
-        })
-        // on_data_channel: when the server's control DC arrives,
-        // install an on_message handler that echoes "ping" back as
-        // "pong".
-        .on_data_channel_hook(Box::new(move |dc: Arc<RTCDataChannel>| {
-            Box::pin(async move {
-                let dc_for_send = dc.clone();
-                dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let dc = dc_for_send.clone();
-                    Box::pin(async move {
-                        if msg.data.as_ref() == b"ping" {
-                            let _ = dc.send(&Bytes::from_static(b"pong")).await;
                         }
-                    })
-                }));
+                    });
+                })
             })
-        }))
+        })
         .build()
         .await
         .expect("client peer");
+
+    // ── Client-side control echo ────────────────────────────────
+    //
+    // The echo runs on the client's *own* seed datachannel, not on
+    // one delivered by `on_data_channel`. On webrtc-rs 0.20 those are
+    // the same SCTP stream: a channel created before the DTLS role is
+    // known always gets stream id 1, both peers do that, and a peer's
+    // DCEP open for an id already in the local map is not announced —
+    // so `on_data_channel` never fires here. See
+    // `TestPeer::seed_data_channel` for the full mechanism and the
+    // source citations.
+    //
+    // This is also how the real browser client behaves:
+    // `ryll/src/web/assets/app.js` creates one `control-seed` channel,
+    // hangs `onmessage` off it, and registers no `ondatachannel`
+    // handler at all. So the echo below exercises the production data
+    // path rather than a test-only one.
+    //
+    // Polling only starts here, after `build()` returned — which on
+    // 0.20 is safe in a way a callback registration would not be:
+    // events queue in the channel's buffer until something polls them,
+    // so nothing is lost by attaching late.
+    let client_dc = client
+        .seed_data_channel()
+        .expect("seed datachannel requested above")
+        .clone();
+    let _echo = tokio::spawn(async move {
+        while let Some(event) = client_dc.poll().await {
+            match event {
+                DataChannelEvent::OnMessage(msg) if msg.data.as_ref() == b"ping" => {
+                    let _ = client_dc.send(BytesMut::from(&b"pong"[..])).await;
+                }
+                DataChannelEvent::OnClose => break,
+                _ => {}
+            }
+        }
+    });
 
     // ── SDP exchange: client offers, server answers ─────────────
     let final_offer_sdp = client.offer_and_gather().await.expect("client offer");

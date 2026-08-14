@@ -1,7 +1,7 @@
 //! WebRTC bridge for the ryll SPICE client.
 //!
-//! Exposes [`WebrtcBridge`], which owns an
-//! [`webrtc::peer_connection::RTCPeerConnection`] together with a
+//! Exposes [`WebrtcBridge`], which owns a
+//! [`webrtc::peer_connection::PeerConnection`] together with a
 //! video track, an audio track, and a control datachannel. Phase 3
 //! step 3b ships the constructor and SDP-answer plumbing; 3c adds
 //! the video pump; 3d adds the synthetic Opus audio pump; the
@@ -9,8 +9,8 @@
 //!
 //! [`host_udp_bind_addrs`] chooses which local addresses to bind the
 //! WebRTC UDP sockets to (see its module docs for why this needs its
-//! own reasoning). Not yet consumed here — webrtc-rs 0.20's upgrade
-//! phase 02 wires it into [`WebrtcBridge`]'s construction.
+//! own reasoning). [`WebrtcBridge::new`] consumes it and fails
+//! construction if it comes back empty.
 
 mod bind_addrs;
 mod bridge;

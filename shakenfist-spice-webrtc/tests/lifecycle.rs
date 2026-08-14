@@ -31,13 +31,6 @@ use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pc_close_signals_dead() {
-    // rustls CryptoProvider: webrtc 0.17.1 pulls both ring and
-    // aws-lc-rs into the dependency graph through rustls 0.23, so
-    // rustls cannot auto-select. Install ring explicitly.
-    // `install_default` is idempotent across concurrent tests
-    // (it returns Err if already set, which we ignore).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     // ── Server: production WebrtcBridge ──────────────────────────
     let (server_enc_tx, _server_enc_rx) = mpsc::channel::<EncoderControl>(4);
     let server = WebrtcBridge::new(WebrtcBridgeConfig {

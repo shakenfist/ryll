@@ -20,20 +20,36 @@ workspace = true
 test-support = []
 
 [dependencies]
-# WebRTC stack (umbrella crate). Held below 0.18 by a Renovate
-# rule; 0.20 re-homes the crate on a sans-io core and needs a
-# port of src/bridge.rs rather than a version bump. Tracked in
-# docs/plans/PLAN-webrtc-0.20-upgrade.md.
-webrtc = "0.17.1"
+# WebRTC stack (umbrella crate). 0.20 is a ~9k-line async shim over
+# the sans-io `rtc` core below: a peer connection is built through
+# `PeerConnectionBuilder`, events arrive through one
+# `PeerConnectionEventHandler`, and datachannels and remote tracks are
+# polled rather than given callbacks. 0.20.2 specifically, not "0.20":
+# 0.20.0 has a driver hot-loop on a non-advancing timeout and 0.20.1
+# still schedules ICE checks in terminal states, both of which this
+# crate's tests and the server-side reaper walk straight into. Declared
+# as a floor rather than `=0.20.2` so patch updates still flow. See
+# docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md, Decision 1.
+webrtc = "0.20.2"
 
-# RTP packet types and payloaders (H264Payloader, OpusPayloader,
-# Header, Packet). `webrtc` re-exports this crate as
-# `webrtc::rtp`, but that re-export is gone in 0.20, and
-# shakenfist-spice-renderer already depends on it directly for
-# tests/webrtc_h264_smoke.rs. Depending on it by name here keeps
-# both crates on one declaration and takes the re-export off the
-# 0.20 port's critical path (phase 01 step 1b).
-rtp = "0.17"
+# The sans-io core `webrtc` is built on. A direct dependency because
+# `webrtc` deliberately does not re-export it, yet its types appear in
+# `webrtc`'s public API: `TrackLocal::write_rtp` takes an
+# `rtc::rtp::Packet`, `add_transceiver_from_kind` takes an
+# `rtc::…::RtpCodecKind`, and the codec constants and payloaders live
+# there too. `webrtc` pins `rtc` to an exact patch, so naming the same
+# version here guarantees by construction that the `Packet` we build is
+# the type `write_rtp` expects — the alignment-by-hand that issue #215
+# was about. Replaces the standalone `rtp` crate, an abandoned line
+# ending at 0.17.2 (Decision 2).
+rtc = "0.20.2"
+
+# `webrtc::peer_connection::PeerConnectionEventHandler` is declared with
+# `#[async_trait::async_trait]`, and `webrtc` does not re-export the
+# macro, so every implementor has to annotate its own impl with it —
+# which is what all 35 shipped examples do. Already in Cargo.lock at
+# 0.1.92 as a transitive dependency, so this adds an edge, not a crate.
+async-trait = "0.1"
 
 # Host interface enumeration, so the WebRTC UDP sockets can be bound
 # to real addresses instead of the placeholder 0.0.0.0, which binds
@@ -73,13 +89,6 @@ opus = "0.3"
 # H264Encoder, and SyntheticFrameSource used for the Phase 3 pumps
 # and integration test.
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7", default-features = false }
-
-# rustls 0.23 dropped the implicit default CryptoProvider; the
-# DTLS handshake inside webrtc-rs needs one installed before the
-# first PeerConnection is created. Pin to the version webrtc
-# 0.17.1 pulls in transitively; "ring" feature ensures the ring
-# backend is compiled in so install_default() succeeds.
-rustls = { version = "0.23", features = ["ring"] }
 
 [dev-dependencies]
 # Self dev-dependency purely to turn on `test-support` for this

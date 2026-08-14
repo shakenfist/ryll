@@ -77,10 +77,10 @@
 //! module does not treat it as one.
 //!
 //! It is the *caller's* job to decide whether an empty result is
-//! fatal. Step 2d constructs a peer connection from this list, and a
-//! peer connection that can never produce a routable candidate is
-//! useless — that construction should fail loudly, so 2d rejects an
-//! empty list rather than building a bridge nobody can connect to.
+//! fatal. `WebrtcBridge::new` constructs a peer connection from this
+//! list, and a peer connection that can never produce a routable
+//! candidate is useless — so it rejects an empty list rather than
+//! building a bridge nobody can connect to.
 //! This module does not make that call itself, because it has no way
 //! to know whether a future caller might have a different bind
 //! source (e.g. a phase 03 configuration override) to fall back to.
@@ -111,13 +111,13 @@ fn bindable_udp_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<SocketAddr
 /// binding, filtered by [`bindable_udp_addrs`].
 ///
 /// See the module docs for what an empty return means and who is
-/// responsible for treating it as an error. Not yet called from
-/// anywhere in this crate — step 2d of
-/// `docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md` is what
-/// wires this into `WebrtcBridge`'s construction. `pub` (and
-/// re-exported from `lib.rs`) so it is part of the crate's API
-/// surface ahead of that, rather than living behind an `#[allow]`
-/// for dead code that stops being true the moment 2d lands.
+/// responsible for treating it as an error. `WebrtcBridge::new` and
+/// `TestPeerBuilder::build` are the callers: both pass the result to
+/// `PeerConnectionBuilder::with_udp_addrs`, and both reject an empty
+/// list rather than build a peer connection that could only ever offer
+/// unroutable candidates. `pub` (and re-exported from `lib.rs`) so an
+/// operator-facing caller in a later phase can reuse the same policy
+/// rather than reimplementing it.
 pub fn host_udp_bind_addrs() -> Vec<SocketAddr> {
     match if_addrs::get_if_addrs() {
         Ok(interfaces) => bindable_udp_addrs(interfaces.into_iter().map(|iface| iface.ip())),

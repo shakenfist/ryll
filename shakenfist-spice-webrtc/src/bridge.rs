@@ -1,4 +1,4 @@
-//! [`WebrtcBridge`] wraps an [`RTCPeerConnection`] together with a
+//! [`WebrtcBridge`] wraps a [`PeerConnection`] together with a
 //! video track, an audio track, and a control datachannel.
 //!
 //! Phase 3 step 3b implements [`WebrtcBridge::new`] and
@@ -23,42 +23,61 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
 
+use crate::bind_addrs::host_udp_bind_addrs;
 use crate::sticky::StickySignal;
 
-use rtp::codecs::h264::H264Payloader;
-use rtp::codecs::opus::OpusPayloader;
-use rtp::header::Header;
-use rtp::packet::Packet;
-use rtp::packetizer::Payloader;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
-use webrtc::ice_transport::ice_server::RTCIceServer;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::{
-    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
+// The protocol-level types come from `rtc`, the sans-io core, because
+// `webrtc` is only a thin async shim over it and deliberately does not
+// re-export it (`webrtc-0.20.2/src/lib.rs:112-125`). Splitting the
+// imports this way is not a choice: `write_rtp` takes an
+// `rtc::rtp::Packet`, and an `rtp` 0.17 `Packet` is not a different
+// version of that type, it is a different type entirely. Note the
+// module is `codec`, singular, where the old crate had `codecs`.
+use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
+use rtc::rtp::codec::h264::H264Payloader;
+use rtc::rtp::codec::opus::OpusPayloader;
+use rtc::rtp::packetizer::Payloader;
+use rtc::rtp::{Header, Packet};
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+    RtpCodecKind,
 };
-use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
-use webrtc::track::track_local::TrackLocalWriter;
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelInit};
+use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
+use webrtc::media_stream::track_local::TrackLocal;
+use webrtc::media_stream::MediaStreamTrack;
+use webrtc::peer_connection::{
+    register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
+    PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
+    RTCPeerConnectionState, RTCSessionDescription, Registry,
+};
 
 /// Payload type used for H.264 in our SDP. Reused by both the
 /// MediaEngine registration in [`register_h264`] and the RTP
 /// header construction in the video pump.
 const H264_PAYLOAD_TYPE: u8 = 102;
+
+/// The media stream both tracks belong to. Surfaces in the answer SDP
+/// as the `msid` / `mslabel` value, so it is observable to the browser
+/// and must not drift.
+const STREAM_ID: &str = "ryll-spice";
+
+/// Track ids, likewise observable in the SDP's `msid` and `label`
+/// lines.
+const VIDEO_TRACK_ID: &str = "video";
+const AUDIO_TRACK_ID: &str = "audio";
+
+/// The H.264 fmtp line we register and select on. Baseline profile,
+/// level 3.1, packetization-mode 1 (FU-A fragmentation, RFC 6184 §5.4)
+/// — matching what the renderer's openh264 wrapper emits.
+const H264_FMTP_LINE: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
 
 /// H.264 RTP clock rate per RFC 6184 / RFC 4566.
 const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
@@ -111,32 +130,30 @@ const LOG_EVERY_N_DROPS: u64 = 100;
 
 /// The bridge's reaction to everything the peer connection tells it.
 ///
-/// Every method here is registered as a webrtc-rs callback in
-/// [`WebrtcBridge::new`]. They are gathered into one type rather than
-/// written inline for two reasons: the closures were capturing four
-/// pieces of shared state between them and the clone dance obscured
-/// what they actually did, and webrtc-rs 0.20 replaces the per-object
-/// callback registration with a single `PeerConnectionEventHandler`
-/// trait implemented on exactly this shape. When the port lands, this
-/// type grows an `impl` and the closures in `new` go away.
+/// The shared state behind [`BridgeHandler`], which is what webrtc-rs
+/// actually calls. Gathered into one type rather than written inline
+/// because the closures this replaced were capturing four pieces of
+/// shared state between them and the clone dance obscured what they
+/// actually did.
 ///
-/// Phase 01 recorded that the bodies below would not move again.
-/// That turned out to be half right, and the half that is wrong is
-/// worth knowing before reading them: 0.20 keeps
-/// `on_state_change` and `on_ice_gathering_state_change` as handler
-/// methods, but datachannel messages stopped being callbacks
-/// altogether. `on_control_message` survives as a function, while its
-/// *callers* become spawned loops polling
-/// `DataChannel::poll()`.
+/// Two of the three things phase 01 wired up survive as handler
+/// methods, renamed: `on_state_change` is dispatched from
+/// [`PeerConnectionEventHandler::on_connection_state_change`], and
+/// `on_ice_gathering_state_change` now takes an
+/// [`RTCIceGatheringState`] rather than an `RTCIceGathererState`. The
+/// third moved: datachannel messages stopped being callbacks
+/// altogether in 0.20, so [`Self::on_control_message`] survives as a
+/// function while its callers are the spawned [`run_dc_pump`] loops.
 ///
 /// # Handlers must not block
 ///
 /// 0.20 awaits handler methods inline in the peer connection's driver
-/// event loop, which is the same task that services ICE, DTLS, SCTP
-/// and RTP. An await inside a method here stalls the whole
-/// connection, so both outgoing channels use `try_send` and degrade to
-/// a counted, rate-limited drop rather than waiting for a slow
-/// consumer. See [`LOG_EVERY_N_DROPS`].
+/// event loop (`webrtc-0.20.2/src/peer_connection/driver.rs:653-681`),
+/// which is the same task that services ICE, DTLS, SCTP and RTP. An
+/// await inside a method here stalls the whole connection, so both
+/// outgoing channels use `try_send` and degrade to a counted,
+/// rate-limited drop rather than waiting for a slow consumer. See
+/// [`LOG_EVERY_N_DROPS`].
 ///
 /// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
 /// step 1e, and step 2b of the phase-02 plan for the `try_send`
@@ -170,6 +187,18 @@ struct BridgeEvents {
     /// draining it fast enough. Same ordering rationale as
     /// `dropped_keyframe_requests`.
     dropped_control_messages: AtomicU64,
+    /// Join handles for the datachannel poll loops, shared with the
+    /// [`WebrtcBridge`] that owns them so [`WebrtcBridge::close`] can
+    /// abort any that are still running. Written here by
+    /// [`PeerConnectionEventHandler::on_data_channel`], one entry per
+    /// datachannel the remote peer opens; `new` adds the one for the
+    /// control DC we create ourselves.
+    ///
+    /// A plain `std::sync::Mutex` because the guard is only ever held
+    /// across a `push` or a `drain` and never across an await — which
+    /// matters here more than usual, since one of the writers runs
+    /// inline in the driver event loop.
+    dc_pumps: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl BridgeEvents {
@@ -274,8 +303,16 @@ impl BridgeEvents {
     /// what `accept_offer` waits on before reading the local
     /// description. Replaces `gathering_complete_promise()`, which
     /// does not exist in webrtc-rs 0.20.
-    async fn on_ice_gathering_state_change(&self, state: RTCIceGathererState) {
-        if state != RTCIceGathererState::Complete {
+    ///
+    /// Ordering is safe on 0.20: each candidate is pushed into the core
+    /// before the completion sentinel, the sentinel is what moves
+    /// gathering state to `Complete`, and `local_description()`
+    /// re-renders from the live ICE agent on every call rather than
+    /// returning a string frozen at `set_local_description` time. So
+    /// "await Complete, then read the description" cannot observe a
+    /// short answer.
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state != RTCIceGatheringState::Complete {
             return;
         }
         if self.gathered.raise() {
@@ -325,6 +362,112 @@ impl BridgeEvents {
     }
 }
 
+/// What webrtc-rs 0.20 is actually handed: one event handler, supplied
+/// to the builder before the peer connection exists, replacing the four
+/// separate callback registrations 0.17 wanted.
+///
+/// A newtype over `Arc<BridgeEvents>` rather than an `impl` on
+/// `BridgeEvents` itself, for one concrete reason:
+/// [`PeerConnectionEventHandler::on_data_channel`] takes `&self`, but it
+/// has to hand an *owned* `Arc<BridgeEvents>` to the poll task it spawns,
+/// and there is no way to recover an `Arc` from a `&self`. Wrapping the
+/// `Arc` is the smallest thing that supplies one, and it leaves
+/// `BridgeEvents` a plain state struct that [`WebrtcBridge::new`] can
+/// share directly with the control-DC pump it spawns itself.
+struct BridgeHandler(Arc<BridgeEvents>);
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for BridgeHandler {
+    async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
+        self.0.on_state_change(state).await;
+    }
+
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        self.0.on_ice_gathering_state_change(state).await;
+    }
+
+    /// A datachannel opened by the remote peer.
+    ///
+    /// This fires less often than it reads like it should. webrtc-rs
+    /// 0.20 assigns a datachannel's SCTP stream id when the channel is
+    /// created, from the DTLS role
+    /// (`rtc-0.20.2/src/peer_connection/internal.rs:936-954`) — and
+    /// before the handshake there is no role, so every channel created
+    /// ahead of negotiation lands on stream 1. Our control DC is one of
+    /// those and so is the browser's `control-seed`
+    /// (`ryll/src/web/assets/app.js`), which makes them the same
+    /// stream: the peer's channel is already in our id map when its
+    /// DCEP open arrives, so the driver does not announce it
+    /// (`webrtc-0.20.2/src/peer_connection/driver.rs:84-101`) and the
+    /// remote's messages surface on *our* control channel instead,
+    /// pumped as `local-dc`.
+    ///
+    /// What is left for this path is a channel the peer opens *after*
+    /// negotiation, where the ids no longer collide. Keeping it costs
+    /// one small handler; dropping it would silently discard those.
+    ///
+    /// Spawns a pump rather than polling inline: this method is awaited
+    /// in the driver event loop, so looping on `poll()` here would wedge
+    /// the connection permanently. The `Arc<dyn DataChannel>` is the only
+    /// handle on the channel, so the spawned task owns it, and the join
+    /// handle goes into the shared `dc_pumps` list for
+    /// [`WebrtcBridge::close`] to abort.
+    async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
+        let events = self.0.clone();
+        let handle = tokio::spawn(run_dc_pump(dc, events, "remote-dc"));
+        // `unwrap_or_else(into_inner)` on poison for the same reason as
+        // the state shadow: the guarded value is a plain Vec that a
+        // panicking pusher cannot leave half-written, and dropping the
+        // handle here would silently opt this pump out of cancellation.
+        self.0
+            .dc_pumps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
+    }
+}
+
+/// Forward one datachannel's incoming messages to
+/// [`BridgeEvents::on_control_message`] until the channel closes.
+///
+/// 0.20 has no `on_message` callback and no user-facing datachannel
+/// type at all: a channel is an `Arc<dyn DataChannel>` whose events you
+/// pull with `poll()`. One spawned task per channel is the shape every
+/// shipped example uses
+/// (`webrtc-0.20.2/examples/data-channels/data-channels.rs:65-110`), and
+/// it is the only shape available given that a poll loop cannot run
+/// inside a handler method without stalling the driver.
+///
+/// `source` distinguishes the datachannel this bridge created from one
+/// the remote peer opened, purely for log attribution — both fan into
+/// the same `control_rx()` channel.
+///
+/// Returns when `poll()` yields `None` (the peer connection closed and
+/// dropped the event sender) or on `OnClose`. `tokio::spawn`, not the
+/// webrtc `Runtime` handle the examples use, because we need the
+/// `JoinHandle` for the close path and the handler already runs on
+/// tokio under the default `runtime-tokio` feature.
+async fn run_dc_pump(dc: Arc<dyn DataChannel>, events: Arc<BridgeEvents>, source: &'static str) {
+    while let Some(event) = dc.poll().await {
+        match event {
+            DataChannelEvent::OnMessage(msg) => {
+                events.on_control_message(msg.data.to_vec(), source).await;
+            }
+            DataChannelEvent::OnOpen => {
+                tracing::debug!(source, "WebrtcBridge: control datachannel open");
+            }
+            DataChannelEvent::OnClose => {
+                tracing::debug!(source, "WebrtcBridge: control datachannel closed");
+                break;
+            }
+            // OnError / OnClosing / the buffered-amount thresholds. We
+            // set no thresholds and do not implement send back-pressure,
+            // so none of them is actionable here.
+            _ => {}
+        }
+    }
+}
+
 /// Configuration for [`WebrtcBridge::new`].
 pub struct WebrtcBridgeConfig {
     /// ICE servers (STUN). Empty by default; the LAN-only assumption
@@ -358,10 +501,15 @@ impl WebrtcBridgeConfig {
 /// [`WebrtcBridge::spawn_synthetic_audio_pump`]; 3e adds
 /// [`WebrtcBridge::send_control`] and [`WebrtcBridge::control_rx`].
 pub struct WebrtcBridge {
-    pc: Arc<RTCPeerConnection>,
+    /// `Arc<dyn PeerConnection>` rather than a concrete type because
+    /// `PeerConnectionBuilder::build` hands back an unnameable
+    /// `impl PeerConnection` — the interceptor chain's type parameter
+    /// stays on the builder and never escapes it, which is what lets us
+    /// keep the registry type out of this struct.
+    pc: Arc<dyn PeerConnection>,
     video_track: Arc<TrackLocalStaticRTP>,
     audio_track: Arc<TrackLocalStaticRTP>,
-    control_dc: Arc<RTCDataChannel>,
+    control_dc: Arc<dyn DataChannel>,
     // Retained so the Sender is kept alive for diagnostics; the
     // on-state handler keeps its own clone. Prefixed with `_` to
     // signal intentional non-use without suppressing via attribute.
@@ -398,6 +546,23 @@ pub struct WebrtcBridge {
     /// waiter returns immediately. Awaited by
     /// [`WebrtcBridge::wait_for_gathering`].
     gathered: Arc<StickySignal>,
+    /// Join handles for the datachannel poll loops, shared with
+    /// [`BridgeEvents`] so that both the control DC created here and
+    /// every DC the remote peer opens land in one list.
+    ///
+    /// This crate owns its own task hygiene on 0.20: dropping a peer
+    /// connection *detaches* its driver task rather than stopping it,
+    /// so a bridge that is dropped without `close()` would leak the
+    /// driver plus one task per datachannel. [`WebrtcBridge::close`]
+    /// aborts these; see there for why the abort is a backstop rather
+    /// than the primary mechanism.
+    dc_pumps: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// The SSRCs advertised for the two tracks, handed to the pumps so
+    /// the RTP headers they stamp match. Not cosmetic: 0.20's
+    /// `write_rtp` rejects any packet whose SSRC is not one of the
+    /// track's. See where they are chosen in [`WebrtcBridge::new`].
+    video_ssrc: u32,
+    audio_ssrc: u32,
 }
 
 impl WebrtcBridge {
@@ -406,13 +571,6 @@ impl WebrtcBridge {
     /// the on-connected handler that requests a keyframe whenever
     /// a viewer attaches.
     pub async fn new(config: WebrtcBridgeConfig) -> Result<Self> {
-        // rustls 0.23 dropped the implicit default CryptoProvider; the
-        // DTLS handshake inside webrtc-rs needs one installed before the
-        // first PeerConnection is created. install_default returns Err
-        // if a provider is already installed (which is fine — tests
-        // install one explicitly), so we ignore the result.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let mut media_engine = MediaEngine::default();
         // register_default_codecs is conditional on webrtc's H.264
         // feature being enabled. Register Opus + H.264 explicitly
@@ -420,63 +578,7 @@ impl WebrtcBridge {
         media_engine.register_default_codecs()?;
         register_h264(&mut media_engine)?;
 
-        let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut media_engine)?;
-
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build();
-
-        let rtc_config = RTCConfiguration {
-            ice_servers: config
-                .ice_servers
-                .iter()
-                .map(|url| RTCIceServer {
-                    urls: vec![url.clone()],
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        };
-        let pc = Arc::new(api.new_peer_connection(rtc_config).await?);
-
-        // Video track.
-        let video_track = Arc::new(TrackLocalStaticRTP::new(
-            RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_H264.to_owned(),
-                ..Default::default()
-            },
-            "video".to_owned(),
-            "ryll-spice".to_owned(),
-        ));
-        pc.add_track(video_track.clone()).await?;
-
-        // Audio track. Opus payload type negotiation is handled by
-        // webrtc-rs's MediaEngine; the capability mime-type is
-        // sufficient here.
-        let audio_track = Arc::new(TrackLocalStaticRTP::new(
-            RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_OPUS.to_owned(),
-                ..Default::default()
-            },
-            "audio".to_owned(),
-            "ryll-spice".to_owned(),
-        ));
-        pc.add_track(audio_track.clone()).await?;
-
-        // Control datachannel. Ordered + reliable for input events
-        // (Phase 5) and cursor overlay (Phase 5b).
-        let control_dc = pc
-            .create_data_channel(
-                "control",
-                Some(RTCDataChannelInit {
-                    ordered: Some(true),
-                    max_retransmits: None,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
         // Bridge lifecycle signal, raised once when the PC reaches a
         // terminal state (`Failed` / `Disconnected` / `Closed`). The
@@ -492,18 +594,19 @@ impl WebrtcBridge {
         // onto one bounded mpsc channel. The consumer takes the
         // Receiver once via `control_rx()`.
         //
-        // Two DCs are involved in a two-bridge loopback scenario:
-        //   1. This bridge's own `control_dc` (created above) — used
-        //      for `send_control` and receives messages from the remote
-        //      peer's answerer-side DC.
-        //   2. The DC *received* from the remote peer when the bridge
-        //      acts as the answerer (`on_data_channel` callback) —
-        //      this carries messages sent by the remote peer on its
-        //      own created DC.
+        // Two sources fan in here:
+        //   1. This bridge's own `control_dc` (created below) — used
+        //      for `send_control`, and in practice also where the
+        //      remote peer's messages arrive, because its channel and
+        //      ours share an SCTP stream id (see
+        //      `BridgeHandler::on_data_channel`).
+        //   2. A DC the remote peer opens after negotiation, delivered
+        //      through `on_data_channel`.
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
 
         let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
         let gathered = Arc::new(StickySignal::new());
+        let dc_pumps = Arc::new(Mutex::new(Vec::new()));
         let events = Arc::new(BridgeEvents {
             encoder_control: config.encoder_control.clone(),
             dead: dead.clone(),
@@ -512,47 +615,153 @@ impl WebrtcBridge {
             gathered: gathered.clone(),
             dropped_keyframe_requests: AtomicU64::new(0),
             dropped_control_messages: AtomicU64::new(0),
+            dc_pumps: dc_pumps.clone(),
         });
 
-        // Everything below is a delegation to `BridgeEvents`. In
-        // webrtc-rs 0.20 these three registrations collapse into a
-        // single `.with_handler(events)` on the builder.
-        let ev = events.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let ev = ev.clone();
-            Box::pin(async move { ev.on_state_change(state).await })
-        }));
+        // Which local addresses to bind the ICE sockets to. 0.20 makes
+        // this the caller's problem — the bound addresses are the only
+        // input to host-candidate generation and nothing downstream
+        // filters them — so an empty list is not a degraded bridge, it
+        // is a bridge that can only ever advertise candidates no
+        // browser will use. Fail here rather than hand back something
+        // that passes every test we have and reaches nobody. See
+        // `crate::bind_addrs` and Decision 4 of the phase-02 plan.
+        let udp_addrs = host_udp_bind_addrs();
+        if udp_addrs.is_empty() {
+            return Err(anyhow!(
+                "no bindable network interface: every address this host reports is loopback, \
+                 unspecified, or IPv6 link-local, so the peer connection could only offer ICE \
+                 candidates no remote peer can reach"
+            ));
+        }
 
-        let ev = events.clone();
-        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
-            let ev = ev.clone();
-            Box::pin(async move { ev.on_ice_gathering_state_change(state).await })
-        }));
+        // One handler replaces 0.17's four separate callback
+        // registrations, and it has to be supplied *before* the peer
+        // connection exists — hence all the state above being built
+        // first. `.with_handler` is the one mandatory builder call:
+        // `build()` returns an error without it.
+        let pc: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(
+                    RTCConfigurationBuilder::new()
+                        .with_ice_servers(
+                            config
+                                .ice_servers
+                                .iter()
+                                .map(|url| RTCIceServer {
+                                    urls: vec![url.clone()],
+                                    ..Default::default()
+                                })
+                                .collect(),
+                        )
+                        .build(),
+                )
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_handler(Arc::new(BridgeHandler(events.clone())))
+                .with_udp_addrs(udp_addrs)
+                .build()
+                .await?,
+        );
 
-        let ev = events.clone();
-        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let ev = ev.clone();
-            Box::pin(async move { ev.on_control_message(msg.data.to_vec(), "local-dc").await })
-        }));
+        // Video and audio tracks. 0.20 builds a track from a whole
+        // `MediaStreamTrack`, whose `codings` carry the SSRC and the
+        // codec that 0.17 chose on our behalf.
+        //
+        // The codings are a *selector, not an override*. Matching is
+        // mime_type plus fmtp, falling back to mime_type alone
+        // (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`),
+        // and the codec that ends up negotiated is cloned from the
+        // MediaEngine's registered entry — so the payload type and fmtp
+        // in the SDP come from `register_h264` and
+        // `register_default_codecs`, never from the values below. Do
+        // not try to fix an fmtp mismatch by editing this side; it is
+        // the side that is ignored.
+        //
+        // The SSRCs are chosen here rather than left as `None` for the
+        // core to fill in. `write_rtp` on 0.20 does not rewrite the
+        // packet header the way 0.17's did — it *validates* it, and
+        // rejects any packet whose SSRC is not one of the track's
+        // (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/mod.rs:368-374`).
+        // So the pumps have to stamp the same value the SDP
+        // advertises, which means something has to know it. Choosing
+        // it at construction, and handing it to the pumps, is what
+        // every shipped example does ("rewrite SSRC to match what we
+        // advertised in the SDP",
+        // `examples/rtp-to-webrtc/rtp-to-webrtc.rs:243`). This is not a
+        // new generator: the pumps each called `rand::random()` for
+        // their own SSRC before, and the core would have done the same
+        // — the change is only that both ends now agree on the answer.
+        //
+        // Getting it wrong is silent. Every packet is dropped at the
+        // sender with a rejection the pumps log at debug, so the
+        // symptom is a connected viewer watching nothing.
+        let video_ssrc: u32 = rand::random();
+        let audio_ssrc: u32 = rand::random();
 
-        // DCs initiated by the remote peer. When this bridge acts as
-        // the answerer, the offerer's DC arrives here.
-        let ev = events.clone();
-        pc.on_data_channel(Box::new(move |remote_dc: Arc<RTCDataChannel>| {
-            let ev = ev.clone();
-            Box::pin(async move {
-                tracing::debug!(
-                    label = %remote_dc.label(),
-                    "WebrtcBridge: remote DC received via on_data_channel"
-                );
-                remote_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let ev = ev.clone();
-                    Box::pin(
-                        async move { ev.on_control_message(msg.data.to_vec(), "remote-dc").await },
-                    )
-                }));
-            })
-        }));
+        let video_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            STREAM_ID.to_owned(),
+            VIDEO_TRACK_ID.to_owned(),
+            VIDEO_TRACK_ID.to_owned(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(video_ssrc),
+                    ..Default::default()
+                },
+                codec: h264_codec(),
+                ..Default::default()
+            }],
+        )));
+        pc.add_track(video_track.clone() as Arc<dyn TrackLocal>)
+            .await?;
+
+        let audio_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            STREAM_ID.to_owned(),
+            AUDIO_TRACK_ID.to_owned(),
+            AUDIO_TRACK_ID.to_owned(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(audio_ssrc),
+                    ..Default::default()
+                },
+                codec: opus_codec(),
+                ..Default::default()
+            }],
+        )));
+        pc.add_track(audio_track.clone() as Arc<dyn TrackLocal>)
+            .await?;
+
+        // Control datachannel. Ordered + reliable for input events
+        // (Phase 5) and cursor overlay (Phase 5b).
+        let control_dc = pc
+            .create_data_channel(
+                "control",
+                // `ordered` is a plain `bool` in 0.20 (it was an
+                // `Option<bool>`), and its `Default` is `true` rather
+                // than the derived `false`. Stated explicitly anyway:
+                // reliable + ordered is a property inputs depend on,
+                // not something to inherit silently.
+                Some(RTCDataChannelInit {
+                    ordered: true,
+                    max_retransmits: None,
+                    ..Default::default()
+                }),
+            )
+            .await?;
+
+        // The DC we created gets the same pump as any remote one; see
+        // `run_dc_pump` for why a task rather than a callback. Its
+        // handle joins the same list `on_data_channel` writes to, so
+        // `close` has one place to look.
+        {
+            let handle = tokio::spawn(run_dc_pump(control_dc.clone(), events.clone(), "local-dc"));
+            dc_pumps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(handle);
+        }
 
         let incoming_control = Mutex::new(Some(incoming_rx));
 
@@ -566,6 +775,9 @@ impl WebrtcBridge {
             dead,
             state,
             gathered,
+            dc_pumps,
+            video_ssrc,
+            audio_ssrc,
         })
     }
 
@@ -648,7 +860,7 @@ impl WebrtcBridge {
     /// logged at debug level.
     pub fn spawn_video_pump(&self, rx: mpsc::Receiver<EncodedFrame>) -> JoinHandle<Result<()>> {
         let track = self.video_track.clone();
-        tokio::spawn(run_video_pump(rx, track))
+        tokio::spawn(run_video_pump(rx, track, self.video_ssrc))
     }
 
     /// Spawn the synthetic audio pump task: generate a 440 Hz sine
@@ -671,7 +883,7 @@ impl WebrtcBridge {
     /// do not stop the loop, mirroring the video pump's behaviour.
     pub fn spawn_synthetic_audio_pump(&self) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
-        tokio::spawn(run_synthetic_audio_pump(track))
+        tokio::spawn(run_synthetic_audio_pump(track, self.audio_ssrc))
     }
 
     /// Spawn the real Opus passthrough pump (Phase 5e).
@@ -698,7 +910,7 @@ impl WebrtcBridge {
     /// mirroring the video pump's behaviour.
     pub fn spawn_audio_pump(&self, rx: mpsc::Receiver<(Vec<u8>, u32)>) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
-        tokio::spawn(run_audio_pump(rx, track))
+        tokio::spawn(run_audio_pump(rx, track, self.audio_ssrc))
     }
 
     /// Send a payload over the control datachannel. The DC is
@@ -709,20 +921,23 @@ impl WebrtcBridge {
     /// (e.g. the channel is not yet open or the remote peer has
     /// closed it).
     pub async fn send_control(&self, payload: &[u8]) -> Result<()> {
-        let bytes = Bytes::copy_from_slice(payload);
+        // `send` takes a `BytesMut` by value in 0.20 and returns
+        // `Result<()>` rather than a byte count, so there is nothing
+        // left to discard.
         self.control_dc
-            .send(&bytes)
+            .send(BytesMut::from(payload))
             .await
-            .map(|_n| ())
             .map_err(|e| anyhow!("control DC send: {}", e))
     }
 
     /// Take the receiver for incoming control-DC messages.
     ///
     /// Can only be called once per bridge; subsequent calls return
-    /// `None`. Register the `on_message` callback (done in
-    /// [`WebrtcBridge::new`]) before calling this to avoid a race
-    /// where an early message is lost.
+    /// `None`. The datachannel poll loops that feed this are spawned by
+    /// [`WebrtcBridge::new`], so messages can start arriving before the
+    /// first call; the channel is buffered (64 slots) precisely so an
+    /// early message is not lost while a caller gets around to taking
+    /// the receiver.
     pub fn control_rx(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
         self.incoming_control
             .lock()
@@ -730,10 +945,43 @@ impl WebrtcBridge {
             .and_then(|mut guard| guard.take())
     }
 
-    /// Close the underlying peer connection. Consumes `self` so
-    /// callers cannot accidentally reuse a closed bridge.
+    /// Close the underlying peer connection and stop the datachannel
+    /// poll loops. Consumes `self` so callers cannot accidentally reuse
+    /// a closed bridge.
+    ///
+    /// Closing must be explicit on 0.20: dropping a peer connection
+    /// detaches its driver task rather than stopping it.
+    ///
+    /// Note that closing here does not reliably raise the `dead`
+    /// signal. `close()` sets the driver's shutdown flag, and the
+    /// driver checks that at the top of every loop iteration, so it
+    /// usually exits before dispatching the `Closed` transition the
+    /// core queued. That is fine for every caller we have — the reaper
+    /// waits on `dead` to decide *whether* to close, and a bridge that
+    /// has been closed has no one left to notify — but it means `dead`
+    /// should be read as "the peer went away", not "the bridge is
+    /// finished".
+    ///
+    /// Order matters. `pc.close()` first, because that is what makes
+    /// each pump's `poll()` return `None` and lets it exit on its own —
+    /// the abort below is a backstop for a pump that is wedged
+    /// somewhere else, not the normal exit path. Aborting first would
+    /// cancel a pump mid-`on_control_message` and drop a message that
+    /// had already been received.
     pub async fn close(self) -> Result<()> {
         self.pc.close().await?;
+
+        let pumps = {
+            let mut guard = self
+                .dc_pumps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        for pump in pumps {
+            pump.abort();
+        }
+
         Ok(())
     }
 }
@@ -743,24 +991,68 @@ impl WebrtcBridge {
 /// renderer's openh264 wrapper emits and what every browser decodes.
 /// Packetization-mode 1 enables FU-A fragmentation per RFC 6184 §5.4.
 ///
-/// The default-codecs register call may or may not include H.264
-/// depending on the webrtc-rs build features. Registering manually
-/// guarantees the answer SDP advertises H.264.
+/// This call is redundant on 0.20 and is kept deliberately.
+/// `register_default_codecs` registers five H.264 entries
+/// unconditionally (PT 102, 127, 125, 108, 123) and webrtc-rs drops
+/// this one as a duplicate payload type — phase 01 asserted exactly
+/// that in `register_h264_is_redundant_with_default_codecs`, and the
+/// answer SDP is byte-identical with or without it. It stays because
+/// it states our profile-level preference in one place: if the
+/// defaults ever stop carrying H.264, or carry it at a profile the
+/// renderer cannot emit, this is what turns that into a changed SDP
+/// rather than a silent renegotiation onto VP8.
+///
+/// It is also why PT 102 negotiates `profile-level-id=42001f` while
+/// the encoder emits `42e01f`: the default entry wins, and 0.20's
+/// codec matching degrades an fmtp mismatch to a mime-type-only match
+/// rather than an error
+/// (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`).
+/// Browsers tolerate the constraint-set difference. The discrepancy
+/// predates the port and is deliberately left alone.
 pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
     let h264 = RTCRtpCodecParameters {
-        capability: RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90_000,
-            channels: 0,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                .to_owned(),
-            rtcp_feedback: vec![],
-        },
+        rtp_codec: h264_codec(),
         payload_type: H264_PAYLOAD_TYPE,
-        ..Default::default()
     };
-    media_engine.register_codec(h264, RTPCodecType::Video)?;
+    media_engine.register_codec(h264, RtpCodecKind::Video)?;
     Ok(())
+}
+
+/// The H.264 codec description, shared by the MediaEngine registration
+/// in [`register_h264`] and the video track's codings.
+///
+/// One function rather than two literals so the two cannot drift: if
+/// the coding names a codec the MediaEngine does not have, `add_track`
+/// fails outright with `ErrRTPTransceiverCodecUnsupported`.
+fn h264_codec() -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: MIME_TYPE_H264.to_owned(),
+        clock_rate: VIDEO_CLOCK_RATE_HZ,
+        // Zero, not one: `channels` is an audio concept and RFC 4566's
+        // rtpmap encoding parameter is omitted entirely for video.
+        channels: 0,
+        sdp_fmtp_line: H264_FMTP_LINE.to_owned(),
+        rtcp_feedback: vec![],
+    }
+}
+
+/// The Opus codec description for the audio track's codings.
+///
+/// Matches the entry `MediaEngine::register_default_codecs` installs at
+/// payload type 111 — 48 kHz stereo per RFC 7587 §4.1, which is the
+/// signalled rate regardless of the mono content we actually send. The
+/// fmtp line is left empty on purpose: matching falls back to mime_type
+/// alone, and the negotiated fmtp comes from the registered entry, so
+/// repeating `minptime=10;useinbandfec=1` here would only create a
+/// second copy to keep in step.
+fn opus_codec() -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: MIME_TYPE_OPUS.to_owned(),
+        clock_rate: AUDIO_SAMPLE_RATE_HZ,
+        channels: 2,
+        sdp_fmtp_line: String::new(),
+        rtcp_feedback: vec![],
+    }
 }
 
 /// Spawned by [`WebrtcBridge::spawn_video_pump`]. Owns the
@@ -771,6 +1063,10 @@ pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
 /// marker bit is set on the last RTP packet of each access unit
 /// per RFC 6184 §5.1.
 ///
+/// `ssrc` must be the SSRC the track advertised (see
+/// [`WebrtcBridge::new`]): 0.20's `write_rtp` validates the header it
+/// is given rather than rewriting it, so a mismatch drops every packet.
+///
 /// Errors from `track.write_rtp` are logged at debug and the
 /// loop continues — the receiver may not have negotiated DTLS
 /// yet when the first frames arrive, so dropped packets early on
@@ -778,10 +1074,10 @@ pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
 async fn run_video_pump(
     mut rx: mpsc::Receiver<EncodedFrame>,
     track: Arc<TrackLocalStaticRTP>,
+    ssrc: u32,
 ) -> Result<()> {
     let mut payloader = H264Payloader::default();
     let mut sequence: u16 = rand::random();
-    let ssrc: u32 = rand::random();
 
     while let Some(frame) = rx.recv().await {
         // EncodedFrame::timestamp_us is microseconds; convert to
@@ -839,7 +1135,7 @@ async fn run_video_pump(
         // stop the pump — the remote side may not have completed
         // ICE/DTLS yet when the first frames arrive.
         for pkt in packets {
-            if let Err(e) = track.write_rtp(&pkt).await {
+            if let Err(e) = track.write_rtp(pkt).await {
                 tracing::debug!("video pump: write_rtp dropped packet: {}", e);
             }
         }
@@ -864,12 +1160,15 @@ async fn run_video_pump(
 /// random per RFC 3550 §5.1 (we use 0 here for simplicity since
 /// the SSRC is randomised; the receiver tracks deltas anyway).
 ///
+/// `ssrc` must be the SSRC the track advertised; see
+/// [`run_video_pump`].
+///
 /// `track.write_rtp` errors are logged at debug and the loop
 /// continues — the receiver may not have negotiated DTLS yet
 /// when the pump starts, so dropped packets early on are normal.
 /// The loop never returns `Ok(())` on its own; it exits only
 /// when the spawning task is aborted or the runtime shuts down.
-async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()> {
+async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>, ssrc: u32) -> Result<()> {
     let mut encoder = opus::Encoder::new(
         AUDIO_SAMPLE_RATE_HZ,
         opus::Channels::Mono,
@@ -887,7 +1186,6 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
 
     let mut payloader = OpusPayloader;
     let mut sequence: u16 = rand::random();
-    let ssrc: u32 = rand::random();
     let mut rtp_timestamp: u32 = 0;
     // Monotonic sample counter drives the sine-wave phase;
     // separate from rtp_timestamp because the latter wraps every
@@ -954,7 +1252,7 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
             };
             let pkt = Packet { header, payload };
             sequence = sequence.wrapping_add(1);
-            if let Err(e) = track.write_rtp(&pkt).await {
+            if let Err(e) = track.write_rtp(pkt).await {
                 tracing::debug!("synthetic audio pump: write_rtp dropped packet: {}", e);
             }
         }
@@ -974,6 +1272,9 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
 /// shorter Opus frames (5.33 ms / 256 samples), the
 /// timestamp delta tracks the actual content duration.
 ///
+/// `ssrc` must be the SSRC the track advertised; see
+/// [`run_video_pump`].
+///
 /// `track.write_rtp` errors are logged at debug and the loop
 /// continues — the receiver may not have negotiated DTLS
 /// yet when the first packets arrive, so dropped packets
@@ -981,10 +1282,10 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>) -> Result<()>
 async fn run_audio_pump(
     mut rx: mpsc::Receiver<(Vec<u8>, u32)>,
     track: Arc<TrackLocalStaticRTP>,
+    ssrc: u32,
 ) -> Result<()> {
     let mut payloader = OpusPayloader;
     let mut sequence: u16 = rand::random();
-    let ssrc: u32 = rand::random();
     let mut rtp_timestamp: u32 = 0;
 
     while let Some((opus_packet, samples_in_packet)) = rx.recv().await {
@@ -1011,7 +1312,7 @@ async fn run_audio_pump(
             };
             let pkt = Packet { header, payload };
             sequence = sequence.wrapping_add(1);
-            if let Err(e) = track.write_rtp(&pkt).await {
+            if let Err(e) = track.write_rtp(pkt).await {
                 tracing::debug!("audio pump: write_rtp dropped packet: {}", e);
             }
         }
@@ -1276,16 +1577,6 @@ mod tests {
     /// any public API.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn control_datachannel_roundtrips_messages() {
-        use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-
-        // When both aws-lc-rs and ring are in the dependency tree
-        // (webrtc 0.17.1 pulls both via rustls 0.23) rustls cannot
-        // auto-select a CryptoProvider. Install ring explicitly before
-        // the DTLS handshake starts. `install_default` is idempotent
-        // across concurrent tests (it returns Err if already set, which
-        // we ignore).
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         // Server bridge (the answerer).
         let (server_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
         let server = WebrtcBridge::new(WebrtcBridgeConfig {
@@ -1404,10 +1695,13 @@ mod tests {
     /// `RYLL_GATHERING_SOAK=1` (`make test` passes the variable
     /// through to the devcontainer) for deliberate runs on a quiet
     /// host — see the testing section of `docs/development.md`.
+    ///
+    /// This test also carries the *only* automated guard on the
+    /// bind-address choice: that every candidate in the answer names a
+    /// routable address. See the assertion below for why nothing else
+    /// in the suite can catch that.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accept_offer_answer_carries_all_candidates() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let soak = std::env::var("RYLL_GATHERING_SOAK").is_ok_and(|v| v == "1");
         let iterations = if soak { 20 } else { 3 };
 
@@ -1429,15 +1723,45 @@ mod tests {
             let offer_sdp = client.offer_and_gather().await.expect("client offer");
             let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
 
-            let candidates = answer_sdp
+            let candidate_lines: Vec<&str> = answer_sdp
                 .lines()
                 .filter(|l| l.starts_with("a=candidate:"))
-                .count();
+                .collect();
+            let candidates = candidate_lines.len();
             assert!(
                 candidates > 0,
                 "iteration {i}: answer carried no ICE candidates, so the \
                  gathering signal fired before any were gathered:\n{answer_sdp}"
             );
+
+            // Every candidate must name an address a remote peer could
+            // actually dial. webrtc-rs 0.20 hands host-candidate
+            // generation the socket addresses we bound and filters
+            // nothing, so a `0.0.0.0` / `::` bind yields a literal
+            // `a=candidate:... 0.0.0.0 <port> typ host` that every
+            // browser discards. This assertion is the only automated
+            // check on that: two Rust peers on one host agree about an
+            // unspecified address and connect happily, so the loopback
+            // and lifecycle tests stay green on a build no browser can
+            // reach. See `crate::bind_addrs` and Decision 4 of the
+            // phase-02 plan.
+            //
+            // The address is the fifth space-separated field of an ICE
+            // candidate line (RFC 5245 §15.1: foundation, component,
+            // transport, priority, connection-address, ...).
+            for line in &candidate_lines {
+                let addr = line
+                    .split_whitespace()
+                    .nth(4)
+                    .unwrap_or_else(|| panic!("iteration {i}: malformed candidate line: {line}"));
+                assert!(
+                    addr != "0.0.0.0" && addr != "::",
+                    "iteration {i}: answer advertises an unspecified candidate address, \
+                     which no browser will use — the UDP sockets were bound to a wildcard \
+                     address rather than a real interface:\n{line}"
+                );
+            }
+
             counts.push(candidates);
 
             // Gathering was Complete when accept_offer returned, so
@@ -1487,8 +1811,6 @@ mod tests {
     /// the wait returns pins that ordering.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn gathering_signal_fires_after_local_description_is_populated() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
         let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
             ice_servers: vec![],

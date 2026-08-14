@@ -527,5 +527,82 @@ datachannel poll loops, and the bind-address wiring.
 
 ## What landed
 
-Filled in as the phase executes. The SDP diff from 2d and the
-browser verification from the Definition of done both belong here.
+Filled in as the phase executes. The browser verification from the
+Definition of done still belongs here.
+
+### Four things this plan got wrong, found while executing 2d
+
+All four were found by the test suite, none by reading the API.
+
+**1. `write_rtp` validates the RTP header, it does not rewrite it.**
+0.17's `TrackLocalStaticRTP::write_rtp` overwrote the packet's SSRC
+and payload type from the bind context, so the pumps could invent
+their own SSRC and it did not matter. 0.20 instead *rejects* a packet
+whose SSRC is not one the track claims
+(`rtc-0.20.2/src/rtp_transceiver/rtp_sender/mod.rs:368-374`) and whose
+payload type is not negotiated on that sender leg (`:390-410`). This
+invalidates Decision-adjacent guidance to leave `ssrc: None` and let
+the core fill it randomly: nothing would then know the value, and
+every packet would be dropped at the sender with only a debug log —
+a connected viewer watching a blank screen. `WebrtcBridge::new` now
+picks both SSRCs, puts them in the codings, and hands them to the
+pumps, which is what every shipped example does
+(`examples/rtp-to-webrtc/rtp-to-webrtc.rs:243`).
+
+**2. Datachannels created before negotiation collide on SCTP stream
+1, so `on_data_channel` does not fire.** The stream id is assigned at
+creation time from the DTLS role
+(`rtc-0.20.2/src/peer_connection/internal.rs:936-954`), and before the
+handshake there is no role, so both peers' pre-negotiation channels
+get id 1. The peer's DCEP open then arrives for an id already in the
+local map and the driver does not announce it
+(`webrtc-0.20.2/src/peer_connection/driver.rs:84-101`); its messages
+surface on our *own* control channel instead. Production is unaffected
+in behaviour — `ryll/src/web/assets/app.js` has a single
+`control-seed` channel with an `onmessage` and no `ondatachannel`, so
+both directions still work — but the `remote-dc` pump is dead in the
+common case, and `tests/loopback.rs` had to move its echo onto the
+client's own seed channel to keep testing the real path. Phase 04's
+browser check is what confirms this end to end.
+
+**3. A self-initiated `close()` does not reliably deliver `Closed`.**
+`close()` sets the driver's shutdown flag and the driver checks it at
+the top of every loop iteration, so it usually exits before
+dispatching the transition the core queued. `WebrtcBridge::close` no
+longer raises `dead` (harmless — the reaper waits on `dead` to decide
+whether to close), and `test_client`'s terminal-state test was a
+coin-flip race until it was rewritten to set the shadow directly.
+
+**4. Smaller API deltas the import map missed.**
+`RTCDataChannelInit::ordered` is a plain `bool`, not `Option<bool>`,
+and its `Default` is `true`. `MediaEngine::register_codec` takes an
+`RTCRtpCodecParameters` whose codec field is `rtp_codec`, not
+`capability`, and it has no `..Default::default()` tail.
+
+### Answer SDP diff, 0.17.1 → 0.20.2
+
+From `bridge_accept_offer_returns_answer_with_h264_and_opus`, against
+the same `TestPeer` offer. Judgement on each difference:
+
+| Difference | Verdict |
+|---|---|
+| Ten `rtx/90000` payload types added (103, 106, 99, 97, 101, 107, 104, 105, 124, 109), one per video codec, each with `a=fmtp:N apt=<primary>` | **Expected** (0.20's `register_default_codecs`), but see the follow-up below |
+| `a=ssrc-group:FID <media> <rtx>` and a second video SSRC | **Needs a follow-up decision.** This is the RTX advertisement made concrete: we now name an RTX stream we never send on. A browser that NACKs gets nothing back, same as before, but it is now entitled to expect otherwise |
+| `a=rtpmap:116 ulpfec/90000` gone | **Expected** — `rtc` 0.20.1 stopped advertising ULPFEC |
+| `a=extmap-allow-mixed` gone | **Expected**; one- and two-byte extension headers are no longer mixed |
+| `a=extmap` set grows: `sdes:mid` (1), `sdes:rtp-stream-id` (2), `sdes:repaired-rtp-stream-id` (3), and transport-cc moves from id 1 to id 4 | **Expected** — the simulcast/RTX extensions `register_default_interceptors` now configures. Note our pumps stamp no extensions, and `write_rtp` rejects unnegotiated ones, so this is advertisement only |
+| `a=msid-semantic:WMS *` added at session level | **Expected**, and more correct than before |
+| m-line payload-type order reversed: video now leads with 126 (H265) rather than 96 (VP8); audio leads with 8 (PCMA) rather than 111 (opus) | **Expected but worth watching.** The payload *numbers* are unchanged — H.264 is still 102 and opus still 111, which is what the pumps stamp — but the order in a `sendonly` answer nominally states our preference. Nothing reads it here, since we send exactly one codec per m-line |
+| `a=msid:` now precedes the `a=ssrc:` block | Cosmetic |
+| Fingerprint, ufrag, pwd, SSRCs, ports differ | Per-run values |
+
+Everything else — the H.264 profile list and payload types, the
+`rtcp-fb` sets, the BUNDLE group, `setup:active`, `rtcp-mux`,
+`rtcp-rsize`, `a=sendonly`, the msid/mslabel/label names, the
+candidate lines — is byte-identical modulo per-run values.
+
+The `profile-level-id=42001f` vs `42e01f` discrepancy phase 01
+recorded is unchanged: PT 102 still carries `42001f`. 0.20's codec
+matching would not have made it an error either way — it degrades to
+a mime-type-only match
+(`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`).

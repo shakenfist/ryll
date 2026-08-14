@@ -1,4 +1,4 @@
-//! A client-side [`RTCPeerConnection`] for tests that need to drive
+//! A client-side [`PeerConnection`] for tests that need to drive
 //! the browser half of a [`WebrtcBridge`] exchange.
 //!
 //! [`WebrtcBridge`]'s API is shaped for the *server* role — it sends
@@ -11,11 +11,11 @@
 //! agreed on the important parts by convention rather than by
 //! construction.
 //!
-//! Every call in the setup those four shared changes shape in
-//! webrtc-rs 0.20 (`APIBuilder`, `Registry`, `new_peer_connection`,
+//! Every call in the setup those four shared changed shape in
+//! webrtc-rs 0.20 (`APIBuilder`, `new_peer_connection`,
 //! `add_transceiver_from_kind`, `gathering_complete_promise`,
-//! `connection_state`). Collapsing them here means the 0.20 port
-//! rewrites this once rather than four times across two crates. See
+//! `connection_state`). Collapsing them here meant the 0.20 port
+//! rewrote this once rather than four times across two crates. See
 //! `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md` step 1c.
 //!
 //! ## Availability
@@ -33,28 +33,25 @@
 //! [`TestPeerBuilder::on_data_channel_hook`] accept those bodies and
 //! register them at build time, which is where webrtc-rs 0.20 also
 //! requires them to be supplied. Reach through [`TestPeer::pc`] for
-//! anything neither hook nor this module covers — but note that four
-//! callback slots are already claimed; see [`TestPeer::pc`]'s docs
-//! before registering handlers.
+//! anything neither hook nor this module covers.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::MediaEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::peer_connection::{OnDataChannelHdlrFn, OnTrackHdlrFn, RTCPeerConnection};
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use webrtc::data_channel::DataChannel;
+use webrtc::media_stream::track_remote::TrackRemote;
+use webrtc::peer_connection::{
+    register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
+    PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState,
+    RTCPeerConnectionState, RTCSessionDescription, Registry,
+};
+use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
+use crate::bind_addrs::host_udp_bind_addrs;
 use crate::bridge::register_h264;
 use crate::sticky::StickySignal;
 
@@ -63,19 +60,27 @@ const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The type [`TestPeerBuilder::on_track_hook`] accepts.
 ///
-/// A bare alias for webrtc-rs 0.17's own [`OnTrackHdlrFn`] rather than
-/// a new name, so the boxed-closure shape callers write does not
-/// change. The point of the alias is the 0.20 port: `on_track` moves
-/// from a registration function to a
-/// `PeerConnectionEventHandler::on_track` method with a different
-/// signature, and this is the one place that has to change to
-/// re-target it — every call site here and in `tests/loopback.rs`
-/// stays as-is.
-pub type OnTrackHook = OnTrackHdlrFn;
+/// Kept as a named alias so `tests/loopback.rs` names one type rather
+/// than spelling out a boxed async closure. It was an alias for
+/// webrtc-rs 0.17's own `OnTrackHdlrFn`; 0.20 has no equivalent public
+/// type — `on_track` is a `PeerConnectionEventHandler` method taking
+/// only the track, with the receiver and transceiver arguments gone —
+/// so the alias is now written out here. That was the point of
+/// introducing it in phase 01 step 2a: this line changes, and the
+/// hook's callers keep their shape.
+pub type OnTrackHook = Box<
+    dyn Fn(Arc<dyn TrackRemote>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        + Send
+        + Sync,
+>;
 
 /// The type [`TestPeerBuilder::on_data_channel_hook`] accepts. See
-/// [`OnTrackHook`] for why this is an alias rather than a new shape.
-pub type OnDataChannelHook = OnDataChannelHdlrFn;
+/// [`OnTrackHook`] for why this is an alias.
+pub type OnDataChannelHook = Box<
+    dyn Fn(Arc<dyn DataChannel>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+        + Send
+        + Sync,
+>;
 
 /// Builder for [`TestPeer`].
 ///
@@ -116,13 +121,11 @@ impl TestPeerBuilder {
     ///
     /// webrtc-rs 0.20 hands the event handler to the builder before
     /// the peer connection exists, so any test that needs `on_track`
-    /// behaviour has to supply it here rather than reaching through
-    /// [`TestPeer::pc`] after construction — that reach-through still
-    /// compiles on 0.17, but has nowhere to go once the port lands,
-    /// and [`TestPeer::pc`]'s docs warn against it now for that
-    /// reason. See `tests/loopback.rs` for the shape callers want:
-    /// spawn a per-track reader rather than looping inline in the
-    /// callback body.
+    /// behaviour has to supply it here; there is no post-construction
+    /// registration to reach through [`TestPeer::pc`] for. See
+    /// `tests/loopback.rs` for the shape callers want: spawn a
+    /// per-track reader rather than looping inline in the hook body,
+    /// which would stall the driver.
     pub fn on_track_hook(mut self, f: OnTrackHook) -> Self {
         self.on_track = Some(f);
         self
@@ -130,7 +133,18 @@ impl TestPeerBuilder {
 
     /// Register a callback for incoming datachannels, at build time.
     /// See [`Self::on_track_hook`] for why build time rather than a
-    /// post-construction reach-through.
+    /// post-construction reach-through. Note the hook receives an
+    /// `Arc<dyn DataChannel>` and must poll it for messages — 0.20 has
+    /// no `on_message` callback.
+    ///
+    /// No test currently uses this, and that is not an oversight: on
+    /// 0.20 a peer that created its own datachannel before negotiation
+    /// never sees an `on_data_channel` for the other end's, because
+    /// both land on the same SCTP stream id. See
+    /// [`TestPeer::seed_data_channel`], which is where a test wanting
+    /// the remote peer's control messages should look. The hook stays
+    /// because a channel created *after* negotiation does still arrive
+    /// this way.
     pub fn on_data_channel_hook(mut self, f: OnDataChannelHook) -> Self {
         self.on_data_channel = Some(f);
         self
@@ -153,22 +167,14 @@ impl TestPeerBuilder {
         media_engine.register_default_codecs()?;
         register_h264(&mut media_engine)?;
 
-        let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut media_engine)?;
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build();
-
-        let pc = Arc::new(api.new_peer_connection(RTCConfiguration::default()).await?);
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
         // Shadow the connection state rather than asking the peer
-        // connection for it. `RTCPeerConnection::connection_state`
-        // is an inherent method in 0.17 but moves onto a trait that
-        // does not carry it in 0.20, whereas the state-change
-        // callback survives the port as a handler method. Observing
-        // transitions here means `wait_until_connected` needs no
-        // change when the port lands.
+        // connection for it. `RTCPeerConnection::connection_state` was
+        // an inherent method in 0.17 and has no replacement in 0.20 —
+        // not on the `PeerConnection` trait, not on the sans-io core —
+        // whereas the state-change callback survived the port as a
+        // handler method.
         //
         // Starts at `New`, the state a fresh peer connection reports
         // before anything happens — asserted in this module's tests,
@@ -177,60 +183,61 @@ impl TestPeerBuilder {
         // gut the tests that rely on it.
         //
         // A `std::sync::Mutex`, matching `WebrtcBridge`'s shadow of
-        // the same state, so the two shadows stay the same shape for
-        // the 0.20 port and `connection_state()` stays synchronous.
+        // the same state, so `connection_state()` stays synchronous.
         // The guard is only ever held across a single assignment or
-        // read of a `Copy` enum, never across an await.
+        // read of a `Copy` enum, never across an await — which matters
+        // because the writer runs inline in the driver event loop.
         let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
-        let state_cb = state.clone();
-        pc.on_peer_connection_state_change(Box::new(move |next: RTCPeerConnectionState| {
-            let state = state_cb.clone();
-            Box::pin(async move {
-                // `into_inner` on poison: a single `Copy` assignment
-                // cannot leave the value inconsistent, and dropping
-                // the write would strand `wait_until_connected` on a
-                // stale state with no hint as to why.
-                *state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
-            })
-        }));
 
         // ICE gathering completion, on the same [`StickySignal`] the
         // bridge uses, and for the same reason:
         // `gathering_complete_promise` does not exist in webrtc-rs
-        // 0.20, but this callback survives the port.
+        // 0.20.
         let gathered = Arc::new(StickySignal::new());
-        let gathered_cb = gathered.clone();
-        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
-            let gathered = gathered_cb.clone();
-            Box::pin(async move {
-                if state == RTCIceGathererState::Complete {
-                    gathered.raise();
-                }
-            })
-        }));
 
-        // Caller-supplied on_track / on_data_channel hooks, registered
-        // here rather than left for the caller to add through `pc()`
-        // after `build()` returns. Registration must happen before the
-        // SDP exchange starts — a track or datachannel that arrives
-        // before the handler is installed fires nothing — and `build`
-        // is the only place that can guarantee that ordering, since it
-        // runs before the offer is even created.
-        if let Some(f) = self.on_track {
-            pc.on_track(f);
-        }
-        if let Some(f) = self.on_data_channel {
-            pc.on_data_channel(f);
+        // Caller-supplied on_track / on_data_channel hooks go into the
+        // handler, which the builder needs *before* the peer connection
+        // exists. That is not merely idiomatic on 0.20, it is the only
+        // option — and it also happens to be the ordering these hooks
+        // always needed, since a track or datachannel that arrives
+        // before its handler is installed fires nothing.
+        let events = Arc::new(TestPeerEvents {
+            state: state.clone(),
+            gathered: gathered.clone(),
+            on_track: self.on_track,
+            on_data_channel: self.on_data_channel,
+        });
+
+        // Bind the same interface addresses the bridge does; see
+        // `crate::bind_addrs` for why not `0.0.0.0`. A host with
+        // nothing but loopback cannot run these tests at all, so say so
+        // here rather than let it surface as an unexplained handshake
+        // timeout twenty seconds later.
+        let udp_addrs = host_udp_bind_addrs();
+        if udp_addrs.is_empty() {
+            return Err(anyhow!(
+                "no bindable network interface for the test peer: this host reports only \
+                 loopback, unspecified or IPv6 link-local addresses"
+            ));
         }
 
-        for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
+        let pc: Arc<dyn PeerConnection> = Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_handler(events)
+                .with_udp_addrs(udp_addrs)
+                .build()
+                .await?,
+        );
+
+        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
                 Some(RTCRtpTransceiverInit {
                     direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
+                    ..Default::default()
                 }),
             )
             .await?;
@@ -249,20 +256,70 @@ impl TestPeerBuilder {
 
         Ok(TestPeer {
             pc,
-            _seed_dc: seed_dc,
+            seed_dc,
             state,
             gathered,
         })
     }
 }
 
+/// The single event handler [`TestPeerBuilder::build`] hands to
+/// webrtc-rs, replacing the four separate callback registrations 0.17
+/// wanted.
+///
+/// Every method here is awaited inline in the peer connection's driver
+/// event loop, so none of them may block. The two built-in ones do a
+/// mutex-guarded assignment and an atomic flag raise respectively; the
+/// two caller-supplied hooks are the test's own business, and
+/// `tests/loopback.rs` documents why its bodies spawn rather than loop.
+struct TestPeerEvents {
+    state: Arc<Mutex<RTCPeerConnectionState>>,
+    gathered: Arc<StickySignal>,
+    on_track: Option<OnTrackHook>,
+    on_data_channel: Option<OnDataChannelHook>,
+}
+
+#[async_trait::async_trait]
+impl PeerConnectionEventHandler for TestPeerEvents {
+    async fn on_connection_state_change(&self, next: RTCPeerConnectionState) {
+        // `into_inner` on poison: a single `Copy` assignment cannot
+        // leave the value inconsistent, and dropping the write would
+        // strand `wait_until_connected` on a stale state with no hint
+        // as to why.
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+    }
+
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
+        if state == RTCIceGatheringState::Complete {
+            self.gathered.raise();
+        }
+    }
+
+    async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        if let Some(hook) = &self.on_track {
+            hook(track).await;
+        }
+    }
+
+    async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
+        if let Some(hook) = &self.on_data_channel {
+            hook(dc).await;
+        }
+    }
+}
+
 /// The client half of a bridge exchange. See the module docs.
 pub struct TestPeer {
-    pc: Arc<RTCPeerConnection>,
-    /// Held only to keep the seed datachannel alive for the life of
-    /// the peer. Never read — its job was done when the offer was
-    /// generated with an `m=application` section.
-    _seed_dc: Option<Arc<RTCDataChannel>>,
+    pc: Arc<dyn PeerConnection>,
+    /// The seed datachannel, if [`TestPeerBuilder::seed_data_channel`]
+    /// asked for one. Held so it outlives the offer that needed it,
+    /// and exposed by [`Self::seed_data_channel`] because on 0.20 it
+    /// is also where the *remote* peer's control messages arrive; see
+    /// that accessor's docs.
+    seed_dc: Option<Arc<dyn DataChannel>>,
     /// Latest state seen by the state-change callback. See the
     /// comment where it is registered for why this is shadowed
     /// rather than read from the peer connection.
@@ -281,23 +338,47 @@ impl TestPeer {
     /// The underlying peer connection, for anything this type does
     /// not wrap — statistics, ICE restarts, and the like.
     ///
-    /// Four callback slots are already claimed:
-    /// `on_peer_connection_state_change` and
-    /// `on_ice_gathering_state_change` are registered by
-    /// [`TestPeerBuilder::build`] and are what back
-    /// [`Self::wait_until_connected`] and [`Self::offer_and_gather`];
-    /// `on_track` and `on_data_channel` are also registered by
-    /// `build` whenever [`TestPeerBuilder::on_track_hook`] or
-    /// [`TestPeerBuilder::on_data_channel_hook`] was called. webrtc-rs
-    /// callback registration is last-writer-wins, so re-registering
-    /// any of the four through this accessor silently breaks whichever
-    /// of the above depends on it — for the state and gathering
-    /// callbacks, the symptom is a `wait_until_connected` that spins
-    /// to its full timeout with the shadow stuck at `New`. Callers
-    /// that need on-track or on-data-channel behaviour should use the
-    /// builder hooks instead of reaching through here.
-    pub fn pc(&self) -> &Arc<RTCPeerConnection> {
+    /// Events are not among those things and cannot be reached from
+    /// here. webrtc-rs 0.20 takes one
+    /// [`PeerConnectionEventHandler`] at build time and offers no way
+    /// to add or replace a handler afterwards, so
+    /// [`TestPeerBuilder::on_track_hook`] and
+    /// [`TestPeerBuilder::on_data_channel_hook`] are the only routes to
+    /// on-track and on-data-channel behaviour. (The upside of the
+    /// inversion: the last-writer-wins footgun this doc comment used to
+    /// warn about no longer exists.)
+    pub fn pc(&self) -> &Arc<dyn PeerConnection> {
         &self.pc
+    }
+
+    /// The seed datachannel, if one was requested.
+    ///
+    /// Poll this to receive what the *remote* peer sends, and send on
+    /// it to reach the remote peer. That is not obvious, and it is
+    /// worth understanding before writing a test against it.
+    ///
+    /// webrtc-rs 0.20 assigns a datachannel's SCTP stream id at
+    /// creation time from the DTLS role
+    /// (`rtc-0.20.2/src/peer_connection/internal.rs:936-954`), and
+    /// before the handshake there is no role yet, so every channel
+    /// created ahead of negotiation lands on stream 1. Both ends of an
+    /// exchange do exactly that — this peer's seed channel and the
+    /// bridge's control channel are the same stream — so each side's
+    /// channel is already present in its own id map when the peer's
+    /// DCEP open arrives, and
+    /// [`PeerConnectionEventHandler::on_data_channel`] is never
+    /// announced for it
+    /// (`webrtc-0.20.2/src/peer_connection/driver.rs:84-101`).
+    ///
+    /// This is what the browser sees too: `ryll/src/web/assets/app.js`
+    /// creates one `control-seed` channel, registers `onmessage` on it,
+    /// and has no `ondatachannel` handler at all. Polling the seed
+    /// channel is therefore the *more* faithful test of production, not
+    /// a workaround. [`TestPeerBuilder::on_data_channel_hook`] remains
+    /// for a genuinely new remote channel — one created after
+    /// negotiation, when the ids no longer collide.
+    pub fn seed_data_channel(&self) -> Option<&Arc<dyn DataChannel>> {
+        self.seed_dc.as_ref()
     }
 
     /// Create an offer and set it as the local description, without
@@ -416,6 +497,39 @@ impl TestPeer {
 mod tests {
     use super::*;
 
+    /// A handler that ignores everything.
+    ///
+    /// `with_handler` is mandatory — `PeerConnectionBuilder::build`
+    /// errors without one — so the comparison peers below, which exist
+    /// only to produce an offer SDP and are never connected, still need
+    /// something to pass.
+    struct IgnoreEvents;
+
+    #[async_trait::async_trait]
+    impl PeerConnectionEventHandler for IgnoreEvents {}
+
+    /// Build a bare peer connection with the given MediaEngine.
+    ///
+    /// Shared by the two tests that deliberately hand-roll a peer to
+    /// compare against [`TestPeerBuilder`]'s output; the transceivers
+    /// and datachannels each one wants differ, so only the plumbing is
+    /// factored out.
+    async fn raw_peer(mut media_engine: MediaEngine) -> Arc<dyn PeerConnection> {
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+            .expect("interceptors");
+        Arc::new(
+            PeerConnectionBuilder::new()
+                .with_configuration(RTCConfigurationBuilder::new().build())
+                .with_media_engine(media_engine)
+                .with_interceptor_registry(registry)
+                .with_handler(Arc::new(IgnoreEvents))
+                .with_udp_addrs(host_udp_bind_addrs())
+                .build()
+                .await
+                .expect("pc"),
+        )
+    }
+
     /// Extract the `m=` line kinds from an SDP, in order.
     fn m_line_kinds(sdp: &str) -> Vec<String> {
         sdp.lines()
@@ -437,8 +551,6 @@ mod tests {
     /// sequence rather than normalising it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn seed_dc_ordering_does_not_change_m_line_order() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         // Transceivers first, then the datachannel — what the builder
         // does.
         let transceivers_first = TestPeer::builder()
@@ -456,25 +568,14 @@ mod tests {
             .register_default_codecs()
             .expect("default codecs");
         register_h264(&mut media_engine).expect("h264");
-        let mut registry = Registry::new();
-        registry =
-            register_default_interceptors(registry, &mut media_engine).expect("interceptors");
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build();
-        let pc = Arc::new(
-            api.new_peer_connection(RTCConfiguration::default())
-                .await
-                .expect("pc"),
-        );
+        let pc = raw_peer(media_engine).await;
         let _dc = pc.create_data_channel("seed", None).await.expect("seed dc");
-        for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
+        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
                 Some(RTCRtpTransceiverInit {
                     direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
+                    ..Default::default()
                 }),
             )
             .await
@@ -503,8 +604,6 @@ mod tests {
     /// handshake — the worst kind of green.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shadowed_state_starts_at_new() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let peer = TestPeer::builder().build().await.expect("peer");
         assert_eq!(
             peer.connection_state(),
@@ -531,24 +630,28 @@ mod tests {
     /// with the observed state in the message, instead of burning
     /// the full timeout. Pins the early-exit arm added after the
     /// PR #272 review noted it had no coverage.
+    ///
+    /// The shadow is set directly rather than by closing the peer and
+    /// waiting for the state-change handler to report `Closed`. On
+    /// webrtc-rs 0.20 that no longer reliably happens to the side that
+    /// initiated the close: `close()` raises the driver's shutdown flag
+    /// (`webrtc-0.20.2/src/peer_connection/mod.rs:868-885`), and the
+    /// driver checks it at the top of every loop iteration
+    /// (`driver.rs:313-323`), so it can exit before dispatching the
+    /// `Closed` transition the core queued. The old spelling of this
+    /// test was therefore a race — it passed roughly half the time.
+    ///
+    /// Writing the shadow is legitimate here rather than a cheat: the
+    /// arm under test is a pure function of the shadow, and the *other*
+    /// direction (a peer observing its remote's teardown, which does
+    /// deliver the transition) is what `tests/lifecycle.rs` covers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wait_until_connected_fails_fast_on_terminal_state() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         let peer = TestPeer::builder().build().await.expect("peer");
-        peer.close().await.expect("close");
-
-        // close() drives the state-change callback to Closed
-        // asynchronously; give the shadow a moment to observe it so
-        // the wait below exercises the terminal arm, not the timeout.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while peer.connection_state() != RTCPeerConnectionState::Closed {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "shadow never observed Closed after close()",
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        *peer
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = RTCPeerConnectionState::Closed;
 
         let started = std::time::Instant::now();
         let err = peer
@@ -565,6 +668,8 @@ mod tests {
             "unexpected error: {}",
             err
         );
+
+        peer.close().await.expect("close");
     }
 
     /// Codec lines from an SDP, in order.
@@ -600,8 +705,6 @@ mod tests {
     /// difference, and untangling it is not this phase's job.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn register_h264_is_redundant_with_default_codecs() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         // What TestPeer builds: defaults plus the explicit H.264.
         let with = TestPeer::builder().build().await.expect("with h264");
         let with_sdp = with.create_offer().await.expect("offer with");
@@ -612,24 +715,13 @@ mod tests {
         media_engine
             .register_default_codecs()
             .expect("default codecs");
-        let mut registry = Registry::new();
-        registry =
-            register_default_interceptors(registry, &mut media_engine).expect("interceptors");
-        let api = APIBuilder::new()
-            .with_media_engine(media_engine)
-            .with_interceptor_registry(registry)
-            .build();
-        let pc = Arc::new(
-            api.new_peer_connection(RTCConfiguration::default())
-                .await
-                .expect("pc"),
-        );
-        for kind in [RTPCodecType::Video, RTPCodecType::Audio] {
+        let pc = raw_peer(media_engine).await;
+        for kind in [RtpCodecKind::Video, RtpCodecKind::Audio] {
             pc.add_transceiver_from_kind(
                 kind,
                 Some(RTCRtpTransceiverInit {
                     direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
+                    ..Default::default()
                 }),
             )
             .await
