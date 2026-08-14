@@ -42,7 +42,8 @@ DOCKER_RUN := docker run --rm \
 	-w /workspace \
 	-u $(UID):$(GID) \
 	-e HOME=/build \
-	-e CARGO_BUILD_JOBS
+	-e CARGO_BUILD_JOBS \
+	-e RYLL_GATHERING_SOAK
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache lint lint-fix test help \

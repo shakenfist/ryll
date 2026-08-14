@@ -3,7 +3,7 @@
 //! when observed. The SPICE session (`run_connection`) is left
 //! untouched — only the WebRTC layer is reaped.
 //!
-//! # Design: dead_handle vs wait_for_dead
+//! # Design: dead_signal vs wait_for_dead
 //!
 //! `WebrtcBridge::wait_for_dead` takes `&self`, which means the
 //! reaper would have to borrow the bridge across an `.await`
@@ -11,17 +11,15 @@
 //! `Mutex<Option<WebrtcBridge>>` — we can't hold the mutex
 //! guard across an await.
 //!
-//! Instead the reaper takes two `Arc` handles out of the slot:
-//!
-//! - `dead_handle()` → `Arc<Notify>` (the raw wakeup channel)
-//! - `dead_flag_handle()` → `Arc<AtomicBool>` (the sticky flag)
-//!
-//! These replicate the logic inside `wait_for_dead`:
-//! check the flag first (late-subscriber fast-path), then await
-//! `Notify::notified()`. Without the flag check, a bridge that
-//! died before we called `notified().await` would leave the
-//! reaper hung forever, because `Notify::notify_waiters()` does
-//! not queue notifications for late waiters.
+//! Instead the reaper clones `dead_signal()` — an
+//! `Arc<StickySignal>` — out of the slot and awaits
+//! `StickySignal::wait()` on its own copy. That is the exact
+//! implementation `wait_for_dead` uses, so the late-subscriber
+//! fast-path and the lost-wakeup guard come from the shared,
+//! unit-tested type rather than a hand-copied inline version of
+//! the pattern (which is how the original lost-wakeup bug got
+//! in). See `StickySignal`'s docs in `shakenfist-spice-webrtc`
+//! for the enable-before-check reasoning.
 //!
 //! # Lock ordering
 //!
@@ -67,46 +65,27 @@ use super::server::WebState;
 /// bridge's dead signal fires late.
 pub async fn run_bridge_reaper(state: Arc<WebState>) {
     loop {
-        // Snapshot the generation counter and the dead-signal
-        // handles from the active bridge — all without holding
-        // the lock across the await.  We take both the Notify
-        // and the AtomicBool so we can replicate
-        // wait_for_dead's late-subscriber fast-path: if the
-        // bridge already died before we called notified().await,
-        // the flag check returns immediately rather than hanging
-        // forever.
+        // Snapshot the generation counter and the dead signal from
+        // the active bridge — both without holding the lock across
+        // the await.
         let gen_at_subscribe = state.bridge_generation.load(Ordering::SeqCst);
-        let handles = {
+        let dead = {
             let slot = state.bridge_slot.lock().await;
-            slot.as_ref()
-                .map(|b| (b.dead_handle(), b.dead_flag_handle()))
+            slot.as_ref().map(|b| b.dead_signal())
         };
 
-        let Some((dead_notify, dead_flag)) = handles else {
+        let Some(dead) = dead else {
             // No active bridge; sleep briefly and re-check.
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         };
 
-        // Wait for the bridge to die. Two guards, both needed.
-        //
-        // `enable()` registers interest before anything else, which
-        // matters because `Notified` does not register until first
-        // polled: without it, a bridge dying between the flag check
-        // and the await would fire `notify_waiters()` with nobody
-        // registered, and the reaper would wait forever on a bridge
-        // that is already gone.
-        //
-        // The flag check then handles the case where the bridge died
-        // before we ever got here — `Notify` does not queue
-        // notifications for late subscribers.
-        let notified = dead_notify.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-
-        if !dead_flag.load(Ordering::SeqCst) {
-            notified.await;
-        }
+        // Wait for the bridge to die. `StickySignal::wait` carries
+        // both guards this needs: the sticky fast-path for a bridge
+        // that died before we subscribed, and interest registration
+        // before the flag check so a death landing mid-subscribe is
+        // still delivered rather than lost.
+        dead.wait().await;
 
         // Generation check: if `/offer` replaced the bridge
         // while we were waiting, skip the reap. The new bridge

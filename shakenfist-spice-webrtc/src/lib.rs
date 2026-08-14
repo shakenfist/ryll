@@ -8,8 +8,10 @@
 //! datachannel send/recv (3e) attaches later.
 
 mod bridge;
+mod sticky;
 
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
+pub use sticky::StickySignal;
 
 /// Client-side peer connection for tests that drive the browser half
 /// of a bridge exchange.

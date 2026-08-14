@@ -180,8 +180,22 @@ Wraps an `RTCPeerConnection` and owns:
 Construction via `WebrtcBridge::new(WebrtcBridgeConfig)`:
 builds the PC via webrtc-rs's `APIBuilder` + `MediaEngine`
 pattern, registers H.264 and Opus codecs, creates both tracks,
-adds them to the PC, creates the control DC, and registers the
-connection-state-change handler.
+adds them to the PC, creates the control DC, and registers three
+callbacks — connection state change, ICE gathering state change,
+and control-DC message — all delegating to one `BridgeEvents`
+struct. `BridgeEvents` is deliberately the shape of webrtc-rs
+0.20's `PeerConnectionEventHandler` trait, so the 0.20 port adds
+an `impl` and deletes the closures without the bodies moving.
+
+The state-change handler shadows the latest
+`RTCPeerConnectionState` (the inherent accessor does not survive
+the 0.20 port) and raises the sticky `dead` signal on the first
+terminal transition. The gathering handler raises the sticky
+`gathered` signal on `Complete`. Both signals are
+`StickySignal`s (`sticky.rs`): a `Notify` + sticky `AtomicBool`
+pair giving level-triggered, raise-exactly-once semantics — see
+the WebRTC Conventions section of AGENTS.md for why a bare
+`Notify` is not safe here.
 
 `WebrtcBridgeConfig` carries the ICE server list (empty for
 LAN-only use) and the `EncoderControl` sender.
@@ -193,12 +207,17 @@ entry point for Phase 4's HTTP `/offer` handler. It:
 1. Sets the remote description (browser's offer).
 2. Creates an answer.
 3. Sets the local description.
-4. Waits for ICE gathering to complete.
+4. Waits for ICE gathering to complete, by awaiting the sticky
+   `gathered` signal raised by `BridgeEvents` (webrtc-rs 0.17's
+   `gathering_complete_promise()` does not exist in 0.20).
 5. Returns the fully-resolved answer SDP.
 
 ICE gathering completion is awaited so the answer already
 contains all host candidates — trickle ICE is not needed for
-the LAN-only MVP.
+the LAN-only MVP. Because the gathering signal is sticky and
+never resets, a `WebrtcBridge` handles exactly one offer/answer
+exchange; renegotiation requires a new bridge, and the web
+frontend constructs one per `POST /offer`.
 
 ### Video pump
 
@@ -363,31 +382,29 @@ proactive bridge reaping and browser-side auto-reconnect.
 
 ### Bridge dead signal
 
-`WebrtcBridge` grows two fields:
-
-- `dead: Arc<tokio::sync::Notify>` — notified exactly once
-  when the `RTCPeerConnection` reaches `Failed`,
-  `Disconnected`, or `Closed`.
-- `dead_flag: Arc<AtomicBool>` — sticky flag that lets late
-  callers avoid waiting on an already-dead bridge.
+`WebrtcBridge` carries a `dead: Arc<StickySignal>` field —
+raised exactly once when the `RTCPeerConnection` reaches
+`Failed`, `Disconnected`, or `Closed`. `StickySignal`
+(`sticky.rs`) pairs a `Notify` with a sticky `AtomicBool`, so
+late callers do not wait on an already-dead bridge and a raise
+landing mid-subscribe is not lost.
 
 Public API:
 
 - `wait_for_dead(&self) -> impl Future` — resolves when the
   PC reaches a terminal state. Returns immediately if the
-  flag is already set (late-subscriber safety).
-- `dead_handle(&self) -> Arc<Notify>` — exposes the raw
-  notify for consumers that hold their own clone without
-  keeping a reference to the bridge.
-- `dead_flag_handle(&self) -> Arc<AtomicBool>` — exposes the
-  sticky flag for the same purpose.
+  signal is already raised (late-subscriber safety).
+- `dead_signal(&self) -> Arc<StickySignal>` — exposes the
+  signal for consumers that hold their own clone without
+  keeping a reference to the bridge; `handle.wait().await`
+  is equivalent to `wait_for_dead()`.
 
 ### Server-side reaper (`ryll/src/web/lifecycle.rs`)
 
 `run_bridge_reaper(state: Arc<WebState>)` is a long-lived
 task spawned from `run_web`. Its loop:
 
-1. Peeks at the active bridge's `dead_handle()` without
+1. Clones the active bridge's `dead_signal()` without
    holding the slot lock for long.
 2. If no bridge is active, sleeps 500 ms and retries.
 3. Awaits the dead signal.
@@ -546,9 +563,12 @@ shakenfist-spice-renderer/src/
 └── byte_counter.rs      # ByteCounter
 
 shakenfist-spice-webrtc/src/
-└── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig;
-                         #   Phase 6: wait_for_dead(), dead_handle(),
-                         #   dead_flag_handle()
+├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig,
+│                        #   BridgeEvents; Phase 6:
+│                        #   wait_for_dead(), dead_signal()
+├── sticky.rs            # StickySignal (Notify + sticky AtomicBool)
+└── test_client.rs       # TestPeer client-side PC for tests
+                         #   (`test-support` feature)
 ```
 
 ## Concurrency Model

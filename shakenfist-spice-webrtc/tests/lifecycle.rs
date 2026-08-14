@@ -16,7 +16,7 @@
 //!   well under 5 s but CI runners can be slow.
 //! * A subsequent call to `wait_for_dead()` returns
 //!   immediately, exercising the late-subscriber fast-path
-//!   driven by the sticky `dead_flag`.
+//!   driven by the sticky `StickySignal`.
 //!
 //! No browser involved; SDP exchange is direct between the two
 //! peers. ICE uses host-only candidates (empty `ice_servers`).
@@ -87,8 +87,8 @@ async fn pc_close_signals_dead() {
     //
     // Closing the client PC tears down DTLS + ICE; the server's
     // peer-connection-state-change callback fires `Disconnected`
-    // and/or `Closed`, which sets `dead_flag` and notifies
-    // waiters. The bridge's `wait_for_dead` future resolves once
+    // and/or `Closed`, which raises the sticky dead signal and
+    // wakes waiters. The bridge's `wait_for_dead` future resolves once
     // the server-side PC observes the failure. In practice this
     // fires in well under 5 s, but the ICE consent-freshness
     // timer and DTLS close_notify propagation are not strictly
@@ -104,16 +104,16 @@ async fn pc_close_signals_dead() {
     // ── Late-subscriber fast-path ─────────────────────────────
     //
     // After the first `wait_for_dead` resolves, the sticky
-    // `dead_flag` is set. A subsequent call must return
-    // immediately via the flag check; otherwise we'd block on
-    // `notify.notified().await`, which does not queue
-    // notifications for late subscribers and would wait forever.
-    // 100 ms is generous: the fast-path is a single atomic load
-    // and a synchronous return.
+    // dead signal is raised. A subsequent call must return
+    // immediately via `StickySignal`'s flag fast-path; a bare
+    // `Notify` would block forever here, because it does not
+    // queue notifications for late subscribers. 100 ms is
+    // generous: the fast-path is a single atomic load and a
+    // synchronous return.
     let late = tokio::time::timeout(Duration::from_millis(100), server.wait_for_dead()).await;
     assert!(
         late.is_ok(),
-        "second wait_for_dead should return immediately via the dead_flag fast-path",
+        "second wait_for_dead should return immediately via the sticky fast-path",
     );
 
     // ── Cleanup ─────────────────────────────────────────────────
