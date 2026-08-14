@@ -10,3 +10,12 @@
 mod bridge;
 
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
+
+/// Client-side peer connection for tests that drive the browser half
+/// of a bridge exchange.
+///
+/// Available to this crate's own tests unconditionally, and to
+/// external consumers that enable the `test-support` feature. Not
+/// part of the production surface.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_client;

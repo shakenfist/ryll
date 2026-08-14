@@ -88,12 +88,24 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             continue;
         };
 
-        // Wait for the bridge to die. Check the flag first
-        // (fast-path for already-dead bridges) before awaiting
-        // the Notify so we never miss a notification that fired
-        // before we subscribed.
+        // Wait for the bridge to die. Two guards, both needed.
+        //
+        // `enable()` registers interest before anything else, which
+        // matters because `Notified` does not register until first
+        // polled: without it, a bridge dying between the flag check
+        // and the await would fire `notify_waiters()` with nobody
+        // registered, and the reaper would wait forever on a bridge
+        // that is already gone.
+        //
+        // The flag check then handles the case where the bridge died
+        // before we ever got here — `Notify` does not queue
+        // notifications for late subscribers.
+        let notified = dead_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         if !dead_flag.load(Ordering::SeqCst) {
-            dead_notify.notified().await;
+            notified.await;
         }
 
         // Generation check: if `/offer` replaced the bridge

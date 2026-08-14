@@ -28,23 +28,24 @@ use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
+use rtp::codecs::h264::H264Payloader;
+use rtp::codecs::opus::OpusPayloader;
+use rtp::header::Header;
+use rtp::packet::Packet;
+use rtp::packetizer::Payloader;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264, MIME_TYPE_OPUS};
 use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_gatherer_state::RTCIceGathererState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp::codecs::h264::H264Payloader;
-use webrtc::rtp::codecs::opus::OpusPayloader;
-use webrtc::rtp::header::Header;
-use webrtc::rtp::packet::Packet;
-use webrtc::rtp::packetizer::Payloader;
 use webrtc::rtp_transceiver::rtp_codec::{
     RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
 };
@@ -94,6 +95,124 @@ const AUDIO_TONE_HZ: f64 = 440.0;
 /// `i16::MAX`. 0.3 leaves headroom and keeps the test tone at a
 /// comfortable listening level.
 const AUDIO_TONE_AMPLITUDE: f64 = 0.3;
+
+/// The bridge's reaction to everything the peer connection tells it.
+///
+/// Every method here is registered as a webrtc-rs callback in
+/// [`WebrtcBridge::new`]. They are gathered into one type rather than
+/// written inline for two reasons: the closures were capturing four
+/// pieces of shared state between them and the clone dance obscured
+/// what they actually did, and webrtc-rs 0.20 replaces the per-object
+/// callback registration with a single `PeerConnectionEventHandler`
+/// trait implemented on exactly this shape. When the port lands, this
+/// type grows an `impl` and the closures in `new` go away; the bodies
+/// below do not move again.
+///
+/// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
+/// step 1e.
+struct BridgeEvents {
+    /// Ask the encoder for an IDR whenever a viewer attaches.
+    encoder_control: mpsc::Sender<EncoderControl>,
+    /// Fired once when the PC reaches a terminal state.
+    dead: Arc<Notify>,
+    /// Sticky companion to `dead`; see [`WebrtcBridge::dead_flag`].
+    dead_flag: Arc<AtomicBool>,
+    /// Fan-in for control-datachannel messages, from either the DC
+    /// this bridge created or one the remote peer opened.
+    incoming_tx: mpsc::Sender<Vec<u8>>,
+    /// Latest peer connection state. Shadowed here because
+    /// `RTCPeerConnection::connection_state` does not survive the
+    /// 0.20 port, while this callback does.
+    state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Fired once when ICE gathering completes. See
+    /// [`BridgeEvents::on_ice_gathering_state_change`].
+    gathered: Arc<Notify>,
+    /// Sticky companion to `gathered`, for the same reason
+    /// `dead_flag` accompanies `dead`: `Notify` does not queue a
+    /// notification for a waiter that subscribes afterwards, and a
+    /// late `accept_offer` would otherwise wait forever.
+    gathered_flag: Arc<AtomicBool>,
+}
+
+impl BridgeEvents {
+    /// Peer connection state transition.
+    ///
+    /// Two jobs. On `Connected`, ask the encoder for a fresh IDR so
+    /// the viewer can decode immediately rather than waiting for the
+    /// next periodic keyframe. On a terminal state, signal `dead` so
+    /// the server-side reaper can tear the bridge and encoder down
+    /// proactively.
+    async fn on_state_change(&self, state: RTCPeerConnectionState) {
+        if let Ok(mut shadow) = self.state.lock() {
+            *shadow = state;
+        }
+
+        match state {
+            RTCPeerConnectionState::Connected => {
+                if let Err(err) = self
+                    .encoder_control
+                    .send(EncoderControl::RequestKeyframe)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        "WebrtcBridge: failed to request keyframe on Connected",
+                    );
+                } else {
+                    tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                }
+            }
+            // `swap(true)` returns the previous value; the guard
+            // fires only on the very first terminal transition so
+            // subsequent state changes (e.g. Disconnected → Closed)
+            // do not re-notify.
+            RTCPeerConnectionState::Failed
+            | RTCPeerConnectionState::Disconnected
+            | RTCPeerConnectionState::Closed
+                if !self.dead_flag.swap(true, Ordering::SeqCst) =>
+            {
+                tracing::info!(
+                    ?state,
+                    "WebrtcBridge: PC reached terminal state, signalling dead",
+                );
+                self.dead.notify_waiters();
+            }
+            _ => {}
+        }
+    }
+
+    /// ICE gathering state transition.
+    ///
+    /// Raises the sticky `gathered` signal on `Complete`, which is
+    /// what `accept_offer` waits on before reading the local
+    /// description. Replaces `gathering_complete_promise()`, which
+    /// does not exist in webrtc-rs 0.20.
+    async fn on_ice_gathering_state_change(&self, state: RTCIceGathererState) {
+        if state != RTCIceGathererState::Complete {
+            return;
+        }
+        // Sticky, and fired once: `swap(true)` returning false means
+        // this is the first Complete, so late waiters can take the
+        // flag fast-path instead of blocking on a notification that
+        // already happened.
+        if !self.gathered_flag.swap(true, Ordering::SeqCst) {
+            tracing::debug!("WebrtcBridge: ICE gathering complete");
+            self.gathered.notify_waiters();
+        }
+    }
+
+    /// A message arrived on a control datachannel — either the one
+    /// this bridge created or one the remote peer opened. Both fan in
+    /// here so `control_rx()` sees messages from either direction.
+    async fn on_control_message(&self, data: Vec<u8>, source: &'static str) {
+        if self.incoming_tx.send(data).await.is_err() {
+            tracing::debug!(
+                source,
+                "WebrtcBridge: control_rx receiver dropped, message lost"
+            );
+        }
+    }
+}
 
 /// Configuration for [`WebrtcBridge::new`].
 pub struct WebrtcBridgeConfig {
@@ -156,6 +275,24 @@ pub struct WebrtcBridge {
     /// [`WebrtcBridge::wait_for_dead`] when the bridge already
     /// died before they began awaiting.
     dead_flag: Arc<AtomicBool>,
+    /// Latest peer connection state, shadowed by [`BridgeEvents`].
+    /// Read by the `#[cfg(test)]` `connection_state` accessor rather
+    /// than asking the peer connection, because
+    /// `RTCPeerConnection::connection_state` does not survive the
+    /// webrtc-rs 0.20 port.
+    ///
+    /// Only that accessor reads it, so outside a `cfg(test)` build of
+    /// this crate the field is genuinely unused. It is kept
+    /// unconditionally anyway: `BridgeEvents` writes to it on every
+    /// transition regardless, and making the field itself conditional
+    /// would mean two shapes of `WebrtcBridge` to keep in step.
+    #[cfg_attr(not(test), allow(dead_code))]
+    state: Arc<Mutex<RTCPeerConnectionState>>,
+    /// Fires once when ICE gathering completes; `gathered_flag` is
+    /// the sticky companion that lets a late waiter skip the wait.
+    /// Awaited by [`WebrtcBridge::wait_for_gathering`].
+    gathered: Arc<Notify>,
+    gathered_flag: Arc<AtomicBool>,
 }
 
 impl WebrtcBridge {
@@ -247,54 +384,10 @@ impl WebrtcBridge {
         let dead = Arc::new(Notify::new());
         let dead_flag = Arc::new(AtomicBool::new(false));
 
-        // Keyframe-on-attach: whenever the PC reaches Connected, ask
-        // the encoder for a fresh IDR so the viewer can decode
-        // immediately rather than waiting for the next periodic
-        // keyframe. Also signals "dead" on terminal states so the
-        // server-side reaper can tear the bridge down proactively.
-        let on_connected_tx = config.encoder_control.clone();
-        let dead_cb = dead.clone();
-        let dead_flag_cb = dead_flag.clone();
-        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-            let tx = on_connected_tx.clone();
-            let dead = dead_cb.clone();
-            let dead_flag = dead_flag_cb.clone();
-            Box::pin(async move {
-                match state {
-                    RTCPeerConnectionState::Connected => {
-                        if let Err(err) = tx.send(EncoderControl::RequestKeyframe).await {
-                            tracing::warn!(
-                                error = %err,
-                                "WebrtcBridge: failed to request keyframe on Connected",
-                            );
-                        } else {
-                            tracing::debug!("WebrtcBridge: requested keyframe on Connected");
-                        }
-                    }
-                    // `swap(true)` returns the previous value;
-                    // the guard fires only on the very first
-                    // terminal transition so subsequent state
-                    // changes (e.g. Disconnected → Closed) do
-                    // not re-notify.
-                    RTCPeerConnectionState::Failed
-                    | RTCPeerConnectionState::Disconnected
-                    | RTCPeerConnectionState::Closed
-                        if !dead_flag.swap(true, Ordering::SeqCst) =>
-                    {
-                        tracing::info!(
-                            ?state,
-                            "WebrtcBridge: PC reached terminal state, signalling dead",
-                        );
-                        dead.notify_waiters();
-                    }
-                    _ => {}
-                }
-            })
-        }));
-
-        // Control DC incoming message fan-in: the on_message callback
-        // pushes raw bytes onto a bounded mpsc channel. The consumer
-        // takes the Receiver once via `control_rx()`.
+        // Control DC incoming message fan-in: both the DC this bridge
+        // created and any DC the remote peer opens push raw bytes
+        // onto one bounded mpsc channel. The consumer takes the
+        // Receiver once via `control_rx()`.
         //
         // Two DCs are involved in a two-bridge loopback scenario:
         //   1. This bridge's own `control_dc` (created above) — used
@@ -304,45 +397,57 @@ impl WebrtcBridge {
         //      acts as the answerer (`on_data_channel` callback) —
         //      this carries messages sent by the remote peer on its
         //      own created DC.
-        // Both are wired to the same `incoming_tx` so `control_rx()`
-        // delivers messages from either direction.
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
 
-        let incoming_tx_clone = incoming_tx.clone();
-        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-            let tx = incoming_tx_clone.clone();
-            Box::pin(async move {
-                let bytes = msg.data.to_vec();
-                if tx.send(bytes).await.is_err() {
-                    tracing::debug!("WebrtcBridge: control_rx receiver dropped, message lost");
-                }
-            })
+        let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
+        let gathered = Arc::new(Notify::new());
+        let gathered_flag = Arc::new(AtomicBool::new(false));
+        let events = Arc::new(BridgeEvents {
+            encoder_control: config.encoder_control.clone(),
+            dead: dead.clone(),
+            dead_flag: dead_flag.clone(),
+            incoming_tx,
+            state: state.clone(),
+            gathered: gathered.clone(),
+            gathered_flag: gathered_flag.clone(),
+        });
+
+        // Everything below is a delegation to `BridgeEvents`. In
+        // webrtc-rs 0.20 these three registrations collapse into a
+        // single `.with_handler(events)` on the builder.
+        let ev = events.clone();
+        pc.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_state_change(state).await })
         }));
 
-        // Also handle DCs initiated by the remote peer. When this
-        // bridge acts as the answerer in an SDP exchange, the offerer's
-        // DC arrives here via `on_data_channel`. Wire its `on_message`
-        // to the same channel so `control_rx()` sees all incoming
-        // messages regardless of which side initiated the DC.
-        let incoming_tx_dc = incoming_tx.clone();
+        let ev = events.clone();
+        pc.on_ice_gathering_state_change(Box::new(move |state: RTCIceGathererState| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_ice_gathering_state_change(state).await })
+        }));
+
+        let ev = events.clone();
+        control_dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let ev = ev.clone();
+            Box::pin(async move { ev.on_control_message(msg.data.to_vec(), "local-dc").await })
+        }));
+
+        // DCs initiated by the remote peer. When this bridge acts as
+        // the answerer, the offerer's DC arrives here.
+        let ev = events.clone();
         pc.on_data_channel(Box::new(move |remote_dc: Arc<RTCDataChannel>| {
-            let tx = incoming_tx_dc.clone();
+            let ev = ev.clone();
             Box::pin(async move {
                 tracing::debug!(
                     label = %remote_dc.label(),
                     "WebrtcBridge: remote DC received via on_data_channel"
                 );
                 remote_dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                    let tx = tx.clone();
-                    Box::pin(async move {
-                        let bytes = msg.data.to_vec();
-                        if tx.send(bytes).await.is_err() {
-                            tracing::debug!(
-                                "WebrtcBridge: control_rx receiver dropped, \
-                                 remote-DC message lost"
-                            );
-                        }
-                    })
+                    let ev = ev.clone();
+                    Box::pin(
+                        async move { ev.on_control_message(msg.data.to_vec(), "remote-dc").await },
+                    )
                 }));
             })
         }));
@@ -358,6 +463,9 @@ impl WebrtcBridge {
             incoming_control,
             dead,
             dead_flag,
+            state,
+            gathered,
+            gathered_flag,
         })
     }
 
@@ -376,11 +484,25 @@ impl WebrtcBridge {
     /// `notified().await` is cancellation-safe: dropping the
     /// awaiting future does not leak any state inside the
     /// `Notify`.
+    ///
+    /// The `enable()` before the flag check is load-bearing.
+    /// `Notified` does not register interest until it is first
+    /// polled, so checking the flag and *then* awaiting leaves a
+    /// window: the peer connection can reach a terminal state
+    /// between the two, `notify_waiters()` fires with nobody
+    /// registered, and the await blocks forever — leaving the reaper
+    /// waiting on a bridge that already died. Registering up front
+    /// means a notification landing in that window is still
+    /// delivered.
     pub async fn wait_for_dead(&self) {
+        let notified = self.dead.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         if self.dead_flag.load(Ordering::SeqCst) {
             return;
         }
-        self.dead.notified().await;
+        notified.await;
     }
 
     /// Return a clone of the `Arc<Notify>` that fires once when
@@ -424,10 +546,7 @@ impl WebrtcBridge {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        // Block until ICE gathering finishes. `gathering_complete_promise`
-        // returns a oneshot-style receiver in webrtc-rs 0.17.
-        let mut gather_complete = self.pc.gathering_complete_promise().await;
-        let _ = gather_complete.recv().await;
+        self.wait_for_gathering().await;
 
         let local_desc = self
             .pc
@@ -435,6 +554,39 @@ impl WebrtcBridge {
             .await
             .ok_or_else(|| anyhow!("local description missing after ICE gathering"))?;
         Ok(local_desc.sdp)
+    }
+
+    /// Wait until ICE gathering has completed.
+    ///
+    /// Backed by [`BridgeEvents::on_ice_gathering_state_change`]
+    /// rather than `RTCPeerConnection::gathering_complete_promise`,
+    /// which does not exist in webrtc-rs 0.20. The sticky
+    /// `gathered_flag` gives a late caller — one that arrives after
+    /// gathering already finished — a fast-path return, exactly as
+    /// `dead_flag` does for [`Self::wait_for_dead`]. Without it a
+    /// late `accept_offer` would block forever, because `Notify` does
+    /// not queue notifications for waiters that subscribe after
+    /// `notify_waiters()`.
+    ///
+    /// The `enable()` before the flag check is what makes the
+    /// fast-path race-free. `Notified` does not register interest
+    /// until it is first polled, so the naive
+    /// "check the flag, then await" ordering has a window: gathering
+    /// can complete between the load and the first poll, firing
+    /// `notify_waiters()` with nobody registered, and the await then
+    /// blocks forever. `enable()` registers up front, so a
+    /// notification landing in that window is still delivered.
+    /// 0.17's `gathering_complete_promise` was a oneshot and had no
+    /// such window; this keeps the replacement equally safe.
+    async fn wait_for_gathering(&self) {
+        let notified = self.gathered.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        if self.gathered_flag.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
     }
 
     /// Spawn the video pump task: consume [`EncodedFrame`]s from
@@ -548,7 +700,7 @@ impl WebrtcBridge {
 /// The default-codecs register call may or may not include H.264
 /// depending on the webrtc-rs build features. Registering manually
 /// guarantees the answer SDP advertises H.264.
-fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
+pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
     let h264 = RTCRtpCodecParameters {
         capability: RTCRtpCodecCapability {
             mime_type: MIME_TYPE_H264.to_owned(),
@@ -838,8 +990,7 @@ impl WebrtcBridge {
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        let mut gather = self.pc.gathering_complete_promise().await;
-        let _ = gather.recv().await;
+        self.wait_for_gathering().await;
         let local = self
             .pc
             .local_description()
@@ -856,12 +1007,19 @@ impl WebrtcBridge {
         Ok(())
     }
 
-    /// Return the current peer connection state. Used in tests to
-    /// poll until both sides reach `Connected`.
-    pub(crate) fn connection_state(
-        &self,
-    ) -> webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState {
-        self.pc.connection_state()
+    /// Return the most recent peer connection state observed by
+    /// [`BridgeEvents::on_state_change`]. Used in tests to poll until
+    /// both sides reach `Connected`.
+    ///
+    /// Reads the shadow rather than the peer connection: the
+    /// inherent `RTCPeerConnection::connection_state` does not
+    /// survive the webrtc-rs 0.20 port, whereas the state-change
+    /// callback that feeds this does.
+    pub(crate) fn connection_state(&self) -> RTCPeerConnectionState {
+        self.state
+            .lock()
+            .map(|s| *s)
+            .unwrap_or(RTCPeerConnectionState::Unspecified)
     }
 }
 
@@ -873,8 +1031,8 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-    use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
+
+    use crate::test_client::TestPeer;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_constructs_with_empty_ice_servers() {
@@ -898,54 +1056,14 @@ mod tests {
         .await
         .expect("bridge");
 
-        // Build a separate "client" PC to generate an offer that the
-        // bridge can answer. The client adds recvonly video + audio
-        // transceivers so its offer has m=video and m=audio sections.
-        let mut client_me = MediaEngine::default();
-        client_me
-            .register_default_codecs()
-            .expect("client default codecs");
-        register_h264(&mut client_me).expect("client h264");
-        let mut client_reg = Registry::new();
-        client_reg =
-            register_default_interceptors(client_reg, &mut client_me).expect("client interceptors");
-        let client_api = APIBuilder::new()
-            .with_media_engine(client_me)
-            .with_interceptor_registry(client_reg)
-            .build();
-        let client_pc = client_api
-            .new_peer_connection(RTCConfiguration::default())
-            .await
-            .expect("client pc");
+        // A separate "client" peer generates an offer for the bridge
+        // to answer. No seed datachannel and no gathering wait: this
+        // test only inspects the answer's codec advertisement, so it
+        // never completes a handshake.
+        let client = TestPeer::builder().build().await.expect("client peer");
+        let offer_sdp = client.create_offer().await.expect("offer");
 
-        let _video_tx = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Video,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("video transceiver");
-        let _audio_tx = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Audio,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("audio transceiver");
-
-        let offer = client_pc.create_offer(None).await.expect("offer");
-        client_pc
-            .set_local_description(offer.clone())
-            .await
-            .expect("client lsd");
-
-        let answer_sdp = bridge.accept_offer(offer.sdp).await.expect("accept_offer");
+        let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
 
         // The answer SDP should advertise both H.264 and Opus. Match
         // case-insensitively because SDP capitalisation is not
@@ -962,7 +1080,7 @@ mod tests {
             answer_sdp
         );
 
-        client_pc.close().await.expect("client close");
+        client.close().await.expect("client close");
         bridge.close().await.expect("bridge close");
     }
 
@@ -1206,6 +1324,127 @@ mod tests {
 
         server.close().await.expect("server close");
         client.close().await.expect("client close");
+    }
+
+    /// `accept_offer` must return an answer carrying every gathered
+    /// candidate, run after run.
+    ///
+    /// This is the acceptance test for replacing
+    /// `gathering_complete_promise()` with the sticky
+    /// `on_ice_gathering_state_change` signal. The failure mode being
+    /// guarded against is subtle and nasty: a signal that fires
+    /// slightly too early yields an answer that is missing
+    /// candidates, which still parses, still completes a handshake on
+    /// loopback, and only fails on networks where the dropped
+    /// candidate was the one that mattered. Counting candidates
+    /// across repeated runs is what makes an early signal visible.
+    ///
+    /// Twenty iterations because a race that shows up one time in
+    /// five would otherwise sail through a single-run test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accept_offer_answer_carries_all_candidates() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let mut counts = Vec::new();
+        for i in 0..20 {
+            let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+            let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+                ice_servers: vec![],
+                encoder_control: tx,
+            })
+            .await
+            .expect("bridge");
+
+            let client = TestPeer::builder()
+                .seed_data_channel("client-seed")
+                .build()
+                .await
+                .expect("client peer");
+            let offer_sdp = client.offer_and_gather().await.expect("client offer");
+            let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
+
+            let candidates = answer_sdp
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .count();
+            assert!(
+                candidates > 0,
+                "iteration {i}: answer carried no ICE candidates, so the \
+                 gathering signal fired before any were gathered:\n{answer_sdp}"
+            );
+            counts.push(candidates);
+
+            client.close().await.expect("client close");
+            bridge.close().await.expect("bridge close");
+        }
+
+        let first = counts[0];
+        assert!(
+            counts.iter().all(|&c| c == first),
+            "answer candidate count varied across runs, which means the \
+             gathering signal is racing: {counts:?}"
+        );
+    }
+
+    /// The gathering signal must not fire before the local
+    /// description actually carries the candidates.
+    ///
+    /// `accept_offer` reads `local_description()` immediately after
+    /// waiting, so if `on_ice_gathering_state_change(Complete)` can
+    /// be observed before the description is updated, the answer goes
+    /// out short. Asserting the description is populated the instant
+    /// the wait returns pins that ordering.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gathering_signal_fires_after_local_description_is_populated() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge");
+
+        let client = TestPeer::builder()
+            .seed_data_channel("client-seed")
+            .build()
+            .await
+            .expect("client peer");
+        let offer_sdp = client.offer_and_gather().await.expect("client offer");
+
+        let offer = RTCSessionDescription::offer(offer_sdp).expect("offer");
+        bridge.pc.set_remote_description(offer).await.expect("srd");
+        let answer = bridge.pc.create_answer(None).await.expect("answer");
+        bridge.pc.set_local_description(answer).await.expect("sld");
+
+        bridge.wait_for_gathering().await;
+
+        let local = bridge
+            .pc
+            .local_description()
+            .await
+            .expect("local description must exist once gathering completed");
+        assert!(
+            local.sdp.contains("a=candidate:"),
+            "gathering reported complete but the local description \
+             carries no candidates yet:\n{}",
+            local.sdp
+        );
+
+        // Gathering has definitely completed by now, so this second
+        // call must take the sticky-flag fast path. Whether the first
+        // call above blocked on the notification or already found the
+        // flag set depends on timing, so this is what guarantees the
+        // late-subscriber path is covered at all — without it a
+        // regression that made `wait_for_gathering` hang for late
+        // callers could pass the suite.
+        tokio::time::timeout(Duration::from_millis(100), bridge.wait_for_gathering())
+            .await
+            .expect("a late wait_for_gathering must return via the sticky flag");
+
+        client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

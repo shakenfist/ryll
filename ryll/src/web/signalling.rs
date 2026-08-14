@@ -383,6 +383,7 @@ mod tests {
     use crate::web::server::{build_router, WebState};
     use axum::body::Body;
     use axum::http::{header, Method, Request as HttpRequest, StatusCode};
+    use shakenfist_spice_webrtc::test_client::TestPeer;
     use tower::ServiceExt;
 
     /// Helper struct that mirrors [`OfferRes`] for
@@ -429,69 +430,28 @@ mod tests {
 
         // Build a client-side PC to generate a real SDP
         // offer.
-        use webrtc::api::interceptor_registry::register_default_interceptors;
-        use webrtc::api::media_engine::MediaEngine;
-        use webrtc::api::APIBuilder;
-        use webrtc::interceptor::registry::Registry;
-        use webrtc::peer_connection::configuration::RTCConfiguration;
-        use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-        use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-        use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
-
-        let mut me = MediaEngine::default();
-        me.register_default_codecs().expect("default codecs");
-        let mut reg = Registry::new();
-        reg = register_default_interceptors(reg, &mut me).expect("interceptors");
-        let api = APIBuilder::new()
-            .with_media_engine(me)
-            .with_interceptor_registry(reg)
-            .build();
-        let client_pc = api
-            .new_peer_connection(RTCConfiguration::default())
+        //
+        // Phase 3 step 3f finding: the offer must carry an
+        // m=application section, or the bridge's data-channel
+        // expectations don't match the answer side. That is
+        // what the seed datachannel is for.
+        //
+        // This test previously built its client without the
+        // bridge's explicit H.264 registration. That turns out
+        // to be indistinguishable from registering it --
+        // webrtc-rs's default codecs already advertise H.264 --
+        // so `TestPeer`'s single spelling is used here too. See
+        // `register_h264_is_redundant_with_default_codecs` in
+        // shakenfist-spice-webrtc.
+        let client = TestPeer::builder()
+            .seed_data_channel("control-seed")
+            .build()
             .await
-            .expect("client pc");
+            .expect("client peer");
 
-        // Phase 3 step 3f finding: must create a DC before
-        // the offer so the SDP carries an m=application
-        // section. Without it, the bridge's data-channel
-        // expectations don't match the answer side.
-        let _client_dc = client_pc
-            .create_data_channel("control-seed", None)
-            .await
-            .expect("client dc");
-
-        let _ = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Video,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("video transceiver");
-        let _ = client_pc
-            .add_transceiver_from_kind(
-                RTPCodecType::Audio,
-                Some(RTCRtpTransceiverInit {
-                    direction: RTCRtpTransceiverDirection::Recvonly,
-                    send_encodings: vec![],
-                }),
-            )
-            .await
-            .expect("audio transceiver");
-
-        let offer = client_pc.create_offer(None).await.expect("offer");
-        client_pc
-            .set_local_description(offer.clone())
-            .await
-            .expect("client lsd");
-
-        // Wait for ICE gathering complete so the offer
-        // carries every candidate.
-        let mut gather = client_pc.gathering_complete_promise().await;
-        let _ = gather.recv().await;
-        let final_offer_sdp = client_pc.local_description().await.unwrap().sdp;
+        // Gathering completes before the offer is returned, so
+        // it carries every candidate.
+        let final_offer_sdp = client.offer_and_gather().await.expect("offer");
 
         // POST the offer.
         let body = serde_json::json!({
@@ -533,16 +493,11 @@ mod tests {
 
         // Cleanup: feed the answer back to the client PC so
         // it can close cleanly.
-        let answer_obj =
-            webrtc::peer_connection::sdp::session_description::RTCSessionDescription::answer(
-                answer.sdp,
-            )
-            .unwrap();
-        client_pc
-            .set_remote_description(answer_obj)
+        client
+            .set_remote_answer(answer.sdp)
             .await
             .expect("client rsd");
-        client_pc.close().await.expect("client close");
+        client.close().await.expect("client close");
     }
 
     /// Without a token, `POST /offer` is rejected by the

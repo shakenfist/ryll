@@ -21,24 +21,12 @@
 //! No browser involved; SDP exchange is direct between the two
 //! peers. ICE uses host-only candidates (empty `ice_servers`).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use shakenfist_spice_renderer::EncoderControl;
 use tokio::sync::mpsc;
-use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
-use webrtc::api::APIBuilder;
-use webrtc::interceptor::registry::Registry;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
-use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
-use webrtc::rtp_transceiver::rtp_codec::{
-    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
-};
-use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
-use webrtc::rtp_transceiver::RTCRtpTransceiverInit;
 
+use shakenfist_spice_webrtc::test_client::TestPeer;
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -59,97 +47,27 @@ async fn pc_close_signals_dead() {
     .await
     .expect("server bridge");
 
-    // ── Client: hand-rolled RTCPeerConnection ───────────────────
+    // ── Client: TestPeer ────────────────────────────────────────
     //
-    // Codec registration mirrors the server bridge: default codecs
-    // (Opus, VP8, several H.264 profiles, ...) plus an explicit
-    // H.264 PT 102 with the same fmtp line as the bridge so the
-    // SDP offer/answer converges.
-    let mut media_engine = MediaEngine::default();
-    media_engine
-        .register_default_codecs()
-        .expect("default codecs");
-    let h264 = RTCRtpCodecParameters {
-        capability: RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_H264.to_owned(),
-            clock_rate: 90_000,
-            channels: 0,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                .to_owned(),
-            rtcp_feedback: vec![],
-        },
-        payload_type: 102,
-        ..Default::default()
-    };
-    media_engine
-        .register_codec(h264, RTPCodecType::Video)
-        .expect("client h264");
-
-    let mut registry = Registry::new();
-    registry = register_default_interceptors(registry, &mut media_engine).expect("interceptors");
-    let api = APIBuilder::new()
-        .with_media_engine(media_engine)
-        .with_interceptor_registry(registry)
-        .build();
-    let client_pc = Arc::new(
-        api.new_peer_connection(RTCConfiguration::default())
-            .await
-            .expect("client pc"),
-    );
-
-    // Add recv-only video and audio transceivers so the offer
-    // carries m=video and m=audio sections.
-    let _ = client_pc
-        .add_transceiver_from_kind(
-            RTPCodecType::Video,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                send_encodings: vec![],
-            }),
-        )
+    // The seed datachannel puts an m=application section in the
+    // offer so the bridge's control DC negotiates over SCTP.
+    // Without it the SCTP association never opens and the handshake
+    // stalls — see the loopback test for the full rationale.
+    let client = TestPeer::builder()
+        .seed_data_channel("client-seed")
+        .build()
         .await
-        .expect("video transceiver");
-    let _ = client_pc
-        .add_transceiver_from_kind(
-            RTPCodecType::Audio,
-            Some(RTCRtpTransceiverInit {
-                direction: RTCRtpTransceiverDirection::Recvonly,
-                send_encodings: vec![],
-            }),
-        )
-        .await
-        .expect("audio transceiver");
-
-    // Seed an m=application section so the bridge's control DC
-    // negotiates over SCTP. Without this the SCTP association
-    // never opens and the loopback handshake stalls — see the
-    // loopback test for the full rationale.
-    let _client_seed_dc = client_pc
-        .create_data_channel("client-seed", None)
-        .await
-        .expect("client seed dc");
+        .expect("client peer");
 
     // ── SDP exchange: client offers, server answers ─────────────
-    let offer = client_pc.create_offer(None).await.expect("offer");
-    client_pc
-        .set_local_description(offer)
-        .await
-        .expect("client lsd");
-    let mut gather = client_pc.gathering_complete_promise().await;
-    let _ = gather.recv().await;
-    let final_offer_sdp = client_pc
-        .local_description()
-        .await
-        .expect("client local description")
-        .sdp;
+    let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
 
     let answer_sdp = server
         .accept_offer(final_offer_sdp)
         .await
         .expect("server accept");
-    let answer = RTCSessionDescription::answer(answer_sdp).expect("answer");
-    client_pc
-        .set_remote_description(answer)
+    client
+        .set_remote_answer(answer_sdp)
         .await
         .expect("client rsd");
 
@@ -160,20 +78,10 @@ async fn pc_close_signals_dead() {
     // complete) its half of the handshake. The server's PC state
     // is not exposed on `WebrtcBridge`'s public API outside of
     // `cfg(test)`, so polling the client side is sufficient.
-    let connected = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if client_pc.connection_state() == RTCPeerConnectionState::Connected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await;
-    assert!(
-        connected.is_ok(),
-        "client PC did not reach Connected within 20s (state={:?})",
-        client_pc.connection_state(),
-    );
+    client
+        .wait_until_connected(Duration::from_secs(20))
+        .await
+        .expect("client PC did not reach Connected");
 
     // ── Force the server's PC into a terminal state ────────────
     //
@@ -185,7 +93,7 @@ async fn pc_close_signals_dead() {
     // fires in well under 5 s, but the ICE consent-freshness
     // timer and DTLS close_notify propagation are not strictly
     // bounded — give CI runners a generous 35 s ceiling.
-    client_pc.close().await.expect("client close");
+    client.close().await.expect("client close");
 
     let dead = tokio::time::timeout(Duration::from_secs(35), server.wait_for_dead()).await;
     assert!(
