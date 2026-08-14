@@ -8,7 +8,7 @@
 //! datachannel send/recv (3e) attaches later.
 
 mod bridge;
-pub mod sticky;
+mod sticky;
 
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
 pub use sticky::StickySignal;

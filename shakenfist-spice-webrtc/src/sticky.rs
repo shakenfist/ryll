@@ -123,10 +123,17 @@ mod tests {
             .expect("a late waiter must take the sticky fast-path");
     }
 
-    /// The lost-wakeup window: the signal is raised after the waiter
-    /// has registered interest (first poll) but the waiter must still
-    /// wake. This is the exact schedule that hung the reaper before
-    /// the phase-01 fix.
+    /// A waiter registered before the raise is woken by it.
+    ///
+    /// Note what this does *not* pin: the lost-wakeup window itself
+    /// (a raise landing between the flag check and the `Notified`'s
+    /// first poll). On this single-threaded runtime the waiter runs
+    /// to its await point before the raise, so even the buggy
+    /// check-then-await ordering would pass here. The window is
+    /// covered probabilistically by
+    /// `concurrent_raise_and_wait_never_lose_the_wakeup` below;
+    /// this test pins the ordinary notification path
+    /// deterministically.
     ///
     /// Single-threaded runtime on purpose: `yield_now` then
     /// deterministically runs the spawned waiter up to its await
@@ -182,6 +189,48 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), signal.wait())
             .await
             .expect("a repeat waiter must return immediately");
+    }
+
+    /// Hammer the raise/wait race on a genuinely parallel runtime.
+    ///
+    /// Each iteration spawns a fresh waiter and raiser with no
+    /// synchronisation between them, so across many iterations the
+    /// raise lands at every point of the wait sequence — including
+    /// inside the window between the flag check and the first poll,
+    /// which the deterministic tests above cannot reach. Against the
+    /// buggy check-then-await ordering (no `enable()`), iterations
+    /// where the raise lands in that window hang the waiter and trip
+    /// the per-iteration timeout. Probabilistic rather than
+    /// exhaustive, but it is the only test in the suite with a
+    /// non-zero chance of observing the schedule that caused the
+    /// original reaper bug.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_raise_and_wait_never_lose_the_wakeup() {
+        for i in 0..5_000 {
+            let signal = Arc::new(StickySignal::new());
+
+            let waiter = tokio::spawn({
+                let signal = Arc::clone(&signal);
+                async move { signal.wait().await }
+            });
+            let raiser = tokio::spawn({
+                let signal = Arc::clone(&signal);
+                async move {
+                    signal.raise();
+                }
+            });
+
+            tokio::time::timeout(Duration::from_secs(5), waiter)
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "iteration {i}: waiter hung — a raise landing between \
+                         the flag check and the first poll was lost"
+                    )
+                })
+                .expect("waiter task must not panic");
+            raiser.await.expect("raiser task must not panic");
+        }
     }
 
     /// Only the first raise reports having done the raising;

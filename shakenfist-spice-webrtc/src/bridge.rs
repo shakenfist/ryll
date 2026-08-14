@@ -1274,23 +1274,27 @@ mod tests {
     /// loopback, and only fails on networks where the dropped
     /// candidate was the one that mattered.
     ///
-    /// Five iterations in the smoke tier, checking only that every
-    /// answer carries at least one candidate. The stricter check —
-    /// twenty iterations with an identical candidate count in every
-    /// answer, which is what makes a signal that fires after *some*
-    /// candidates visible — couples the test to host network
-    /// stability: on the self-hosted runners, docker/veth interfaces
-    /// come and go and IPv6 temporary addresses rotate, so an exact
-    /// cross-run equality assertion is a flake waiting to happen.
-    /// Set `RYLL_GATHERING_SOAK=1` to run the full invariance check
-    /// deliberately (e.g. while touching the gathering signal, or
-    /// during the phase-04 soak) on a host known to be quiet.
+    /// The partial-gathering check is *intra-run*: after
+    /// `accept_offer` returns, wait 500 ms and re-read the local
+    /// description — if the gathering signal fired early, the
+    /// candidates that were still in flight land during that window
+    /// and the count grows past what the answer carried. This
+    /// detects the real failure mode without depending on host
+    /// network stability, which the original cross-run
+    /// equal-count assertion did: on the self-hosted runners,
+    /// docker/veth interfaces come and go and IPv6 temporary
+    /// addresses rotate, so exact equality across twenty sequential
+    /// runs is a flake waiting to happen. That stricter cross-run
+    /// invariance check still exists, gated behind
+    /// `RYLL_GATHERING_SOAK=1` (`make test` passes the variable
+    /// through to the devcontainer) for deliberate runs on a quiet
+    /// host — see AGENTS.md's Testing section.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accept_offer_answer_carries_all_candidates() {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let soak = std::env::var("RYLL_GATHERING_SOAK").is_ok_and(|v| v == "1");
-        let iterations = if soak { 20 } else { 5 };
+        let iterations = if soak { 20 } else { 3 };
 
         let mut counts = Vec::new();
         for i in 0..iterations {
@@ -1320,6 +1324,28 @@ mod tests {
                  gathering signal fired before any were gathered:\n{answer_sdp}"
             );
             counts.push(candidates);
+
+            // Gathering was Complete when accept_offer returned, so
+            // no further candidates may appear. If some do, the
+            // signal fired after *some* candidates but before the
+            // rest — the exact failure mode that yields an answer
+            // which parses, handshakes on loopback, and fails only
+            // where the missing candidate mattered.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let late = bridge
+                .pc
+                .local_description()
+                .await
+                .expect("local description must still exist")
+                .sdp
+                .lines()
+                .filter(|l| l.starts_with("a=candidate:"))
+                .count();
+            assert_eq!(
+                late, candidates,
+                "iteration {i}: candidates kept arriving after the gathering \
+                 signal fired — the answer went out short"
+            );
 
             client.close().await.expect("client close");
             bridge.close().await.expect("bridge close");

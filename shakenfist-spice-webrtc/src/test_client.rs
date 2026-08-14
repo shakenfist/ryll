@@ -303,19 +303,24 @@ impl TestPeer {
     /// handshake. Polling one end is sufficient for an in-process
     /// loopback.
     ///
-    /// A peer that reaches `Failed` or `Closed` without ever
-    /// connecting errors immediately rather than burning the full
-    /// timeout — in CI that turns a 20-second dead wait into a
-    /// sub-second failure with the right diagnosis. The timeout path
-    /// still reports the state it saw, because "did not connect" and
-    /// "connected then failed" want different debugging.
+    /// A peer observed at `Failed` or `Closed` before `Connected`
+    /// errors immediately rather than burning the full timeout — in
+    /// CI that turns a 20-second dead wait into a sub-second failure
+    /// with the observed state in the message. (The message says
+    /// "while waiting for", not "without ever connecting": a 50 ms
+    /// poll cadence cannot rule out a connect-then-close inside one
+    /// interval.) The timeout path also reports the state it saw,
+    /// because "did not connect" and "connected then failed" want
+    /// different debugging.
     pub async fn wait_until_connected(&self, timeout: Duration) -> Result<()> {
         let outcome = tokio::time::timeout(timeout, async {
             loop {
                 match self.connection_state() {
                     RTCPeerConnectionState::Connected => return Ok(()),
                     state @ (RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed) => {
-                        return Err(anyhow!("peer reached {state:?} without ever connecting"));
+                        return Err(anyhow!(
+                            "peer reached {state:?} while waiting for Connected"
+                        ));
                     }
                     _ => {}
                 }
@@ -454,6 +459,46 @@ mod tests {
         );
 
         peer.close().await.expect("close");
+    }
+
+    /// A peer at a terminal state fails `wait_until_connected` fast,
+    /// with the observed state in the message, instead of burning
+    /// the full timeout. Pins the early-exit arm added after the
+    /// PR #272 review noted it had no coverage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_until_connected_fails_fast_on_terminal_state() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let peer = TestPeer::builder().build().await.expect("peer");
+        peer.close().await.expect("close");
+
+        // close() drives the state-change callback to Closed
+        // asynchronously; give the shadow a moment to observe it so
+        // the wait below exercises the terminal arm, not the timeout.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while peer.connection_state() != RTCPeerConnectionState::Closed {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shadow never observed Closed after close()",
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let started = std::time::Instant::now();
+        let err = peer
+            .wait_until_connected(Duration::from_secs(20))
+            .await
+            .expect_err("a closed peer must not report Connected");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "terminal state should fail fast, not burn the timeout",
+        );
+        assert!(
+            err.to_string()
+                .contains("reached Closed while waiting for Connected"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     /// Codec lines from an SDP, in order.
