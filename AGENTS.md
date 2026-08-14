@@ -372,7 +372,7 @@ ryll/src/
     │                    #   parse → InputEvent + resize events into
     │                    #   the renderer's inputs channel handler
     └── lifecycle.rs     # run_bridge_reaper: watches WebrtcBridge's
-                         #   dead signal (wait_for_dead / dead_handle),
+                         #   dead signal (wait_for_dead / dead_signal),
                          #   reaps bridge + calls EncoderInfra::stop
                          #   + clears opus_active_tx when PC dies
 ```
@@ -744,6 +744,13 @@ webrtc-0.20 pre-work, and apply to all future webrtc-rs work:
 - The loopback integration test (`shakenfist-spice-webrtc/tests/
   loopback.rs`) creates two in-process `RTCPeerConnection`s and
   asserts video + audio + datachannel all flow end-to-end
+- `RYLL_GATHERING_SOAK=1 make test` runs the 20-iteration
+  invariant-candidate-count soak in
+  `accept_offer_answer_carries_all_candidates`. Off by default
+  because exact cross-run candidate-count equality is coupled to
+  host interface churn (docker/veth appearing, IPv6 temporary
+  addresses rotating). Run it on a quiet host when touching the
+  ICE gathering signal
 - Integration testing requires a real SPICE server
 - `make test-qemu` starts a local QEMU instance with SPICE on port 5900
   running the UEFI latency guest (keystrokes change screen colour) for testing

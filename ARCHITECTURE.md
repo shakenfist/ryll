@@ -382,31 +382,29 @@ proactive bridge reaping and browser-side auto-reconnect.
 
 ### Bridge dead signal
 
-`WebrtcBridge` grows two fields:
-
-- `dead: Arc<tokio::sync::Notify>` — notified exactly once
-  when the `RTCPeerConnection` reaches `Failed`,
-  `Disconnected`, or `Closed`.
-- `dead_flag: Arc<AtomicBool>` — sticky flag that lets late
-  callers avoid waiting on an already-dead bridge.
+`WebrtcBridge` carries a `dead: Arc<StickySignal>` field —
+raised exactly once when the `RTCPeerConnection` reaches
+`Failed`, `Disconnected`, or `Closed`. `StickySignal`
+(`sticky.rs`) pairs a `Notify` with a sticky `AtomicBool`, so
+late callers do not wait on an already-dead bridge and a raise
+landing mid-subscribe is not lost.
 
 Public API:
 
 - `wait_for_dead(&self) -> impl Future` — resolves when the
   PC reaches a terminal state. Returns immediately if the
-  flag is already set (late-subscriber safety).
-- `dead_handle(&self) -> Arc<Notify>` — exposes the raw
-  notify for consumers that hold their own clone without
-  keeping a reference to the bridge.
-- `dead_flag_handle(&self) -> Arc<AtomicBool>` — exposes the
-  sticky flag for the same purpose.
+  signal is already raised (late-subscriber safety).
+- `dead_signal(&self) -> Arc<StickySignal>` — exposes the
+  signal for consumers that hold their own clone without
+  keeping a reference to the bridge; `handle.wait().await`
+  is equivalent to `wait_for_dead()`.
 
 ### Server-side reaper (`ryll/src/web/lifecycle.rs`)
 
 `run_bridge_reaper(state: Arc<WebState>)` is a long-lived
 task spawned from `run_web`. Its loop:
 
-1. Peeks at the active bridge's `dead_handle()` without
+1. Clones the active bridge's `dead_signal()` without
    holding the slot lock for long.
 2. If no bridge is active, sleeps 500 ms and retries.
 3. Awaits the dead signal.
