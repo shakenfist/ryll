@@ -318,7 +318,7 @@ minutes.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Complete — baseline captured, 1g agrees within noise |
-| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Planned — not started |
+| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Code complete — awaiting the browser session, the one check the test suite cannot stand in for |
 | 3. Socket binding configuration | PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md | Not started |
 | 4. Soak validation and docs | PLAN-webrtc-0.20-upgrade-phase-04-soak.md | Not started |
 

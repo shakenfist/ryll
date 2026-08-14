@@ -525,10 +525,61 @@ specifically, back-brief the three shapes named in the step table:
 the `codings` vectors, the ownership and cancellation of the
 datachannel poll loops, and the bind-address wiring.
 
-## What landed
+## Status
 
-Filled in as the phase executes. The browser verification from the
-Definition of done still belongs here.
+| Step | State |
+|------|-------|
+| 2a — `TestPeer` callbacks at build time | Done (`df4d15b7`) |
+| 2b — non-blocking `BridgeEvents` | Done (`526d8d67`) |
+| 2c — UDP bind-address selection | Done (`0397a656`) |
+| 2d — the atomic bump | Done (`41c1e7cf`) |
+| 2e — Renovate and docs | Done (`959b14a8`) |
+
+Every Definition-of-done item is met **except the browser
+session**, which is manual and is the phase's remaining gate:
+
+- `make test` (16 suites), `make lint`, `make check-windows`,
+  `make web-smoke`, `make web-smoke-tls` and
+  `pre-commit run --all-files` all pass.
+- The manifest declares `webrtc = "0.20.2"` and `rtc = "0.20.2"`
+  and neither `rtp` nor `rustls`; `grep -rn install_default
+  shakenfist-spice-webrtc/` is empty while ryll keeps its two;
+  `webrtc = ` appears once in the workspace; `renovate.json`
+  mentions webrtc nowhere.
+- `accept_offer_answer_carries_all_candidates` asserts every
+  candidate carries a routable address.
+- `tests/lifecycle.rs` is unchanged in intent and passes.
+
+**Outstanding: a real browser against a real SPICE guest.** This
+is not a formality. Decision 4 exists because a wrong bind address
+leaves the entire automated suite green — two Rust peers on one
+host agree about an unroutable address and connect — so nothing
+above can distinguish a working deployment from a broken one. Two
+findings from 2d sharpen the same point: the datachannel
+stream-1 collision means the browser direction is now exercised
+only by a test that emulates the browser, and the new RTX
+advertisement is something only a real browser can react to.
+
+## Two decisions this phase deliberately left open
+
+Both belong to whoever reviews this before phase 04, not to the
+port:
+
+1. **We advertise RTX we never send.** `a=ssrc-group:FID` plus a
+   second video SSRC. A browser that loses a packet and NACKs gets
+   nothing back — no worse than 0.17 in outcome, but it is now
+   entitled to expect otherwise, and it costs an SSRC. Decision 5
+   deliberately did not pre-empt this; suppressing it is a change
+   with its own reasoning, not a port detail. The alternative is a
+   bare `MediaEngine` registering only H.264 and Opus.
+2. **The `remote-dc` pump is dead code in the common path** now
+   that `on_data_channel` does not fire for pre-negotiated
+   channels. It is retained because a peer that creates its
+   channel *after* negotiation would still land there. If the
+   browser session confirms nothing ever arrives that way, it
+   could go — but confirm before deleting.
+
+## What landed
 
 ### Four things this plan got wrong, found while executing 2d
 
