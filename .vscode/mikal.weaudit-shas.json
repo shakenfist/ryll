@@ -41,6 +41,10 @@
       "sha": "c899fbea321c1de86e3de21e6c0dd3e6f02db177",
       "date": "2026-08-05"
     },
+    ".github/workflows/renovate.yml": {
+      "sha": "73e1a3568311d2c04d7f419ea566879e46b38db1",
+      "date": "2026-08-15"
+    },
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
@@ -48,6 +52,14 @@
     ".pre-commit-config.yaml": {
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
+    },
+    "AGENTS.md": {
+      "sha": "2ce04cff1db69a9cf8b54bec13b8e3272d5d0ceb",
+      "date": "2026-08-15"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "868884d57283a3f4611d335f494f371f2a834edb",
+      "date": "2026-08-15"
     },
     "MERGE-TEMPLATE.md": {
       "sha": "f0926fbfe0808d692bb7a9a1a4689bf5ba6ed6a6",
@@ -221,6 +233,10 @@
       "sha": "bbef6a32df50ba89d4555daee7fde1d7bfda6683",
       "date": "2026-07-26"
     },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "3e5576687e113b15710f3efae55fb21d14945555",
+      "date": "2026-08-15"
+    },
     "ryll/src/web/mod.rs": {
       "sha": "71e9e32f4b98b11df6a457c74425127db1ac180c",
       "date": "2026-07-26"
@@ -228,6 +244,10 @@
     "ryll/src/web/server.rs": {
       "sha": "c4fbca1dd4d372882a4a55361c4fd983a1319021",
       "date": "2026-07-26"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "0bfbc908dd4dc1b5d627dc18635161ed2423c042",
+      "date": "2026-08-15"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -536,6 +556,30 @@
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
+    },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "1b7a02caeaf3359d2f959735033b4f9084d5bcb1",
+      "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/src/lib.rs": {
+      "sha": "c020d538cfeeea5ae44bf38ed78739a1aca6f53a",
+      "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/src/sticky.rs": {
+      "sha": "78e4793c82858d1b6f3a40415d7dca3f419a3139",
+      "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/src/test_client.rs": {
+      "sha": "208446b806c14ec27e06d7ff7fe425fad3b9cbe2",
+      "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
+      "sha": "a0677cd844df5c6e36067c76c41c22e89f22e8ff",
+      "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/tests/loopback.rs": {
+      "sha": "5a84677a44d53a054c7f5b7f49a9edbd96433799",
+      "date": "2026-08-15"
     },
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
