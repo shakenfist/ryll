@@ -508,10 +508,6 @@
       "author": "mikal"
     },
     {
-      "path": "ARCHITECTURE.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/configuration.md",
       "author": "mikal"
     },
@@ -709,10 +705,6 @@
     },
     {
       "path": "docs/index.md",
-      "author": "mikal"
-    },
-    {
-      "path": "AGENTS.md",
       "author": "mikal"
     }
   ],
