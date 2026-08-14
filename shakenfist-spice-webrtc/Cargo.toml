@@ -35,6 +35,16 @@ webrtc = "0.17.1"
 # 0.20 port's critical path (phase 01 step 1b).
 rtp = "0.17"
 
+# Host interface enumeration, so the WebRTC UDP sockets can be bound
+# to real addresses instead of the placeholder 0.0.0.0, which binds
+# fine and then produces host candidates every browser discards (see
+# src/bind_addrs.rs and Decision 4 of
+# docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md). MIT OR
+# BSD-3-Clause, both already on deny.toml's allowlist; pulls in libc
+# on unix and windows-sys 0.61 on Windows, and 0.61.2 is already in
+# Cargo.lock, so it adds no duplicate dependency version.
+if-addrs = "0.15"
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

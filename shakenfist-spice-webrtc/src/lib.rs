@@ -6,10 +6,17 @@
 //! step 3b ships the constructor and SDP-answer plumbing; 3c adds
 //! the video pump; 3d adds the synthetic Opus audio pump; the
 //! datachannel send/recv (3e) attaches later.
+//!
+//! [`host_udp_bind_addrs`] chooses which local addresses to bind the
+//! WebRTC UDP sockets to (see its module docs for why this needs its
+//! own reasoning). Not yet consumed here — webrtc-rs 0.20's upgrade
+//! phase 02 wires it into [`WebrtcBridge`]'s construction.
 
+mod bind_addrs;
 mod bridge;
 mod sticky;
 
+pub use bind_addrs::host_udp_bind_addrs;
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
 pub use sticky::StickySignal;
 
