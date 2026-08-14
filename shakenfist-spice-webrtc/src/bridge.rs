@@ -19,12 +19,14 @@
 //! (`profile-level-id=42e01f`, baseline level 3.1, packetization
 //! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use shakenfist_spice_renderer::{EncodedFrame, EncoderControl};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
 
 use crate::sticky::StickySignal;
@@ -97,6 +99,16 @@ const AUDIO_TONE_HZ: f64 = 440.0;
 /// comfortable listening level.
 const AUDIO_TONE_AMPLITUDE: f64 = 0.3;
 
+/// How often a run of dropped messages gets a repeat log line, once
+/// the first drop has already been logged. `BridgeEvents` uses
+/// `try_send` on both its outgoing channels so a slow consumer can
+/// never stall the peer connection's driver loop (see
+/// [`BridgeEvents`]); a consumer that stays stalled at input-event
+/// rates would otherwise produce one `warn!` per event. Logging the
+/// first drop immediately, then every Nth after that, gives a stalled
+/// consumer a periodic reminder in the logs without flooding them.
+const LOG_EVERY_N_DROPS: u64 = 100;
+
 /// The bridge's reaction to everything the peer connection tells it.
 ///
 /// Every method here is registered as a webrtc-rs callback in
@@ -106,11 +118,29 @@ const AUDIO_TONE_AMPLITUDE: f64 = 0.3;
 /// what they actually did, and webrtc-rs 0.20 replaces the per-object
 /// callback registration with a single `PeerConnectionEventHandler`
 /// trait implemented on exactly this shape. When the port lands, this
-/// type grows an `impl` and the closures in `new` go away; the bodies
-/// below do not move again.
+/// type grows an `impl` and the closures in `new` go away.
+///
+/// Phase 01 recorded that the bodies below would not move again.
+/// That turned out to be half right, and the half that is wrong is
+/// worth knowing before reading them: 0.20 keeps
+/// `on_state_change` and `on_ice_gathering_state_change` as handler
+/// methods, but datachannel messages stopped being callbacks
+/// altogether. `on_control_message` survives as a function, while its
+/// *callers* become spawned loops polling
+/// `DataChannel::poll()`.
+///
+/// # Handlers must not block
+///
+/// 0.20 awaits handler methods inline in the peer connection's driver
+/// event loop, which is the same task that services ICE, DTLS, SCTP
+/// and RTP. An await inside a method here stalls the whole
+/// connection, so both outgoing channels use `try_send` and degrade to
+/// a counted, rate-limited drop rather than waiting for a slow
+/// consumer. See [`LOG_EVERY_N_DROPS`].
 ///
 /// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
-/// step 1e.
+/// step 1e, and step 2b of the phase-02 plan for the `try_send`
+/// change.
 struct BridgeEvents {
     /// Ask the encoder for an IDR whenever a viewer attaches.
     encoder_control: mpsc::Sender<EncoderControl>,
@@ -129,9 +159,32 @@ struct BridgeEvents {
     /// reason as `dead`: a late `accept_offer` would otherwise wait
     /// forever on a notification that already happened.
     gathered: Arc<StickySignal>,
+    /// Count of keyframe requests dropped because `encoder_control`
+    /// was full — the encoder is not draining it fast enough.
+    /// Read/written with `Ordering::Relaxed`: this is a log-cadence
+    /// counter, not a synchronisation point, so it needs no ordering
+    /// guarantee beyond atomicity. See [`LOG_EVERY_N_DROPS`].
+    dropped_keyframe_requests: AtomicU64,
+    /// Count of control-datachannel messages dropped because
+    /// `incoming_tx` was full — the `control_rx()` consumer is not
+    /// draining it fast enough. Same ordering rationale as
+    /// `dropped_keyframe_requests`.
+    dropped_control_messages: AtomicU64,
 }
 
 impl BridgeEvents {
+    /// Record a dropped message on `counter` and decide whether this
+    /// particular drop should be logged.
+    ///
+    /// Returns the new running total on the first drop and on every
+    /// `LOG_EVERY_N_DROPS`th drop after that, `None` otherwise. Callers
+    /// use the total to say how many messages have been lost so far,
+    /// not just that one more was.
+    fn note_drop(counter: &AtomicU64) -> Option<u64> {
+        let total = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        (total == 1 || total.is_multiple_of(LOG_EVERY_N_DROPS)).then_some(total)
+    }
+
     /// Peer connection state transition.
     ///
     /// Two jobs. On `Connected`, ask the encoder for a fresh IDR so
@@ -152,18 +205,49 @@ impl BridgeEvents {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
 
         match state {
+            // `try_send`, not `send().await`: this method is awaited
+            // inline in webrtc-rs's peer-connection driver loop once
+            // the 0.20 port lands (see `BridgeEvents`), so it must
+            // never block on a consumer. `encoder_control` is bounded
+            // capacity 4 in the test suite, and the production
+            // encoder task is expected to drain it promptly, but a
+            // slow encoder must degrade the keyframe request, not the
+            // whole connection.
             RTCPeerConnectionState::Connected => {
-                if let Err(err) = self
+                match self
                     .encoder_control
-                    .send(EncoderControl::RequestKeyframe)
-                    .await
+                    .try_send(EncoderControl::RequestKeyframe)
                 {
-                    tracing::warn!(
-                        error = %err,
-                        "WebrtcBridge: failed to request keyframe on Connected",
-                    );
-                } else {
-                    tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                    Ok(()) => {
+                        tracing::debug!("WebrtcBridge: requested keyframe on Connected");
+                    }
+                    // The receiver was dropped — same failure and
+                    // wording as the pre-`try_send` code path.
+                    Err(err @ TrySendError::Closed(_)) => {
+                        tracing::warn!(
+                            error = %err,
+                            "WebrtcBridge: failed to request keyframe on Connected",
+                        );
+                    }
+                    // The channel is full: the encoder is behind and
+                    // did not drain the last request in time. Dropping
+                    // this one silently would leave a viewer looking
+                    // at a stale or corrupt frame until the next
+                    // periodic IDR, which nobody would be able to
+                    // explain from logs alone, so this is `warn!`
+                    // rather than `debug!`. Rate-limited via
+                    // `note_drop` so a stuck encoder does not turn
+                    // into a log line per `Connected` transition.
+                    Err(TrySendError::Full(_)) => {
+                        if let Some(dropped) = Self::note_drop(&self.dropped_keyframe_requests) {
+                            tracing::warn!(
+                                dropped,
+                                "WebrtcBridge: encoder_control channel full, dropped keyframe \
+                                 request — encoder is not keeping up, viewer may see a stale \
+                                 or corrupt frame until the next periodic IDR",
+                            );
+                        }
+                    }
                 }
             }
             // The guard has a deliberate side effect: `raise()`
@@ -202,12 +286,41 @@ impl BridgeEvents {
     /// A message arrived on a control datachannel — either the one
     /// this bridge created or one the remote peer opened. Both fan in
     /// here so `control_rx()` sees messages from either direction.
+    ///
+    /// `try_send`, not `send().await`, for the same reason as
+    /// `on_state_change`: once the 0.20 port lands this method is
+    /// awaited inline in the driver loop, so it cannot block on
+    /// `control_rx()`'s consumer. `incoming_tx` is a 64-slot channel;
+    /// letting it fill up must degrade to a dropped message, not a
+    /// stalled connection.
     async fn on_control_message(&self, data: Vec<u8>, source: &'static str) {
-        if self.incoming_tx.send(data).await.is_err() {
-            tracing::debug!(
-                source,
-                "WebrtcBridge: control_rx receiver dropped, message lost"
-            );
+        match self.incoming_tx.try_send(data) {
+            Ok(()) => {}
+            // The receiver was dropped — same failure and wording as
+            // the pre-`try_send` code path.
+            Err(TrySendError::Closed(_)) => {
+                tracing::debug!(
+                    source,
+                    "WebrtcBridge: control_rx receiver dropped, message lost"
+                );
+            }
+            // The channel is full: whoever calls `control_rx()` is
+            // not keeping up. Silently dropping here loses a keystroke
+            // or mouse event that will never be redelivered — a
+            // symptom a viewer can only report as "my input didn't
+            // work", so this is `warn!` rather than `debug!`.
+            // Rate-limited via `note_drop` so a stalled consumer at
+            // input-event rates does not flood the log.
+            Err(TrySendError::Full(_)) => {
+                if let Some(dropped) = Self::note_drop(&self.dropped_control_messages) {
+                    tracing::warn!(
+                        source,
+                        dropped,
+                        "WebrtcBridge: incoming_tx channel full, dropped control message — \
+                         control_rx() consumer is not keeping up, an input event was lost",
+                    );
+                }
+            }
         }
     }
 }
@@ -397,6 +510,8 @@ impl WebrtcBridge {
             incoming_tx,
             state: state.clone(),
             gathered: gathered.clone(),
+            dropped_keyframe_requests: AtomicU64::new(0),
+            dropped_control_messages: AtomicU64::new(0),
         });
 
         // Everything below is a delegation to `BridgeEvents`. In
