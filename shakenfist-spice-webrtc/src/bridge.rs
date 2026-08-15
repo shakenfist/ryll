@@ -1155,15 +1155,33 @@ fn negotiated_payload_type(codecs: &[RTCRtpCodecParameters], mime_type: &str) ->
 }
 
 /// The payload type to stamp on H.264 packets, preferring an entry
-/// that negotiated packetization-mode 1.
+/// that negotiated packetization-mode 1 and, among those, one whose
+/// profile matches what the encoder actually emits.
 ///
-/// The preference is not cosmetic. [`H264Payloader`] fragments NALs
-/// larger than [`VIDEO_MTU`] into FU-A units, which is exactly what
-/// packetization-mode 1 permits and mode 0 forbids (RFC 6184 §5.4,
-/// §6.2). If only a mode-0 entry survives negotiation there is nothing
-/// useful to do about it here — refusing to send guarantees a blank
-/// screen, whereas sending gets the un-fragmented frames through — so
-/// this warns and uses it.
+/// The packetization-mode preference is not cosmetic.
+/// [`H264Payloader`] fragments NALs larger than [`VIDEO_MTU`] into
+/// FU-A units, which is exactly what packetization-mode 1 permits and
+/// mode 0 forbids (RFC 6184 §5.4, §6.2). If only a mode-0 entry
+/// survives negotiation there is nothing useful to do about it here —
+/// refusing to send guarantees a blank screen, whereas sending gets
+/// the un-fragmented frames through — so this warns and uses it.
+///
+/// The profile preference breaks ties between mode-1 entries.
+/// `register_default_codecs` registers baseline, constrained-baseline
+/// and high-profile entries, and a browser may negotiate several, so
+/// without a tie-break the choice falls to intersection order and can
+/// name a profile we never produce. The renderer pins none, which
+/// leaves openh264 at its own defaults: `iEntropyCodingModeFlag` is 0
+/// (CAVLC) in `param_svc.h:164` and nothing in `EncoderConfig` or
+/// `H264Encoder::new` overrides it, so `encoder_ext.cpp:662` resolves
+/// `uiProfileIdc` to `PRO_BASELINE` — profile_idc `0x42`. Preferring a
+/// `profile-level-id` that starts `42` therefore makes the payload
+/// type we stamp agree with the bitstream we send.
+///
+/// This is a preference, not a filter. Browsers decode from the SPS
+/// rather than the SDP profile, so a mismatch is unlikely to break
+/// playback on its own; there is no case in which having no `42` entry
+/// is a reason to send nothing.
 fn negotiated_h264_payload_type(codecs: &[RTCRtpCodecParameters]) -> Option<u8> {
     let h264 = codecs.iter().filter(|codec| {
         codec
@@ -1173,11 +1191,24 @@ fn negotiated_h264_payload_type(codecs: &[RTCRtpCodecParameters]) -> Option<u8> 
     });
 
     let mut fallback: Option<u8> = None;
+    let mut off_profile: Option<u8> = None;
     for codec in h264 {
         if is_packetization_mode_1(&codec.rtp_codec.sdp_fmtp_line) {
-            return Some(codec.payload_type);
+            if is_baseline_profile(&codec.rtp_codec.sdp_fmtp_line) {
+                return Some(codec.payload_type);
+            }
+            off_profile.get_or_insert(codec.payload_type);
         }
         fallback.get_or_insert(codec.payload_type);
+    }
+
+    if let Some(pt) = off_profile {
+        tracing::debug!(
+            "webrtc: no baseline-profile H.264 entry negotiated; using packetization-mode 1 \
+             payload type {}, whose profile does not match the encoder's baseline output",
+            pt
+        );
+        return Some(pt);
     }
 
     if let Some(pt) = fallback {
@@ -1202,6 +1233,35 @@ fn is_packetization_mode_1(sdp_fmtp_line: &str) -> bool {
             (kv.next().map(str::trim), kv.next().map(str::trim)),
             (Some("packetization-mode"), Some("1"))
         )
+    })
+}
+
+/// Whether an SDP fmtp line declares a baseline-profile
+/// `profile-level-id`, i.e. one whose profile_idc byte is `0x42`.
+///
+/// RFC 6184 §8.1 defines `profile-level-id` as exactly six hex digits:
+/// profile_idc, profile_iop, level_idc. Only the first byte is
+/// compared, so both plain baseline (`42001f`) and constrained
+/// baseline (`42e01f`) match — they differ only in the constraint
+/// flags of the second byte, and openh264's `PRO_BASELINE` output is
+/// decodable by anything that offered either.
+///
+/// An absent, short or non-hex value is not baseline. Per §8.1 an
+/// absent `profile-level-id` means `42000a` — which *is* baseline —
+/// but that default only applies to a codec the remote actually
+/// offered without the parameter, and treating a malformed line as a
+/// match would let a garbled high-profile entry win the tie-break.
+/// Returning false costs nothing: the caller falls back to the first
+/// packetization-mode 1 entry either way.
+fn is_baseline_profile(sdp_fmtp_line: &str) -> bool {
+    sdp_fmtp_line.split(';').any(|param| {
+        let mut kv = param.splitn(2, '=');
+        match (kv.next().map(str::trim), kv.next().map(str::trim)) {
+            (Some("profile-level-id"), Some(id)) => {
+                id.len() == 6 && id.is_char_boundary(2) && id[..2].eq_ignore_ascii_case("42")
+            }
+            _ => false,
+        }
     })
 }
 
@@ -1753,6 +1813,70 @@ mod tests {
         // Nothing better on offer: send it rather than nothing, and
         // let the warning explain the fragmentation problem.
         assert_eq!(negotiated_h264_payload_type(&codecs), Some(108));
+    }
+
+    #[test]
+    fn negotiated_h264_payload_type_prefers_baseline_among_mode_1_entries() {
+        // A high-profile mode-1 entry first, so ordering is not what
+        // makes this pass. The encoder emits PRO_BASELINE, so 125 is
+        // the entry that describes what we actually send.
+        let codecs = vec![
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032",
+                123,
+            ),
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+                125,
+            ),
+        ];
+        assert_eq!(negotiated_h264_payload_type(&codecs), Some(125));
+    }
+
+    #[test]
+    fn negotiated_h264_payload_type_takes_an_off_profile_mode_1_entry() {
+        // No baseline entry survived. Packetization mode still wins
+        // over profile: mode 0 cannot carry a fragmented NAL at all,
+        // whereas a profile mismatch is decoded from the SPS anyway.
+        let codecs = vec![
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f",
+                108,
+            ),
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640032",
+                123,
+            ),
+        ];
+        assert_eq!(negotiated_h264_payload_type(&codecs), Some(123));
+    }
+
+    #[test]
+    fn baseline_profile_is_recognised_only_from_a_well_formed_id() {
+        assert!(is_baseline_profile(
+            "packetization-mode=1;profile-level-id=42e01f"
+        ));
+        assert!(is_baseline_profile("profile-level-id=42001f"));
+        // Case-insensitive: SDP hex digits are not case-significant.
+        assert!(is_baseline_profile("profile-level-id=42E01F"));
+
+        assert!(!is_baseline_profile("profile-level-id=640032"));
+        assert!(!is_baseline_profile("profile-level-id=4d001f"));
+        // Absent, truncated, over-long, or not a parameter at all.
+        assert!(!is_baseline_profile("packetization-mode=1"));
+        assert!(!is_baseline_profile(""));
+        assert!(!is_baseline_profile("profile-level-id=42"));
+        assert!(!is_baseline_profile("profile-level-id=42e01f00"));
+        // Six *bytes* whose second byte is mid-character: the length
+        // check passes and the `[..2]` slice would panic without the
+        // char-boundary guard. "€" is three bytes.
+        assert!(!is_baseline_profile("profile-level-id=€abc"));
+        // Six bytes, boundary at 2, but not "42".
+        assert!(!is_baseline_profile("profile-level-id=é2e01"));
     }
 
     #[test]

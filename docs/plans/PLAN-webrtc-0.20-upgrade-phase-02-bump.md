@@ -802,3 +802,17 @@ gained the replacement arm and the liveness gate, since a reader who
 trusted the old text would conclude both were redundant.
 `tests/lifecycle.rs` was correct throughout: it closes the *client*
 peer, which is the remote-side case that does still raise the signal.
+
+**13. H.264 selection ignored profile-level-id (fixed).** Taken
+rather than deferred, because the premise checked out from source.
+`negotiated_h264_payload_type` preferred a packetization-mode 1 entry
+but broke ties by intersection order, so it could name a main- or
+high-profile payload type. The renderer pins no profile
+(`H264Encoder::new` calls `Encoder::new()`), which leaves openh264 at
+`iEntropyCodingModeFlag = 0` — CAVLC — per `param_svc.h:164`, and
+`encoder_ext.cpp:662` then resolves `uiProfileIdc` to `PRO_BASELINE`.
+So the encoder emits profile_idc `0x42` and the SDP could advertise
+something else. Mode 1 still outranks profile: mode 0 cannot carry a
+fragmented NAL at all, whereas a profile mismatch is decoded from the
+SPS anyway. This changes nothing for Chrome or Firefox today; it only
+bites a browser that orders a high-profile entry first.
