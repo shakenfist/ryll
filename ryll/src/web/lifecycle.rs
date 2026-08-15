@@ -37,6 +37,20 @@
 //! the reaper was waiting), the reaper skips the reap and loops
 //! back. This prevents the reaper from closing a healthy new
 //! bridge when the old bridge's dead signal fires late.
+//!
+//! # Why the wait is a `select!`
+//!
+//! The reaper also wakes on `WebState::bridge_replaced`, and that
+//! arm is load-bearing rather than an optimisation. One task watches
+//! one bridge at a time, so the only way it advances to the next
+//! bridge is for its wait to return. On webrtc-rs 0.20 a bridge
+//! closed by `/offer` does not reliably raise `dead`: `close()`
+//! usually consumes the driver before it dispatches the `Closed`
+//! transition, and a stopped driver cannot deliver an ICE or DTLS
+//! event either. Waiting on `dead` alone would therefore park this
+//! task forever the first time a viewer reloaded the page. On 0.17
+//! this could not happen — `pc.close()` drove the state-change
+//! callback to `Closed`, which raised `dead` and released the reaper.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -80,16 +94,35 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
             continue;
         };
 
-        // Wait for the bridge to die. `StickySignal::wait` carries
-        // both guards this needs: the sticky fast-path for a bridge
-        // that died before we subscribed, and interest registration
-        // before the flag check so a death landing mid-subscribe is
-        // still delivered rather than lost.
-        dead.wait().await;
+        // Wait for the bridge to die, or for `/offer` to replace it.
+        //
+        // `StickySignal::wait` carries both guards the death case
+        // needs: the sticky fast-path for a bridge that died before we
+        // subscribed, and interest registration before the flag check
+        // so a death landing mid-subscribe is still delivered rather
+        // than lost.
+        //
+        // The replacement arm is not an optimisation. This task is
+        // long-lived and watches one bridge at a time, so the *only*
+        // way it moves on to the next bridge is for this wait to
+        // return — and a bridge that `/offer` closed does not reliably
+        // raise its dead signal on webrtc-rs 0.20, because `close()`
+        // usually consumes the driver before it dispatches the
+        // `Closed` transition, after which no ICE or DTLS event can
+        // fire either. Watching only `dead` would park this task on a
+        // signal that will never fire, for the rest of the process's
+        // life: the encoder would keep running for nobody, the audio
+        // tap would keep feeding a dead pump, and no later viewer
+        // would ever be reaped.
+        tokio::select! {
+            () = dead.wait() => {}
+            () = state.bridge_replaced.notified() => {}
+        }
 
         // Generation check: if `/offer` replaced the bridge
         // while we were waiting, skip the reap. The new bridge
         // is healthy and its own dead-signal is yet to fire.
+        // This is also the replacement arm's normal exit.
         let gen_now = state.bridge_generation.load(Ordering::SeqCst);
         if gen_now != gen_at_subscribe {
             tracing::debug!(
@@ -190,14 +223,93 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
     }
 
-    // NOTE: A unit test that exercises the race path (generation
-    // mismatch causes reaper to skip a reap) requires constructing
-    // a real `WebrtcBridge` (which needs a running ICE/DTLS stack).
-    // That is too heavy for a unit test. The no-regression case —
-    // a normal browser disconnect triggers a reap — is covered by
-    // the integration test `post_offer_returns_valid_answer` in
-    // `signalling.rs` (the bridge is closed at the end of that
-    // test, which transitions the PC to Closed state). The
-    // generation-counter skip path is exercised by code inspection
-    // and the logic above.
+    /// A bridge replaced by `/offer` does not strand the reaper on the
+    /// old bridge's dead signal.
+    ///
+    /// This is the path that broke on the webrtc-rs 0.20 port. The
+    /// reaper watches one bridge at a time and only advances when its
+    /// wait returns; `close()` on 0.20 does not reliably raise `dead`,
+    /// so a reaper watching only `dead` parks on the replaced bridge
+    /// forever and never reaps any later viewer.
+    ///
+    /// Both bridges are real, but no peer connects to either — the
+    /// dead signal is raised directly through the public
+    /// [`shakenfist_spice_webrtc::StickySignal::raise`], which is what
+    /// the state-change handler would do, so the test is deterministic
+    /// and needs no ICE or DTLS.
+    ///
+    /// Without the replacement arm in `run_bridge_reaper`, this fails
+    /// by timeout with the bridge still sitting in the slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reaper_follows_a_replaced_bridge() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+        use tokio::sync::mpsc;
+
+        let state = Arc::new(WebState::new());
+
+        let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
+        let first = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: enc_tx.clone(),
+        })
+        .await
+        .expect("first bridge");
+        let first_dead = first.dead_signal();
+        {
+            let mut slot = state.bridge_slot.lock().await;
+            *slot = Some(first);
+        }
+
+        // The reaper parks on the first bridge's dead signal, which
+        // this test never raises.
+        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Replace it, exactly as `post_offer` does: install, bump the
+        // generation, then wake the reaper.
+        let second = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: enc_tx,
+        })
+        .await
+        .expect("second bridge");
+        let second_dead = second.dead_signal();
+        {
+            let mut slot = state.bridge_slot.lock().await;
+            let old = slot.replace(second);
+            state.bridge_generation.fetch_add(1, Ordering::SeqCst);
+            if let Some(old) = old {
+                old.close().await.ok();
+            }
+        }
+        state.bridge_replaced.notify_one();
+
+        // Give the reaper a moment to re-read the slot and park on the
+        // new bridge, then kill that one.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !first_dead.is_raised(),
+            "the first bridge's dead signal was never raised by this test; if it is raised \
+             here the test is no longer proving what it claims to"
+        );
+        second_dead.raise();
+
+        // The reaper must now reap: the slot ends up empty.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if state.bridge_slot.lock().await.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reaper did not reap the replacement bridge within 5s — it is probably still \
+                 waiting on the replaced bridge's dead signal"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        reaper.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+    }
 }

@@ -370,6 +370,19 @@ pub async fn post_offer(
         state.bridge_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    // Wake the reaper so it stops watching the bridge we just
+    // replaced. Strictly after the generation bump above: the reaper
+    // compares generations on waking to decide whether the bridge it
+    // was watching is still current, and waking it any earlier would
+    // have it see an unchanged counter and reap the bridge installed
+    // a line ago.
+    //
+    // Needed because closing the old bridge does not reliably raise
+    // its dead signal on webrtc-rs 0.20 — without this the reaper
+    // parks on a signal that will never fire and never observes any
+    // later bridge. See `crate::web::lifecycle::run_bridge_reaper`.
+    state.bridge_replaced.notify_one();
+
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
     Ok(Json(OfferRes {
         res_type: "answer",
@@ -403,10 +416,13 @@ mod tests {
     /// carries an SDP answer that advertises H.264.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn post_offer_returns_valid_answer() {
-        // When both aws-lc-rs and ring are in the dependency
-        // tree (webrtc 0.17.1 pulls both via rustls 0.23)
-        // rustls cannot auto-select a CryptoProvider. Install
-        // ring explicitly before the DTLS handshake starts.
+        // Install the rustls ring provider, mirroring the
+        // production install in `main()`. Not for the DTLS
+        // handshake: `shakenfist-spice-webrtc` has no rustls
+        // dependency since the webrtc-0.20 port, and rtc-dtls
+        // selects its crypto provider from its own cargo
+        // features without consulting the process default. It
+        // is the SPICE TLS and axum-server paths that need one.
         // `install_default` is idempotent across concurrent
         // tests (it returns Err if already set, which we
         // ignore).
