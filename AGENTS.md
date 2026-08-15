@@ -31,6 +31,10 @@ Related repositories:
 | How do I build, test and debug it? | [`docs/development.md`](docs/development.md) |
 | How does CI work, and what gates a PR? | [`docs/ci.md`](docs/ci.md) |
 | What does the SPICE wire protocol handling do? | [`docs/spice-protocol.md`](docs/spice-protocol.md) |
+| How are surfaces composited and audio played? | [`docs/rendering-pipeline.md`](docs/rendering-pipeline.md) |
+| How do USB and folder sharing work? | [`docs/device-redirection.md`](docs/device-redirection.md) |
+| What diagnostics does a session record? | [`docs/diagnostics.md`](docs/diagnostics.md) |
+| What survives a reconnect? | [`docs/session-lifecycle.md`](docs/session-lifecycle.md) |
 | How does `--web` mode work internally? | [`docs/web-mode-internals.md`](docs/web-mode-internals.md) |
 | What is the control socket contract, and how is it implemented? | [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md) |
 | Which features work in which mode? | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |

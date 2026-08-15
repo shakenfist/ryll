@@ -93,7 +93,7 @@ directory:
 
 Project reference files:
 
-- [ARCHITECTURE.md](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) - Technical design and data flow
+- [ARCHITECTURE.md](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) - The crate map, code organisation, and concurrency model
 - [AGENTS.md](https://github.com/shakenfist/ryll/blob/develop/AGENTS.md) - Guide for AI coding assistants
 - [STYLEGUIDE.md](https://github.com/shakenfist/ryll/blob/develop/STYLEGUIDE.md) - Code conventions and patterns
 

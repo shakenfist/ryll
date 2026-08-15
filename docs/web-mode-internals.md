@@ -151,14 +151,7 @@ the same purpose when a viewer requests a refresh.
 
 ### webrtc-rs convention: `on_track` must spawn a task
 
-The webrtc-rs `on_track` callback's returned future is awaited
-serially by the ICE/DTLS machinery. A long-lived `read_rtp`
-loop inside the callback blocks subsequent `on_track` firings
-(e.g. audio track never fires if video track's callback loops).
-Always spawn a separate tokio task for the `read_rtp` loop inside
-`on_track`. This is a webrtc-rs idiom that differs from what
-plain intuition suggests; document it explicitly when writing
-any new receiver-side WebRTC code.
+See the "WebRTC conventions" section in `AGENTS.md` for the normative rule regarding `on_track` and `read_rtp`.
 
 ## SPICE wire-up
 

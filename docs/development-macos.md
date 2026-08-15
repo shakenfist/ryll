@@ -175,7 +175,7 @@ cargo run -- --file connection.vv --capture /tmp/ryll-capture
 ```
 
 This writes per-channel pcap files and an MP4 video to the capture
-directory. See [ARCHITECTURE.md](../ARCHITECTURE.md) for details on
+directory. See [diagnostics.md](diagnostics.md) for details on
 what is captured.
 
 ## Differences from the devcontainer workflow

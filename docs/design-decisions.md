@@ -56,7 +56,8 @@ for the structure these decisions produced.
    caps cover stream-report feedback to the server's encoder, LZ4-compressed
    images, multi-codec video (H.264 plus the legacy MJPEG fallback), and
    per-codec / per-compression preference messages sent at link-up. See
-   `ARCHITECTURE.md`'s "Display channel capabilities" table for the full
+   the "Display Channel Capabilities" table in [spice-protocol.md](spice-protocol.md)
+   for the full
    bit list.
 
 8. **GLZ win_head_dist eviction** - The GLZ dictionary evicts cached images

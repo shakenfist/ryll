@@ -116,8 +116,9 @@ injected at construction time rather than emitted as events:
 | `CaptureSink` | `shakenfist-spice-renderer` | `capture::CaptureSession` | pcap + MP4 frame recording; also has a no-op stub when the `capture` feature is disabled |
 | `NotificationSink` | `shakenfist-spice-renderer` | `notifications::NotificationStoreSink` | Pushes `NotificationEntry` values into the in-app notification store |
 | `ClipboardBackend` | `shakenfist-spice-renderer` | `clipboard_arboard` | Host clipboard read/write via `arboard` |
-| `UsbBackend` | `shakenfist-spice-renderer` | usbredir channel constructor; `RealDevice` / `VirtualMsc` concrete types live in the renderer's `usb/` directory | USB host-side device attachment |
-| `WebdavBackend` | `shakenfist-spice-renderer` | webdav channel constructor; mux + embedded HTTP server live in the renderer's `webdav/` directory | WebDAV directory share lifecycle |
+| `UsbDeviceBackend` | `shakenfist-spice-renderer` | usbredir channel constructor; `RealDevice` / `VirtualMsc` concrete types live in the renderer's `usb/` directory | USB host-side device attachment |
+| `WebdavBackend` | `shakenfist-spice-renderer` | webdav channel constructor; `MuxDemuxer` + `WebdavServer` live in the renderer's `webdav/` directory | WebDAV directory share lifecycle |
+| `OpusPacketSink` | `shakenfist-spice-renderer` | `web::audio::WebOpusSink` | Pre-decode Opus tap on the playback channel for WebRTC passthrough |
 
 **When to use `ChannelEvent` vs a trait**: prefer a
 `ChannelEvent` variant when the concern is event-shaped
