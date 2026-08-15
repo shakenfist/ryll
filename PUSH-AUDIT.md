@@ -67,13 +67,13 @@ style questions need a sub-agent to read code:
 **Brief for sub-agent (only if wave 1 passes):**
 
 Check `git diff develop...HEAD` for adherence to project
-conventions in `AGENTS.md`:
+conventions in `AGENTS.md` and `docs/design-decisions.md`:
 
 - Channel handler conventions: message loop structure,
   ACK handling, channel name prefix on log messages
   (e.g. `"display: ..."`, `"playback: ..."`), and the
   `repaint_notify.notify_one()` pairing requirement
-  documented in AGENTS.md decision #16.
+  documented in `docs/design-decisions.md` decision #17.
 - Protocol message conventions: constants in
   `shakenfist-spice-protocol/src/constants.rs`, message
   parsing in `messages.rs`, name lookups in `logging.rs`.
@@ -234,8 +234,9 @@ copy lives in shakenfist/development at
 - `ARCHITECTURE.md` reflects any new or modified
   channels, message types, compression algorithms,
   or the connection model.
-- `AGENTS.md` reflects any new dependencies, build
-  commands, or conventions.
+- `docs/development.md` reflects any new dependencies or
+  build commands, and `AGENTS.md` any new convention an
+  agent could not infer by reading the code.
 - Plan files in `docs/plans/` are up to date — completed
   phases are marked complete, deferred items are listed.
 - If SPICE protocol behaviour changed, note whether

@@ -738,8 +738,8 @@ The rolling cap is enforced by age (oldest files pruned first), so disk usage
 stays bounded. At the default cap of 20 zips with typical sizes (~1 MiB each),
 you'll use ~20 MiB total.
 
-See the [README section on auto-snapshot mode](../README.md#auto-snapshot-mode)
-for more details on what each field means.
+See [auto-snapshot mode](diagnostics.md#auto-snapshot-mode---auto-snapshot-interval)
+in the diagnostics guide for more details on what each field means.
 
 ## Display image cache pressure
 

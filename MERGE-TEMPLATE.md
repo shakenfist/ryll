@@ -15,9 +15,10 @@ confident answer. Flag any uncertainty explicitly rather than
 guessing.
 
 Consult `ARCHITECTURE.md` for the system architecture
-overview, `AGENTS.md` for build commands and conventions, and
-`PLAN-TEMPLATE.md` for the format of the follow-up plan file
-this process requires you to produce.
+overview, `docs/development.md` for build commands,
+`AGENTS.md` for the conventions an agent cannot infer by
+reading the code, and `PLAN-TEMPLATE.md` for the format of
+the follow-up plan file this process requires you to produce.
 
 ## Philosophy
 

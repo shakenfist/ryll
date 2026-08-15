@@ -59,8 +59,8 @@ This document records the baseline; it does not propose fixes. There
 is no standing gap-closure plan — gaps get closed by mode-specific
 work (the [web frontend plan](plans/PLAN-web-frontend.md) closed the
 Web column's MVP set; the control socket work gave headless an
-interactive driving surface). Last full audit: post-Phase-8 web
-frontend sweep; control-socket cells refreshed 2026-07-30.
+interactive driving surface). Last full audit: the web frontend
+sweep; control-socket cells refreshed 2026-07-30.
 
 ## Parity matrix
 

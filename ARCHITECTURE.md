@@ -138,6 +138,8 @@ ryll/src/
 ├── main.rs              # CLI entry, mode selection, Ctrl+C handler
 ├── app.rs               # egui App, event loop, GUI panels, headless
 │                        #   runner, reconnect, egui trait impls
+├── auto_snapshot.rs     # --auto-snapshot-interval background task,
+│                        #   rolling auto-snapshots/ directory + cap
 ├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,
 │                        #   implements TrafficSink), bug-report ZIP
 │                        #   assembly, write_disconnect / DisconnectCause
@@ -150,9 +152,14 @@ ryll/src/
 ├── input_egui.rs        # egui::Key → LogicalKey adapter
 ├── notifications.rs     # NotificationStore + NotificationStoreSink
 ├── settings.rs          # is_verbose() gate
+├── streaming_state.rs   # Derived state for the streaming status-bar
+│                        #   indicator and the flap heuristic
 └── web/                 # --web mode
-    ├── mod.rs           # run_web(), HTTP server, /offer endpoint,
-    │                    #   token auth, EncoderInfra stop helper
+    ├── mod.rs           # run_web() entry, EncoderInfra stop helper
+    ├── server.rs        # WebState, axum router, TLS config, bind/serve
+    ├── signalling.rs    # POST /offer handler, per-viewer encoder +
+    │                    #   bridge lifecycle
+    ├── assets.rs        # Embedded browser shell, {{TOKEN}} substitution
     ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
     ├── cursor.rs        # Cursor relay → control datachannel
     ├── inputs.rs        # Input relay ← control datachannel
@@ -169,6 +176,11 @@ shakenfist-spice-renderer/src/
 │   ├── playback.rs      # Audio (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC)
 │   └── webdav.rs        # WebDAV sharing (SpiceVMC)
+├── control/             # Headless control socket (see
+│   │                    #   docs/control-socket-protocol.md)
+│   ├── mod.rs           # Re-exports: Server, StatusProvider
+│   ├── protocol.rs      # Request/Response/Event wire types
+│   └── server.rs        # Server::run: bind, accept, dispatch verbs
 ├── display/
 │   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
 ├── encoder/
@@ -183,6 +195,13 @@ shakenfist-spice-renderer/src/
 ├── session.rs           # run_connection, run_headless orchestrators
 ├── capture_sink.rs      # CaptureSink trait
 ├── clipboard.rs         # ClipboardBackend trait
+├── device_config.rs     # Virtual-disk / shared-directory config shapes
+│                        #   passed to the usbredir and webdav channels
+├── digest.rs            # Visual-digest QR poller (digest-decode feature)
+├── image_cache.rs       # BoundedImageCache: byte-bounded LRU
+├── metrics.rs           # Process/thread CPU, memory and uptime sampling
+│                        #   for bug reports
+├── mm_clock.rs          # Shared monotonic SPICE mm_time clock
 ├── notification.rs      # NotificationEntry, NotificationSource
 ├── notification_sink.rs # NotificationSink trait
 ├── traffic.rs           # TrafficSink trait

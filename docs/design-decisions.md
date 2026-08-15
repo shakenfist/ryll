@@ -151,8 +151,8 @@ for the structure these decisions produced.
 18. **Draw-op coverage: one `decode_*` per opcode, warn-once everything
     skipped** - Every implemented `DRAW_*` opcode on the display channel
     follows the same shape: a pure `fn decode_<op>(payload) ->
-    io::Result<<Op>Outcome>` classifier that parses the phase-1 wire
-    struct and returns an Outcome enum describing what to do (`Paint`,
+    io::Result<<Op>Outcome>` classifier that parses the wire struct
+    and returns an Outcome enum describing what to do (`Paint`,
     `SkipNonOpPut { rop }`, etc.), then an `async fn handle_<op>` shim
     that destructures the outcome, fires `warn_once!` on each skip
     variant, and emits a typed `ChannelEvent`. Any feature the handler
@@ -191,7 +191,7 @@ for the structure these decisions produced.
     matters because the traffic pcap is what makes a pedantic report
     actionable for debugging.
 
-20b. **Auto-disconnect snapshots and the bug-report directory chain** -
+21. **Auto-disconnect snapshots and the bug-report directory chain** -
     Every `ChannelEvent::Error` / `ChannelEvent::Disconnected` calls
     `RyllApp::maybe_write_disconnect_snapshot`, which builds a
     `bugreport::DisconnectCause` (channel name, error message,
@@ -211,7 +211,7 @@ for the structure these decisions produced.
     `RuntimeMetrics::unavailable(...)` here — sampling on the GUI
     thread blocks the render loop for ~1 s.
 
-21. **Notifications go through the unified store, not direct UI
+22. **Notifications go through the unified store, not direct UI
     calls** - The notification store at `ryll/src/notifications.rs`
     is the single producer boundary. Channel handlers, the bug-report
     writer, the screenshot dialog, and the gap observer all push
@@ -241,7 +241,7 @@ for the structure these decisions produced.
     button falls back gracefully to post-event-only when
     no snapshot exists.
 
-22. **Auto-reconnect: pure state-machine transition, side effects
+23. **Auto-reconnect: pure state-machine transition, side effects
     at the call site** - The `ReconnectState` enum on `RyllApp`
     (`ryll/src/app.rs`) replaces the old `show_disconnect_dialog`
     boolean. `Idle` / `Pending { attempt, next_at, latest_error }` /

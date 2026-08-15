@@ -158,8 +158,8 @@ of codec — the per-codec logic lives in the impl, not the dispatch.
 Currently supported codec types:
 - `1` (MJPEG): decoded by `MJpegVideoDecoder`, which wraps the
   platform-optimised JPEG backend and maintains a DHT cache for frames
-  that omit the Huffman tables after the first. JPEG decoder selection
-  and architecture details are in `docs/plans/PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
+  that omit the Huffman tables after the first. The backend selection is
+  described below.
 - `3` (H.264): decoded via `H264VideoDecoder` using the openh264 software
   decoder; H.264 is typically more bandwidth-efficient than MJPEG for
   sustained video playback.
@@ -282,8 +282,9 @@ The correct display server opcodes are:
 
 The display channel handles the full set of
 `DRAW_*` / `COPY_BITS` opcodes that modern QXL emits in
-practice. Each opcode parses through a phase-1 protocol
-struct, runs through a per-op `decode_*` classifier (a
+practice. Each opcode parses through a protocol struct in
+`shakenfist-spice-protocol`, runs through a per-op
+`decode_*` classifier (a
 pure free function that returns an `Outcome` enum), and
 emits a typed `ChannelEvent` that the app-side handler
 turns into a `DisplaySurface` mutation.

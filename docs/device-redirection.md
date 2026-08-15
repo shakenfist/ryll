@@ -20,16 +20,19 @@ SPICE SpiceVMC (DATA/COMPRESSED_DATA messages)
 
 ### Device backends
 
-The `UsbDeviceBackend` trait (`ryll/src/usb/mod.rs`) abstracts over device
-types. The `DeviceBackend` enum provides non-object-safe dispatch:
+The `UsbDeviceBackend` trait (`shakenfist-spice-renderer/src/usb/mod.rs`)
+abstracts over device types. The `DeviceBackend` enum provides
+non-object-safe dispatch:
 
-- **RealDevice** (`ryll/src/usb/real.rs`): Physical USB device via the `nusb`
-  crate. Linux only (`#[cfg(target_os = "linux")]`). Detaches kernel drivers,
-  claims interfaces, forwards control/bulk/interrupt transfers. On non-Linux
-  platforms, only virtual devices are available.
-- **VirtualMsc** (`ryll/src/usb/virtual_msc.rs`): Emulated USB mass storage
-  device backed by a RAW disk image. Implements BOT protocol (CBW/CSW) and
-  8 SCSI commands. Reports as a USB 2.0 High Speed removable disk.
+- **RealDevice** (`shakenfist-spice-renderer/src/usb/real.rs`): Physical USB
+  device via the `nusb` crate. Linux only (`#[cfg(target_os = "linux")]`).
+  Detaches kernel drivers, claims interfaces, forwards
+  control/bulk/interrupt transfers. On non-Linux platforms, only virtual
+  devices are available.
+- **VirtualMsc** (`shakenfist-spice-renderer/src/usb/virtual_msc.rs`):
+  Emulated USB mass storage device backed by a RAW disk image. Implements
+  BOT protocol (CBW/CSW) and 8 SCSI commands. Reports as a USB 2.0 High
+  Speed removable disk.
 
 ### Channel handler flow
 
@@ -129,9 +132,9 @@ data_size:  u16 LE  (2 bytes) — payload size (0 = disconnect)
 data:       [u8]    (data_size bytes) — raw HTTP bytes
 ```
 
-The `MuxDemuxer` (`ryll/src/webdav/mux.rs`) accumulates bytes and extracts
-complete frames, handling frames that span VMC messages or are packed
-together.
+The `MuxDemuxer` (`shakenfist-spice-renderer/src/webdav/mux.rs`) accumulates
+bytes and extracts complete frames, handling frames that span VMC messages
+or are packed together.
 
 ### Per-client architecture
 
@@ -162,8 +165,9 @@ interrupt polling tasks.
 
 ### Server lifecycle
 
-The `WebdavServer` (`ryll/src/webdav/server.rs`) wraps `dav-server::DavHandler`
-with `LocalFs` and is cheaply cloneable (inner `Arc`). It is created when
+The `WebdavServer` (`shakenfist-spice-renderer/src/webdav/server.rs`) wraps
+`dav-server::DavHandler` with `LocalFs` and is cheaply cloneable (inner
+`Arc`). It is created when
 a `ShareDirectory` command arrives from the UI or `--share-dir` is
 specified on the CLI, and destroyed on `StopSharing`. Read-only mode uses
 `DavMethodSet::WEBDAV_RO` to restrict allowed HTTP methods.

@@ -85,6 +85,28 @@ The slim test-harness binary is built with
 [control-socket-protocol.md](control-socket-protocol.md)
 for the `surface_drawn` and `digest_updated` event shapes.
 
+## Workspace dependency convention
+
+Every workspace crate carries `version.workspace = true`, so
+the single version in the root `Cargo.toml` is the only place
+a release bump has to happen.
+
+Dependencies between workspace crates must declare **both** a
+path and a version:
+
+```toml
+shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7" }
+```
+
+The path wins for local builds, so day-to-day development sees
+the working tree rather than a published crate. The version is
+what `cargo publish` requires — a path-only dependency cannot
+be published to crates.io. Omitting it therefore costs nothing
+until release day, and then fails the publish, which is why it
+is easy to get wrong. Bump the version alongside the workspace
+version whenever the depended-on crate is released; see
+[releasing.md](releasing.md).
+
 ## Debugging async hangs
 
 A set of diagnostic hooks exists for debugging tokio task hangs

@@ -32,7 +32,7 @@ Related repositories:
 | How does CI work, and what gates a PR? | [`docs/ci.md`](docs/ci.md) |
 | What does the SPICE wire protocol handling do? | [`docs/spice-protocol.md`](docs/spice-protocol.md) |
 | How does `--web` mode work internally? | [`docs/web-mode-internals.md`](docs/web-mode-internals.md) |
-| What is the control socket contract? | [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md) |
+| What is the control socket contract, and how is it implemented? | [`docs/control-socket-protocol.md`](docs/control-socket-protocol.md) |
 | Which features work in which mode? | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |
 | How do I cut a release? | [`docs/releasing.md`](docs/releasing.md) |
 

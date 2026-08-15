@@ -355,7 +355,7 @@ diagnostic data anyway.
 ### Notification snapshots and the "file from notification" button
 
 Every notification entry in the side panel carries a
-per-row "File…" button (F2). Clicking always
+per-row "File…" button. Clicking always
 produces a bug-report zip; the variant depends on whether
 a live snapshot of the traffic-buffer state exists for
 that notification.

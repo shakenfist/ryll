@@ -1288,7 +1288,7 @@ mod tests {
     /// invariance check still exists, gated behind
     /// `RYLL_GATHERING_SOAK=1` (`make test` passes the variable
     /// through to the devcontainer) for deliberate runs on a quiet
-    /// host — see AGENTS.md's Testing section.
+    /// host — see the testing section of `docs/development.md`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn accept_offer_answer_carries_all_candidates() {
         let _ = rustls::crypto::ring::default_provider().install_default();

@@ -90,7 +90,7 @@ both ends of the traffic through the proxy. This would allow:
 - [Installation](installation.md) - Pre-built packages, pip, and building from source
 - [Configuration](configuration.md) - CLI options and .vv file format
 - [Web frontend](web-frontend.md) - Operator guide for `--web` mode
-- [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools
+- [Control socket protocol](control-socket-protocol.md) - Driving headless sessions from external tools, and how the socket is implemented
 - [Key design decisions](design-decisions.md) - Why ryll is shaped the way it is
 - [SPICE protocol handling](spice-protocol.md) - Channels, handshake, image encodings, scancodes
 - [Rendering and audio pipeline](rendering-pipeline.md) - Surfaces, window sizing, multi-monitor, audio, notifications
