@@ -240,3 +240,115 @@ async fn loopback_video_audio_datachannel() {
     server.close().await.expect("server close");
     client.close().await.expect("client close");
 }
+
+/// Media still flows when the client offers a codec set that does not
+/// include the payload types the bridge registered.
+///
+/// `loopback_video_audio_datachannel` above cannot catch this. Its
+/// `TestPeer` registers the same codec set as the bridge, so every
+/// payload type the bridge might stamp is negotiated and accepted no
+/// matter where the number came from. Real browsers offer a subset:
+/// Chrome offers H.264 `42001f` (which matches the MediaEngine entry at
+/// PT 102), Firefox offers only `42e01f` (which matches PT 125). The
+/// core remaps each offered codec onto whichever of *our* entries it
+/// matched, and 0.20's `write_rtp` then rejects any packet whose
+/// payload type is not on the resulting list.
+///
+/// So this offers what Firefox offers, and numbers it the way Firefox
+/// does — 126 for H.264 and 109 for Opus, neither of which is a number
+/// the bridge registers — and asserts packets still arrive. Stamping a
+/// constant fails this test with zero video packets while every other
+/// test in the suite stays green, which is exactly the failure mode
+/// worth a dedicated test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
+    let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
+    let server = WebrtcBridge::new(WebrtcBridgeConfig {
+        ice_servers: vec![],
+        encoder_control: server_enc_tx,
+    })
+    .await
+    .expect("server bridge");
+
+    let video_count = Arc::new(AtomicUsize::new(0));
+    let audio_count = Arc::new(AtomicUsize::new(0));
+
+    let client = TestPeer::builder()
+        // The seed channel is still required: without an m=application
+        // section in the offer the SCTP association never opens and the
+        // handshake stalls. See the test above.
+        .seed_data_channel("client-seed")
+        .offer_only_h264_fmtp(
+            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+            126,
+            109,
+        )
+        .on_track_hook({
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
+            // Spawns rather than looping inline, for the reason given
+            // in the test above: the hook is awaited in the driver loop.
+            Box::new(move |track: Arc<dyn TrackRemote>| {
+                let video_count = video_count.clone();
+                let audio_count = audio_count.clone();
+                Box::pin(async move {
+                    let counter = match track.kind().await {
+                        RtpCodecKind::Video => video_count,
+                        RtpCodecKind::Audio => audio_count,
+                        RtpCodecKind::Unspecified => return,
+                    };
+                    tokio::spawn(async move {
+                        while let Some(event) = track.poll().await {
+                            if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                })
+            })
+        })
+        .build()
+        .await
+        .expect("client peer");
+
+    let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
+    let answer_sdp = server
+        .accept_offer(final_offer_sdp)
+        .await
+        .expect("server accept");
+    client
+        .set_remote_answer(answer_sdp)
+        .await
+        .expect("client rsd");
+
+    client
+        .wait_until_connected(Duration::from_secs(20))
+        .await
+        .expect("client PC did not reach Connected");
+
+    let encoder = H264Encoder::new(64, 64).expect("encoder init");
+    let source = SyntheticFrameSource::new(64, 64);
+    let (frame_tx, frame_rx) = mpsc::channel(32);
+    let _enc_handle = EncoderTask::spawn(encoder, source, frame_tx, server_enc_rx, 30);
+    let _video_pump = server.spawn_video_pump(frame_rx);
+    let _audio_pump = server.spawn_synthetic_audio_pump();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let v = video_count.load(Ordering::Relaxed);
+    let a = audio_count.load(Ordering::Relaxed);
+    eprintln!(
+        "narrow-codec loopback: received {} video RTP packets, {} audio RTP packets",
+        v, a
+    );
+    assert!(
+        v >= 10,
+        "expected >=10 video packets with a narrow codec offer, got {} — the pump is probably \
+         stamping a payload type that was not negotiated",
+        v
+    );
+    assert!(a >= 5, "expected >=5 audio packets, got {}", a);
+
+    server.close().await.expect("server close");
+    client.close().await.expect("client close");
+}

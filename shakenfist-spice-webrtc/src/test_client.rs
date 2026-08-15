@@ -41,7 +41,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
+use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use webrtc::data_channel::DataChannel;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::{
@@ -94,6 +95,16 @@ pub struct TestPeerBuilder {
     seed_data_channel: Option<String>,
     on_track: Option<OnTrackHook>,
     on_data_channel: Option<OnDataChannelHook>,
+    narrow_codecs: Option<NarrowCodecs>,
+}
+
+/// A deliberately narrow codec set for the offer, replacing
+/// `register_default_codecs`. See
+/// [`TestPeerBuilder::offer_only_h264_fmtp`].
+struct NarrowCodecs {
+    h264_fmtp: String,
+    h264_payload_type: u8,
+    opus_payload_type: u8,
 }
 
 impl TestPeerBuilder {
@@ -150,6 +161,37 @@ impl TestPeerBuilder {
         self
     }
 
+    /// Offer exactly one H.264 entry, with `fmtp` at
+    /// `h264_payload_type`, plus one Opus entry at
+    /// `opus_payload_type` — instead of webrtc-rs's default codec set.
+    ///
+    /// This exists because the default `TestPeer` cannot catch a whole
+    /// class of bug. It registers the same codecs as the bridge, so
+    /// every payload type the bridge might stamp is negotiated and
+    /// anything the bridge sends is accepted. Real browsers are not so
+    /// accommodating: Chrome offers H.264 `42001f`, Firefox offers only
+    /// `42e01f`, and the negotiated payload type differs accordingly
+    /// because the core remaps each match onto whichever of our
+    /// MediaEngine entries it matched.
+    ///
+    /// Offering a narrow set is what makes the remap observable, and
+    /// distinct payload types on this side prove the numbers on the
+    /// wire came from negotiation rather than from a constant that
+    /// happened to agree.
+    pub fn offer_only_h264_fmtp(
+        mut self,
+        fmtp: &str,
+        h264_payload_type: u8,
+        opus_payload_type: u8,
+    ) -> Self {
+        self.narrow_codecs = Some(NarrowCodecs {
+            h264_fmtp: fmtp.to_owned(),
+            h264_payload_type,
+            opus_payload_type,
+        });
+        self
+    }
+
     /// Build the peer connection and add its transceivers.
     pub async fn build(self) -> Result<TestPeer> {
         // Mirror the bridge's own codec registration exactly, so the
@@ -164,8 +206,13 @@ impl TestPeerBuilder {
         // Calling it anyway keeps this peer in lockstep with the
         // bridge rather than relying on the coincidence.
         let mut media_engine = MediaEngine::default();
-        media_engine.register_default_codecs()?;
-        register_h264(&mut media_engine)?;
+        match &self.narrow_codecs {
+            None => {
+                media_engine.register_default_codecs()?;
+                register_h264(&mut media_engine)?;
+            }
+            Some(narrow) => register_narrow_codecs(&mut media_engine, narrow)?,
+        }
 
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
@@ -261,6 +308,44 @@ impl TestPeerBuilder {
             gathered,
         })
     }
+}
+
+/// Register exactly the codecs [`TestPeerBuilder::offer_only_h264_fmtp`]
+/// asked for, in place of webrtc-rs's defaults.
+///
+/// Registered directly rather than by filtering
+/// `register_default_codecs`, because the point is to control the
+/// payload *numbers* as well as the entries: a browser picks its own,
+/// and the bridge has to cope with numbers that are not the ones it
+/// registered.
+fn register_narrow_codecs(media_engine: &mut MediaEngine, narrow: &NarrowCodecs) -> Result<()> {
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_H264.to_owned(),
+                clock_rate: 90_000,
+                channels: 0,
+                sdp_fmtp_line: narrow.h264_fmtp.clone(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: narrow.h264_payload_type,
+        },
+        RtpCodecKind::Video,
+    )?;
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: MIME_TYPE_OPUS.to_owned(),
+                clock_rate: 48_000,
+                channels: 2,
+                sdp_fmtp_line: "minptime=10;useinbandfec=1".to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type: narrow.opus_payload_type,
+        },
+        RtpCodecKind::Audio,
+    )?;
+    Ok(())
 }
 
 /// The single event handler [`TestPeerBuilder::build`] hands to

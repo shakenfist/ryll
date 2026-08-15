@@ -19,7 +19,7 @@
 //! (`profile-level-id=42e01f`, baseline level 3.1, packetization
 //! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -58,9 +58,13 @@ use webrtc::peer_connection::{
     RTCPeerConnectionState, RTCSessionDescription, Registry,
 };
 
-/// Payload type used for H.264 in our SDP. Reused by both the
-/// MediaEngine registration in [`register_h264`] and the RTP
-/// header construction in the video pump.
+/// Payload type we register H.264 under in the MediaEngine, and the
+/// value the pumps stamp until negotiation replaces it.
+///
+/// This is a starting point, not the wire value. The payload type
+/// actually sent is whatever the offer/answer settled on, resolved by
+/// [`WebrtcBridge::resolve_negotiated_payload_types`] — see there for
+/// why a constant is not good enough.
 const H264_PAYLOAD_TYPE: u8 = 102;
 
 /// The media stream both tracks belong to. Surfaces in the answer SDP
@@ -87,9 +91,16 @@ const VIDEO_CLOCK_RATE_HZ: u32 = 90_000;
 /// MTU minus UDP+IP+SRTP overhead on a 1500-byte ethernet frame.
 const VIDEO_MTU: usize = 1200;
 
-/// Payload type used for Opus in our SDP. Matches the value used
-/// by webrtc-rs's [`MediaEngine::register_default_codecs`] (which
-/// the bridge calls in [`WebrtcBridge::new`]).
+/// Payload type Opus is registered under by webrtc-rs's
+/// [`MediaEngine::register_default_codecs`] (which the bridge calls in
+/// [`WebrtcBridge::new`]), and the value the audio pumps stamp until
+/// negotiation replaces it.
+///
+/// Opus is far safer than H.264 here — there is exactly one Opus entry
+/// in the MediaEngine, so any Opus the remote peer offers remaps onto
+/// this number whatever it called it. It is still resolved from the
+/// negotiated parameters rather than trusted, because "there is only
+/// one entry today" is not a property this module controls.
 const OPUS_PAYLOAD_TYPE: u8 = 111;
 
 /// Opus RTP clock rate per RFC 7587 §4.1: always 48 kHz, even for
@@ -235,9 +246,8 @@ impl BridgeEvents {
 
         match state {
             // `try_send`, not `send().await`: this method is awaited
-            // inline in webrtc-rs's peer-connection driver loop once
-            // the 0.20 port lands (see `BridgeEvents`), so it must
-            // never block on a consumer. `encoder_control` is bounded
+            // inline in webrtc-rs's peer-connection driver loop (see
+            // `BridgeEvents`), so it must never block on a consumer. `encoder_control` is bounded
             // capacity 4 in the test suite, and the production
             // encoder task is expected to drain it promptly, but a
             // slow encoder must degrade the keyframe request, not the
@@ -325,9 +335,8 @@ impl BridgeEvents {
     /// here so `control_rx()` sees messages from either direction.
     ///
     /// `try_send`, not `send().await`, for the same reason as
-    /// `on_state_change`: once the 0.20 port lands this method is
-    /// awaited inline in the driver loop, so it cannot block on
-    /// `control_rx()`'s consumer. `incoming_tx` is a 64-slot channel;
+    /// `on_state_change`: this method is awaited inline in the driver
+    /// loop, so it cannot block on `control_rx()`'s consumer. `incoming_tx` is a 64-slot channel;
     /// letting it fill up must degrade to a dropped message, not a
     /// stalled connection.
     async fn on_control_message(&self, data: Vec<u8>, source: &'static str) {
@@ -563,6 +572,16 @@ pub struct WebrtcBridge {
     /// track's. See where they are chosen in [`WebrtcBridge::new`].
     video_ssrc: u32,
     audio_ssrc: u32,
+    /// The payload types the pumps stamp, published here by
+    /// [`WebrtcBridge::resolve_negotiated_payload_types`] once the
+    /// offer/answer has settled.
+    ///
+    /// Shared rather than passed by value because of ordering: the
+    /// pumps are spawned before `accept_offer` runs (see
+    /// `ryll/src/web/signalling.rs`), so the value does not exist yet
+    /// when they start. They read it per packet.
+    video_payload_type: Arc<AtomicU8>,
+    audio_payload_type: Arc<AtomicU8>,
 }
 
 impl WebrtcBridge {
@@ -778,6 +797,8 @@ impl WebrtcBridge {
             dc_pumps,
             video_ssrc,
             audio_ssrc,
+            video_payload_type: Arc::new(AtomicU8::new(H264_PAYLOAD_TYPE)),
+            audio_payload_type: Arc::new(AtomicU8::new(OPUS_PAYLOAD_TYPE)),
         })
     }
 
@@ -820,6 +841,11 @@ impl WebrtcBridge {
         let offer = RTCSessionDescription::offer(offer_sdp)?;
         self.pc.set_remote_description(offer).await?;
 
+        // Must be after `set_remote_description` and cannot be any
+        // earlier: that call is what intersects the offer with our
+        // MediaEngine and fixes the payload types.
+        self.resolve_negotiated_payload_types().await;
+
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
@@ -831,6 +857,79 @@ impl WebrtcBridge {
             .await
             .ok_or_else(|| anyhow!("local description missing after ICE gathering"))?;
         Ok(local_desc.sdp)
+    }
+
+    /// Read the payload types the offer/answer settled on out of the
+    /// senders, and publish them where the pumps will see them.
+    ///
+    /// A payload type is a *negotiated* value, not a constant, and 0.20
+    /// is the release where that stops being a technicality. `write_rtp`
+    /// validates the header's payload type against the sender's
+    /// negotiated codec list and rejects anything else with
+    /// `ErrRTPTransceiverCodecUnsupported`
+    /// (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/mod.rs:388-409`);
+    /// 0.17 silently overwrote the field instead, which is why stamping
+    /// a constant worked for as long as it did.
+    ///
+    /// That list is the offer intersected with our MediaEngine, with
+    /// each match remapped onto *our* payload type
+    /// (`rtc-0.20.2/src/rtp_transceiver/internal.rs:299-383`), so which
+    /// number survives depends on what the browser offered.
+    /// `register_default_codecs` registers five H.264 entries at
+    /// different profile-level-ids, and browsers do not all offer the
+    /// same ones: Chrome offers `42001f`, which matches our PT 102,
+    /// while Firefox offers only `42e01f`, which matches PT 125. Stamp
+    /// 102 for a Firefox viewer and every video packet is rejected at
+    /// the sender — a connected viewer looking at a black screen, with
+    /// the explanation only at `trace` level inside the library.
+    ///
+    /// Audio has one Opus entry and so cannot drift today, but it is
+    /// resolved the same way rather than trusted.
+    ///
+    /// Failure to resolve leaves the registered default in place and
+    /// warns. It does not fail the offer: a bridge that answers and
+    /// sends nothing is worth more diagnostically than one that refuses
+    /// to answer, and the warning names the symptom.
+    async fn resolve_negotiated_payload_types(&self) {
+        let mut video: Option<u8> = None;
+        let mut audio: Option<u8> = None;
+
+        for sender in self.pc.get_senders().await {
+            let params = match sender.get_parameters().await {
+                Ok(params) => params,
+                Err(e) => {
+                    tracing::warn!("webrtc: reading sender parameters failed: {}", e);
+                    continue;
+                }
+            };
+            let codecs = &params.rtp_parameters.codecs;
+            video = video.or_else(|| negotiated_h264_payload_type(codecs));
+            audio = audio.or_else(|| negotiated_payload_type(codecs, MIME_TYPE_OPUS));
+        }
+
+        match video {
+            Some(pt) => {
+                self.video_payload_type.store(pt, Ordering::Relaxed);
+                tracing::debug!("webrtc: negotiated H.264 payload type {}", pt);
+            }
+            None => tracing::warn!(
+                "webrtc: no H.264 payload type negotiated; the video pump will keep stamping {} \
+                 and the sender will reject every packet — the viewer will see no video",
+                H264_PAYLOAD_TYPE
+            ),
+        }
+
+        match audio {
+            Some(pt) => {
+                self.audio_payload_type.store(pt, Ordering::Relaxed);
+                tracing::debug!("webrtc: negotiated Opus payload type {}", pt);
+            }
+            None => tracing::warn!(
+                "webrtc: no Opus payload type negotiated; the audio pump will keep stamping {} \
+                 and the sender will reject every packet — the viewer will hear nothing",
+                OPUS_PAYLOAD_TYPE
+            ),
+        }
     }
 
     /// Wait until ICE gathering has completed.
@@ -860,7 +959,12 @@ impl WebrtcBridge {
     /// logged at debug level.
     pub fn spawn_video_pump(&self, rx: mpsc::Receiver<EncodedFrame>) -> JoinHandle<Result<()>> {
         let track = self.video_track.clone();
-        tokio::spawn(run_video_pump(rx, track, self.video_ssrc))
+        tokio::spawn(run_video_pump(
+            rx,
+            track,
+            self.video_ssrc,
+            self.video_payload_type.clone(),
+        ))
     }
 
     /// Spawn the synthetic audio pump task: generate a 440 Hz sine
@@ -883,7 +987,11 @@ impl WebrtcBridge {
     /// do not stop the loop, mirroring the video pump's behaviour.
     pub fn spawn_synthetic_audio_pump(&self) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
-        tokio::spawn(run_synthetic_audio_pump(track, self.audio_ssrc))
+        tokio::spawn(run_synthetic_audio_pump(
+            track,
+            self.audio_ssrc,
+            self.audio_payload_type.clone(),
+        ))
     }
 
     /// Spawn the real Opus passthrough pump (Phase 5e).
@@ -910,7 +1018,12 @@ impl WebrtcBridge {
     /// mirroring the video pump's behaviour.
     pub fn spawn_audio_pump(&self, rx: mpsc::Receiver<(Vec<u8>, u32)>) -> JoinHandle<Result<()>> {
         let track = self.audio_track.clone();
-        tokio::spawn(run_audio_pump(rx, track, self.audio_ssrc))
+        tokio::spawn(run_audio_pump(
+            rx,
+            track,
+            self.audio_ssrc,
+            self.audio_payload_type.clone(),
+        ))
     }
 
     /// Send a payload over the control datachannel. The DC is
@@ -1018,6 +1131,71 @@ pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
     Ok(())
 }
 
+/// The payload type negotiated for `mime_type`, if the remote peer
+/// accepted it at all.
+///
+/// Case-insensitive because the mime type arrives from the remote SDP,
+/// where `video/H264` and `video/h264` are the same codec — the core
+/// compares it the same way
+/// (`rtc-0.20.2/src/rtp_transceiver/internal.rs:307`).
+fn negotiated_payload_type(codecs: &[RTCRtpCodecParameters], mime_type: &str) -> Option<u8> {
+    codecs
+        .iter()
+        .find(|codec| codec.rtp_codec.mime_type.eq_ignore_ascii_case(mime_type))
+        .map(|codec| codec.payload_type)
+}
+
+/// The payload type to stamp on H.264 packets, preferring an entry
+/// that negotiated packetization-mode 1.
+///
+/// The preference is not cosmetic. [`H264Payloader`] fragments NALs
+/// larger than [`VIDEO_MTU`] into FU-A units, which is exactly what
+/// packetization-mode 1 permits and mode 0 forbids (RFC 6184 §5.4,
+/// §6.2). If only a mode-0 entry survives negotiation there is nothing
+/// useful to do about it here — refusing to send guarantees a blank
+/// screen, whereas sending gets the un-fragmented frames through — so
+/// this warns and uses it.
+fn negotiated_h264_payload_type(codecs: &[RTCRtpCodecParameters]) -> Option<u8> {
+    let h264 = codecs.iter().filter(|codec| {
+        codec
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case(MIME_TYPE_H264)
+    });
+
+    let mut fallback: Option<u8> = None;
+    for codec in h264 {
+        if is_packetization_mode_1(&codec.rtp_codec.sdp_fmtp_line) {
+            return Some(codec.payload_type);
+        }
+        fallback.get_or_insert(codec.payload_type);
+    }
+
+    if let Some(pt) = fallback {
+        tracing::warn!(
+            "webrtc: negotiated H.264 payload type {} is packetization-mode 0; frames larger \
+             than {} bytes need FU-A fragmentation and will not decode",
+            pt,
+            VIDEO_MTU
+        );
+    }
+    fallback
+}
+
+/// Whether an SDP fmtp line declares packetization-mode 1.
+///
+/// RFC 6184 §8.1: the parameter is optional and defaults to 0, so an
+/// absent or unparseable line is mode 0, not "unknown".
+fn is_packetization_mode_1(sdp_fmtp_line: &str) -> bool {
+    sdp_fmtp_line.split(';').any(|param| {
+        let mut kv = param.splitn(2, '=');
+        matches!(
+            (kv.next().map(str::trim), kv.next().map(str::trim)),
+            (Some("packetization-mode"), Some("1"))
+        )
+    })
+}
+
 /// The H.264 codec description, shared by the MediaEngine registration
 /// in [`register_h264`] and the video track's codings.
 ///
@@ -1066,6 +1244,10 @@ fn opus_codec() -> RTCRtpCodec {
 /// `ssrc` must be the SSRC the track advertised (see
 /// [`WebrtcBridge::new`]): 0.20's `write_rtp` validates the header it
 /// is given rather than rewriting it, so a mismatch drops every packet.
+/// `payload_type` is the same story for the other validated header
+/// field, and is read per packet rather than captured because
+/// negotiation resolves it after this task is already running — see
+/// [`WebrtcBridge::resolve_negotiated_payload_types`].
 ///
 /// Errors from `track.write_rtp` are logged at debug and the
 /// loop continues — the receiver may not have negotiated DTLS
@@ -1075,6 +1257,7 @@ async fn run_video_pump(
     mut rx: mpsc::Receiver<EncodedFrame>,
     track: Arc<TrackLocalStaticRTP>,
     ssrc: u32,
+    payload_type: Arc<AtomicU8>,
 ) -> Result<()> {
     let mut payloader = H264Payloader::default();
     let mut sequence: u16 = rand::random();
@@ -1114,7 +1297,7 @@ async fn run_video_pump(
                 }
                 let header = Header {
                     version: 2,
-                    payload_type: H264_PAYLOAD_TYPE,
+                    payload_type: payload_type.load(Ordering::Relaxed),
                     sequence_number: sequence,
                     timestamp: rtp_ts,
                     ssrc,
@@ -1160,15 +1343,19 @@ async fn run_video_pump(
 /// random per RFC 3550 §5.1 (we use 0 here for simplicity since
 /// the SSRC is randomised; the receiver tracks deltas anyway).
 ///
-/// `ssrc` must be the SSRC the track advertised; see
-/// [`run_video_pump`].
+/// `ssrc` and `payload_type` must match what the track advertised and
+/// what negotiation settled on; see [`run_video_pump`].
 ///
 /// `track.write_rtp` errors are logged at debug and the loop
 /// continues — the receiver may not have negotiated DTLS yet
 /// when the pump starts, so dropped packets early on are normal.
 /// The loop never returns `Ok(())` on its own; it exits only
 /// when the spawning task is aborted or the runtime shuts down.
-async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>, ssrc: u32) -> Result<()> {
+async fn run_synthetic_audio_pump(
+    track: Arc<TrackLocalStaticRTP>,
+    ssrc: u32,
+    payload_type: Arc<AtomicU8>,
+) -> Result<()> {
     let mut encoder = opus::Encoder::new(
         AUDIO_SAMPLE_RATE_HZ,
         opus::Channels::Mono,
@@ -1243,7 +1430,7 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>, ssrc: u32) ->
             }
             let header = Header {
                 version: 2,
-                payload_type: OPUS_PAYLOAD_TYPE,
+                payload_type: payload_type.load(Ordering::Relaxed),
                 sequence_number: sequence,
                 timestamp: rtp_timestamp,
                 ssrc,
@@ -1272,8 +1459,8 @@ async fn run_synthetic_audio_pump(track: Arc<TrackLocalStaticRTP>, ssrc: u32) ->
 /// shorter Opus frames (5.33 ms / 256 samples), the
 /// timestamp delta tracks the actual content duration.
 ///
-/// `ssrc` must be the SSRC the track advertised; see
-/// [`run_video_pump`].
+/// `ssrc` and `payload_type` must match what the track advertised and
+/// what negotiation settled on; see [`run_video_pump`].
 ///
 /// `track.write_rtp` errors are logged at debug and the loop
 /// continues — the receiver may not have negotiated DTLS
@@ -1283,6 +1470,7 @@ async fn run_audio_pump(
     mut rx: mpsc::Receiver<(Vec<u8>, u32)>,
     track: Arc<TrackLocalStaticRTP>,
     ssrc: u32,
+    payload_type: Arc<AtomicU8>,
 ) -> Result<()> {
     let mut payloader = OpusPayloader;
     let mut sequence: u16 = rand::random();
@@ -1303,7 +1491,7 @@ async fn run_audio_pump(
             }
             let header = Header {
                 version: 2,
-                payload_type: OPUS_PAYLOAD_TYPE,
+                payload_type: payload_type.load(Ordering::Relaxed),
                 sequence_number: sequence,
                 timestamp: rtp_timestamp,
                 ssrc,
@@ -1385,6 +1573,93 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::test_client::TestPeer;
+
+    /// Build a codec-parameters entry the way negotiation hands it to
+    /// us: mime type, fmtp line and the payload type our MediaEngine
+    /// remapped the remote's onto.
+    fn codec_params(
+        mime_type: &str,
+        sdp_fmtp_line: &str,
+        payload_type: u8,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate: 90_000,
+                channels: 0,
+                sdp_fmtp_line: sdp_fmtp_line.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn packetization_mode_1_is_recognised_and_defaults_to_0() {
+        assert!(is_packetization_mode_1(H264_FMTP_LINE));
+        assert!(is_packetization_mode_1("packetization-mode=1"));
+        // Whitespace around the separators is legal in an fmtp line.
+        assert!(is_packetization_mode_1(
+            "level-asymmetry-allowed=1; packetization-mode=1 ;profile-level-id=42e01f"
+        ));
+        assert!(!is_packetization_mode_1(
+            "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f"
+        ));
+        // RFC 6184 §8.1: absent means mode 0, not "unknown".
+        assert!(!is_packetization_mode_1(""));
+        assert!(!is_packetization_mode_1("profile-level-id=42e01f"));
+        // A value we do not understand is not mode 1.
+        assert!(!is_packetization_mode_1("packetization-mode=2"));
+    }
+
+    #[test]
+    fn negotiated_h264_payload_type_prefers_packetization_mode_1() {
+        // What a Firefox offer leaves us with: only the 42e01f pair,
+        // remapped onto the MediaEngine's PT 125 (mode 1) and 108
+        // (mode 0). The mode-0 entry comes first to prove ordering is
+        // not what makes this pass.
+        let codecs = vec![
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f",
+                108,
+            ),
+            codec_params(
+                MIME_TYPE_H264,
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+                125,
+            ),
+        ];
+        assert_eq!(negotiated_h264_payload_type(&codecs), Some(125));
+    }
+
+    #[test]
+    fn negotiated_h264_payload_type_falls_back_to_mode_0() {
+        let codecs = vec![codec_params(
+            MIME_TYPE_H264,
+            "level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42e01f",
+            108,
+        )];
+        // Nothing better on offer: send it rather than nothing, and
+        // let the warning explain the fragmentation problem.
+        assert_eq!(negotiated_h264_payload_type(&codecs), Some(108));
+    }
+
+    #[test]
+    fn negotiated_h264_payload_type_is_none_when_h264_was_rejected() {
+        let codecs = vec![codec_params("video/VP8", "", 96)];
+        assert_eq!(negotiated_h264_payload_type(&codecs), None);
+    }
+
+    #[test]
+    fn negotiated_payload_type_matches_mime_type_case_insensitively() {
+        let codecs = vec![
+            codec_params("video/vp8", "", 96),
+            codec_params("audio/OPUS", "minptime=10;useinbandfec=1", 111),
+        ];
+        assert_eq!(negotiated_payload_type(&codecs, MIME_TYPE_OPUS), Some(111));
+        assert_eq!(negotiated_payload_type(&codecs, MIME_TYPE_H264), None);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_constructs_with_empty_ice_servers() {
