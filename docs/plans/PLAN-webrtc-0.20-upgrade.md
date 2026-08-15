@@ -507,10 +507,39 @@ sized phase 02, and two of them moved work between phases.
   during the port so that negotiation differences stay
   attributable; worth revisiting once the phase-04 soak has a
   clean baseline.
+* Give phase 03's configuration surface an interface allowlist,
+  not just a port pin. Since 0.20 made socket binding the
+  caller's job, `host_udp_bind_addrs` binds and advertises every
+  non-loopback address the host has — including RFC 1918,
+  169.254/16 and container/veth addresses — so a browser on the
+  public interface learns the host's internal addressing. This is
+  what 0.17 did internally too, so the port did not regress it,
+  but 0.20's `SettingEngine::set_ip_filter` /
+  `set_interface_filter` still compile while doing nothing, so
+  there is no way to narrow it today. Raised by the automated
+  review of PR #278.
 
 ### Bugs fixed during this work
 
-None yet. Related existing issues: #215 (webrtc sibling-crate
+Two, both found by the automated review of PR #278 and both
+introduced by the 0.20 port itself:
+
+* The RTP pumps stamped a hardcoded payload type. 0.20 validates
+  the payload type against the negotiated codec list rather than
+  rewriting it, and which type is negotiated depends on what the
+  browser offered — so Chrome worked and Firefox would have shown
+  a black screen with nothing above `trace` in the log. The pumps
+  now read the resolved value out of the senders' parameters.
+* The bridge reaper parked forever on a bridge replaced by
+  `POST /offer`, because `close()` on 0.20 does not reliably raise
+  the dead signal the reaper waits on. A viewer reloading the page
+  would strand it for the life of the process. It now also wakes on
+  a bridge-replacement notification.
+
+Both are covered by regression tests that fail on the pre-fix code;
+see the phase-02 plan's review follow-up.
+
+Related existing issues: #215 (webrtc sibling-crate
 lockfile skew, the reason for the patch-disable rule) and PR #245
 (the Renovate bump this plan defers).
 

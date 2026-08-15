@@ -643,7 +643,7 @@ the same `TestPeer` offer. Judgement on each difference:
 | `a=extmap-allow-mixed` gone | **Expected**; one- and two-byte extension headers are no longer mixed |
 | `a=extmap` set grows: `sdes:mid` (1), `sdes:rtp-stream-id` (2), `sdes:repaired-rtp-stream-id` (3), and transport-cc moves from id 1 to id 4 | **Expected** — the simulcast/RTX extensions `register_default_interceptors` now configures. Note our pumps stamp no extensions, and `write_rtp` rejects unnegotiated ones, so this is advertisement only |
 | `a=msid-semantic:WMS *` added at session level | **Expected**, and more correct than before |
-| m-line payload-type order reversed: video now leads with 126 (H265) rather than 96 (VP8); audio leads with 8 (PCMA) rather than 111 (opus) | **Expected but worth watching.** The payload *numbers* are unchanged — H.264 is still 102 and opus still 111, which is what the pumps stamp — but the order in a `sendonly` answer nominally states our preference. Nothing reads it here, since we send exactly one codec per m-line |
+| m-line payload-type order reversed: video now leads with 126 (H265) rather than 96 (VP8); audio leads with 8 (PCMA) rather than 111 (opus) | **Expected but worth watching.** The payload *numbers* against this particular offer are unchanged — H.264 102, opus 111 — but the order in a `sendonly` answer nominally states our preference. Nothing reads it here, since we send exactly one codec per m-line. Note the numbers are not fixed in general; see the review follow-up below |
 | `a=msid:` now precedes the `a=ssrc:` block | Cosmetic |
 | Fingerprint, ufrag, pwd, SSRCs, ports differ | Per-run values |
 
@@ -657,3 +657,89 @@ recorded is unchanged: PT 102 still carries `42001f`. 0.20's codec
 matching would not have made it an error either way — it degrades to
 a mime-type-only match
 (`rtc-0.20.2/src/rtp_transceiver/rtp_sender/rtp_codec.rs:139-163`).
+
+
+## Review follow-up
+
+The automated reviewer raised ten items on PR #278. Two were real
+bugs with no test covering them; both are fixed here with a
+regression test that fails on the pre-fix code.
+
+**1. The pumps stamped a hardcoded payload type (fixed).** The same
+0.20 change that made the SSRC load-bearing — `write_rtp` validates
+the header rather than rewriting it — applies to the payload type,
+and only the SSRC half was handled. Which payload type is negotiated
+depends on what the browser offered:
+`set_codec_preferences_from_remote_description`
+(`rtc-0.20.2/src/rtp_transceiver/internal.rs:299-383`) intersects the
+offer with our MediaEngine and remaps each match onto *our* number,
+and `register_default_codecs` registers five H.264 entries at
+different profile-level-ids. Chrome offers `42001f` and lands on
+PT 102, so the constant happened to be right. Firefox offers only
+`42e01f`, which matches PT 125 — every video packet would have been
+rejected at the sender, logged at `trace` inside the library, leaving
+a connected viewer on a black screen.
+
+Fixed by resolving the payload types from the senders' negotiated
+parameters after `set_remote_description` and publishing them to the
+pumps through an `Arc<AtomicU8>` (the pumps are spawned before
+`accept_offer`, so the value does not exist when they start). H.264
+selection prefers a `packetization-mode=1` entry, because the
+payloader emits FU-A fragments.
+
+Opus was safe by luck rather than design — one Opus entry in the
+MediaEngine means any Opus offer remaps onto 111 — and is now
+resolved the same way rather than trusted.
+
+Covered by `loopback_media_flows_when_client_offers_a_narrow_codec_set`,
+which offers one H.264 fmtp at Firefox's payload numbers. It reports
+0 video packets against the old code while every other test stays
+green.
+
+**2. The reaper parked forever on a replaced bridge (fixed).**
+`run_bridge_reaper` is one long-lived task that watches one bridge at
+a time and only advances when its wait returns. This phase documented
+that `close()` no longer reliably raises `dead` and judged it
+harmless; that was right for the bridge being closed and wrong for
+the reaper's loop. A viewer reloading the page would leave the reaper
+parked on the old bridge's signal for the life of the process: the
+encoder keeps running for nobody, the audio tap keeps feeding a dead
+pump, and no later viewer is ever reaped.
+
+Fixed by adding a `WebState::bridge_replaced` notification, raised by
+`post_offer` after the generation bump, and selecting on it alongside
+the dead signal. `notify_one` rather than `notify_waiters` so a
+replacement landing between the reaper's slot read and its park is
+not lost. Covered by `reaper_follows_a_replaced_bridge`, which fails
+by timeout on the old code — and whose `!first_dead.is_raised()`
+assertion independently confirms that `close()` really does leave the
+signal unraised.
+
+**Also addressed:** finished datachannel pumps are now pruned on push
+rather than accumulating for the life of the bridge; the
+empty-bind-address errors no longer assert a cause they cannot know
+(enumeration failure and a loopback-only host are indistinguishable
+by design, so they point at the `warn` that does distinguish them);
+the `raw_peer` test helper reuses the same guard as the real
+builders; and four stale comments were corrected — two describing the
+0.20 port in the future tense, one rustls rationale in a `ryll` test
+that still blamed webrtc 0.17.1's dependency tree, and
+`ARCHITECTURE.md` plus `AGENTS.md` still naming the retired
+`RTCPeerConnection` Rust type.
+
+**One review item did not survive checking.** The reviewer read the
+`Cargo.lock` churn — `getrandom 0.4.3`, `nix` gaining `memoffset`, a
+second `quinn-udp` major — as unrelated to the port. Every one of
+them traces back to the new dependency tree: `quinn-udp 0.6.1` is a
+direct dependency of `webrtc 0.20.2`, `rand 0.10.2` (which pulls
+`getrandom 0.4.3`) comes from the whole `rtc` family, and `nix
+0.31.3` (which pulls `memoffset`) comes from `rtc-shared 0.20.2`.
+Nothing was swept in. `deny.toml` sets `multiple-versions = "warn"`,
+so the duplicate `quinn-udp` majors are reported and not fatal.
+
+**Deferred deliberately.** The reviewer's observation that we now
+bind and advertise every non-loopback address, with `SettingEngine`'s
+filters dead on 0.20, stands as written and belongs with phase 03's
+configuration surface — an interface allowlist, not just a port pin.
+It is now recorded under Future work in the master plan; it was
+not there before this review.
