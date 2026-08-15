@@ -428,11 +428,19 @@ impl PeerConnectionEventHandler for BridgeHandler {
         // the state shadow: the guarded value is a plain Vec that a
         // panicking pusher cannot leave half-written, and dropping the
         // handle here would silently opt this pump out of cancellation.
-        self.0
+        let mut pumps = self
+            .0
             .dc_pumps
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Drop the handles of pumps that have already exited. Nothing
+        // else removes them — `close()` drains the list once, at the
+        // end — so a peer that repeatedly opens and closes
+        // post-negotiation channels would otherwise grow this vector
+        // for the life of the bridge. Bounded in practice, unbounded
+        // in principle.
+        pumps.retain(|pump| !pump.is_finished());
+        pumps.push(handle);
     }
 }
 
@@ -648,9 +656,10 @@ impl WebrtcBridge {
         let udp_addrs = host_udp_bind_addrs();
         if udp_addrs.is_empty() {
             return Err(anyhow!(
-                "no bindable network interface: every address this host reports is loopback, \
-                 unspecified, or IPv6 link-local, so the peer connection could only offer ICE \
-                 candidates no remote peer can reach"
+                "no bindable network interface: either enumeration failed or every address \
+                 this host reports is loopback, unspecified, or IPv6 link-local — check for an \
+                 earlier `host_udp_bind_addrs` warning to tell which. Either way the peer \
+                 connection could only offer ICE candidates no remote peer can reach"
             ));
         }
 

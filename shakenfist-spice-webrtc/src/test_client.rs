@@ -263,8 +263,9 @@ impl TestPeerBuilder {
         let udp_addrs = host_udp_bind_addrs();
         if udp_addrs.is_empty() {
             return Err(anyhow!(
-                "no bindable network interface for the test peer: this host reports only \
-                 loopback, unspecified or IPv6 link-local addresses"
+                "no bindable network interface for the test peer: either enumeration failed \
+                 or this host reports only loopback, unspecified or IPv6 link-local addresses \
+                 — check for an earlier `host_udp_bind_addrs` warning to tell which"
             ));
         }
 
@@ -602,13 +603,24 @@ mod tests {
     async fn raw_peer(mut media_engine: MediaEngine) -> Arc<dyn PeerConnection> {
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .expect("interceptors");
+        // Same guard as `TestPeerBuilder::build` and `WebrtcBridge::new`.
+        // Without it a loopback-only host fails these two tests with an
+        // opaque builder error while every other test in the file
+        // explains itself.
+        let udp_addrs = host_udp_bind_addrs();
+        assert!(
+            !udp_addrs.is_empty(),
+            "no bindable network interface for the test peer: either enumeration failed or this \
+             host reports only loopback, unspecified or IPv6 link-local addresses — check for an \
+             earlier `host_udp_bind_addrs` warning to tell which"
+        );
         Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(RTCConfigurationBuilder::new().build())
                 .with_media_engine(media_engine)
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::new(IgnoreEvents))
-                .with_udp_addrs(host_udp_bind_addrs())
+                .with_udp_addrs(udp_addrs)
                 .build()
                 .await
                 .expect("pc"),

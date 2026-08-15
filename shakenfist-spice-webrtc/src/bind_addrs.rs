@@ -76,6 +76,11 @@
 //! only `lo` is a real deployment shape, not a malfunction, so this
 //! module does not treat it as one.
 //!
+//! The corollary is that a caller cannot state *which* of the two
+//! happened, and must not write an error message that implies it
+//! knows. The `warn` above is the only place the distinction survives,
+//! so the callers' messages point at it.
+//!
 //! It is the *caller's* job to decide whether an empty result is
 //! fatal. `WebrtcBridge::new` constructs a peer connection from this
 //! list, and a peer connection that can never produce a routable
