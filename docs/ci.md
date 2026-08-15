@@ -71,7 +71,7 @@ aarch64-specific. The msvc triple cannot be checked from Linux
 without an MSVC toolchain, because `cargo check` still runs
 build scripts and `aws-lc-sys` compiles vendored BoringSSL C for
 the target. See
-[PLAN-two-stage-ci-phase-02-windows-check.md](plans/PLAN-two-stage-ci-phase-02-windows-check.md).
+[PLAN-two-stage-ci.md](plans/PLAN-two-stage-ci.md).
 
 ## The three gates
 

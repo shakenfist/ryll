@@ -96,7 +96,7 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters (see `PLAN-video-keeping-up-phase-01-instrumentation.md`), pcap writer-queue drop counter, ACK state, bytes in/out, image cache statistics (cap in bytes, LRU eviction count, bytes evicted) from `BoundedImageCache` |
+| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters, pcap writer-queue drop counter, ACK state, bytes in/out, image cache statistics (cap in bytes, LRU eviction count, bytes evicted) from `BoundedImageCache` |
 | `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
 | `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
 | `MainSnapshot` | Main | Session ID, mm_time, keepalive, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
