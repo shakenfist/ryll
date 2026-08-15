@@ -51,6 +51,33 @@
 //! task forever the first time a viewer reloaded the page. On 0.17
 //! this could not happen — `pc.close()` drove the state-change
 //! callback to `Closed`, which raised `dead` and released the reaper.
+//!
+//! # Why waking is not permission to reap
+//!
+//! A second wake source breaks an assumption the loop previously got
+//! for free: that returning from the wait meant *this* bridge had
+//! died. It no longer does, so the reap is gated on
+//! `StickySignal::is_raised` — the condition itself — rather than on
+//! the wait having returned.
+//!
+//! That gate is load-bearing, not belt and braces.
+//! `Notify::notify_one` stores a permit when no task is parked, and
+//! `post_offer` empties `bridge_slot` at the *start* of the request,
+//! so for the whole of the encoder restart, bridge construction and
+//! ICE gathering the reaper is going round its no-bridge sleep rather
+//! than sitting in the `select!`. The wake lands as a stored permit;
+//! the reaper's next iteration then snapshots the already-bumped
+//! generation, picks up the *new* bridge, consumes the permit
+//! immediately, sees an unchanged generation and — without the gate —
+//! reaps the bridge the viewer just connected on. That is the ordinary
+//! first-connection path, not a rare race.
+//!
+//! The generation check cannot cover this, and no amount of care about
+//! when the notification is raised can either. The check discriminates
+//! a replacement that landed *during* the wait; this is a replacement
+//! that landed *before* the snapshot. The two are symmetric, and a
+//! wake carries no evidence of which one it was. Only the bridge's own
+//! signal does.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -131,6 +158,22 @@ pub async fn run_bridge_reaper(state: Arc<WebState>) {
                 gen_at_subscribe,
                 gen_now,
             );
+            continue;
+        }
+
+        // Gate the reap on the bridge actually being dead. Returning
+        // from the wait is not evidence of that: a replacement
+        // notification raised while this task was on the no-bridge
+        // sleep path is stored as a permit and consumed by the very
+        // next `select!`, which is the normal first-connection
+        // sequence — see "Why waking is not permission to reap" in
+        // the module docs.
+        //
+        // This cannot spin. The permit has been consumed, so the next
+        // iteration re-reads the same generation and the same bridge
+        // and parks on both arms with nothing pending.
+        if !dead.is_raised() {
+            tracing::debug!("bridge reaper: woken but bridge is alive; re-parking");
             continue;
         }
 
@@ -305,6 +348,89 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "reaper did not reap the replacement bridge within 5s — it is probably still \
                  waiting on the replaced bridge's dead signal"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        reaper.abort();
+        let _ = tokio::time::timeout(Duration::from_millis(200), reaper).await;
+    }
+
+    /// A replacement notification raised while no bridge is in the slot
+    /// does not cause the reaper to reap the bridge that replacement
+    /// installed.
+    ///
+    /// This is the ordinary first-connection sequence, not a rare race.
+    /// `post_offer` empties `bridge_slot` before it restarts the
+    /// encoder and builds the new bridge, so the reaper spends that
+    /// whole window on its no-bridge sleep path with nothing parked in
+    /// the `select!`. `notify_one` therefore stores a permit, and the
+    /// reaper's next iteration snapshots the already-bumped generation
+    /// before consuming it — so the generation check sees no change and
+    /// waves the reap through.
+    ///
+    /// Without the `dead.is_raised()` gate this fails: the bridge is
+    /// gone from the slot, its peer connection closed and the encoder
+    /// stopped, moments after the viewer was sent its answer.
+    ///
+    /// The second half then raises the dead signal for real, so the
+    /// test also shows the gate did not simply disable reaping.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_replacement_wake_does_not_reap_a_live_bridge() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+        use tokio::sync::mpsc;
+
+        let state = Arc::new(WebState::new());
+        let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
+
+        // Built up front so the install below is quick enough to land
+        // inside a single no-bridge sleep window.
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: enc_tx,
+        })
+        .await
+        .expect("bridge");
+        let dead = bridge.dead_signal();
+
+        // Start the reaper with an empty slot and let it reach the
+        // no-bridge sleep, which is where `post_offer` finds it.
+        let reaper = tokio::spawn(run_bridge_reaper(Arc::clone(&state)));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Install exactly as `post_offer` does, while nothing is parked
+        // on `bridge_replaced` — so this stores a permit.
+        {
+            let mut slot = state.bridge_slot.lock().await;
+            *slot = Some(bridge);
+        }
+        state.bridge_generation.fetch_add(1, Ordering::SeqCst);
+        state.bridge_replaced.notify_one();
+
+        // Well past the 500ms no-bridge sleep, so the reaper has had
+        // its chance to wake, consume the permit and act on it.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            state.bridge_slot.lock().await.is_some(),
+            "the reaper reaped a live bridge on a stale replacement wake — a viewer would \
+             lose its peer connection immediately after being sent an answer"
+        );
+        assert!(
+            !dead.is_raised(),
+            "the bridge died on its own; this test is no longer proving what it claims to"
+        );
+
+        // The gate must not have cost us the actual reap.
+        dead.raise();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if state.bridge_slot.lock().await.is_none() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reaper did not reap a genuinely dead bridge within 5s"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

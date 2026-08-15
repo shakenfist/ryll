@@ -478,8 +478,11 @@ Falsifiable, in the order a reviewer would check them:
   carries a routable address — no `0.0.0.0`, no `::`, and at least
   one candidate present.
 - `tests/lifecycle.rs` passes unchanged in intent: `wait_for_dead`
-  fires on `Failed`, `Disconnected` and `Closed`, and the second
-  wait takes the sticky fast path.
+  fires when the *peer* goes away — the test closes the client
+  peer, which is the case that still raises the signal — and the
+  second wait takes the sticky fast path. It does not, and must
+  not be read to, claim that a locally-initiated `close()` raises
+  `dead`; finding 3 below records that it usually does not.
 - A real browser has reached a real SPICE guest through `--web`
   with video, audio, keyboard, mouse and cursor all working, and
   the result is recorded in this file with the browser, guest and
@@ -661,9 +664,13 @@ a mime-type-only match
 
 ## Review follow-up
 
-The automated reviewer raised ten items on PR #278. Two were real
-bugs with no test covering them; both are fixed here with a
+The automated reviewer raised ten items on PR #278 in a first round
+and three in a second. Two of the first round and one of the second
+were real bugs with no test covering them; each is fixed here with a
 regression test that fails on the pre-fix code.
+
+Round 1's items are recorded first, then round 2's under "Second
+review round" below.
 
 **1. The pumps stamped a hardcoded payload type (fixed).** The same
 0.20 change that made the SSRC load-bearing — `write_rtp` validates
@@ -743,3 +750,55 @@ filters dead on 0.20, stands as written and belongs with phase 03's
 configuration surface — an interface allowlist, not just a port pin.
 It is now recorded under Future work in the master plan; it was
 not there before this review.
+
+### Second review round
+
+Round 2 raised three items on the round-1 fixes. One was a real bug
+introduced by the round-1 reaper fix; it is the reason this section
+exists rather than the phase being closed after one round.
+
+**11. The replacement notification could reap a live bridge (fixed).**
+The round-1 fix gave the reaper a second wake source but left it
+treating any wake as proof that its bridge had died. `notify_one`
+stores a permit when no task is parked, and `post_offer` empties
+`bridge_slot` at the *start* of the request — so for the whole of the
+encoder restart, bridge construction and ICE gathering the reaper is
+on its no-bridge sleep path, not in the `select!`. The wake was
+therefore stored, and the reaper's next iteration snapshotted the
+already-bumped generation, picked up the *new* bridge, consumed the
+permit and reaped it. The generation check cannot discriminate this:
+it detects a replacement that landed *during* the wait, and this one
+landed *before* the snapshot.
+
+This was not a narrow race. It is the ordinary first-connection path
+— the reaper is spawned before any offer with the slot empty — so the
+round-1 fix turned "no viewer after the first is ever reaped" into
+"the first viewer is torn down moments after it connects". That is a
+worse failure than the one it fixed, and it survived a full green test
+run, `make web-smoke` and `make web-smoke-tls`.
+
+The fix is to gate the reap on `StickySignal::is_raised` — the
+condition itself — rather than on the wait having returned. The
+generation check stays: it covers the opposite direction, an old
+bridge's signal raised late while a new bridge sits in the slot.
+`a_replacement_wake_does_not_reap_a_live_bridge` reproduces the
+sequence and fails without the gate, while
+`reaper_follows_a_replaced_bridge` passes either way — the round-1
+test could not see this.
+
+The general lesson, recorded because it is the kind of thing that
+recurs: adding a wake source to a loop silently invalidates any
+"I woke, therefore X" reasoning the loop was resting on. Waking is
+scheduling, not evidence.
+
+**12. Three statements of the dead-signal contract (fixed).**
+`ARCHITECTURE.md`'s Phase 6 section, `AGENTS.md`'s `bridge.rs`
+annotation and this plan's Definition of done all still said the
+signal is raised on `Failed`, `Disconnected` or `Closed` — which
+finding 3 above had already contradicted. All three now say the
+signal means "the peer went away", and that a locally-initiated
+`close()` usually does not raise it. `ARCHITECTURE.md`'s reaper loop
+gained the replacement arm and the liveness gate, since a reader who
+trusted the old text would conclude both were redundant.
+`tests/lifecycle.rs` was correct throughout: it closes the *client*
+peer, which is the remote-side case that does still raise the signal.
