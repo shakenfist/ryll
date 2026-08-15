@@ -1604,6 +1604,107 @@ mod tests {
     }
 
     #[test]
+    fn note_drop_logs_the_first_then_every_nth() {
+        let counter = AtomicU64::new(0);
+
+        // The first drop always reports, so a single lost message is
+        // never silent.
+        assert_eq!(BridgeEvents::note_drop(&counter), Some(1));
+
+        // Then nothing until the threshold, and what it reports is the
+        // running total rather than "one more".
+        for _ in 2..LOG_EVERY_N_DROPS {
+            assert_eq!(BridgeEvents::note_drop(&counter), None);
+        }
+        assert_eq!(
+            BridgeEvents::note_drop(&counter),
+            Some(LOG_EVERY_N_DROPS),
+            "the Nth drop should report"
+        );
+
+        for _ in 1..LOG_EVERY_N_DROPS {
+            assert_eq!(BridgeEvents::note_drop(&counter), None);
+        }
+        assert_eq!(
+            BridgeEvents::note_drop(&counter),
+            Some(LOG_EVERY_N_DROPS * 2),
+            "and every Nth after that"
+        );
+    }
+
+    /// Build a [`BridgeEvents`] whose two outbound channels are
+    /// already full, so both handlers take their drop path.
+    ///
+    /// The receivers are returned rather than dropped: dropping them
+    /// closes the channels, and `try_send` would then report `Closed`
+    /// instead of `Full` — a different arm, with different logging and
+    /// no counter increment.
+    #[allow(clippy::type_complexity)]
+    fn events_with_full_channels() -> (
+        BridgeEvents,
+        mpsc::Receiver<EncoderControl>,
+        mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (encoder_control, enc_rx) = mpsc::channel::<EncoderControl>(1);
+        let (incoming_tx, inc_rx) = mpsc::channel::<Vec<u8>>(1);
+        encoder_control
+            .try_send(EncoderControl::RequestKeyframe)
+            .expect("fill the encoder channel to capacity");
+        incoming_tx.try_send(vec![0]).expect("fill the DC channel");
+
+        let events = BridgeEvents {
+            encoder_control,
+            dead: Arc::new(StickySignal::new()),
+            incoming_tx,
+            state: Arc::new(Mutex::new(RTCPeerConnectionState::New)),
+            gathered: Arc::new(StickySignal::new()),
+            dropped_keyframe_requests: AtomicU64::new(0),
+            dropped_control_messages: AtomicU64::new(0),
+            dc_pumps: Arc::new(Mutex::new(Vec::new())),
+        };
+        (events, enc_rx, inc_rx)
+    }
+
+    #[tokio::test]
+    async fn a_full_encoder_channel_drops_the_keyframe_request_and_counts_it() {
+        let (events, _enc_rx, _inc_rx) = events_with_full_channels();
+
+        // Must return rather than block: this runs inline in the
+        // driver event loop, so a slow encoder has to cost a keyframe
+        // rather than the whole connection.
+        events
+            .on_state_change(RTCPeerConnectionState::Connected)
+            .await;
+
+        assert_eq!(
+            events.dropped_keyframe_requests.load(Ordering::Relaxed),
+            1,
+            "a full encoder channel should count a dropped keyframe request"
+        );
+        // Dropping the request must not cost the state transition too.
+        assert_eq!(
+            *events
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            RTCPeerConnectionState::Connected
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_control_channel_drops_the_message_and_counts_it() {
+        let (events, _enc_rx, _inc_rx) = events_with_full_channels();
+
+        events.on_control_message(vec![1, 2, 3], "test").await;
+
+        assert_eq!(
+            events.dropped_control_messages.load(Ordering::Relaxed),
+            1,
+            "a full control channel should count a dropped message"
+        );
+    }
+
+    #[test]
     fn packetization_mode_1_is_recognised_and_defaults_to_0() {
         assert!(is_packetization_mode_1(H264_FMTP_LINE));
         assert!(is_packetization_mode_1("packetization-mode=1"));
