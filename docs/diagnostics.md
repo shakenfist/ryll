@@ -348,7 +348,8 @@ a misconfigured output directory does not retry on every
 disconnect event. Snapshots land in (in order of
 preference) `--bug-report-dir`, `<--capture>/bug-reports/`,
 or the current working directory. The same resolution
-chain is used for the manual F8 button. Runtime metrics
+chain is used for the manual F12 / Menu → Report path.
+Runtime metrics
 are recorded as unavailable in this path — sampling
 them on the GUI thread would freeze the UI for ~1 s,
 and the pcap and channel snapshots are the load-bearing

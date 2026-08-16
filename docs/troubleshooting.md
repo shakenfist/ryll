@@ -389,8 +389,8 @@ tools/pcap-inspect.py opcodes <dir>/display.pcap
 # Which image codecs dominate the DRAW_COPY traffic?
 tools/pcap-inspect.py draw-copy <dir>/display.pcap
 
-# What did the server send in the last 5 seconds before
-# you hit F8?
+# What did the server send in the last 5 seconds of the
+# capture, right after the artefact appeared?
 tools/pcap-inspect.py timeline <dir>/display.pcap --since-last 5
 ```
 

@@ -205,7 +205,8 @@ produced.
     captured at the moment of failure. A 60 s cooldown is enforced
     via `RyllApp::last_disconnect_report_at` and is updated even on
     write failure to avoid retry storms. Output directory resolution
-    (shared with the manual F8 button via `manual_bug_report_dir`):
+    (shared with the manual F12 / Menu → Report path via
+    `manual_bug_report_dir`):
     `--bug-report-dir` → `<--capture>/bug-reports/` → CWD. The
     `--pedantic-dir` flag falls back through the same chain when
     unspecified: `--pedantic-dir` → `--bug-report-dir` →
