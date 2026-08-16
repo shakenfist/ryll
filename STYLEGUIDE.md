@@ -198,18 +198,17 @@ Rules:
   For dynamically-composed keys (e.g. `log_unknown_once` keying off
   `channel × msg_type`), use `logging::intern_key`.
 * One key per distinct kind per session -- do not vary by instance
-  count or payload. Phase-8 pedantic mode reads the key registry to
-  build its gap counter; per-instance keys would blow it up.
+  count or payload. Pedantic mode reads the key registry to build
+  its gap counter; per-instance keys would blow it up.
 * Silent repeats: `warn_once!` only fires its `tracing::warn!` the
   first time per session. The rest of the flow (skip / unmasked
   paint / etc.) still runs normally on every call.
 * The truly-unknown-opcode `_ =>` arms in every channel handler
-  call `logging::log_unknown_once(channel, msg_type, payload)`
-  (added in phase 7 and wired up across every channel in phase 8c).
+  call `logging::log_unknown_once(channel, msg_type, payload)`.
   `log_unknown_once` enters the same warn_once registry with key
   `"<channel>:hexdump:<msg_type>"`, hex-dumps the payload on first
   occurrence, and stays silent on repeats. The older `log_unknown`
-  is unused in channel handlers as of phase 8.
+  is no longer used in channel handlers.
 
 The registry is append-only within a session; there is no
 remove-or-reset API. Tests query via `warn_once_keys()` and key off

@@ -17,9 +17,10 @@ guessing.
 All planning documents should go into `docs/plans/`.
 
 Consult `ARCHITECTURE.md` for the system architecture
-overview, channel types, and data flow. Consult `AGENTS.md`
-for build commands, project conventions, code organisation,
-and a table of protocol reference sources. Key references
+overview, channel types, data flow, and code organisation.
+Consult `docs/development.md` for build commands, and
+`AGENTS.md` for project conventions and a table of protocol
+reference sources. Key references
 include `shakenfist/kerbside` (Python SPICE proxy with
 protocol docs and a reference client),
 `/srv/src-reference/spice/spice-protocol/` (canonical SPICE
@@ -232,11 +233,13 @@ because the following statements will be true:
   still pass (`make test`).
 * Lines are wrapped at 120 characters, single quotes for
   Rust strings where applicable.
-* `README.md`, `ARCHITECTURE.md`, and `AGENTS.md` have been
-  updated if the change adds or modifies channels, message
-  types, or compression algorithms.
 * Documentation in `docs/` has been updated to describe any
-  new features or configuration options.
+  new features or configuration options — including
+  `docs/spice-protocol.md` if the change adds or modifies
+  channels, message types, or compression algorithms.
+* `ARCHITECTURE.md` has been updated only if the shape of
+  the system changed, and `AGENTS.md` only if a convention
+  changed. Both are a summary and an index into `docs/`.
 * If the changes affect SPICE protocol behaviour, the
   relevant documentation in `shakenfist/kerbside/docs/` has
   also been reviewed and updated if needed.
