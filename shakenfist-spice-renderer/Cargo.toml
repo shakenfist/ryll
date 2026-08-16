@@ -130,8 +130,13 @@ tempfile = "3"
 
 # Phase 2 step 2e pre-flight: smoke-test that webrtc-rs's H.264
 # RTP payloader accepts the NAL output our H264Encoder produces.
-# `rtp` is the standalone crate that the umbrella `webrtc` crate
-# re-exports as `webrtc::rtp`; depending on it directly keeps the
-# test's transitive footprint minimal. Used only by
-# tests/webrtc_h264_smoke.rs.
+# `rtp` was the standalone crate the umbrella `webrtc` crate
+# re-exported as `webrtc::rtp` on 0.17; `webrtc` 0.20 replaced it
+# with the sans-io `rtc` core (reached as `rtc::rtp`) and does not
+# re-export that either, so this is now a dead upstream line ending
+# at 0.17.2, kept only because this dev-dependency has no coupling
+# to shakenfist-spice-webrtc's types. Used only by
+# tests/webrtc_h264_smoke.rs; should move onto `rtc::rtp` (or be
+# retired) eventually — see the webrtc-0.20-upgrade master plan's
+# Future work.
 rtp = "0.17"

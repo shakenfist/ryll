@@ -117,7 +117,11 @@ fn main() -> Result<()> {
     // The Linux devcontainer's resolver lands on a single provider
     // and silently auto-detects; macOS resolves with both enabled
     // and panics. Installing a default explicitly at startup
-    // covers every entry path (--web already did this internally).
+    // covers every entry path. `shakenfist-spice-webrtc` no longer
+    // has a rustls dependency of its own (the webrtc-0.20 port; see
+    // docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md), so this
+    // call is now the only thing installing a provider for the
+    // SPICE TLS and axum-server paths.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Optional tokio-console initialisation for the K1 hang
@@ -505,10 +509,12 @@ fn run_web(
 
     let capture_for_renderer = capture.clone();
     let result = runtime.block_on(async move {
-        // Idempotent rustls CryptoProvider install. The
-        // WebrtcBridge::new path also installs this internally
-        // (commit a2dc11cb), but doing it here once at startup
-        // covers the case where no offer is ever received.
+        // Idempotent rustls CryptoProvider install, matching the
+        // one in `main()` above. `shakenfist-spice-webrtc` has no
+        // rustls dependency (the webrtc-0.20 port removed it; see
+        // docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md), so
+        // this call is what installs a provider for the SPICE TLS
+        // and axum-server paths in the `--web` entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Build the host-side scaffolding the renderer expects.

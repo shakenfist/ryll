@@ -51,23 +51,6 @@
         "rand_core"
       ],
       "allowedVersions": "<0.10"
-    },
-    {
-      "description": "Hold webrtc < 0.18 until the 0.20 port lands. webrtc-rs 0.20 re-homes the crate on the sans-io `rtc` protocol core behind a thin async layer, which makes it a port of shakenfist-spice-webrtc/src/bridge.rs rather than a version bump: the `api`, `interceptor`, `track` and `rtp` top-level modules are gone, RTCPeerConnection's operations moved onto the object-safe `PeerConnection` trait, the per-object callbacks (on_peer_connection_state_change, on_data_channel, on_message) collapse into a single PeerConnectionEventHandler passed to PeerConnectionBuilder at build time, `gathering_complete_promise` and `connection_state` have no direct replacement, and the builder now requires explicit UDP bind addresses. Renovate raised this as shakenfist/ryll#245; CI failed with 25 errors in the lib and 36 in the lib tests. Estimated at roughly a week and tracked in docs/plans/PLAN-webrtc-0.20-upgrade.md; remove this rule when phase 2 of that plan lands.",
-      "matchPackageNames": [
-        "webrtc"
-      ],
-      "allowedVersions": "<0.18"
-    },
-    {
-      "description": "Skip in-range (lockfile-only) patch bumps of webrtc. webrtc-rs releases its sibling crates (webrtc-util, webrtc-sctp, webrtc-ice, webrtc-srtp, webrtc-data, webrtc-media, webrtc-mdns) in lockstep but declares loose version ranges on them, so bumping only webrtc's lock entry can yield an inconsistent set — webrtc 0.17.2 sets the mtu field on webrtc_sctp Config, which only exists in webrtc-sctp 0.17.2, breaking the build against the still-locked 0.17.1 (shakenfist/ryll#215). The siblings are transitive deps that Renovate cannot bump via grouping, so in-range webrtc patches instead arrive through lock file maintenance, whose full `cargo update` advances the whole family together. Minor/major webrtc updates rewrite Cargo.toml and re-resolve properly, so they stay enabled.",
-      "matchPackageNames": [
-        "webrtc"
-      ],
-      "matchUpdateTypes": [
-        "patch"
-      ],
-      "enabled": false
     }
   ],
   "lockFileMaintenance": {

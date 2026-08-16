@@ -20,7 +20,7 @@ use rand::RngCore;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tracing::info;
 
 use super::signalling::EncoderInfra;
@@ -101,6 +101,20 @@ pub struct WebState {
     /// wakes, a new bridge has replaced the old one and the
     /// reaper skips the reap to avoid closing a healthy bridge.
     pub bridge_generation: Arc<AtomicU64>,
+    /// Raised by `POST /offer` once a new bridge is in the slot and
+    /// [`Self::bridge_generation`] has been bumped.
+    ///
+    /// The reaper parks on the *current* bridge's dead signal, so
+    /// without this its only way to notice a replacement is for the
+    /// bridge it is watching to die — and a bridge closed by `/offer`
+    /// is not guaranteed to raise `dead` at all. See
+    /// `crate::web::lifecycle::run_bridge_reaper`.
+    ///
+    /// `notify_one`, not `notify_waiters`: the replacement can land in
+    /// the window between the reaper reading the slot and parking on
+    /// the signal, and a stored permit survives that race where a
+    /// broadcast to zero waiters would be lost.
+    pub bridge_replaced: Arc<Notify>,
     /// Timestamp of the last accepted `POST /offer`. Used to
     /// enforce a 1-second cooldown between offers so an
     /// authenticated client cannot thrash the openh264 encoder
@@ -172,6 +186,7 @@ impl WebState {
             surface_mirror,
             active_opus_tx,
             bridge_generation: Arc::new(AtomicU64::new(0)),
+            bridge_replaced: Arc::new(Notify::new()),
             // Initialise 60 s in the past so the first offer
             // always succeeds without a cold-start delay.
             last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),

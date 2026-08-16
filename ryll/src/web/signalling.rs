@@ -355,10 +355,27 @@ pub async fn post_offer(
     }
 
     // Step 6: SDP exchange.
-    let answer_sdp = bridge
-        .accept_offer(offer.sdp)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)))?;
+    //
+    // Close the bridge explicitly on the error path. It is not in
+    // `bridge_slot` yet, so nothing else will ever reap it, and on
+    // 0.20 dropping it detaches the driver task rather than stopping
+    // it — the peer connection, its UDP sockets (one per non-loopback
+    // interface), the control-DC pump, and the input relay spawned at
+    // step 5c would all outlive the failed request. A client posting
+    // malformed SDP in a loop would accumulate them for the life of
+    // the process; the offer cooldown bounds the rate, not the total.
+    // `WebrtcBridge`'s `Drop` is a backstop for paths that forget,
+    // but here the close is awaited, so teardown is finished before
+    // the 400 goes back.
+    let answer_sdp = match bridge.accept_offer(offer.sdp).await {
+        Ok(sdp) => sdp,
+        Err(e) => {
+            if let Err(ce) = bridge.close().await {
+                warn!("web: closing an abandoned bridge errored: {}", ce);
+            }
+            return Err((StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)));
+        }
+    };
 
     // Step 7: store the new bridge and bump the generation
     // counter so the reaper knows not to act on the dead
@@ -369,6 +386,19 @@ pub async fn post_offer(
         *slot = Some(bridge);
         state.bridge_generation.fetch_add(1, Ordering::SeqCst);
     }
+
+    // Wake the reaper so it stops watching the bridge we just
+    // replaced. Strictly after the generation bump above: the reaper
+    // compares generations on waking to decide whether the bridge it
+    // was watching is still current, and waking it any earlier would
+    // have it see an unchanged counter and reap the bridge installed
+    // a line ago.
+    //
+    // Needed because closing the old bridge does not reliably raise
+    // its dead signal on webrtc-rs 0.20 — without this the reaper
+    // parks on a signal that will never fire and never observes any
+    // later bridge. See `crate::web::lifecycle::run_bridge_reaper`.
+    state.bridge_replaced.notify_one();
 
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
     Ok(Json(OfferRes {
@@ -403,10 +433,13 @@ mod tests {
     /// carries an SDP answer that advertises H.264.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn post_offer_returns_valid_answer() {
-        // When both aws-lc-rs and ring are in the dependency
-        // tree (webrtc 0.17.1 pulls both via rustls 0.23)
-        // rustls cannot auto-select a CryptoProvider. Install
-        // ring explicitly before the DTLS handshake starts.
+        // Install the rustls ring provider, mirroring the
+        // production install in `main()`. Not for the DTLS
+        // handshake: `shakenfist-spice-webrtc` has no rustls
+        // dependency since the webrtc-0.20 port, and rtc-dtls
+        // selects its crypto provider from its own cargo
+        // features without consulting the process default. It
+        // is the SPICE TLS and axum-server paths that need one.
         // `install_default` is idempotent across concurrent
         // tests (it returns Err if already set, which we
         // ignore).

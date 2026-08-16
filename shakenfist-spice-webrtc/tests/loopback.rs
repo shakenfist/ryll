@@ -4,10 +4,10 @@
 //! [`WebrtcBridge`] (the production type) and runs the H.264 video
 //! pump (driven by a real `H264Encoder` + `EncoderTask` +
 //! `SyntheticFrameSource`) and the synthetic Opus audio pump. The
-//! "client" peer is a hand-rolled `RTCPeerConnection`: the bridge's
-//! API is shaped for the *server* role (sending video + audio,
-//! owning the control DC), so to verify "incoming RTP packets" and
-//! the ping/pong round-trip we drive the client side directly.
+//! "client" peer is a `TestPeer`: the bridge's API is shaped for the
+//! *server* role (sending video + audio, owning the control DC), so
+//! to verify "incoming RTP packets" and the ping/pong round-trip we
+//! drive the client side directly.
 //!
 //! Asserts:
 //! * >= 10 video RTP packets received within ~3 seconds.
@@ -22,28 +22,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use bytes::BytesMut;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use shakenfist_spice_renderer::{EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource};
 use tokio::sync::mpsc;
-use webrtc::data_channel::data_channel_message::DataChannelMessage;
-use webrtc::data_channel::RTCDataChannel;
-use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
-use webrtc::rtp_transceiver::rtp_receiver::RTCRtpReceiver;
-use webrtc::rtp_transceiver::RTCRtpTransceiver;
-use webrtc::track::track_remote::TrackRemote;
+use webrtc::data_channel::DataChannelEvent;
+use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
 use shakenfist_spice_webrtc::test_client::TestPeer;
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loopback_video_audio_datachannel() {
-    // rustls CryptoProvider: webrtc 0.17.1 pulls both ring and
-    // aws-lc-rs into the dependency graph through rustls 0.23, so
-    // rustls cannot auto-select. Install ring explicitly. The 3e
-    // unit test does the same; `install_default` is idempotent
-    // (returns Err if already set; we ignore the result).
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     // ── Server: production WebrtcBridge ──────────────────────────
     let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
     let server = WebrtcBridge::new(WebrtcBridgeConfig {
@@ -64,70 +54,104 @@ async fn loopback_video_audio_datachannel() {
     // `TestPeer` handles the codec registration (default codecs plus
     // the bridge's H.264 PT 102), the recvonly transceivers, and the
     // seed datachannel that puts an m=application section in the
-    // offer. The `on_track` / `on_data_channel` wiring below is
-    // specific to this test, so it reaches through to the raw PC.
-    let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
-        .build()
-        .await
-        .expect("client peer");
-    let client_pc = client.pc().clone();
-
-    // Counters for incoming RTP packets, by track kind.
+    // offer. The `on_track` wiring below is specific to this test, so
+    // it is supplied to the builder: 0.20 hands the event handler to
+    // the builder before the peer connection exists, so there is no
+    // post-construction registration to reach through `TestPeer::pc()`
+    // for. That is also the ordering an on-track hook always needed —
+    // a track that arrives before its handler is installed fires
+    // nothing. The datachannel side is handled after `build()`
+    // instead; see the echo below for why that is both possible and
+    // necessary now.
+    //
+    // Counters for incoming RTP packets, by track kind. Created
+    // before the peer so they can be cloned into the builder hooks
+    // below.
     let video_count = Arc::new(AtomicUsize::new(0));
     let audio_count = Arc::new(AtomicUsize::new(0));
 
-    // on_track: spawn a per-track reader loop that increments the
-    // appropriate counter for each successfully decoded RTP packet.
-    //
-    // The read loop runs in a `tokio::spawn`-ed task rather than
-    // directly inside the on_track callback. webrtc-rs awaits the
-    // returned future before firing on_track for the *next* track,
-    // so a long-lived `read_rtp` loop inside the callback would
-    // pin the event loop on the first track (audio) and prevent
-    // on_track from ever firing for video. Spawning lets the
-    // callback return immediately and both kinds receive packets.
-    {
-        let video_count = video_count.clone();
-        let audio_count = audio_count.clone();
-        client_pc.on_track(Box::new(
-            move |track: Arc<TrackRemote>,
-                  _receiver: Arc<RTCRtpReceiver>,
-                  _transceiver: Arc<RTCRtpTransceiver>| {
+    let client = TestPeer::builder()
+        .seed_data_channel("client-seed")
+        .on_track_hook({
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
+            // on_track: spawn a per-track reader loop that increments
+            // the appropriate counter for each RTP packet the track
+            // yields.
+            //
+            // The read loop runs in a `tokio::spawn`-ed task rather
+            // than directly inside the hook body. webrtc-rs awaits
+            // the returned future before firing on_track for the
+            // *next* track, so a long-lived poll loop inside the hook
+            // would pin the driver's event loop on the first track
+            // (audio) and prevent on_track from ever firing for
+            // video. Spawning lets the hook return immediately and
+            // both kinds receive packets. This reasoning is unchanged
+            // from 0.17 — 0.20's driver loop awaits handler methods
+            // inline too — but the mechanics are not: `read_rtp()` is
+            // gone, and a remote track is now polled for events of
+            // which RTP packets are one variant.
+            Box::new(move |track: Arc<dyn TrackRemote>| {
                 let video_count = video_count.clone();
                 let audio_count = audio_count.clone();
                 Box::pin(async move {
-                    let kind = track.kind();
-                    let counter = match kind {
-                        RTPCodecType::Video => video_count,
-                        RTPCodecType::Audio => audio_count,
-                        _ => return,
+                    // `kind()` is async in 0.20. Awaiting it here is
+                    // fine: once per track, not once per packet.
+                    let counter = match track.kind().await {
+                        RtpCodecKind::Video => video_count,
+                        RtpCodecKind::Audio => audio_count,
+                        RtpCodecKind::Unspecified => return,
                     };
                     tokio::spawn(async move {
-                        while track.read_rtp().await.is_ok() {
-                            counter.fetch_add(1, Ordering::Relaxed);
+                        while let Some(event) = track.poll().await {
+                            if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
                     });
                 })
-            },
-        ));
-    }
-
-    // on_data_channel: when the server's control DC arrives, install
-    // an on_message handler that echoes "ping" back as "pong".
-    client_pc.on_data_channel(Box::new(move |dc: Arc<RTCDataChannel>| {
-        Box::pin(async move {
-            let dc_for_send = dc.clone();
-            dc.on_message(Box::new(move |msg: DataChannelMessage| {
-                let dc = dc_for_send.clone();
-                Box::pin(async move {
-                    if msg.data.as_ref() == b"ping" {
-                        let _ = dc.send(&Bytes::from_static(b"pong")).await;
-                    }
-                })
-            }));
+            })
         })
-    }));
+        .build()
+        .await
+        .expect("client peer");
+
+    // ── Client-side control echo ────────────────────────────────
+    //
+    // The echo runs on the client's *own* seed datachannel, not on
+    // one delivered by `on_data_channel`. On webrtc-rs 0.20 those are
+    // the same SCTP stream: a channel created before the DTLS role is
+    // known always gets stream id 1, both peers do that, and a peer's
+    // DCEP open for an id already in the local map is not announced —
+    // so `on_data_channel` never fires here. See
+    // `TestPeer::seed_data_channel` for the full mechanism and the
+    // source citations.
+    //
+    // This is also how the real browser client behaves:
+    // `ryll/src/web/assets/app.js` creates one `control-seed` channel,
+    // hangs `onmessage` off it, and registers no `ondatachannel`
+    // handler at all. So the echo below exercises the production data
+    // path rather than a test-only one.
+    //
+    // Polling only starts here, after `build()` returned — which on
+    // 0.20 is safe in a way a callback registration would not be:
+    // events queue in the channel's buffer until something polls them,
+    // so nothing is lost by attaching late.
+    let client_dc = client
+        .seed_data_channel()
+        .expect("seed datachannel requested above")
+        .clone();
+    let _echo = tokio::spawn(async move {
+        while let Some(event) = client_dc.poll().await {
+            match event {
+                DataChannelEvent::OnMessage(msg) if msg.data.as_ref() == b"ping" => {
+                    let _ = client_dc.send(BytesMut::from(&b"pong"[..])).await;
+                }
+                DataChannelEvent::OnClose => break,
+                _ => {}
+            }
+        }
+    });
 
     // ── SDP exchange: client offers, server answers ─────────────
     let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
@@ -213,6 +237,118 @@ async fn loopback_video_audio_datachannel() {
     assert!(a >= 5, "expected >=5 audio packets, got {}", a);
 
     // ── Cleanup ─────────────────────────────────────────────────
+    server.close().await.expect("server close");
+    client.close().await.expect("client close");
+}
+
+/// Media still flows when the client offers a codec set that does not
+/// include the payload types the bridge registered.
+///
+/// `loopback_video_audio_datachannel` above cannot catch this. Its
+/// `TestPeer` registers the same codec set as the bridge, so every
+/// payload type the bridge might stamp is negotiated and accepted no
+/// matter where the number came from. Real browsers offer a subset:
+/// Chrome offers H.264 `42001f` (which matches the MediaEngine entry at
+/// PT 102), Firefox offers only `42e01f` (which matches PT 125). The
+/// core remaps each offered codec onto whichever of *our* entries it
+/// matched, and 0.20's `write_rtp` then rejects any packet whose
+/// payload type is not on the resulting list.
+///
+/// So this offers what Firefox offers, and numbers it the way Firefox
+/// does — 126 for H.264 and 109 for Opus, neither of which is a number
+/// the bridge registers — and asserts packets still arrive. Stamping a
+/// constant fails this test with zero video packets while every other
+/// test in the suite stays green, which is exactly the failure mode
+/// worth a dedicated test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
+    let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
+    let server = WebrtcBridge::new(WebrtcBridgeConfig {
+        ice_servers: vec![],
+        encoder_control: server_enc_tx,
+    })
+    .await
+    .expect("server bridge");
+
+    let video_count = Arc::new(AtomicUsize::new(0));
+    let audio_count = Arc::new(AtomicUsize::new(0));
+
+    let client = TestPeer::builder()
+        // The seed channel is still required: without an m=application
+        // section in the offer the SCTP association never opens and the
+        // handshake stalls. See the test above.
+        .seed_data_channel("client-seed")
+        .offer_only_h264_fmtp(
+            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+            126,
+            109,
+        )
+        .on_track_hook({
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
+            // Spawns rather than looping inline, for the reason given
+            // in the test above: the hook is awaited in the driver loop.
+            Box::new(move |track: Arc<dyn TrackRemote>| {
+                let video_count = video_count.clone();
+                let audio_count = audio_count.clone();
+                Box::pin(async move {
+                    let counter = match track.kind().await {
+                        RtpCodecKind::Video => video_count,
+                        RtpCodecKind::Audio => audio_count,
+                        RtpCodecKind::Unspecified => return,
+                    };
+                    tokio::spawn(async move {
+                        while let Some(event) = track.poll().await {
+                            if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                })
+            })
+        })
+        .build()
+        .await
+        .expect("client peer");
+
+    let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
+    let answer_sdp = server
+        .accept_offer(final_offer_sdp)
+        .await
+        .expect("server accept");
+    client
+        .set_remote_answer(answer_sdp)
+        .await
+        .expect("client rsd");
+
+    client
+        .wait_until_connected(Duration::from_secs(20))
+        .await
+        .expect("client PC did not reach Connected");
+
+    let encoder = H264Encoder::new(64, 64).expect("encoder init");
+    let source = SyntheticFrameSource::new(64, 64);
+    let (frame_tx, frame_rx) = mpsc::channel(32);
+    let _enc_handle = EncoderTask::spawn(encoder, source, frame_tx, server_enc_rx, 30);
+    let _video_pump = server.spawn_video_pump(frame_rx);
+    let _audio_pump = server.spawn_synthetic_audio_pump();
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let v = video_count.load(Ordering::Relaxed);
+    let a = audio_count.load(Ordering::Relaxed);
+    eprintln!(
+        "narrow-codec loopback: received {} video RTP packets, {} audio RTP packets",
+        v, a
+    );
+    assert!(
+        v >= 10,
+        "expected >=10 video packets with a narrow codec offer, got {} — the pump is probably \
+         stamping a payload type that was not negotiated",
+        v
+    );
+    assert!(a >= 5, "expected >=5 audio packets, got {}", a);
+
     server.close().await.expect("server close");
     client.close().await.expect("client close");
 }

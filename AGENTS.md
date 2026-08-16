@@ -148,16 +148,34 @@ between design and implementation is explicit in `git log`.
 
 Both of these were learned the hard way and apply to all webrtc-rs work:
 
-- **`on_track` must spawn a task for `read_rtp` loops.**
-  webrtc-rs serialises `on_track` firings on the future returned
-  by each callback. A long-lived `loop { track.read_rtp().await
-  }` inside `on_track` blocks the machinery from firing
-  subsequent callbacks (e.g. the audio track never fires because
-  the video track's callback never returns). Always
-  `tokio::spawn` the `read_rtp` loop inside `on_track` and
-  return immediately. This differs from what intuition suggests
-  and from many webrtc-rs examples; document it explicitly
-  whenever writing receiver-side WebRTC code.
+- **Handler methods must never block — they run inline in the
+  driver event loop.** webrtc-rs 0.20 replaced the per-object
+  callback registrations (`on_peer_connection_state_change`,
+  `on_track`, `on_data_channel`, `on_message`, ...) with one
+  `PeerConnectionEventHandler` supplied to the builder before the
+  peer connection exists, and every method on it is awaited
+  inline by the driver loop. A slow or blocking handler method
+  stalls the whole connection, not just the event it is handling.
+  So anything that needs to *loop* — reading a datachannel's
+  events or a remote track's RTP — must `tokio::spawn` and return
+  immediately, and anything that needs to *hand off from inside a
+  handler method* must use `try_send`, never `send().await`, so a
+  full channel degrades to a dropped message rather than stalling
+  the driver. This is stricter than pre-0.20, where only
+  `on_track` firings were serialised on each other.
+
+  **The rule is about the dispatch path, not about the type.**
+  Check where a function is actually *called from* before applying
+  it. `BridgeEvents` holds both kinds: `on_state_change` is
+  dispatched from the handler and uses `try_send`, while
+  `on_control_message` is reached only from a spawned
+  `run_dc_pump` and therefore awaits — deliberately, because it
+  carries keyboard and mouse events, and back-pressure onto SCTP
+  is better than a dropped key-up leaving a modifier stuck down in
+  the guest. Applying "never block" to the second one cost real
+  input events before it was caught. See
+  [`docs/web-mode-internals.md`](docs/web-mode-internals.md) for
+  where each case bites in `bridge.rs`.
 
 - **One-shot lifecycle events use `StickySignal`, never a bare
   `Notify`.** `Notify::notify_waiters()` wakes only the waiters
@@ -172,6 +190,19 @@ Both of these were learned the hard way and apply to all webrtc-rs work:
   a permit) on the raise side — and is unit-tested against the
   lost-wakeup schedule. Do not hand-roll a fifth copy; that is how
   the original bug got in.
+
+  A *recurring* wake source is the other case, and the rules
+  invert. `WebState::bridge_replaced` is a bare `Notify` using
+  `notify_one()` on purpose: the stored permit is the feature,
+  because it survives the reaper's 500 ms no-bridge sleep and is
+  still there when the loop next parks. The cost is that a wake
+  carries no information. Any loop that gains a second wake
+  source must re-check the condition it actually cares about
+  rather than treating the wake as proof — the reaper waking and
+  concluding "my bridge died" is a bug that shipped, and the fix
+  was to gate the reap on `StickySignal::is_raised`. Sticky for
+  a one-shot fact; bare `Notify` plus an explicit re-check for a
+  recurring nudge.
 
 ## Cargo feature gating
 
