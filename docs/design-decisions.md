@@ -1,9 +1,10 @@
 # Key design decisions
 
-Why ryll is shaped the way it is. Each entry records a decision and the
-reasoning behind it, so a change that contradicts one is a deliberate
-choice rather than an accident. See [Architecture](../ARCHITECTURE.md)
-for the structure these decisions produced.
+This page records why ryll is shaped the way it is. Each entry captures a
+decision and the reasoning behind it, so a change that contradicts one is
+a deliberate choice rather than an accident. See
+[Architecture](../ARCHITECTURE.md) for the structure these decisions
+produced.
 
 
 1. **Immediate mode rendering** - egui was chosen because SPICE sends bitmap

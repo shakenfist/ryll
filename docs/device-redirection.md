@@ -1,8 +1,10 @@
 # Device redirection
 
-Peripherals and data shared between the local machine and the guest: USB
-mass storage over the usbredir channel, folder sharing over WebDAV, and
-clipboard text delivered as synthetic keystrokes.
+Device redirection shares peripherals and data between the local machine
+and the guest: USB devices over the usbredir channel, either as physical
+pass-through on Linux or as virtual mass storage devices everywhere;
+folder sharing over WebDAV; and clipboard text delivered as synthetic
+keystrokes for guests without vdagent.
 
 ## USB Redirection
 

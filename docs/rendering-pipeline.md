@@ -1,8 +1,9 @@
 # Rendering and audio pipeline
 
-How decoded SPICE surfaces become pixels on a screen, how the window is
-sized and how multiple monitors are handled, how audio playback is driven,
-and how user-facing notifications are raised.
+The rendering and audio pipeline turns decoded SPICE surfaces into pixels
+on a screen. This page covers that path in both GUI and headless modes,
+how the window is sized and how multiple monitors are handled, how audio
+playback is driven, and how user-facing notifications are raised.
 
 ## Display Rendering
 

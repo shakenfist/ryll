@@ -1,10 +1,10 @@
 # SPICE protocol handling
 
-How ryll speaks SPICE on the wire: the channel model and handshake, the
-image encodings it decodes, the display channel capabilities it advertises,
-and the keyboard scancode mapping. See
-[Architecture](../ARCHITECTURE.md) for where these pieces sit in the crate
-layout.
+This page describes how ryll speaks SPICE on the wire: the channel model
+and handshake, mouse-mode negotiation, the image encodings it decodes, the
+display channel capabilities it advertises, and the keyboard scancode
+mapping. See [Architecture](../ARCHITECTURE.md) for where these pieces
+sit in the crate layout.
 
 ## SPICE Protocol
 

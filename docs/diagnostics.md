@@ -1,8 +1,10 @@
 # Diagnostics and instrumentation
 
-The facilities ryll carries for understanding what a session did: traffic
-capture, statistics collection, the in-memory traffic ring buffer, channel
-state snapshots, the live traffic viewer, and bug report assembly.
+Ryll carries a set of facilities for understanding what a session did:
+statistics collection, an in-memory traffic ring buffer, channel state
+snapshots, bug report assembly, a live traffic viewer, and a capture mode
+that records per-channel protocol pcaps and H.264 video of the display to
+a directory.
 
 ## Statistics and Instrumentation
 
