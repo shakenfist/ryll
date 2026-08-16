@@ -57,6 +57,46 @@
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
+    "docs/ci.md": {
+      "sha": "42104e8bda43b586545295778e61f230a0ef90f2",
+      "date": "2026-08-17"
+    },
+    "docs/configuration.md": {
+      "sha": "5f4aee4f262c90d50bbd9d96579ae920ec6eca06",
+      "date": "2026-08-17"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
+      "date": "2026-08-17"
+    },
+    "docs/design-decisions.md": {
+      "sha": "c54826e62f4009723e873fa2afe80441c1b6e573",
+      "date": "2026-08-17"
+    },
+    "docs/development-macos.md": {
+      "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
+      "date": "2026-08-17"
+    },
+    "docs/development.md": {
+      "sha": "b639b25eb05459d2226763eb08a69c1a639a7e08",
+      "date": "2026-08-17"
+    },
+    "docs/device-redirection.md": {
+      "sha": "defa853042863ed796795857ab56386b554ef615",
+      "date": "2026-08-17"
+    },
+    "docs/diagnostics.md": {
+      "sha": "c12d592d6729dcb7946554f71c5c0df05ac4f0de",
+      "date": "2026-08-17"
+    },
+    "docs/features.md": {
+      "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
+      "date": "2026-08-17"
+    },
+    "docs/index.md": {
+      "sha": "75b810768e1febcef2be2cf9b057cfc857c39fa8",
+      "date": "2026-08-17"
+    },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
