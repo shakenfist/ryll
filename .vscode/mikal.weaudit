@@ -650,6 +650,14 @@
     {
       "path": "docs/features.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
