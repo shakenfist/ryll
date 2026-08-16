@@ -658,6 +658,22 @@
     {
       "path": "docs/design-decisions.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/device-redirection.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/libvirt-spice-recommendations.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
