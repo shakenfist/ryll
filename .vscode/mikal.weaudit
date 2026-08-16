@@ -356,10 +356,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/server.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/app.rs",
       "author": "mikal"
     },
@@ -381,10 +377,6 @@
     },
     {
       "path": "ryll/src/input_egui.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
       "author": "mikal"
     },
     {
@@ -632,35 +624,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-webrtc/tests/loopback.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/tests/lifecycle.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/tests",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/lifecycle.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/signalling.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-webrtc/src/sticky.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/src/test_client.rs",
       "author": "mikal"
     },
     {

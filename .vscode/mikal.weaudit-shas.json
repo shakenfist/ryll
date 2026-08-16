@@ -109,10 +109,6 @@
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
     },
-    "ryll/src/main.rs": {
-      "sha": "5fa07ccf979bdc4c585d3398bceeec68fcfba648",
-      "date": "2026-07-26"
-    },
     "ryll/src/notifications.rs": {
       "sha": "288c18f9f3f8422fbbe3bedc35b88207449f5e07",
       "date": "2026-07-26"
@@ -149,21 +145,9 @@
       "sha": "bbef6a32df50ba89d4555daee7fde1d7bfda6683",
       "date": "2026-07-26"
     },
-    "ryll/src/web/lifecycle.rs": {
-      "sha": "3e5576687e113b15710f3efae55fb21d14945555",
-      "date": "2026-08-15"
-    },
     "ryll/src/web/mod.rs": {
       "sha": "71e9e32f4b98b11df6a457c74425127db1ac180c",
       "date": "2026-07-26"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "c4fbca1dd4d372882a4a55361c4fd983a1319021",
-      "date": "2026-07-26"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "0bfbc908dd4dc1b5d627dc18635161ed2423c042",
-      "date": "2026-08-15"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -473,24 +457,8 @@
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
     },
-    "shakenfist-spice-webrtc/src/lib.rs": {
-      "sha": "c020d538cfeeea5ae44bf38ed78739a1aca6f53a",
-      "date": "2026-08-15"
-    },
     "shakenfist-spice-webrtc/src/sticky.rs": {
       "sha": "78e4793c82858d1b6f3a40415d7dca3f419a3139",
-      "date": "2026-08-15"
-    },
-    "shakenfist-spice-webrtc/src/test_client.rs": {
-      "sha": "208446b806c14ec27e06d7ff7fe425fad3b9cbe2",
-      "date": "2026-08-15"
-    },
-    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
-      "sha": "a0677cd844df5c6e36067c76c41c22e89f22e8ff",
-      "date": "2026-08-15"
-    },
-    "shakenfist-spice-webrtc/tests/loopback.rs": {
-      "sha": "5a84677a44d53a054c7f5b7f49a9edbd96433799",
       "date": "2026-08-15"
     },
     "tools/address-comments-with-claude.sh": {
