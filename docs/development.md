@@ -267,8 +267,11 @@ Beyond `make test`, a few tests are worth knowing about individually:
   (`shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs`) verifies
   `H264Payloader` accepts the encoder's Annex-B NAL output.
 - **Loopback integration test** (`shakenfist-spice-webrtc/tests/loopback.rs`)
-  creates two in-process `RTCPeerConnection`s and asserts video, audio
-  and datachannel all flow end to end.
+  drives a production `WebrtcBridge` against a `TestPeer` in one process
+  and asserts video, audio and datachannel all flow end to end. A second
+  case offers a narrow codec set (one H.264 fmtp, browser-chosen payload
+  numbers) to prove the pumps stamp the *negotiated* payload type rather
+  than a constant.
 - **Control socket integration tests**
   (`shakenfist-spice-renderer/tests/control_socket.rs`) exercise every v1
   verb and event without a real SPICE session, using a stub

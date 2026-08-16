@@ -148,16 +148,23 @@ between design and implementation is explicit in `git log`.
 
 Both of these were learned the hard way and apply to all webrtc-rs work:
 
-- **`on_track` must spawn a task for `read_rtp` loops.**
-  webrtc-rs serialises `on_track` firings on the future returned
-  by each callback. A long-lived `loop { track.read_rtp().await
-  }` inside `on_track` blocks the machinery from firing
-  subsequent callbacks (e.g. the audio track never fires because
-  the video track's callback never returns). Always
-  `tokio::spawn` the `read_rtp` loop inside `on_track` and
-  return immediately. This differs from what intuition suggests
-  and from many webrtc-rs examples; document it explicitly
-  whenever writing receiver-side WebRTC code.
+- **Handler methods must never block — they run inline in the
+  driver event loop.** webrtc-rs 0.20 replaced the per-object
+  callback registrations (`on_peer_connection_state_change`,
+  `on_track`, `on_data_channel`, `on_message`, ...) with one
+  `PeerConnectionEventHandler` supplied to the builder before the
+  peer connection exists, and every method on it is awaited
+  inline by the driver loop. A slow or blocking handler method
+  stalls the whole connection, not just the event it is handling.
+  So anything that needs to *loop* — reading a datachannel's
+  events or a remote track's RTP — must `tokio::spawn` and return
+  immediately, and anything that needs to *hand off* must use
+  `try_send`, never `send().await`, so a full channel degrades to
+  a dropped-message warning rather than stalling the driver. This
+  is stricter than pre-0.20, where only `on_track` firings were
+  serialised on each other. See
+  [`docs/web-mode-internals.md`](docs/web-mode-internals.md) for
+  where each case bites in `bridge.rs`.
 
 - **One-shot lifecycle events use `StickySignal`, never a bare
   `Notify`.** `Notify::notify_waiters()` wakes only the waiters

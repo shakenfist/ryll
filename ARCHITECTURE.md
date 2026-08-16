@@ -30,7 +30,7 @@ The repository is a Cargo workspace with **6 crates**:
 | `shakenfist-spice-compression` | GLZ/LZ/LZ4 + QUIC decompression, shared (byte-bounded) GLZ dictionary (cross-channel), per-platform JPEG decoder selector (ImageIO / WIC / VA-API / libjpeg-turbo / pure-Rust fallback), MJPEG + H.264 video decoder traits |
 | `shakenfist-spice-usbredir` | usbredir wire-format parser and message types |
 | `shakenfist-spice-renderer` | SPICE substrate shared by all frontends: channels, display surface, encoder pipeline, session orchestrator, trait surface for host-side concerns |
-| `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `RTCPeerConnection` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
+| `shakenfist-spice-webrtc` | WebRTC bridge: wraps an `Arc<dyn PeerConnection>` with a video track, audio track, and control datachannel; consumes `EncodedFrame`s from the renderer's encoder |
 
 When invoking cargo from the workspace root, use `-p ryll` to
 target the ryll package (e.g. `cargo build -p ryll`,
@@ -164,8 +164,10 @@ ryll/src/
     ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
     ├── cursor.rs        # Cursor relay → control datachannel
     ├── inputs.rs        # Input relay ← control datachannel
-    └── lifecycle.rs     # run_bridge_reaper: watches dead signal,
-                         #   reaps bridge + encoder when PC dies
+    └── lifecycle.rs     # run_bridge_reaper: waits on the dead
+                         #   signal or a bridge replacement, reaps
+                         #   bridge + encoder once the bridge it
+                         #   holds is confirmed dead
 
 shakenfist-spice-renderer/src/
 ├── channels/            # Per-channel handlers
@@ -211,8 +213,15 @@ shakenfist-spice-renderer/src/
 └── byte_counter.rs      # ByteCounter
 
 shakenfist-spice-webrtc/src/
-├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig, BridgeEvents,
-│                        #   wait_for_dead(), dead_signal()
+├── bridge.rs            # WebrtcBridge, WebrtcBridgeConfig, BridgeEvents
+│                        #   + BridgeHandler (the 0.20
+│                        #   PeerConnectionEventHandler impl);
+│                        #   wait_for_dead() — resolves when the peer
+│                        #   goes away; a local close() usually does
+│                        #   not raise it — and dead_signal()
+├── bind_addrs.rs        # host_udp_bind_addrs(): non-loopback host
+│                        #   addresses for PeerConnectionBuilder
+│                        #   ::with_udp_addrs
 ├── sticky.rs            # StickySignal (Notify + sticky AtomicBool)
 └── test_client.rs       # TestPeer client-side PC for tests
                          #   (`test-support` feature)
