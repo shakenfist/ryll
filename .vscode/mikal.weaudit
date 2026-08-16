@@ -488,39 +488,7 @@
       "author": "mikal"
     },
     {
-      "path": "PLAN-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "README.md",
-      "author": "mikal"
-    },
-    {
-      "path": "MERGE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
       "path": "REVIEW-STATE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/macos-metrics-verification.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
       "author": "mikal"
     },
     {
@@ -528,23 +496,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/libvirt-spice-recommendations.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/multi-mode-parity.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/portability.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/releasing.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/web-frontend.md",
       "author": "mikal"
     },
     {
@@ -616,14 +568,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/control-socket-protocol.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
@@ -664,10 +608,6 @@
       "author": "mikal"
     },
     {
-      "path": "PUSH-AUDIT.md",
-      "author": "mikal"
-    },
-    {
       "path": ".pre-commit-config.yaml",
       "author": "mikal"
     },
@@ -688,23 +628,7 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/prune-reviews.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/index.md",
       "author": "mikal"
     },
     {
@@ -728,18 +652,6 @@
       "author": "mikal"
     },
     {
-      "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ARCHITECTURE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/src/bridge.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-webrtc/src/lib.rs",
       "author": "mikal"
     },
@@ -752,15 +664,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-webrtc/src",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     }
   ],

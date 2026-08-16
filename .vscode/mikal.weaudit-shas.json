@@ -5,10 +5,6 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "c7efeb760662a8c9eced0ce04aa55017c8dc56ed",
-      "date": "2026-08-10"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
@@ -53,100 +49,20 @@
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
     },
-    "AGENTS.md": {
-      "sha": "2ce04cff1db69a9cf8b54bec13b8e3272d5d0ceb",
-      "date": "2026-08-15"
-    },
-    "ARCHITECTURE.md": {
-      "sha": "868884d57283a3f4611d335f494f371f2a834edb",
-      "date": "2026-08-15"
-    },
-    "MERGE-TEMPLATE.md": {
-      "sha": "f0926fbfe0808d692bb7a9a1a4689bf5ba6ed6a6",
-      "date": "2026-07-29"
-    },
-    "PLAN-TEMPLATE.md": {
-      "sha": "66c7ee9e755d02afff4c8cb072acaa3d062cc1ae",
-      "date": "2026-07-27"
-    },
-    "PUSH-AUDIT.md": {
-      "sha": "2138be5e933603aa460ed586669900aaf65cbc27",
-      "date": "2026-08-05"
-    },
-    "README.md": {
-      "sha": "edb9696cc2d1e94dcc22e020057c0f5033ee9335",
-      "date": "2026-07-29"
-    },
     "REVIEW-STATE-TEMPLATE.md": {
       "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
-      "date": "2026-07-29"
-    },
-    "STYLEGUIDE.md": {
-      "sha": "2359a5fb067d79f512b2eef4c830200091cdf405",
       "date": "2026-07-29"
     },
     "docs/channel-diagnostics-audit.md": {
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
-    "docs/ci.md": {
-      "sha": "68fc6eb3e28f7dcbc54eff4ccc170ae263a9911e",
-      "date": "2026-08-12"
-    },
-    "docs/configuration.md": {
-      "sha": "d6c99efc2d570b234784dae984fafe7d4399494a",
-      "date": "2026-07-30"
-    },
-    "docs/control-socket-protocol.md": {
-      "sha": "41a99e15b127d4083aafc411bce4fa1fc37127b0",
-      "date": "2026-08-03"
-    },
-    "docs/development-macos.md": {
-      "sha": "342ead8ac23b52bd038624d930fb811c15cc52a5",
-      "date": "2026-07-30"
-    },
-    "docs/development.md": {
-      "sha": "e3a56fef991cec909814c25e51870c6952371c49",
-      "date": "2026-08-12"
-    },
-    "docs/features.md": {
-      "sha": "cc431660fe257455a42c2e73dbb347ee23d38468",
-      "date": "2026-07-30"
-    },
-    "docs/index.md": {
-      "sha": "506980b2618978f7fe23a861e6285f9de361de89",
-      "date": "2026-08-12"
-    },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
     },
-    "docs/libvirt-spice-recommendations.md": {
-      "sha": "a18f9162579defcb1123635acc7207325c3e1001",
-      "date": "2026-07-30"
-    },
-    "docs/macos-metrics-verification.md": {
-      "sha": "dc3a3a12905493063b172344165b43ad9c1d3316",
-      "date": "2026-07-30"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "524c1c26ff6c1be672f54a8b79c6f1b49dc53741",
-      "date": "2026-07-31"
-    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
-      "date": "2026-07-31"
-    },
-    "docs/releasing.md": {
-      "sha": "7d02d9354ef0989c0eaf80eadeb82beba6c87831",
-      "date": "2026-07-31"
-    },
-    "docs/troubleshooting.md": {
-      "sha": "6b61c89775782a3d18d646cd22aab9567ac85ecd",
-      "date": "2026-08-03"
-    },
-    "docs/web-frontend.md": {
-      "sha": "00394a57e07fdb70a219b1fc2808e407078d4afa",
       "date": "2026-07-31"
     },
     "examples/control-socket-demo.py": {
@@ -556,10 +472,6 @@
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
-    },
-    "shakenfist-spice-webrtc/src/bridge.rs": {
-      "sha": "1b7a02caeaf3359d2f959735033b4f9084d5bcb1",
-      "date": "2026-08-15"
     },
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "c020d538cfeeea5ae44bf38ed78739a1aca6f53a",
