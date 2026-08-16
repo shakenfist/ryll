@@ -3,7 +3,7 @@
 This page describes how ryll speaks SPICE on the wire: the channel model
 and handshake, mouse-mode negotiation, the image encodings it decodes, the
 display channel capabilities it advertises, and the keyboard scancode
-mapping. See [Architecture](../ARCHITECTURE.md) for where these pieces
+mapping. See [Architecture](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) for where these pieces
 sit in the crate layout.
 
 ## SPICE Protocol
@@ -77,7 +77,7 @@ supported=3 / current=2) which fail every mode check.
 
 `parse_mouse_mode_payload` and
 `build_mouse_mode_request_payload` in
-[`main_channel.rs`](../shakenfist-spice-renderer/src/channels/main_channel.rs)
+[`main_channel.rs`](https://github.com/shakenfist/ryll/blob/develop/shakenfist-spice-renderer/src/channels/main_channel.rs)
 own the read and write sides; both have unit tests next
 to them.
 
@@ -342,7 +342,7 @@ unimplemented opcode, ignored sub-feature on an
 implemented op, recoverable decode failure — is
 registered in the process-global warn_once registry
 defined in
-[shakenfist-spice-protocol/src/logging.rs](../shakenfist-spice-protocol/src/logging.rs).
+[shakenfist-spice-protocol/src/logging.rs](https://github.com/shakenfist/ryll/blob/develop/shakenfist-spice-protocol/src/logging.rs).
 Each call site holds a stable `&'static str` key shaped
 `"<channel>:<kind>:<detail>"`; the registry fires
 `tracing::warn!` exactly once per key per session.

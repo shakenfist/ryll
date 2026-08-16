@@ -7,7 +7,7 @@ packaging concerns around them.
 
 This is the developer-facing companion to the
 [`--web` operator guide](web-frontend.md), which covers running the thing.
-See [Architecture](../ARCHITECTURE.md) for where these crates sit overall.
+See [Architecture](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) for where these crates sit overall.
 
 ## Encoder module
 
@@ -220,7 +220,7 @@ no `on_rtcp_packet`-equivalent handling.
 
 ### webrtc-rs convention: handler methods must never block
 
-See the "WebRTC conventions" section in [`AGENTS.md`](../AGENTS.md) for the
+See the "WebRTC conventions" section in [`AGENTS.md`](https://github.com/shakenfist/ryll/blob/develop/AGENTS.md) for the
 normative rule. In short: webrtc-rs 0.20 awaits every
 `PeerConnectionEventHandler` method inline in the peer
 connection's driver event loop, so a handler method that loops

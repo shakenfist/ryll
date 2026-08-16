@@ -112,6 +112,6 @@ both ends of the traffic through the proxy. This would allow:
 
 ## Project Files
 
-- [README](../README.md) - Quick start and usage
-- [ARCHITECTURE](../ARCHITECTURE.md) - The crate map, code organisation, and concurrency model
-- [AGENTS](../AGENTS.md) - Guide for AI coding assistants
+- [README](https://github.com/shakenfist/ryll/blob/develop/README.md) - Quick start and usage
+- [ARCHITECTURE](https://github.com/shakenfist/ryll/blob/develop/ARCHITECTURE.md) - The crate map, code organisation, and concurrency model
+- [AGENTS](https://github.com/shakenfist/ryll/blob/develop/AGENTS.md) - Guide for AI coding assistants

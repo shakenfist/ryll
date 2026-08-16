@@ -380,7 +380,7 @@ of whether the signalling page is served over HTTPS.
 For long-lived deployments, run ryll under systemd so it restarts
 automatically on failure and logs go to the journal.
 
-A reference unit file is at [`examples/ryll-web.service`](../examples/ryll-web.service).
+A reference unit file is at [`examples/ryll-web.service`](https://github.com/shakenfist/ryll/blob/develop/examples/ryll-web.service).
 Copy it to `/etc/systemd/system/ryll-web.service`, then:
 
     systemctl daemon-reload

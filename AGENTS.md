@@ -42,6 +42,16 @@ Related repositories:
 
 `docs/index.md` is the full index.
 
+Links inside `docs/` must resolve within `docs/`. The tree is
+synchronised into `shakenfist/shakenfist` under
+`docs/components/ryll/` and published on shakenfist.com, where the
+repository above `docs/` does not exist, so `../tools/x.sh` and
+friends 404 there while rendering perfectly on GitHub. Anything
+outside `docs/` -- source files, workflows, `README.md` --
+needs an absolute
+`https://github.com/shakenfist/ryll/blob/develop/<path>` URL. This
+applies to `docs/plans/` too; those pages are published as well.
+
 ## Protocol reference sources
 
 When working on SPICE protocol implementation details, these
