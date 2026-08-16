@@ -19,7 +19,7 @@
 //! (`profile-level-id=42e01f`, baseline level 3.1, packetization
 //! mode 1). See RFC 6184 §8.1 for the SDP fmtp line semantics.
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -590,6 +590,63 @@ pub struct WebrtcBridge {
     /// when they start. They read it per packet.
     video_payload_type: Arc<AtomicU8>,
     audio_payload_type: Arc<AtomicU8>,
+    /// Set by [`WebrtcBridge::close`] so the `Drop` backstop below
+    /// knows the teardown already happened and stays out of the way.
+    closed: AtomicBool,
+}
+
+/// Best-effort cleanup for a bridge that is dropped without
+/// [`WebrtcBridge::close`].
+///
+/// On 0.20 dropping the peer connection detaches its driver task
+/// rather than stopping it, so a forgotten `close()` leaks the driver,
+/// the UDP sockets bound for ICE, and one task per datachannel — and
+/// leaks them silently, which is what makes this worth a destructor
+/// rather than a rule to remember. `close()` remains the real path: it
+/// is awaited, it propagates errors, and it is what the tests
+/// exercise. This only catches the paths that forgot.
+///
+/// `Drop` cannot await, so the close is spawned. If there is no
+/// runtime to spawn on there is nothing useful left to do, and the
+/// leak is reported rather than hidden.
+impl Drop for WebrtcBridge {
+    fn drop(&mut self) {
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let pumps = {
+            let mut guard = self
+                .dc_pumps
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        for pump in pumps {
+            pump.abort();
+        }
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let pc = self.pc.clone();
+                handle.spawn(async move {
+                    if let Err(e) = pc.close().await {
+                        tracing::debug!(
+                            "webrtc: background close of a dropped-but-not-closed bridge \
+                             errored: {}",
+                            e
+                        );
+                    }
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "webrtc: bridge dropped without close() and outside a tokio runtime; \
+                     its driver task and UDP sockets leak for the life of the process"
+                );
+            }
+        }
+    }
 }
 
 impl WebrtcBridge {
@@ -808,6 +865,7 @@ impl WebrtcBridge {
             audio_ssrc,
             video_payload_type: Arc::new(AtomicU8::new(H264_PAYLOAD_TYPE)),
             audio_payload_type: Arc::new(AtomicU8::new(OPUS_PAYLOAD_TYPE)),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -1090,8 +1148,18 @@ impl WebrtcBridge {
     /// somewhere else, not the normal exit path. Aborting first would
     /// cancel a pump mid-`on_control_message` and drop a message that
     /// had already been received.
+    ///
+    /// Ordering and unconditionality are separable, though. The
+    /// aborts run whether or not `pc.close()` succeeded, and the close
+    /// result is propagated afterwards: returning early on a close
+    /// error would leak exactly the tasks this method exists to reap.
+    /// Every caller already treats that error as something to log and
+    /// carry on from — `post_offer` and `run_bridge_reaper` both warn
+    /// and continue — so the error branch was anticipated everywhere
+    /// except in here.
     pub async fn close(self) -> Result<()> {
-        self.pc.close().await?;
+        self.closed.store(true, Ordering::SeqCst);
+        let closed = self.pc.close().await;
 
         let pumps = {
             let mut guard = self
@@ -1104,7 +1172,7 @@ impl WebrtcBridge {
             pump.abort();
         }
 
-        Ok(())
+        Ok(closed?)
     }
 }
 
@@ -2390,5 +2458,74 @@ mod tests {
         );
 
         bridge.close().await.expect("close");
+    }
+
+    /// `close()` must leave nothing behind for the caller to reap.
+    ///
+    /// The handles are drained by `close()` itself, so an empty list
+    /// is the observable: every handle that was in it has been taken
+    /// and aborted. This is the happy path — see
+    /// `dropping_a_bridge_without_close_still_stops_its_pumps` for the
+    /// path that forgets.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_drains_the_datachannel_pump_handles() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use tokio::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge constructs");
+
+        let pumps = bridge.dc_pumps.clone();
+        assert!(
+            !pumps.lock().unwrap_or_else(|p| p.into_inner()).is_empty(),
+            "the control datachannel pump should be running before close"
+        );
+
+        bridge.close().await.expect("close");
+
+        assert!(
+            pumps.lock().unwrap_or_else(|p| p.into_inner()).is_empty(),
+            "close() left datachannel pump handles behind"
+        );
+    }
+
+    /// A bridge dropped without `close()` must still stop its pumps.
+    ///
+    /// On 0.20 dropping the peer connection detaches its driver rather
+    /// than stopping it, so "forgot to close" is a silent leak of the
+    /// driver, the ICE sockets and every datachannel pump. `post_offer`
+    /// closes explicitly on its error path; this covers the paths that
+    /// do not, which is what the `Drop` impl exists for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_a_bridge_without_close_still_stops_its_pumps() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use tokio::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge constructs");
+
+        let pumps = bridge.dc_pumps.clone();
+        assert!(
+            !pumps.lock().unwrap_or_else(|p| p.into_inner()).is_empty(),
+            "the control datachannel pump should be running before the drop"
+        );
+
+        drop(bridge);
+
+        assert!(
+            pumps.lock().unwrap_or_else(|p| p.into_inner()).is_empty(),
+            "a bridge dropped without close() leaked its datachannel pumps — on 0.20 that \
+             leaks the driver task and its UDP sockets for the life of the process"
+        );
     }
 }

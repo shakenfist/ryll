@@ -355,10 +355,27 @@ pub async fn post_offer(
     }
 
     // Step 6: SDP exchange.
-    let answer_sdp = bridge
-        .accept_offer(offer.sdp)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)))?;
+    //
+    // Close the bridge explicitly on the error path. It is not in
+    // `bridge_slot` yet, so nothing else will ever reap it, and on
+    // 0.20 dropping it detaches the driver task rather than stopping
+    // it — the peer connection, its UDP sockets (one per non-loopback
+    // interface), the control-DC pump, and the input relay spawned at
+    // step 5c would all outlive the failed request. A client posting
+    // malformed SDP in a loop would accumulate them for the life of
+    // the process; the offer cooldown bounds the rate, not the total.
+    // `WebrtcBridge`'s `Drop` is a backstop for paths that forget,
+    // but here the close is awaited, so teardown is finished before
+    // the 400 goes back.
+    let answer_sdp = match bridge.accept_offer(offer.sdp).await {
+        Ok(sdp) => sdp,
+        Err(e) => {
+            if let Err(ce) = bridge.close().await {
+                warn!("web: closing an abandoned bridge errored: {}", ce);
+            }
+            return Err((StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)));
+        }
+    };
 
     // Step 7: store the new bridge and bump the generation
     // counter so the reaper knows not to act on the dead
