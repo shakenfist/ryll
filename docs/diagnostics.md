@@ -52,7 +52,7 @@ ring buffer regardless of whether `--capture` is active. The ring
 buffer retains the most recent traffic up to a 50 MB total cap,
 allocated by weight per channel rather than split evenly:
 
-| Channel | Cap | Weight | Coverage at session-001 rates |
+| Channel | Cap | Weight | Coverage at measured desktop rates |
 |---------|-----|--------|-------------------------------|
 | display | 32 MB | 16 | ~16 s @ 2 MB/s typical, ~5 s @ 6 MB/s peak |
 | usbredir | 4 MB | 2 | session-long when idle (active transfers exceed any cap) |
@@ -83,8 +83,8 @@ shared via `Arc<TrafficBuffers>` between all channel handler tasks
 and the UI thread. This supports both bug-report export, the live
 traffic viewer, and the snapshot-on-notification path. (The webdav
 channel is intentionally absent — its handler does not call
-`traffic.record_*` today; tracked as a follow-up in
-[`PLAN-session-001-feedback.md`](plans/PLAN-session-001-feedback.md).)
+`traffic.record_*` today; tracked as a follow-up in the
+[dogfooding feedback plan](plans/PLAN-session-001-feedback.md).)
 
 ## Channel State Snapshots
 
@@ -110,9 +110,9 @@ All channel snapshots share an eight-field transport common baseline
 `ping_recv_count`, `pong_send_count`, `last_ping_recv_ts_secs`,
 `writer_dropped_count`) plus four baseline additions
 (`messages_recv_by_opcode`, `messages_send_by_opcode`,
-`last_unknown_opcode`, `unknown_opcode_count`). See
-`docs/channel-diagnostics-audit.md` for the full audit matrix and
-minimum-baseline rationale.
+`last_unknown_opcode`, `unknown_opcode_count`). See the
+[channel diagnostics audit](channel-diagnostics-audit.md) for the full
+audit matrix and minimum-baseline rationale.
 
 The `ChannelSnapshots` struct in `ryll/src/bugreport.rs` holds the four
 channel snapshot `Arc<Mutex<T>>` values and is created alongside

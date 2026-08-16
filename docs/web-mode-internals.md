@@ -135,8 +135,9 @@ unspecified, and IPv6 link-local addresses. `WebrtcBridge::new`
 rejects an empty result rather than building a peer connection
 that could only ever offer unroutable candidates. This is
 independent of the `--web-host` flag, which only controls the
-HTTP/HTTPS signalling listener; see `docs/web-frontend.md`'s
-reverse-proxy callout for the operator-facing consequences.
+HTTP/HTTPS signalling listener; see the reverse-proxy callout in
+the [web frontend guide](web-frontend.md) for the operator-facing
+consequences.
 
 ### SDP flow
 
@@ -168,7 +169,7 @@ video track:
 - Payloads raw NALs via `H264Payloader` (from
   `rtc::rtp::codec::h264` — the sans-io core's payloader, not the
   abandoned standalone `rtp` crate; see the webrtc entry in
-  `docs/development.md`'s dependency list).
+  the [development guide](development.md)'s dependency list).
 - Sets the `marker` bit on the last RTP packet of each access unit
   (per RFC 6184 §5.1 — decoder pacing depends on this).
 - Derives RTP timestamps from `EncodedFrame::timestamp_us` at
@@ -219,7 +220,7 @@ no `on_rtcp_packet`-equivalent handling.
 
 ### webrtc-rs convention: handler methods must never block
 
-See the "WebRTC conventions" section in `AGENTS.md` for the
+See the "WebRTC conventions" section in [`AGENTS.md`](../AGENTS.md) for the
 normative rule. In short: webrtc-rs 0.20 awaits every
 `PeerConnectionEventHandler` method inline in the peer
 connection's driver event loop, so a handler method that loops

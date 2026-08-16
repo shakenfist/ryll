@@ -19,8 +19,8 @@ for the structure these decisions produced.
    stack without GUI overhead. Headless is also the first evidence of the
    project's broader **multi-modal client** stance: the SPICE stack is
    frontend-agnostic, and additional frontends (`--web` browser mode shipped
-   end-to-end via `docs/plans/PLAN-web-frontend.md`) are first-class peers of
-   the GUI rather than retrofits. When you add or modify a feature, ask which
+   end-to-end via the [web frontend plan](plans/PLAN-web-frontend.md)) are
+   first-class peers of the GUI rather than retrofits. When you add or modify a feature, ask which
    modes it should be reachable from; if a mode physically cannot host the
    feature, say so in the docs rather than leaving the gap unstated.
 

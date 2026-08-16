@@ -24,12 +24,14 @@ the focus has started to shift to performance validation.
 Honestly, I am not super into Star Wars or anything, but "ryll" was the first
 good spice pun I came across. To quote the excellently named Wookieepedia:
 
-> Ryll was a precious ore harvested from the mines of Ryloth, and could also
-> be found in the Krost Mountains on Aaloth. It had military and scientific
-> applications, but could also be used as a drug in the form of refined spice,
-> which was less effective than glitterstim.
-> 
-> https://starwars.fandom.com/wiki/Ryll
+!!! quote
+
+    Ryll was a precious ore harvested from the mines of Ryloth, and could also
+    be found in the Krost Mountains on Aaloth. It had military and scientific
+    applications, but could also be used as a drug in the form of refined spice,
+    which was less effective than glitterstim.
+
+    https://starwars.fandom.com/wiki/Ryll
 
 I guess I should think of a project to name "glitterstim" now too.
 

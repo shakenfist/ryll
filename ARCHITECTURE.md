@@ -8,16 +8,16 @@ in `docs/`, indexed below.
 
 | Topic | Document |
 |-------|----------|
-| Channel model, handshake, image encodings, display capabilities, scancodes | `docs/spice-protocol.md` |
-| Surface compositing, window sizing, multi-monitor, audio playback, notifications | `docs/rendering-pipeline.md` |
-| USB redirection, WebDAV folder sharing, paste-as-keystrokes | `docs/device-redirection.md` |
-| Traffic capture, statistics, ring buffer, snapshots, bug reports | `docs/diagnostics.md` |
-| Reconnection and graceful shutdown | `docs/session-lifecycle.md` |
-| Encoder, WebRTC bridge, `--web` relays and lifecycle | `docs/web-mode-internals.md` |
-| Running `--web` as an operator | `docs/web-frontend.md` |
-| CLI options, `.vv` format, environment variables | `docs/configuration.md` |
-| Building, testing, the local QEMU test server | `docs/development.md` |
-| Feature parity across the three modes | `docs/multi-mode-parity.md` |
+| Channel model, handshake, image encodings, display capabilities, scancodes | [`docs/spice-protocol.md`](docs/spice-protocol.md) |
+| Surface compositing, window sizing, multi-monitor, audio playback, notifications | [`docs/rendering-pipeline.md`](docs/rendering-pipeline.md) |
+| USB redirection, WebDAV folder sharing, paste-as-keystrokes | [`docs/device-redirection.md`](docs/device-redirection.md) |
+| Traffic capture, statistics, ring buffer, snapshots, bug reports | [`docs/diagnostics.md`](docs/diagnostics.md) |
+| Reconnection and graceful shutdown | [`docs/session-lifecycle.md`](docs/session-lifecycle.md) |
+| Encoder, WebRTC bridge, `--web` relays and lifecycle | [`docs/web-mode-internals.md`](docs/web-mode-internals.md) |
+| Running `--web` as an operator | [`docs/web-frontend.md`](docs/web-frontend.md) |
+| CLI options, `.vv` format, environment variables | [`docs/configuration.md`](docs/configuration.md) |
+| Building, testing, the local QEMU test server | [`docs/development.md`](docs/development.md) |
+| Feature parity across the three modes | [`docs/multi-mode-parity.md`](docs/multi-mode-parity.md) |
 
 ## Repository layout
 

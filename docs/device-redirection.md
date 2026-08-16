@@ -52,8 +52,9 @@ ryll --file conn.vv --usb-disk /path/to/image.raw       # read-write
 ryll --file conn.vv --usb-disk-ro /path/to/image.raw     # read-only
 ```
 
-See `docs/configuration.md` for details. Use `make test-qemu-usb` to start
-a QEMU instance with USB redirection enabled.
+See the [configuration guide](configuration.md) for details. Use
+`make test-qemu-usb` to start a QEMU instance with USB redirection
+enabled.
 
 ### GUI Components
 
@@ -179,8 +180,8 @@ ryll --file conn.vv --share-dir /path/to/dir          # read-write
 ryll --file conn.vv --share-dir /path/to/dir --share-dir-ro  # read-only
 ```
 
-See `docs/configuration.md` for details. Use `make test-qemu-webdav` to start
-a QEMU instance with WebDAV enabled.
+See the [configuration guide](configuration.md) for details. Use
+`make test-qemu-webdav` to start a QEMU instance with WebDAV enabled.
 
 ### GUI Components
 
