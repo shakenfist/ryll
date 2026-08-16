@@ -228,8 +228,18 @@ consumer stalls the whole connection. `bridge.rs` has no
 `on_track` implementation — the bridge only sends media, it does
 not receive any — but the same rule is why `on_data_channel`
 spawns a pump task instead of polling inline, and why
-`BridgeEvents::on_state_change` and `on_control_message` use
-`try_send` rather than `send().await`.
+`BridgeEvents::on_state_change` uses `try_send` rather than
+`send().await`.
+
+The rule follows the dispatch path, not the type. Only the
+methods reached from `BridgeHandler` run inline.
+`on_control_message` lives on the same struct but is called from
+the spawned `run_dc_pump` loops, so awaiting there parks one
+datachannel's poll loop and nothing else — which is why it
+awaits. That is the right trade for an ordered, reliable channel
+carrying input: back-pressure onto SCTP costs latency, whereas a
+dropped key-up leaves a modifier stuck down in the guest and
+never gets redelivered.
 
 ## SPICE wire-up
 

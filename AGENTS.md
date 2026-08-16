@@ -158,11 +158,22 @@ Both of these were learned the hard way and apply to all webrtc-rs work:
   stalls the whole connection, not just the event it is handling.
   So anything that needs to *loop* — reading a datachannel's
   events or a remote track's RTP — must `tokio::spawn` and return
-  immediately, and anything that needs to *hand off* must use
-  `try_send`, never `send().await`, so a full channel degrades to
-  a dropped-message warning rather than stalling the driver. This
-  is stricter than pre-0.20, where only `on_track` firings were
-  serialised on each other. See
+  immediately, and anything that needs to *hand off from inside a
+  handler method* must use `try_send`, never `send().await`, so a
+  full channel degrades to a dropped message rather than stalling
+  the driver. This is stricter than pre-0.20, where only
+  `on_track` firings were serialised on each other.
+
+  **The rule is about the dispatch path, not about the type.**
+  Check where a function is actually *called from* before applying
+  it. `BridgeEvents` holds both kinds: `on_state_change` is
+  dispatched from the handler and uses `try_send`, while
+  `on_control_message` is reached only from a spawned
+  `run_dc_pump` and therefore awaits — deliberately, because it
+  carries keyboard and mouse events, and back-pressure onto SCTP
+  is better than a dropped key-up leaving a modifier stuck down in
+  the guest. Applying "never block" to the second one cost real
+  input events before it was caught. See
   [`docs/web-mode-internals.md`](docs/web-mode-internals.md) for
   where each case bites in `bridge.rs`.
 

@@ -156,15 +156,28 @@ const LOG_EVERY_N_DROPS: u64 = 100;
 /// altogether in 0.20, so [`Self::on_control_message`] survives as a
 /// function while its callers are the spawned [`run_dc_pump`] loops.
 ///
-/// # Handlers must not block
+/// # Handler methods must not block — but not every method here is a
+/// handler
 ///
 /// 0.20 awaits handler methods inline in the peer connection's driver
 /// event loop (`webrtc-0.20.2/src/peer_connection/driver.rs:653-681`),
 /// which is the same task that services ICE, DTLS, SCTP and RTP. An
-/// await inside a method here stalls the whole connection, so both
-/// outgoing channels use `try_send` and degrade to a counted,
-/// rate-limited drop rather than waiting for a slow consumer. See
+/// await inside one of those stalls the whole connection.
+///
+/// The rule is about the *dispatch path*, not about this type. Only
+/// the methods reached from [`BridgeHandler`] run inline:
+/// [`Self::on_state_change`] and
+/// [`Self::on_ice_gathering_state_change`]. `on_state_change`
+/// therefore uses `try_send` and degrades to a counted, rate-limited
+/// drop rather than waiting on a slow encoder — see
 /// [`LOG_EVERY_N_DROPS`].
+///
+/// [`Self::on_control_message`] is not a handler. Datachannel
+/// messages stopped being callbacks in 0.20, so it is called from the
+/// spawned [`run_dc_pump`] loops, where an await parks one poll loop
+/// and nothing else. It awaits, on purpose; see the method for why
+/// dropping input events is worse than back-pressure. Getting this
+/// distinction wrong is how a keystroke goes missing.
 ///
 /// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
 /// step 1e, and step 2b of the phase-02 plan for the `try_send`
@@ -193,11 +206,6 @@ struct BridgeEvents {
     /// counter, not a synchronisation point, so it needs no ordering
     /// guarantee beyond atomicity. See [`LOG_EVERY_N_DROPS`].
     dropped_keyframe_requests: AtomicU64,
-    /// Count of control-datachannel messages dropped because
-    /// `incoming_tx` was full — the `control_rx()` consumer is not
-    /// draining it fast enough. Same ordering rationale as
-    /// `dropped_keyframe_requests`.
-    dropped_control_messages: AtomicU64,
     /// Join handles for the datachannel poll loops, shared with the
     /// [`WebrtcBridge`] that owns them so [`WebrtcBridge::close`] can
     /// abort any that are still running. Written here by
@@ -334,39 +342,34 @@ impl BridgeEvents {
     /// this bridge created or one the remote peer opened. Both fan in
     /// here so `control_rx()` sees messages from either direction.
     ///
-    /// `try_send`, not `send().await`, for the same reason as
-    /// `on_state_change`: this method is awaited inline in the driver
-    /// loop, so it cannot block on `control_rx()`'s consumer. `incoming_tx` is a 64-slot channel;
-    /// letting it fill up must degrade to a dropped message, not a
-    /// stalled connection.
+    /// `send().await`, not `try_send`, and deliberately unlike
+    /// `on_state_change`.
+    ///
+    /// The two are not in the same position despite living on the
+    /// same type. `on_state_change` really is dispatched inline from
+    /// [`BridgeHandler::on_connection_state_change`], so an await
+    /// there stalls the driver loop. This method is not: its only
+    /// caller is [`run_dc_pump`], which both
+    /// [`WebrtcBridge::new`] and [`BridgeHandler::on_data_channel`]
+    /// `tokio::spawn`. Awaiting here parks that one datachannel's
+    /// poll loop and nothing else.
+    ///
+    /// Which makes back-pressure the right answer rather than a
+    /// luxury. This channel carries the browser's keyboard, mouse and
+    /// resize events over an ordered, reliable datachannel; dropping
+    /// one is not a lost frame that the next frame supersedes. A
+    /// dropped key-up leaves a modifier stuck down in the guest, a
+    /// symptom a viewer can only report as "my keyboard went weird".
+    /// Parking the pump instead lets SCTP flow control push back on
+    /// the browser, which is what an ordered reliable channel is for.
     async fn on_control_message(&self, data: Vec<u8>, source: &'static str) {
-        match self.incoming_tx.try_send(data) {
-            Ok(()) => {}
-            // The receiver was dropped — same failure and wording as
-            // the pre-`try_send` code path.
-            Err(TrySendError::Closed(_)) => {
-                tracing::debug!(
-                    source,
-                    "WebrtcBridge: control_rx receiver dropped, message lost"
-                );
-            }
-            // The channel is full: whoever calls `control_rx()` is
-            // not keeping up. Silently dropping here loses a keystroke
-            // or mouse event that will never be redelivered — a
-            // symptom a viewer can only report as "my input didn't
-            // work", so this is `warn!` rather than `debug!`.
-            // Rate-limited via `note_drop` so a stalled consumer at
-            // input-event rates does not flood the log.
-            Err(TrySendError::Full(_)) => {
-                if let Some(dropped) = Self::note_drop(&self.dropped_control_messages) {
-                    tracing::warn!(
-                        source,
-                        dropped,
-                        "WebrtcBridge: incoming_tx channel full, dropped control message — \
-                         control_rx() consumer is not keeping up, an input event was lost",
-                    );
-                }
-            }
+        // The only failure left is a dropped receiver, which is not a
+        // back-pressure condition and cannot be waited out.
+        if self.incoming_tx.send(data).await.is_err() {
+            tracing::debug!(
+                source,
+                "WebrtcBridge: control_rx receiver dropped, message lost"
+            );
         }
     }
 }
@@ -698,7 +701,6 @@ impl WebrtcBridge {
             state: state.clone(),
             gathered: gathered.clone(),
             dropped_keyframe_requests: AtomicU64::new(0),
-            dropped_control_messages: AtomicU64::new(0),
             dc_pumps: dc_pumps.clone(),
         });
 
@@ -798,57 +800,27 @@ impl WebrtcBridge {
             audio_ssrc = nonzero_random_ssrc();
         }
 
-        let video_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-            STREAM_ID.to_owned(),
-            VIDEO_TRACK_ID.to_owned(),
-            VIDEO_TRACK_ID.to_owned(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(video_ssrc),
-                    ..Default::default()
-                },
-                codec: h264_codec(),
-                ..Default::default()
-            }],
-        )));
-        pc.add_track(video_track.clone() as Arc<dyn TrackLocal>)
-            .await?;
-
-        let audio_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-            STREAM_ID.to_owned(),
-            AUDIO_TRACK_ID.to_owned(),
-            AUDIO_TRACK_ID.to_owned(),
-            RtpCodecKind::Audio,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(audio_ssrc),
-                    ..Default::default()
-                },
-                codec: opus_codec(),
-                ..Default::default()
-            }],
-        )));
-        pc.add_track(audio_track.clone() as Arc<dyn TrackLocal>)
-            .await?;
-
-        // Control datachannel. Ordered + reliable for input events
-        // (Phase 5) and cursor overlay (Phase 5b).
-        let control_dc = pc
-            .create_data_channel(
-                "control",
-                // `ordered` is a plain `bool` in 0.20 (it was an
-                // `Option<bool>`), and its `Default` is `true` rather
-                // than the derived `false`. Stated explicitly anyway:
-                // reliable + ordered is a property inputs depend on,
-                // not something to inherit silently.
-                Some(RTCDataChannelInit {
-                    ordered: true,
-                    max_retransmits: None,
-                    ..Default::default()
-                }),
-            )
-            .await?;
+        // Attaching the tracks and the control datachannel is
+        // fallible, and the peer connection already exists with its
+        // driver task running and its UDP sockets bound. A bare `?`
+        // here would drop that `Arc` and — on 0.20, where dropping
+        // detaches the driver rather than stopping it — leak the
+        // driver and one socket per interface, with `WebrtcBridge`
+        // never constructed so its `Drop` backstop cannot help. So
+        // the fallible part is one call with one error path.
+        let (video_track, audio_track, control_dc) =
+            match attach_tracks_and_control_dc(&pc, video_ssrc, audio_ssrc).await {
+                Ok(attached) => attached,
+                Err(e) => {
+                    if let Err(ce) = pc.close().await {
+                        tracing::debug!(
+                            "webrtc: closing a half-built peer connection errored: {}",
+                            ce
+                        );
+                    }
+                    return Err(e);
+                }
+            };
 
         // The DC we created gets the same pump as any remote one; see
         // `run_dc_pump` for why a task rather than a callback. Its
@@ -1172,7 +1144,6 @@ impl WebrtcBridge {
     /// and continue — so the error branch was anticipated everywhere
     /// except in here.
     pub async fn close(self) -> Result<()> {
-        self.closed.store(true, Ordering::SeqCst);
         let closed = self.pc.close().await;
 
         let pumps = {
@@ -1186,8 +1157,109 @@ impl WebrtcBridge {
             pump.abort();
         }
 
+        // Disarm the destructor only now that the work is done. This
+        // is a cancellation point, not a formality: `close()` is
+        // awaited inside an axum handler whose future is dropped when
+        // the client disconnects, and inside `run_bridge_reaper`,
+        // which `run_web` aborts at shutdown. Storing the flag first
+        // would mean a `close()` cancelled anywhere above leaves a
+        // bridge that `Drop` then declines to touch — the one path
+        // where the backstop is guaranteed not to fire, which is the
+        // opposite of what it exists for.
+        //
+        // Falling through to `Drop` on cancellation is safe because
+        // both steps are idempotent: aborting a finished or
+        // already-aborted handle is a no-op, and a second
+        // `pc.close()` re-sets a shutdown flag that is already set.
+        //
+        // Not covered by a test, and deliberately not faked with one.
+        // Reaching the window needs `pc.close()` to return `Pending`
+        // at least once, and in-process — connected to a `TestPeer`
+        // or not — it completes on the first poll, so the test passes
+        // whichever order these two statements are in. A test that
+        // cannot fail reads as coverage without being any. Keep the
+        // store last on the strength of the reasoning above.
+        self.closed.store(true, Ordering::SeqCst);
+
         Ok(closed?)
     }
+}
+
+/// Attach the two media tracks and the control datachannel to a
+/// freshly built peer connection.
+///
+/// Split out of [`WebrtcBridge::new`] so that everything which can
+/// fail after `PeerConnectionBuilder::build()` shares a single error
+/// path. The caller closes the peer connection on `Err`; see there
+/// for why dropping it instead would leak.
+///
+/// `add_track` fails with `ErrRTPTransceiverCodecUnsupported` if a
+/// coding names a codec the MediaEngine does not carry — the drift
+/// `h264_codec()` and `opus_codec()` exist to prevent, and one that
+/// would be deterministic rather than intermittent if it ever
+/// happened.
+async fn attach_tracks_and_control_dc(
+    pc: &Arc<dyn PeerConnection>,
+    video_ssrc: u32,
+    audio_ssrc: u32,
+) -> Result<(
+    Arc<TrackLocalStaticRTP>,
+    Arc<TrackLocalStaticRTP>,
+    Arc<dyn DataChannel>,
+)> {
+    let video_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+        STREAM_ID.to_owned(),
+        VIDEO_TRACK_ID.to_owned(),
+        VIDEO_TRACK_ID.to_owned(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(video_ssrc),
+                ..Default::default()
+            },
+            codec: h264_codec(),
+            ..Default::default()
+        }],
+    )));
+    pc.add_track(video_track.clone() as Arc<dyn TrackLocal>)
+        .await?;
+
+    let audio_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+        STREAM_ID.to_owned(),
+        AUDIO_TRACK_ID.to_owned(),
+        AUDIO_TRACK_ID.to_owned(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(audio_ssrc),
+                ..Default::default()
+            },
+            codec: opus_codec(),
+            ..Default::default()
+        }],
+    )));
+    pc.add_track(audio_track.clone() as Arc<dyn TrackLocal>)
+        .await?;
+
+    // Control datachannel. Ordered + reliable for input events
+    // (Phase 5) and cursor overlay (Phase 5b).
+    let control_dc = pc
+        .create_data_channel(
+            "control",
+            // `ordered` is a plain `bool` in 0.20 (it was an
+            // `Option<bool>`), and its `Default` is `true` rather
+            // than the derived `false`. Stated explicitly anyway:
+            // reliable + ordered is a property inputs depend on,
+            // not something to inherit silently.
+            Some(RTCDataChannelInit {
+                ordered: true,
+                max_retransmits: None,
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+    Ok((video_track, audio_track, control_dc))
 }
 
 /// Draw a random SSRC that is never zero.
@@ -1434,6 +1506,17 @@ async fn run_video_pump(
         let rtp_ts = ((frame.timestamp_us as u128).saturating_mul(VIDEO_CLOCK_RATE_HZ as u128)
             / 1_000_000u128) as u32;
 
+        // Read the negotiated payload type once per access unit, not
+        // once per packet. `resolve_negotiated_payload_types` can
+        // store a new value while this frame is being fragmented, and
+        // an AU that went out under two payload types reads as two
+        // streams to a receiver, which then reassembles neither. The
+        // window is small — the pumps start at step 5 and the store
+        // happens inside `accept_offer` at step 6, before DTLS is up,
+        // so affected packets are dropped at the sender anyway — but
+        // one load is no more work than several.
+        let frame_payload_type = payload_type.load(Ordering::Relaxed);
+
         // Collect every RTP packet for this access unit so we can
         // set the marker bit on the last one only.
         let mut packets: Vec<Packet> = Vec::new();
@@ -1462,7 +1545,7 @@ async fn run_video_pump(
                 }
                 let header = Header {
                     version: 2,
-                    payload_type: payload_type.load(Ordering::Relaxed),
+                    payload_type: frame_payload_type,
                     sequence_number: sequence,
                     timestamp: rtp_ts,
                     ssrc,
@@ -1589,13 +1672,17 @@ async fn run_synthetic_audio_pump(
             .payload(AUDIO_OPUS_BUF_BYTES, &opus_packet)
             .map_err(|e| anyhow!("OpusPayloader failed: {}", e))?;
 
+        // One load per input packet rather than per output packet,
+        // for the reason given in `run_video_pump`.
+        let packet_payload_type = payload_type.load(Ordering::Relaxed);
+
         for payload in payloads {
             if payload.is_empty() {
                 continue;
             }
             let header = Header {
                 version: 2,
-                payload_type: payload_type.load(Ordering::Relaxed),
+                payload_type: packet_payload_type,
                 sequence_number: sequence,
                 timestamp: rtp_timestamp,
                 ssrc,
@@ -1650,13 +1737,17 @@ async fn run_audio_pump(
             .payload(AUDIO_OPUS_BUF_BYTES, &payload)
             .map_err(|e| anyhow!("OpusPayloader failed: {}", e))?;
 
+        // One load per input packet rather than per output packet,
+        // for the reason given in `run_video_pump`.
+        let packet_payload_type = payload_type.load(Ordering::Relaxed);
+
         for payload in payloads {
             if payload.is_empty() {
                 continue;
             }
             let header = Header {
                 version: 2,
-                payload_type: payload_type.load(Ordering::Relaxed),
+                payload_type: packet_payload_type,
                 sequence_number: sequence,
                 timestamp: rtp_timestamp,
                 ssrc,
@@ -1815,7 +1906,6 @@ mod tests {
             state: Arc::new(Mutex::new(RTCPeerConnectionState::New)),
             gathered: Arc::new(StickySignal::new()),
             dropped_keyframe_requests: AtomicU64::new(0),
-            dropped_control_messages: AtomicU64::new(0),
             dc_pumps: Arc::new(Mutex::new(Vec::new())),
         };
         (events, enc_rx, inc_rx)
@@ -1847,16 +1937,48 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_full_control_channel_drops_the_message_and_counts_it() {
-        let (events, _enc_rx, _inc_rx) = events_with_full_channels();
+    /// A full control channel must park the caller, not discard the
+    /// message.
+    ///
+    /// The opposite of `a_full_encoder_channel_drops_...` above, and
+    /// deliberately so: that path runs inline in the driver loop,
+    /// this one runs in a spawned `run_dc_pump`. Input events are
+    /// ordered and reliable — a dropped key-up sticks a modifier down
+    /// in the guest — so waiting for a slot, and letting SCTP push
+    /// back on the browser, is the correct behaviour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_full_control_channel_applies_back_pressure() {
+        use std::time::Duration;
 
-        events.on_control_message(vec![1, 2, 3], "test").await;
+        let (events, _enc_rx, mut inc_rx) = events_with_full_channels();
+        let events = Arc::new(events);
+
+        let send = tokio::spawn({
+            let events = events.clone();
+            async move { events.on_control_message(vec![1, 2, 3], "test").await }
+        });
+
+        // Every slot is taken, so the send must still be parked.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !send.is_finished(),
+            "a full control channel dropped the message instead of waiting — an input \
+             event would be lost, and a lost key-up sticks a modifier down in the guest"
+        );
+
+        // Free a slot; the parked send must then complete and deliver.
+        let first = inc_rx.recv().await.expect("the pre-filled message");
+        assert_eq!(first, vec![0]);
+
+        tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("the send should complete once a slot frees")
+            .expect("send task panicked");
 
         assert_eq!(
-            events.dropped_control_messages.load(Ordering::Relaxed),
-            1,
-            "a full control channel should count a dropped message"
+            inc_rx.recv().await.expect("the back-pressured message"),
+            vec![1, 2, 3],
+            "the message that waited must still arrive, in order"
         );
     }
 
