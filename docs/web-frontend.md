@@ -300,6 +300,24 @@ high CPU with no active browser session, check that the
 reaper task is reaching the dead-bridge signal in the logs.
 If it is absent, file a bug with ryll version and log.
 
+### Every `/offer` returns 500 on a host with no network
+
+`--web` needs at least one non-loopback interface address, even
+when you are browsing from the same machine. WebRTC binds its own
+UDP sockets and advertises their addresses as ICE candidates;
+loopback is excluded because a candidate a remote browser cannot
+reach is worse than a clear failure. On a host with networking
+down, or a network-isolated container, `WebrtcBridge::new` has
+nothing to bind and fails the request rather than handing the
+browser an answer it can never connect to.
+
+The error mentions ICE candidates and interface enumeration,
+which does not obviously translate to "bring up a network
+interface" — that is what it means. Connecting any interface,
+including a bridge or a VPN tunnel, is enough. There is no
+opt-in for loopback-only operation today; whether to add one is
+a question for the phase 03 configuration surface.
+
 ### Cert load errors at startup
 
 ryll prints a clear error chain on cert-load failure, for

@@ -180,6 +180,19 @@ Both of these were learned the hard way and apply to all webrtc-rs work:
   lost-wakeup schedule. Do not hand-roll a fifth copy; that is how
   the original bug got in.
 
+  A *recurring* wake source is the other case, and the rules
+  invert. `WebState::bridge_replaced` is a bare `Notify` using
+  `notify_one()` on purpose: the stored permit is the feature,
+  because it survives the reaper's 500 ms no-bridge sleep and is
+  still there when the loop next parks. The cost is that a wake
+  carries no information. Any loop that gains a second wake
+  source must re-check the condition it actually cares about
+  rather than treating the wake as proof — the reaper waking and
+  concluding "my bridge died" is a bug that shipped, and the fix
+  was to gate the reap on `StickySignal::is_raised`. Sticky for
+  a one-shot fact; bare `Notify` plus an explicit re-check for a
+  recurring nudge.
+
 ## Cargo feature gating
 
 The `ryll` binary ships four features: `gui`, `audio` and `capture`

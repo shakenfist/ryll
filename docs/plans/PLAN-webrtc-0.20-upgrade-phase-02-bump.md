@@ -664,13 +664,15 @@ a mime-type-only match
 
 ## Review follow-up
 
-The automated reviewer raised ten items on PR #278 in a first round
-and three in a second. Two of the first round and one of the second
-were real bugs with no test covering them; each is fixed here with a
-regression test that fails on the pre-fix code.
+The automated reviewer raised ten items on PR #278 in a first round,
+three in a second and seven in a third. Two of the first round, one
+of the second and two of the third were real bugs with no test
+covering them. Each is fixed here, and all but one carries a
+regression test that fails on the pre-fix code; the exception is
+recorded as such under item 15 rather than papered over.
 
 Round 1's items are recorded first, then round 2's under "Second
-review round" below.
+review round" and round 3's under "Third review round" below.
 
 **1. The pumps stamped a hardcoded payload type (fixed).** The same
 0.20 change that made the SSRC load-bearing — `write_rtp` validates
@@ -816,3 +818,129 @@ something else. Mode 1 still outranks profile: mode 0 cannot carry a
 fragmented NAL at all, whereas a profile mismatch is decoded from the
 SPS anyway. This changes nothing for Chrome or Firefox today; it only
 bites a browser that orders a high-profile entry first.
+
+### Third review round
+
+Seven items: two `fix`, two `document`, three `consider`. The two
+fixes are both task and socket leaks created by the same 0.20
+change — dropping a peer connection detaches its driver rather than
+stopping it — which the port documented and then did not fully act
+on. Two of the round's items had already been resolved by the
+`llm-doc-structure` restructure that landed on `develop` while this
+branch was in review, and are recorded as such.
+
+**14. A failed `/offer` leaked the whole bridge (fixed).**
+`post_offer` builds the bridge at step 4 and installs it in
+`bridge_slot` at step 7. The `?` on step 6's `accept_offer` dropped
+the bridge on the floor in between, and on 0.20 a dropped bridge is
+not a stopped bridge: the driver task, the UDP sockets bound for ICE
+(one per non-loopback interface), the control-DC pump, and the input
+relay spawned at step 5c all survive the failed request. Nothing
+else could ever reap it, because reaping is driven by the slot it
+never reached. The offer cooldown bounds the rate, not the total, so
+a client posting malformed SDP in a loop accumulates them for the
+life of the process. This is a genuine regression: on 0.17 the drop
+stopped the machinery.
+
+Fixed at two levels, deliberately. The call site now closes
+explicitly and awaits it, so teardown is finished before the 400 is
+returned — that is the deterministic path and the one that matters.
+`WebrtcBridge` also gained a `Drop` impl that aborts the pumps and
+spawns a best-effort close, because "forgot to close" is silent
+everywhere on 0.20, not only here, and a rule nobody can see being
+broken is not a safeguard. `close()` sets a flag the destructor
+checks, so the two do not both run.
+
+The crate's own `accept_offer_rejects_malformed_sdp` test proves the
+SDP is rejected and calls `close()` itself, which is exactly why it
+never noticed that production did not. A test that cleans up after
+the code under test cannot see the code under test failing to clean
+up.
+
+**15. `close()` skipped the pump aborts when `pc.close()` errored
+(fixed, and not covered by a test).** `close()` was
+`self.pc.close().await?;` followed by draining and aborting the
+pumps, so a close error returned before aborting anything — leaking
+precisely the tasks the method exists to reap. Reachable in
+production: `post_offer` and `run_bridge_reaper` both anticipate that
+error and warn-and-continue, so every caller handled it except
+`close()` itself. The aborts are now unconditional and the result is
+propagated afterwards; the ordering argument in the doc comment
+(close first so pumps exit naturally rather than being cancelled
+mid-message) is unaffected, because ordering and unconditionality are
+separable.
+
+No regression test, and this is a real gap rather than an oversight.
+The error branch needs `pc.close()` to fail, which is not inducible
+without a fake `dyn PeerConnection` — a test double for the whole
+trait, to exercise two lines. `close_drains_the_datachannel_pump_handles`
+was checked against the pre-fix code and *passes*, because the happy
+path drains the list either way. Recorded here so the next reader
+knows the guard is inspection, not CI.
+
+**16. Doc items, mostly overtaken by the docs restructure.** The
+reviewer asked for `bind_addrs.rs` in ARCHITECTURE.md's second crate
+tree and for AGENTS.md's `lifecycle.rs` annotation to mention the
+replacement arm and the liveness gate. Both referred to text that
+`llm-doc-structure` (PR #277) deleted: AGENTS.md no longer carries a
+source tree at all, and ARCHITECTURE.md's duplicate tree is now the
+only one, corrected while re-homing this branch's doc changes over
+that restructure.
+
+What did survive is the contradiction the reviewer found underneath
+those: AGENTS.md's `StickySignal` convention says one-shot lifecycle
+events must never use a bare `Notify` and never `notify_one()`,
+"which would leak a permit" — while `bridge_replaced`, added by this
+PR, is a bare `Notify` using `notify_one()` *because* the leaked
+permit is the point. Both statements are right and they read as
+contradictory. The convention now distinguishes the two cases: sticky
+for a one-shot fact, bare `Notify` plus an explicit re-check for a
+recurring nudge, with the round-2 bug named as what happens when a
+loop treats a wake as evidence.
+
+**17. SSRC collision and zero (taken).** Video and audio SSRCs were
+drawn independently with no check that they differ or are non-zero.
+Both tracks are BUNDLE-ed onto one transport and RFC 8843 §9.2
+requires SSRCs to be unique across a BUNDLE group, so a collision
+would have a receiver demultiplexing by SSRC misroute or drop one
+stream. Before the port this was invisible because the core rewrote
+the header; now the value is what the SDP advertises and what
+`write_rtp` validates. Probability is ~2^-32 per bridge and it will
+realistically never fire — taken anyway because the guard is three
+lines and the failure mode (one media stream silently missing, for
+one viewer, unreproducibly) is the worst kind to debug.
+
+**18. Loopback-only hosts (documented, not changed).** `new` errors
+when `host_udp_bind_addrs()` is empty, so `--web` fails every
+`/offer` on a host with no non-loopback interface — including when
+browsing from that same host. That is Decision 4 working as intended,
+and the failure is loud rather than a browser that mysteriously never
+connects. The gap was that the error talks about ICE candidates and
+interface enumeration, which does not obviously translate to "bring
+up an interface". `docs/web-frontend.md`'s troubleshooting section
+now says so plainly. Whether to add an opt-in for loopback-only
+operation is left to phase 03's configuration surface.
+
+**19. The `rtc` 0.20.x stack is a fresh security-critical dependency
+(acknowledged).** The port swapped a mature DTLS/SRTP/SCTP/STUN tree
+for a sans-io reimplementation released days earlier, parsing
+untrusted input from every address the host binds. Not a defect in
+this PR, and the alternative is strictly worse — 0.17.x is abandoned
+and will never be fixed. Recorded as an accepted risk in
+`docs/plans/PLAN-supply-chain-followups.md`, where the scanning
+policy lives, along with the transitive `winapi` / `bitflags 1.3.2` /
+duplicate `quinn-udp` warnings and the intent to treat `rtc-*` as a
+watch item on the weekly `cargo audit`. Confirmed against CI rather
+than by inspection: the `cargo audit` and `cargo deny` lanes both
+pass on the ported tree.
+
+**Convergence.** Round 3 is 2 fix / 2 doc / 3 consider, against
+round 2's 1 / 1 / 1 and round 1's 3 / 3 / 4. The fix count went *up*,
+which is the signal worth taking seriously rather than explaining
+away — but both fixes are the same defect class (0.20's detach
+semantics) in code the port wrote, not in machinery added by
+review rounds, and the `Drop` backstop closes the class rather than
+the two instances. That is the distinction between a converging loop
+and a generator feeding on its own output. The rule stands: land when
+no `fix` items remain, and the browser check is still the gate that
+matters more than any of this.
