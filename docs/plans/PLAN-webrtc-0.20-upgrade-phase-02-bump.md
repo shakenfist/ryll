@@ -665,14 +665,15 @@ a mime-type-only match
 ## Review follow-up
 
 The automated reviewer raised ten items on PR #278 in a first round,
-three in a second and seven in a third. Two of the first round, one
-of the second and two of the third were real bugs with no test
-covering them. Each is fixed here, and all but one carries a
-regression test that fails on the pre-fix code; the exception is
-recorded as such under item 15 rather than papered over.
+three in a second, seven in a third and ten in a fourth. Seven were
+real bugs with no test covering them. Each is fixed here; most carry
+a regression test that fails on the pre-fix code, and the two that
+do not are recorded as such — under items 15 and 20 — rather than
+papered over with a test that cannot fail.
 
-Round 1's items are recorded first, then round 2's under "Second
-review round" and round 3's under "Third review round" below.
+Round 1's items are recorded first, then rounds 2, 3 and 4 under
+their own headings below. Round 4 is the last: see "Why the review
+loop stops here" at the end.
 
 **1. The pumps stamped a hardcoded payload type (fixed).** The same
 0.20 change that made the SSRC load-bearing — `write_rtp` validates
@@ -944,3 +945,132 @@ the two instances. That is the distinction between a converging loop
 and a generator feeding on its own output. The rule stands: land when
 no `fix` items remain, and the browser check is still the gate that
 matters more than any of this.
+
+### Fourth review round
+
+Ten items: two `fix`, five `consider`, three `info`. Items 1, 2, 3
+and 5 were taken; 4, 6 and 7 were declined with reasons; the three
+`info` items needed no action, and one of them (10) was the reviewer
+confirming that round 3's `StickySignal` convention change was the
+right way to handle a genuine exception to a documented rule.
+
+Both `fix` items land in code this PR wrote, and the first lands in
+machinery *added by round 3* — which is the signal that stopped the
+loop. See the end of this section.
+
+**20. `close()` disarmed the `Drop` backstop before doing the work
+(fixed, and not covered by a test).** Round 3 added a `Drop` impl so
+a bridge that is dropped without `close()` still gets cleaned up,
+and keyed it on a `closed` flag that `close()` set as its *first*
+statement. Cancel that future between the store and the aborts and
+`Drop` takes its early-return path and does nothing: the pumps are
+never aborted, and the driver task and its UDP sockets leak. That is
+reachable — `post_offer` is an axum handler whose future is dropped
+when the client disconnects, and `run_bridge_reaper` is aborted by
+the shutdown path while it may be inside `close()`. The backstop
+added to catch silent leaks was guaranteed not to fire on exactly
+the path where it was needed, which is worse than not having one,
+because it looks like there is one.
+
+Fixed by moving the store after the aborts. Both cleanup steps are
+idempotent, so a cancelled `close()` now falls through to `Drop`
+correctly and a completed one still skips it.
+
+No regression test, and a test was written and then deleted rather
+than kept. Reaching the window needs `pc.close()` to return
+`Pending` at least once; measured in-process, both connected to a
+`TestPeer` and not, it completes on the first poll, so the test
+passed with the statements in either order. A test that cannot fail
+reads as coverage without being any — the same objection the round
+raised about the renderer's H.264 smoke test, and it applies here
+too. The ordering is guarded by the comment at the store.
+
+**21. `on_control_message` dropped browser input events for a reason
+that had stopped being true (fixed).** It used `try_send` on the
+64-slot `incoming_tx`, justified by "this method is awaited inline
+in the driver loop". After step 2d that is false: its only caller is
+`run_dc_pump`, which both `new` and `on_data_channel` `tokio::spawn`.
+The same file said so eleven lines above the justification, and the
+two were never reconciled.
+
+The cost was real rather than theoretical. That channel carries the
+browser's keyboard, mouse and resize events over an ordered,
+reliable datachannel. If the consumer stalls — the SPICE inputs
+channel on a slow network is the ordinary case — the slots fill and
+events are discarded mid-stream. A dropped key-up leaves a modifier
+stuck down in the guest, which a user can only report as "my
+keyboard went weird". Awaiting instead parks that one datachannel's
+poll loop and lets SCTP flow control push back on the browser, which
+is what an ordered reliable channel is for.
+
+`on_state_change` keeps `try_send`: it really is dispatched inline.
+The distinction is now stated on the type, on both methods, and in
+AGENTS.md, because the over-broad version of the rule — "anything
+that needs to hand off must use `try_send`" — had already been
+copied into the conventions file where the next author would inherit
+it. The rule is about the dispatch path, not the type.
+`a_full_control_channel_applies_back_pressure` replaces the test
+that asserted the old dropping behaviour, and fails on the pre-fix
+code.
+
+**22. `new` leaked the peer connection on a post-`build()` failure
+(taken).** Between `build()` and `Ok(Self { .. })`, `new` used `?`
+on two `add_track` calls and one `create_data_channel`. On any of
+them the `Arc<dyn PeerConnection>` was dropped with the driver
+running and the sockets bound, and the `Drop` backstop could not
+help because `WebrtcBridge` had never been constructed. Same leak
+class as item 14, one layer earlier. The fallible part is now
+`attach_tracks_and_control_dc`, so there is one error path, and it
+closes the peer connection before returning.
+
+**23. Payload type re-read per packet (taken).** `run_video_pump`
+loaded the negotiated payload type inside the per-packet loop, so a
+store landing mid-frame could split one access unit across two
+payload types — which a receiver reads as two streams and
+reassembles as neither. The load is now hoisted to once per access
+unit, and once per input packet in both audio pumps. The window
+closes before DTLS is up, so this is defensive rather than a live
+defect.
+
+**Declined, with reasons:**
+
+- **Item 4 — the failed `/offer` leaves the encoder and audio pump
+  running.** Correct, and bounded: the next successful offer
+  restarts the encoder and replaces `active_opus_tx`, retiring both
+  pumps. The residue is a CPU cost until the next offer, not
+  unbounded growth. Factoring the reaper's teardown into a shared
+  helper is the right fix and is worth doing on its own, not
+  bolted onto the end of a port that has already had four review
+  rounds. Rides to the auto-filed issue.
+- **Item 6 — `accept_offer` waits for ICE gathering with no
+  timeout.** Pre-existing, inherited from phase 01's `gathered`
+  signal, and unchanged by this port. Adding a timeout changes
+  behaviour on a path the port did not touch, which is exactly what
+  makes a regression unattributable in phase 04's comparison
+  against the phase-01 baseline.
+- **Item 7 — the renderer's H.264 smoke test exercises the
+  abandoned `rtp` crate.** The sharpest of the three, and the
+  argument is accepted: a green test against a payloader we no
+  longer ship reads as coverage it does not provide. It is already
+  recorded under the master plan's Future work, and moving it means
+  touching a second crate's dev-dependencies during the bump.
+  Deferred, not dismissed.
+
+**Why the review loop stops here.** Four rounds, thirty items, seven
+real bugs. Rounds 1 and 2 found defects in the port; rounds 3 and 4
+each found a defect in the machinery the *previous round* added —
+round 4's item 20 is a bug in round 3's `Drop` impl, and item 22 is
+the same leak class one layer up. That is the documented signature
+of a generator loop rather than a converging one, and the fix count
+rising from 1 to 2 while the diff grows is the second signature.
+
+The counter-argument, which is why round 4 was worth running: the
+bugs are real, and item 21 would have cost users dropped keystrokes.
+But the remaining risk in this PR is no longer the kind static
+review finds. The reviewer's own item 8 says so — the browser check
+is "the highest-value check remaining and the automated suite is
+structurally unable to substitute for it". Three of the four rounds
+have found defects that a fully green suite could not see, and none
+of them would have been caught by a fifth round either; they were
+caught by reading. So: no fifth round. The remaining `consider`
+items ride to their auto-filed issues, and the gate is the browser.
