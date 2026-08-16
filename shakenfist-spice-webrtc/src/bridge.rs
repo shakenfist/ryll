@@ -781,8 +781,22 @@ impl WebrtcBridge {
         // Getting it wrong is silent. Every packet is dropped at the
         // sender with a rejection the pumps log at debug, so the
         // symptom is a connected viewer watching nothing.
-        let video_ssrc: u32 = rand::random();
-        let audio_ssrc: u32 = rand::random();
+        // Distinct and non-zero. Both tracks are BUNDLE-ed onto one
+        // transport, and RFC 8843 §9.2 requires SSRCs to be unique
+        // across a BUNDLE group — a receiver demultiplexing by SSRC
+        // would misroute or drop one of the two streams. Zero is
+        // excluded because it reads as "unset" in enough tooling to be
+        // worth never emitting. Before the port a collision was
+        // invisible, because the core rewrote the header; now the
+        // value is what the SDP advertises and what `write_rtp`
+        // validates against, so it is load-bearing. The odds are
+        // ~2^-32 per bridge, which is precisely why this is a guard
+        // rather than something anyone would ever reproduce.
+        let video_ssrc = nonzero_random_ssrc();
+        let mut audio_ssrc = nonzero_random_ssrc();
+        while audio_ssrc == video_ssrc {
+            audio_ssrc = nonzero_random_ssrc();
+        }
 
         let video_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             STREAM_ID.to_owned(),
@@ -1173,6 +1187,20 @@ impl WebrtcBridge {
         }
 
         Ok(closed?)
+    }
+}
+
+/// Draw a random SSRC that is never zero.
+///
+/// See the SSRC discussion in [`WebrtcBridge::new`] for why the value
+/// matters on 0.20 and why the caller also rejects a collision between
+/// the two tracks.
+fn nonzero_random_ssrc() -> u32 {
+    loop {
+        let candidate: u32 = rand::random();
+        if candidate != 0 {
+            return candidate;
+        }
     }
 }
 
@@ -2527,5 +2555,37 @@ mod tests {
             "a bridge dropped without close() leaked its datachannel pumps — on 0.20 that \
              leaks the driver task and its UDP sockets for the life of the process"
         );
+    }
+
+    /// The two tracks are BUNDLE-ed, so their SSRCs must differ, and
+    /// neither may be zero.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn track_ssrcs_are_distinct_and_non_zero() {
+        use shakenfist_spice_renderer::EncoderControl;
+        use tokio::sync::mpsc;
+
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
+            ice_servers: vec![],
+            encoder_control: tx,
+        })
+        .await
+        .expect("bridge constructs");
+
+        assert_ne!(bridge.video_ssrc, 0, "video SSRC must not be zero");
+        assert_ne!(bridge.audio_ssrc, 0, "audio SSRC must not be zero");
+        assert_ne!(
+            bridge.video_ssrc, bridge.audio_ssrc,
+            "BUNDLE-ed tracks must not share an SSRC (RFC 8843 §9.2)"
+        );
+
+        bridge.close().await.expect("close");
+    }
+
+    #[test]
+    fn nonzero_random_ssrc_never_returns_zero() {
+        for _ in 0..1_000 {
+            assert_ne!(nonzero_random_ssrc(), 0);
+        }
     }
 }
