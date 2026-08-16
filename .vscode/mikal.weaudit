@@ -640,19 +640,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/design-decisions.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/device-redirection.md",
       "author": "mikal"
     },
     {
       "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/index.md",
       "author": "mikal"
     },
     {

@@ -69,10 +69,6 @@
       "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
       "date": "2026-08-17"
     },
-    "docs/design-decisions.md": {
-      "sha": "9ee4e1653c6788a3fc50d3cb377d36840b19bd8a",
-      "date": "2026-08-17"
-    },
     "docs/development-macos.md": {
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
@@ -91,10 +87,6 @@
     },
     "docs/features.md": {
       "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
-      "date": "2026-08-17"
-    },
-    "docs/index.md": {
-      "sha": "484cc4975f37eb158500c7e8ab6f30d86a1a0a2e",
       "date": "2026-08-17"
     },
     "docs/installation.md": {
