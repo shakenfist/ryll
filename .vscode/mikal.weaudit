@@ -356,10 +356,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/auto_snapshot.rs",
       "author": "mikal"
     },
@@ -504,10 +500,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-usbredir/README.md",
       "author": "mikal"
     },
@@ -557,10 +549,6 @@
     },
     {
       "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
     {
@@ -641,10 +629,6 @@
     },
     {
       "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/development.md",
       "author": "mikal"
     },
     {

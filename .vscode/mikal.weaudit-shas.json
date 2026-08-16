@@ -69,10 +69,6 @@
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
     },
-    "docs/development.md": {
-      "sha": "b639b25eb05459d2226763eb08a69c1a639a7e08",
-      "date": "2026-08-17"
-    },
     "docs/features.md": {
       "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
       "date": "2026-08-17"
@@ -97,17 +93,9 @@
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
     },
-    "ryll/src/app.rs": {
-      "sha": "ef2d5550c7e14ec394b82a9a2547a6161d13740f",
-      "date": "2026-07-26"
-    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
       "date": "2026-07-26"
-    },
-    "ryll/src/bugreport.rs": {
-      "sha": "d8ac1f0838ae816970c7ae77200c11ab5c33f874",
-      "date": "2026-08-03"
     },
     "ryll/src/capture.rs": {
       "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
@@ -116,10 +104,6 @@
     "ryll/src/clipboard_arboard.rs": {
       "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
       "date": "2026-07-26"
-    },
-    "ryll/src/config.rs": {
-      "sha": "a2dc713690c96528e4d3bf75f7898f4351202c33",
-      "date": "2026-08-02"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
