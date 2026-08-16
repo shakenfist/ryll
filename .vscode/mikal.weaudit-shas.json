@@ -57,6 +57,10 @@
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
+    "docs/ci.md": {
+      "sha": "042bf7c62c659a54c4c4119ff08e2b7a62275bed",
+      "date": "2026-08-17"
+    },
     "docs/configuration.md": {
       "sha": "5f4aee4f262c90d50bbd9d96579ae920ec6eca06",
       "date": "2026-08-17"
@@ -65,17 +69,49 @@
       "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
       "date": "2026-08-17"
     },
+    "docs/design-decisions.md": {
+      "sha": "9ee4e1653c6788a3fc50d3cb377d36840b19bd8a",
+      "date": "2026-08-17"
+    },
     "docs/development-macos.md": {
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
+      "date": "2026-08-17"
+    },
+    "docs/development.md": {
+      "sha": "cc4008e89c214de5ef3b0e3f4351286fd6ee22d0",
+      "date": "2026-08-17"
+    },
+    "docs/device-redirection.md": {
+      "sha": "6e4382750527109b6450a69fe672389357c0e7bc",
+      "date": "2026-08-17"
+    },
+    "docs/diagnostics.md": {
+      "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
     },
     "docs/features.md": {
       "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
       "date": "2026-08-17"
     },
+    "docs/index.md": {
+      "sha": "484cc4975f37eb158500c7e8ab6f30d86a1a0a2e",
+      "date": "2026-08-17"
+    },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
+    },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "7ace045ff7dd95bb36fb6c751c83456e73be6695",
+      "date": "2026-08-17"
+    },
+    "docs/macos-metrics-verification.md": {
+      "sha": "5b7000c363632de72de502fd1dc0bfeb40819d45",
+      "date": "2026-08-17"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "1f1fa47a196baaacdd860ebc96f71e6071092814",
+      "date": "2026-08-17"
     },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
