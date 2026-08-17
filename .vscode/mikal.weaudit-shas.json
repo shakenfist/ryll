@@ -593,6 +593,14 @@
       "sha": "b77ce81cadd559b48590b8b54ee72bcd5d1808d5",
       "date": "2026-08-18"
     },
+    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
+      "sha": "fad8f97e7a71d809f4fbc1988ae0d12378811e08",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/tests/loopback.rs": {
+      "sha": "52bd9b4b2428eba95f3f7fcec71eb33ac3098298",
+      "date": "2026-08-18"
+    },
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
       "date": "2026-08-02"

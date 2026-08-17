@@ -758,6 +758,18 @@
     {
       "path": "shakenfist-spice-renderer/src/encoder",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
