@@ -5,6 +5,10 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "3ac56419fb6f3580acb5198997e3ac987300de4b",
+      "date": "2026-08-18"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
@@ -237,6 +241,10 @@
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
     },
+    "ryll/src/web/assets/app.js": {
+      "sha": "b9aa90bf0421a510eeb9dcf793995e32250981ce",
+      "date": "2026-08-18"
+    },
     "ryll/src/web/assets/index.html": {
       "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
       "date": "2026-08-08"
@@ -401,6 +409,10 @@
       "sha": "829bdc44838acc1a85321b97d8f360ac23d01efb",
       "date": "2026-07-18"
     },
+    "shakenfist-spice-renderer/src/channels/inputs.rs": {
+      "sha": "1280d56f9eab14ba6064eea16306f4106d2555e2",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-renderer/src/channels/main_channel.rs": {
       "sha": "96687566c03f82f8860db66b9772fb7202dedb09",
       "date": "2026-07-19"
@@ -476,6 +488,10 @@
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
       "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/lib.rs": {
+      "sha": "5c9380c706a38baf82dd19d2bde72fdd856fc7d7",
+      "date": "2026-08-18"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
@@ -633,6 +649,10 @@
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
       "date": "2026-07-26"
     },
+    "tools/make-cloud-seed.sh": {
+      "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
+      "date": "2026-08-18"
+    },
     "tools/pcap-inspect.py": {
       "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
       "date": "2026-07-26"
@@ -660,6 +680,10 @@
     "tools/sign-release-tag.sh": {
       "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
       "date": "2026-07-26"
+    },
+    "tools/start-desktop-qemu.sh": {
+      "sha": "18e1d798477e9750a82a03f2beeb2f2a1f72cc39",
+      "date": "2026-08-18"
     },
     "tools/tag-release.sh": {
       "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",

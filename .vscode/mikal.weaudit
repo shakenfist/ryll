@@ -770,6 +770,42 @@
     {
       "path": "shakenfist-spice-webrtc/tests",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/make-cloud-seed.sh",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/start-desktop-qemu.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/app.js",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
