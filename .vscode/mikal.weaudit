@@ -632,10 +632,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/features.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/ci.md",
       "author": "mikal"
     },
@@ -644,15 +640,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/libvirt-spice-recommendations.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/macos-metrics-verification.md",
       "author": "mikal"
     },
     {
@@ -689,10 +677,6 @@
     },
     {
       "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/web-frontend.md",
       "author": "mikal"
     },
     {

@@ -89,10 +89,6 @@
       "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
     },
-    "docs/features.md": {
-      "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
-      "date": "2026-08-17"
-    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -100,14 +96,6 @@
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
-    },
-    "docs/libvirt-spice-recommendations.md": {
-      "sha": "7ace045ff7dd95bb36fb6c751c83456e73be6695",
-      "date": "2026-08-17"
-    },
-    "docs/macos-metrics-verification.md": {
-      "sha": "5b7000c363632de72de502fd1dc0bfeb40819d45",
-      "date": "2026-08-17"
     },
     "docs/multi-mode-parity.md": {
       "sha": "1f1fa47a196baaacdd860ebc96f71e6071092814",
@@ -135,10 +123,6 @@
     },
     "docs/troubleshooting.md": {
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
-      "date": "2026-08-17"
-    },
-    "docs/web-frontend.md": {
-      "sha": "7640e546649f50038f9f4f40ec1f78dd093f830f",
       "date": "2026-08-17"
     },
     "docs/web-mode-internals.md": {
