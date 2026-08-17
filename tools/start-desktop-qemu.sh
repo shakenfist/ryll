@@ -9,7 +9,12 @@
 #   --ovmf-vars PATH \
 #   --spice-port N \
 #   --pid-file PATH \
-#   [--memory MB] [--cpus N]
+#   [--memory MB] [--cpus N] [--spice-addr ADDR]
+#
+# --spice-addr defaults to 127.0.0.1. Ticketing is disabled and this
+# guest has a desktop, a known password and passwordless sudo, so
+# binding it to every interface would hand a session to anyone on the
+# same network. The documented workflow points ryll at localhost.
 #
 # Unlike tools/start-qemu.sh in kerbside, this guest is a full desktop
 # and the point of it is to exercise every SPICE channel a browser
@@ -35,6 +40,7 @@ SPICE_PORT=''
 PID_FILE=''
 MEMORY='2048'
 CPUS='2'
+SPICE_ADDR='127.0.0.1'
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,6 +49,7 @@ while [ $# -gt 0 ]; do
         --ovmf-code)  OVMF_CODE="$2";  shift 2 ;;
         --ovmf-vars)  OVMF_VARS="$2";  shift 2 ;;
         --spice-port) SPICE_PORT="$2"; shift 2 ;;
+        --spice-addr) SPICE_ADDR="$2"; shift 2 ;;
         --pid-file)   PID_FILE="$2";   shift 2 ;;
         --memory)     MEMORY="$2";     shift 2 ;;
         --cpus)       CPUS="$2";       shift 2 ;;
@@ -52,7 +59,12 @@ done
 
 for arg in QCOW2 SEED OVMF_CODE OVMF_VARS SPICE_PORT PID_FILE; do
     if [ -z "${!arg}" ]; then
-        echo "ERROR: --${arg,,} is required" >&2
+        # Variables are FOO_BAR; flags are --foo-bar. Lowercasing
+        # alone printed `--ovmf_code`, which is not a flag this
+        # script accepts, so the error told you to pass something
+        # that would then be rejected as unknown.
+        flag="${arg,,}"
+        echo "ERROR: --${flag//_/-} is required" >&2
         exit 1
     fi
 done
@@ -64,8 +76,11 @@ for f in "${QCOW2}" "${SEED}" "${OVMF_CODE}" "${OVMF_VARS}"; do
     fi
 done
 
-# qemu writes to the vars file at runtime, so work on a copy.
-VARS_COPY="$(dirname "${PID_FILE}")/ryll-desktop-ovmf-vars.fd"
+# qemu writes to the vars file at runtime, so work on a copy. Put it
+# beside the disk overlay rather than beside the pid file: the overlay
+# lives in testdata/, which `make clean-testdata` already sweeps,
+# whereas the pid file is in /tmp and nothing removed the copy.
+VARS_COPY="${QCOW2%.qcow2}-ovmf-vars.fd"
 cp "${OVMF_VARS}" "${VARS_COPY}"
 
 if [ -w /dev/kvm ]; then
@@ -79,7 +94,8 @@ else
          "input latency measurements will be meaningless." >&2
 fi
 
-echo "[start-desktop-qemu] Launching XFCE guest with SPICE on port ${SPICE_PORT}"
+echo "[start-desktop-qemu] Launching XFCE guest with SPICE on" \
+     "${SPICE_ADDR}:${SPICE_PORT}"
 
 qemu-system-x86_64 \
     -machine "q35,accel=${ACCEL}" \
@@ -91,7 +107,7 @@ qemu-system-x86_64 \
     -drive "file=${QCOW2},format=qcow2,if=virtio" \
     -drive "file=${SEED},format=raw,if=virtio" \
     -vga qxl \
-    -spice "port=${SPICE_PORT},disable-ticketing=on" \
+    -spice "addr=${SPICE_ADDR},port=${SPICE_PORT},disable-ticketing=on" \
     -device virtio-serial-pci \
     -chardev spicevmc,id=vdagent,name=vdagent \
     -device virtserialport,chardev=vdagent,name=com.redhat.spice.0 \
@@ -104,4 +120,4 @@ qemu-system-x86_64 \
     -daemonize \
     -pidfile "${PID_FILE}"
 
-echo "[start-desktop-qemu] SPICE server on port ${SPICE_PORT} (PID $(cat "${PID_FILE}"))"
+echo "[start-desktop-qemu] SPICE server on ${SPICE_ADDR}:${SPICE_PORT} (PID $(cat "${PID_FILE}"))"

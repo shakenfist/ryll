@@ -331,6 +331,8 @@ clean:
 clean-testdata:
 	rm -f testdata/usb-test.raw
 	rm -f $(DESKTOP_OVERLAY) $(DESKTOP_SEED)
+	rm -f $(DESKTOP_OVERLAY:.qcow2=-ovmf-vars.fd)
+	rm -f $(DESKTOP_BASE_IMAGE).tmp
 	@echo "Kept $(DESKTOP_BASE_IMAGE) (delete by hand to re-download ~770MB)"
 
 # Clean devcontainer image
@@ -371,13 +373,24 @@ test-qemu-stop:
 	@rm -f $(QEMU_VARS_COPY)
 
 # Download the XFCE desktop test image (~770MB, cached in testdata/).
+#
+# Download to a temporary name and rename on success. Without --fail,
+# curl writes an HTTP error page to the target and exits 0; without
+# the rename, an interrupted transfer leaves a truncated file that
+# make then treats as up to date. At 770MB neither is hypothetical.
 $(DESKTOP_BASE_IMAGE):
 	mkdir -p testdata
-	curl -L -o $(DESKTOP_BASE_IMAGE) $(DESKTOP_IMAGE_URL)
+	curl -fL -o $(DESKTOP_BASE_IMAGE).tmp $(DESKTOP_IMAGE_URL)
+	mv $(DESKTOP_BASE_IMAGE).tmp $(DESKTOP_BASE_IMAGE)
 
 # Build the cloud-init seed ISO that gives the guest a password and
 # saves it from waiting out cloud-init's datasource search.
-$(DESKTOP_SEED): tools/make-cloud-seed.sh
+#
+# Depends on the Makefile as well as the script, because
+# DESKTOP_PASSWORD is defined here: without it, changing the password
+# left the old seed in place and the login this target prints was
+# wrong.
+$(DESKTOP_SEED): tools/make-cloud-seed.sh Makefile
 	./tools/make-cloud-seed.sh --output $(DESKTOP_SEED) \
 		--password $(DESKTOP_PASSWORD)
 
