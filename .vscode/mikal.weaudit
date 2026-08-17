@@ -634,6 +634,34 @@
     {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "MERGE-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
+    },
+    {
+      "path": "README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
