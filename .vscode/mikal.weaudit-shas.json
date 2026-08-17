@@ -461,6 +461,18 @@
       "sha": "f7ebd1659b4fd7239df78d418be8ede3f393a52e",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/src/encoder/h264.rs": {
+      "sha": "5bea35f6284d9fe3b9edb8f0246861a255c040e4",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/src/encoder/mod.rs": {
+      "sha": "62fd67b8792f8630769b1fd86e9402c6b37d0ed9",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/src/encoder/task.rs": {
+      "sha": "7020c30c224f81aba0616670c4dabce481c72a1f",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
       "date": "2026-07-21"

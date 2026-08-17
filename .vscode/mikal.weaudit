@@ -742,6 +742,22 @@
     {
       "path": "shakenfist-spice-webrtc/src",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/task.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
