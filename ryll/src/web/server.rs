@@ -56,6 +56,16 @@ pub struct WebState {
     /// Single-viewer enforcement: a new offer replaces the
     /// existing bridge.
     pub bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    /// Producer end of the outbound control queue. Cloned into the
+    /// cursor relay, the mouse-mode tracker and each input relay; see
+    /// [`super::control`] for why those producers do not touch
+    /// `bridge_slot` themselves.
+    pub(crate) control_tx: super::control::ControlSink,
+    /// Consumer end, taken exactly once by `run_web` when it spawns
+    /// [`super::control::run_control_writer`]. Left in place by unit
+    /// tests, which read it directly to see what the browser would
+    /// have been sent.
+    pub(crate) control_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
     /// Per-launch encoder pipeline (synthetic source +
     /// `H264Encoder` + `EncoderTask`). `EncoderInfra::restart`
     /// stops any existing encoder and spawns a fresh one for
@@ -186,9 +196,12 @@ impl WebState {
             let _ = write!(acc, "{:02x}", b);
             acc
         });
+        let (control_tx, control_rx) = super::control::control_queue();
         Self {
             token,
             bridge_slot: Arc::new(Mutex::new(None)),
+            control_tx,
+            control_rx: Mutex::new(Some(control_rx)),
             encoder: Arc::new(Mutex::new(EncoderInfra::new())),
             input_tx,
             resize_tx,

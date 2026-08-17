@@ -354,6 +354,7 @@ pub async fn post_offer(
                 resize_tx,
                 mirror,
                 state.mouse_mode.clone(),
+                state.control_tx.clone(),
             ));
         } else {
             warn!("web: bridge.control_rx() returned None; input relay not spawned");
@@ -406,20 +407,11 @@ pub async fn post_offer(
     // later bridge. See `crate::web::lifecycle::run_bridge_reaper`.
     state.bridge_replaced.notify_one();
 
-    // Catch the new browser up on the mouse mode. The SPICE server
-    // announces it at session-init, which is normally long before
-    // any browser connects, so the tracker's own broadcast of the
-    // change has already been and gone by the time there is a
-    // bridge to send it over. Without this the browser would sit on
-    // its default until the mode next changed — which, on a healthy
-    // session, is never.
-    crate::web::control::send_msg(
-        &state.bridge_slot,
-        &crate::web::control::ControlMsg::MouseMode {
-            mode: state.mouse_mode.load(Ordering::Relaxed),
-        },
-    )
-    .await;
+    // The browser is caught up on the mouse mode by its own `hello`
+    // over the control datachannel, not from here. Sending it at this
+    // point would be strictly too early: the answer below has not
+    // been returned yet, so ICE, DTLS and SCTP have not run and the
+    // datachannel cannot accept anything. See `BrowserMsg::Hello`.
 
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
     Ok(Json(OfferRes {
@@ -552,6 +544,81 @@ mod tests {
             .await
             .expect("client rsd");
         client.close().await.expect("client close");
+    }
+
+    /// `post_offer` must not try to push anything to the browser.
+    ///
+    /// It used to end by sending the current mouse mode, to catch a
+    /// newly-connected browser up on state the SPICE server announced
+    /// at session-init — long before any browser existed, and never
+    /// re-broadcast, since the mode does not change again on a healthy
+    /// session. The send was strictly too early: it ran before the
+    /// answer below had even been returned, so ICE, DTLS and SCTP had
+    /// not run and the datachannel could not accept anything.
+    /// `send_control` has no buffering and no open-state tracking, and
+    /// the error was swallowed at debug, so it failed in silence.
+    ///
+    /// The browser now asks instead (`BrowserMsg::Hello`). This test
+    /// pins the negative half of that: nothing is queued for the
+    /// browser during signalling. It fails on the old code — the
+    /// mouse-mode message is sitting in the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn post_offer_queues_nothing_for_a_browser_that_cannot_receive_yet() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let state = Arc::new(WebState::new());
+        {
+            let mut m = state.surface_mirror.lock().await;
+            m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
+                display_channel_id: 0,
+                surface_id: 0,
+                width: 1280,
+                height: 720,
+            });
+        }
+        let token = state.token.clone();
+        let router = build_router(state.clone());
+
+        let client = TestPeer::builder()
+            .seed_data_channel("control-seed")
+            .build()
+            .await
+            .expect("client peer");
+        let final_offer_sdp = client.offer_and_gather().await.expect("offer");
+
+        let body = serde_json::json!({ "type": "offer", "sdp": final_offer_sdp }).to_string();
+        let req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri(format!("/offer?token={}", token))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = router.oneshot(req).await.expect("router");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .expect("body");
+        let answer: OfferResJson = serde_json::from_slice(&body_bytes).expect("json");
+
+        let queued = state
+            .control_rx
+            .lock()
+            .await
+            .as_mut()
+            .expect("no writer has taken the receiver in tests")
+            .try_recv();
+        assert!(
+            queued.is_err(),
+            "post_offer queued {:?} for a datachannel that cannot be open yet",
+            queued.map(|b| String::from_utf8_lossy(&b).into_owned())
+        );
+
+        client
+            .set_remote_answer(answer.sdp)
+            .await
+            .expect("client rsd");
+        client.close().await.expect("client close");
+        state.encoder.lock().await.stop().await;
     }
 
     /// Without a token, `POST /offer` is rejected by the

@@ -474,6 +474,12 @@
                 positionCursor(msg.x_norm, msg.y_norm);
                 break;
             case 'cursor-hide':
+                // Deliberately leaves .spice-cursor on the video, so
+                // the viewer has no pointer at all until cursor-show.
+                // The guest asked for a hidden cursor — full-screen
+                // video players and some games do — and revealing the
+                // host arrow instead would contradict it. spice-gtk
+                // behaves the same way.
                 cursorEl.hidden = true;
                 break;
             case 'cursor-show':
@@ -513,6 +519,12 @@
 
         dc.onopen = () => {
             console.log('[ryll] data channel open');
+            // Ask for the mouse mode. The server cannot push it
+            // unprompted: it learns the mode from SPICE session-init,
+            // seconds before this page loaded, and send_control drops
+            // anything written before this channel opened. This
+            // message is the server's proof that it is open.
+            sendCtrl({ type: 'hello' });
             // The other half of the race in sendViewport(): if the
             // peer connection reached `connected` before SCTP
             // opened this channel, that attempt found nothing to

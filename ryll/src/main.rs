@@ -734,16 +734,28 @@ fn run_web(
             surface_mirror,
             active_opus_tx,
         ));
-        let cursor_bridge_slot = state.bridge_slot.clone();
+        // Drain the outbound control queue onto whichever bridge is
+        // installed. One writer for the process, like the relays that
+        // feed it: the queue outlives any single browser connection.
+        let control_rx = state
+            .control_rx
+            .lock()
+            .await
+            .take()
+            .expect("control queue receiver is taken exactly once, here");
+        let control_writer_handle = tokio::spawn(crate::web::control::run_control_writer(
+            control_rx,
+            state.bridge_slot.clone(),
+        ));
         let cursor_handle = tokio::spawn(crate::web::cursor::run_cursor_relay(
             cursor_event_rx,
-            cursor_bridge_slot,
+            state.control_tx.clone(),
             cursor_mirror,
         ));
         let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
             mouse_mode_event_rx,
             state.mouse_mode.clone(),
-            state.bridge_slot.clone(),
+            state.control_tx.clone(),
         ));
 
         // Phase 6b: spawn the bridge reaper. It watches the
@@ -808,6 +820,7 @@ fn run_web(
         mirror_handle.abort();
         cursor_handle.abort();
         mouse_mode_handle.abort();
+        control_writer_handle.abort();
 
         server_result
     });
