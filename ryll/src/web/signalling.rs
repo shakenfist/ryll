@@ -347,7 +347,11 @@ pub async fn post_offer(
         if let Some(control_rx) = bridge.control_rx() {
             let mirror = state.surface_mirror.clone();
             tokio::spawn(crate::web::inputs::run_input_relay(
-                control_rx, input_tx, resize_tx, mirror,
+                control_rx,
+                input_tx,
+                resize_tx,
+                mirror,
+                state.mouse_mode.clone(),
             ));
         } else {
             warn!("web: bridge.control_rx() returned None; input relay not spawned");

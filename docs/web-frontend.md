@@ -265,6 +265,28 @@ pattern.
   the encoder task is wedged — restart ryll and file a
   bug.
 
+### The guest pointer does not move, or lands in the wrong place
+
+Check the negotiated mouse mode in ryll's log:
+
+    main: mouse mode=2 (client (absolute)), supported_modes=3
+
+`supported_modes=1` means the guest is not running
+`spice-vdagent`, so the SPICE server cannot offer client mode and
+the session stays relative. ryll handles both, but a guest with no
+agent also has no absolute pointing device, so the pointer is
+driven by deltas and cannot be warped to a position.
+
+If the pointer stops responding entirely part-way through a
+session, look for:
+
+    inputs: N consecutive pointer moves dropped ...
+
+That is the ack window wedged — the server acknowledges only the
+pointer messages it consumes, so a client sending the form the
+server did not negotiate fills the window once and drops
+everything after it.
+
 ### No audio, video works
 
 **Likely causes:**

@@ -26,6 +26,13 @@ use super::{ChannelEvent, InputEvent};
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
 
+/// Consecutive throttled pointer moves, with no `MOUSE_MOTION_ACK`
+/// in between, that make the ack window look wedged rather than
+/// briefly busy. At a browser's pointer event rate a genuine burst
+/// clears in a handful of events, so this is roughly a second of a
+/// pointer that is going nowhere.
+const MOTION_WEDGE_THRESHOLD: u32 = 100;
+
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
 
@@ -72,6 +79,13 @@ pub struct InputsChannel {
     last_key_time: Option<Instant>,
     button_state: u32,
     motion_count: u32,
+    /// Pointer moves dropped by the ack-window throttle since the
+    /// last `MOUSE_MOTION_ACK`. See
+    /// [`InputsChannel::note_motion_throttled`].
+    motion_drops_since_ack: u32,
+    /// Set once the wedged-throttle warning has been emitted, so
+    /// it is said once per session rather than per event.
+    motion_throttle_warned: bool,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -152,6 +166,8 @@ impl InputsChannel {
             last_key_time: None,
             button_state: 0,
             motion_count: 0,
+            motion_drops_since_ack: 0,
+            motion_throttle_warned: false,
             capture,
             byte_counter,
             traffic,
@@ -455,6 +471,9 @@ impl InputsChannel {
 
             inputs_server::MOUSE_MOTION_ACK => {
                 self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
+                // The window is draining, so any run of drops was
+                // a busy burst rather than a wedge.
+                self.motion_drops_since_ack = 0;
                 debug!("inputs: mouse motion ack (pending={})", self.motion_count);
             }
 
@@ -626,6 +645,8 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
                     self.motion_count += 1;
+                } else {
+                    self.note_motion_throttled();
                 }
             }
 
@@ -652,6 +673,8 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
                     self.motion_count += 1;
+                } else {
+                    self.note_motion_throttled();
                 }
             }
 
@@ -847,6 +870,44 @@ impl InputsChannel {
         }
 
         Ok(())
+    }
+
+    /// Note a pointer move dropped by the ack-window throttle, and
+    /// complain once per session if the throttle looks wedged
+    /// rather than merely busy.
+    ///
+    /// The throttle matches spice-gtk (`channel-inputs.c`): at most
+    /// `MOTION_ACK_BUNCH * 2` motions may be outstanding, and the
+    /// server returns a `MOUSE_MOTION_ACK` for every
+    /// `MOTION_ACK_BUNCH` it consumes. A burst of input can fill
+    /// that window briefly, which is normal and not worth a word.
+    ///
+    /// What is not normal is the window never draining. The count
+    /// only falls on an ack, so if the server acks nothing the
+    /// window stays full for the rest of the session and every
+    /// later pointer move is discarded — the guest pointer just
+    /// stops moving. A client sending the wrong message type for
+    /// the negotiated mouse mode produces exactly that, because
+    /// the server does not ack what it did not consume.
+    ///
+    /// [`MOTION_WEDGE_THRESHOLD`] consecutive drops with no
+    /// intervening ack is the line between the two. Below it, say
+    /// nothing; above it, say so once. The original failure had no
+    /// log line at all, which made an input problem look like a
+    /// rendering or transport one.
+    fn note_motion_throttled(&mut self) {
+        self.motion_drops_since_ack = self.motion_drops_since_ack.saturating_add(1);
+        if self.motion_drops_since_ack >= MOTION_WEDGE_THRESHOLD && !self.motion_throttle_warned {
+            self.motion_throttle_warned = true;
+            warn!(
+                "inputs: {} consecutive pointer moves dropped with {} \
+                 motions outstanding and no MOUSE_MOTION_ACK in between; \
+                 further motion will be dropped silently. If the guest \
+                 pointer is not moving, check the negotiated mouse mode — \
+                 the server does not acknowledge messages it ignores.",
+                self.motion_drops_since_ack, self.motion_count
+            );
+        }
     }
 
     /// Record an input event in the local deque.

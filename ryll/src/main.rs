@@ -721,6 +721,12 @@ fn run_web(
         // same `bridge_slot` the signalling handler installs into.
         let cursor_event_rx = event_broadcast_tx.subscribe();
         let cursor_mirror = surface_mirror.clone();
+        // Subscribed here, before `with_channels` moves the
+        // broadcast sender. The mouse mode arrives at session-init,
+        // which has usually already happened by the time a browser
+        // posts its first offer, so this subscription has to exist
+        // for the whole run rather than per bridge.
+        let mouse_mode_event_rx = event_broadcast_tx.subscribe();
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
             resize_tx,
@@ -733,6 +739,10 @@ fn run_web(
             cursor_event_rx,
             cursor_bridge_slot,
             cursor_mirror,
+        ));
+        let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
+            mouse_mode_event_rx,
+            state.mouse_mode.clone(),
         ));
 
         // Phase 6b: spawn the bridge reaper. It watches the
@@ -796,6 +806,7 @@ fn run_web(
         forwarder_handle.abort();
         mirror_handle.abort();
         cursor_handle.abort();
+        mouse_mode_handle.abort();
 
         server_result
     });

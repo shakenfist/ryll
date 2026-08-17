@@ -14,21 +14,29 @@
 //! needs to wrap the integer in an [`InputEvent::KeyDown`] /
 //! [`KeyUp`]. Pointer coordinates arrive as normalised `[0, 1]`
 //! floats; we denormalise against the surface mirror's primary
-//! surface dimensions to match what the renderer's
-//! [`InputsChannel`] expects (absolute SPICE pixel coordinates
-//! for the client mouse mode).
+//! surface dimensions to get the SPICE pixel coordinates the
+//! renderer's [`InputsChannel`] expects.
+//!
+//! Which pointer message we then send depends on the negotiated
+//! mouse mode, tracked by [`run_mouse_mode_tracker`]: absolute
+//! positions in client mode, relative deltas in server mode. A
+//! SPICE server discards the form it did not negotiate without
+//! saying anything, so sending the wrong one presents as a dead
+//! pointer rather than as an error.
 //!
 //! [`scancode_for_logical_key`]: shakenfist_spice_renderer
 //! [`InputEvent::KeyDown`]: shakenfist_spice_renderer::InputEvent
 //! [`KeyUp`]: shakenfist_spice_renderer::InputEvent::KeyUp
 //! [`InputsChannel`]: shakenfist_spice_renderer
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use shakenfist_spice_renderer::{InputEvent, SurfaceMirror};
-use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, warn};
+use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
+use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tracing::{debug, info, warn};
 
 /// Wire-format browser → server input messages. The `type`
 /// discriminator matches the JSON envelopes built by `app.js`.
@@ -68,16 +76,61 @@ enum BrowserMsg {
     Viewport { width: u32, height: u32 },
 }
 
+/// Track the SPICE session's mouse mode into a shared cell for
+/// [`run_input_relay`] to read.
+///
+/// This is a long-lived task spawned once by `run_web`, not per
+/// bridge, because the mode is session state: the server announces
+/// it at session-init, seconds before any browser connects, and a
+/// `broadcast::Receiver` created later would never see that
+/// message. A per-offer subscription would therefore always start
+/// out not knowing the mode.
+pub async fn run_mouse_mode_tracker(
+    mut event_rx: broadcast::Receiver<ChannelEvent>,
+    mouse_mode: Arc<AtomicU32>,
+) {
+    loop {
+        match event_rx.recv().await {
+            Ok(ChannelEvent::MouseMode(mode)) => {
+                mouse_mode.store(mode, Ordering::Relaxed);
+                info!("web inputs: mouse mode is now {}", mode);
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                // A dropped MouseMode would leave us sending the
+                // wrong message type indefinitely, so say so.
+                warn!(
+                    "web inputs: mouse mode tracker lagged by {} events; \
+                     mouse mode may be stale",
+                    n
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                debug!("web inputs: mouse mode tracker exiting (broadcast closed)");
+                return;
+            }
+        }
+    }
+}
+
 /// Spawn-friendly relay. Loops until `control_rx` closes (i.e.
 /// the bridge dropped its sender, normally because the data
 /// channel went away). Bad JSON is logged at debug and
 /// otherwise ignored; we never panic on browser-supplied input.
+///
+/// `mouse_mode` selects how pointer movement is delivered, and
+/// getting it wrong is silent: see the `PointerMove` arm.
 pub async fn run_input_relay(
     mut control_rx: mpsc::Receiver<Vec<u8>>,
     input_tx: mpsc::Sender<InputEvent>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
+    mouse_mode: Arc<AtomicU32>,
 ) {
+    // Last pointer position in surface pixels, for deriving
+    // relative deltas in server mouse mode.
+    let mut last_pos: Option<(u32, u32)> = None;
+
     while let Some(payload) = control_rx.recv().await {
         let msg: BrowserMsg = match serde_json::from_slice(&payload) {
             Ok(m) => m,
@@ -105,10 +158,9 @@ pub async fn run_input_relay(
             }
 
             BrowserMsg::PointerMove { x_norm, y_norm } => {
-                // Denormalise against the primary surface size
-                // so the SPICE inputs channel sees absolute
-                // pixel coordinates (client mouse mode). If
-                // there's no primary yet (browser sent input
+                // Denormalise against the primary surface size so
+                // the SPICE inputs channel sees pixel coordinates.
+                // If there's no primary yet (browser sent input
                 // before SPICE finished session-init) drop
                 // the event silently.
                 let size = {
@@ -117,7 +169,36 @@ pub async fn run_input_relay(
                 };
                 let Some((w, h)) = size else { continue };
                 let (x, y) = denormalise(x_norm, y_norm, w, h);
-                if input_tx.send(InputEvent::MouseMove { x, y }).await.is_err() {
+
+                // Which message the server will actually act on
+                // depends on the mouse mode, and it ignores the
+                // wrong one without complaint — see
+                // `ryll/src/app.rs`, which makes the same choice
+                // for the GUI.
+                //
+                // Client mode means the guest has a vdagent and
+                // therefore an absolute pointing device, so
+                // `MOUSE_POSITION` lands. Server mode means it
+                // does not, and only relative `MOUSE_MOTION` is
+                // consumed: sending absolute positions to a
+                // server-mode session moves nothing at all, which
+                // is what made this worth fixing rather than
+                // documenting.
+                let event = if mouse_mode.load(Ordering::Relaxed) == MOUSE_MODE_SERVER {
+                    // First move after connect has no reference
+                    // point; treat it as a zero delta rather than
+                    // as a jump from the origin.
+                    let (prev_x, prev_y) = last_pos.unwrap_or((x, y));
+                    InputEvent::MouseMotion {
+                        dx: x as i32 - prev_x as i32,
+                        dy: y as i32 - prev_y as i32,
+                    }
+                } else {
+                    InputEvent::MouseMove { x, y }
+                };
+                last_pos = Some((x, y));
+
+                if input_tx.send(event).await.is_err() {
                     warn!("web inputs: input_tx receiver dropped; relay exiting");
                     return;
                 }
@@ -135,6 +216,11 @@ pub async fn run_input_relay(
                 };
                 let Some((w, h)) = size else { continue };
                 let (x, y) = denormalise(x_norm, y_norm, w, h);
+                // Buttons carry coordinates too, so record them:
+                // a click that arrives without a preceding move
+                // would otherwise leave the next delta measured
+                // from a stale position.
+                last_pos = Some((x, y));
                 let event = if down {
                     InputEvent::MouseDown { button, x, y }
                 } else {
@@ -176,7 +262,7 @@ fn denormalise(x_norm: f32, y_norm: f32, w: u32, h: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakenfist_spice_renderer::ChannelEvent;
+    use shakenfist_spice_protocol::MOUSE_MODE_CLIENT;
     use std::time::Duration;
 
     async fn primary_mirror(width: u32, height: u32) -> Arc<Mutex<SurfaceMirror>> {
@@ -205,11 +291,37 @@ mod tests {
         mpsc::Receiver<(u32, u32)>,
         tokio::task::JoinHandle<()>,
     ) {
+        spawn_relay_in_mode(mirror, MOUSE_MODE_CLIENT)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn spawn_relay_in_mode(
+        mirror: Arc<Mutex<SurfaceMirror>>,
+        mode: u32,
+    ) -> (
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<InputEvent>,
+        mpsc::Receiver<(u32, u32)>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
         let (input_tx, input_rx) = mpsc::channel::<InputEvent>(16);
         let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(4);
-        let handle = tokio::spawn(run_input_relay(control_rx, input_tx, resize_tx, mirror));
+        let handle = tokio::spawn(run_input_relay(
+            control_rx,
+            input_tx,
+            resize_tx,
+            mirror,
+            Arc::new(AtomicU32::new(mode)),
+        ));
         (control_tx, input_rx, resize_rx, handle)
+    }
+
+    async fn next_event(rx: &mut mpsc::Receiver<InputEvent>) -> InputEvent {
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should send")
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -269,6 +381,91 @@ mod tests {
             }
             other => panic!("expected MouseMove, got {:?}", other),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pointer_move_in_server_mode_sends_relative_motion() {
+        // A guest with no vdagent leaves the session in server
+        // mouse mode, where the SPICE server consumes only
+        // relative MOUSE_MOTION and silently ignores absolute
+        // MOUSE_POSITION. Sending the absolute form there moves
+        // the guest pointer not at all.
+        let mirror = primary_mirror(1000, 800).await;
+        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_in_mode(mirror, MOUSE_MODE_SERVER);
+
+        // First move establishes the reference point.
+        tx.send(br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec())
+            .await
+            .expect("send");
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMotion { dx, dy } => {
+                assert_eq!((dx, dy), (0, 0), "first move has no reference point");
+            }
+            other => panic!("expected MouseMotion, got {:?}", other),
+        }
+
+        // Second move is a delta from the first: 0.5 -> 0.6 of
+        // 1000 is +100, 0.5 -> 0.25 of 800 is -200.
+        tx.send(br#"{"type":"pointer-move","x_norm":0.6,"y_norm":0.25}"#.to_vec())
+            .await
+            .expect("send");
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMotion { dx, dy } => {
+                assert_eq!((dx, dy), (100, -200));
+            }
+            other => panic!("expected MouseMotion, got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_button_position_becomes_the_next_delta_reference() {
+        // A click carries coordinates. If it did not update the
+        // reference point, a move after a click-without-move
+        // would be measured from wherever the pointer last was.
+        let mirror = primary_mirror(1000, 800).await;
+        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_in_mode(mirror, MOUSE_MODE_SERVER);
+
+        tx.send(
+            br#"{"type":"pointer-button","button":1,"down":true,"x_norm":0.5,"y_norm":0.5}"#
+                .to_vec(),
+        )
+        .await
+        .expect("send");
+        assert!(matches!(
+            next_event(&mut input_rx).await,
+            InputEvent::MouseDown { .. }
+        ));
+
+        tx.send(br#"{"type":"pointer-move","x_norm":0.6,"y_norm":0.5}"#.to_vec())
+            .await
+            .expect("send");
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMotion { dx, dy } => assert_eq!((dx, dy), (100, 0)),
+            other => panic!("expected MouseMotion, got {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mouse_mode_tracker_records_the_latest_mode() {
+        let (event_tx, event_rx) = broadcast::channel::<ChannelEvent>(8);
+        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let handle = tokio::spawn(run_mouse_mode_tracker(event_rx, mode.clone()));
+
+        event_tx
+            .send(ChannelEvent::MouseMode(MOUSE_MODE_SERVER))
+            .expect("send");
+
+        // Poll briefly: the tracker is a separate task.
+        for _ in 0..100 {
+            if mode.load(Ordering::Relaxed) == MOUSE_MODE_SERVER {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(mode.load(Ordering::Relaxed), MOUSE_MODE_SERVER);
+
+        drop(event_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -163,7 +163,9 @@ ryll/src/
     ├── assets.rs        # Embedded browser shell, {{TOKEN}} substitution
     ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
     ├── cursor.rs        # Cursor relay → control datachannel
-    ├── inputs.rs        # Input relay ← control datachannel
+    ├── inputs.rs        # Input relay ← control datachannel, plus the
+    │                    #   mouse-mode tracker that chooses between
+    │                    #   absolute and relative pointer messages
     └── lifecycle.rs     # run_bridge_reaper: waits on the dead
                          #   signal or a bridge replacement, reaps
                          #   bridge + encoder once the bridge it
