@@ -199,10 +199,21 @@ pub async fn run_input_relay(
                     // point; treat it as a zero delta rather than
                     // as a jump from the origin.
                     let (prev_x, prev_y) = last_pos.unwrap_or((x, y));
-                    InputEvent::MouseMotion {
-                        dx: x as i32 - prev_x as i32,
-                        dy: y as i32 - prev_y as i32,
+                    let dx = x as i32 - prev_x as i32;
+                    let dy = y as i32 - prev_y as i32;
+                    if dx == 0 && dy == 0 {
+                        // Nothing to tell the guest, and sending it
+                        // anyway is not free: every MOUSE_MOTION
+                        // takes a slot in the ack window, which only
+                        // drains on MOUSE_MOTION_ACK. The browser
+                        // reports sub-pixel movement that denormalises
+                        // to the same pixel, and the very first move
+                        // is a deliberate zero, so this is a steady
+                        // trickle rather than a rarity.
+                        last_pos = Some((x, y));
+                        continue;
                     }
+                    InputEvent::MouseMotion { dx, dy }
                 } else {
                     InputEvent::MouseMove { x, y }
                 };
@@ -403,16 +414,13 @@ mod tests {
         let mirror = primary_mirror(1000, 800).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_in_mode(mirror, MOUSE_MODE_SERVER);
 
-        // First move establishes the reference point.
+        // First move establishes the reference point and sends
+        // nothing: it has no previous position to measure against, so
+        // its delta is zero, and a zero delta would burn an
+        // ack-window slot to tell the guest to stay put.
         tx.send(br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec())
             .await
             .expect("send");
-        match next_event(&mut input_rx).await {
-            InputEvent::MouseMotion { dx, dy } => {
-                assert_eq!((dx, dy), (0, 0), "first move has no reference point");
-            }
-            other => panic!("expected MouseMotion, got {:?}", other),
-        }
 
         // Second move is a delta from the first: 0.5 -> 0.6 of
         // 1000 is +100, 0.5 -> 0.25 of 800 is -200.
@@ -423,6 +431,38 @@ mod tests {
             InputEvent::MouseMotion { dx, dy } => {
                 assert_eq!((dx, dy), (100, -200));
             }
+            other => panic!("expected MouseMotion, got {:?}", other),
+        }
+    }
+
+    /// A move that denormalises to the pixel the pointer is already
+    /// on tells the guest nothing, and every `MouseMotion` costs a
+    /// slot in an ack window that only drains on `MOUSE_MOTION_ACK`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_zero_delta_move_is_not_sent_in_server_mode() {
+        let mirror = primary_mirror(1000, 800).await;
+        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_in_mode(mirror, MOUSE_MODE_SERVER);
+
+        // Reference point, then two sub-pixel moves that land on it.
+        for payload in [
+            br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec(),
+            br#"{"type":"pointer-move","x_norm":0.5001,"y_norm":0.5001}"#.to_vec(),
+            br#"{"type":"pointer-move","x_norm":0.4999,"y_norm":0.4999}"#.to_vec(),
+        ] {
+            tx.send(payload).await.expect("send");
+        }
+        // A real move behind them: it must be the *first* thing that
+        // arrives, which is only true if the three above sent nothing.
+        tx.send(br#"{"type":"pointer-move","x_norm":0.6,"y_norm":0.5}"#.to_vec())
+            .await
+            .expect("send");
+
+        match next_event(&mut input_rx).await {
+            InputEvent::MouseMotion { dx, dy } => assert_eq!(
+                (dx, dy),
+                (100, 0),
+                "a zero-delta move was forwarded ahead of the real one"
+            ),
             other => panic!("expected MouseMotion, got {:?}", other),
         }
     }
