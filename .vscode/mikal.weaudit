@@ -662,6 +662,26 @@
     {
       "path": "STYLEGUIDE.md",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
