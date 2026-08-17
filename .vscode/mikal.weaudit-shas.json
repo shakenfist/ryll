@@ -561,9 +561,25 @@
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
     },
+    "shakenfist-spice-webrtc/src/bind_addrs.rs": {
+      "sha": "8d2525a486113f05153c8fe1f021fca04fb14adc",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "694ab1e37223cbee0f84a0b51f279b3efae1e7db",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/src/lib.rs": {
+      "sha": "035b468c5e94598bb6174aaf0fcb50e0e1991959",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-webrtc/src/sticky.rs": {
       "sha": "78e4793c82858d1b6f3a40415d7dca3f419a3139",
       "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/src/test_client.rs": {
+      "sha": "b77ce81cadd559b48590b8b54ee72bcd5d1808d5",
+      "date": "2026-08-18"
     },
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",

@@ -722,6 +722,26 @@
     {
       "path": "shakenfist-spice-renderer/tests",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bind_addrs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/test_client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
