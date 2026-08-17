@@ -16,5 +16,5 @@ mod h264;
 mod task;
 
 pub use frame_source::{FrameRef, FrameSource, RealFrameSource, SyntheticFrameSource};
-pub use h264::{EncodedFrame, H264Encoder};
+pub use h264::{even_dimensions, EncodedFrame, H264Encoder};
 pub use task::{EncoderControl, EncoderTask};

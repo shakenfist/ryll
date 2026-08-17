@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
-use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{even_dimensions, ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, info, warn};
@@ -254,7 +254,20 @@ pub async fn run_input_relay(
             }
 
             BrowserMsg::Viewport { width, height } => {
+                // Round to even before asking the guest for the
+                // mode. The browser reports `Math.round()` of a CSS
+                // size, so odd values are ordinary, and nothing
+                // between here and vdagent rounds — the guest would
+                // grant exactly what it was asked for and the H.264
+                // encoder cannot code an odd surface. Asking for a
+                // size the encoder can use is cheaper than teaching
+                // every downstream stage to cope with one it cannot.
+                let (width, height) = even_dimensions(width, height);
                 debug!("web inputs: viewport {}x{}", width, height);
+                if width == 0 || height == 0 {
+                    debug!("web inputs: ignoring degenerate viewport");
+                    continue;
+                }
                 if resize_tx.send((width, height)).await.is_err() {
                     warn!("web inputs: resize_tx receiver dropped");
                 }
@@ -559,6 +572,48 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         assert_eq!(dims, (1920, 1080));
+    }
+
+    /// The browser reports `Math.round()` of a CSS size, so an odd
+    /// viewport is ordinary rather than exotic. Nothing downstream
+    /// rounds — vdagent asks the guest for exactly this, and the
+    /// H.264 encoder cannot code an odd surface — so it has to
+    /// happen here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_odd_viewport_is_rounded_before_the_guest_sees_it() {
+        let mirror = primary_mirror(640, 480).await;
+        let (tx, _input_rx, mut resize_rx, _h) = spawn_relay(mirror);
+
+        let payload = br#"{"type":"viewport","width":1367,"height":769}"#.to_vec();
+        tx.send(payload).await.expect("send");
+
+        let dims = tokio::time::timeout(Duration::from_secs(1), resize_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should send");
+        assert_eq!(dims, (1366, 768));
+    }
+
+    /// A viewport that rounds to zero would ask the guest for a mode
+    /// it cannot set and the encoder for a size it rejects.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_degenerate_viewport_is_dropped() {
+        let mirror = primary_mirror(640, 480).await;
+        let (tx, _input_rx, mut resize_rx, _h) = spawn_relay(mirror);
+
+        tx.send(br#"{"type":"viewport","width":1,"height":768}"#.to_vec())
+            .await
+            .expect("send");
+        // A good message behind it proves the relay kept running.
+        tx.send(br#"{"type":"viewport","width":800,"height":600}"#.to_vec())
+            .await
+            .expect("send");
+
+        let dims = tokio::time::timeout(Duration::from_secs(1), resize_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("relay should send");
+        assert_eq!(dims, (800, 600), "the degenerate viewport was forwarded");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

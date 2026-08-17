@@ -7,7 +7,18 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use super::frame_source::FrameSource;
-use super::h264::{EncodedFrame, H264Encoder};
+use super::h264::{even_dimensions, EncodedFrame, H264Encoder};
+
+/// How many consecutive failed frames the task tolerates before it
+/// gives up and returns the error.
+///
+/// Nothing restarts the encoder task, so returning on the first
+/// failure freezes the viewer's video until it renegotiates. At the
+/// 30fps the web path runs at this is about a second of trying, which
+/// is long enough to ride out a transient and short enough that a
+/// genuinely broken encoder still surfaces as an error rather than as
+/// a silently stalled picture.
+const MAX_CONSECUTIVE_ERRORS: u32 = 30;
 
 /// Control messages sent to a running [`EncoderTask`].
 #[derive(Debug)]
@@ -65,6 +76,7 @@ fn run<S: FrameSource>(
     }
     let frame_period = Duration::from_micros(1_000_000 / fps_cap as u64);
     let mut keyframe_pending = false;
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         let tick_start = Instant::now();
@@ -94,36 +106,89 @@ fn run<S: FrameSource>(
             // Rebuilding costs an IDR, which is the same price a
             // resolution change costs anywhere else, and browsers
             // take the new SPS/PPS in stride.
-            if frame.width != encoder.width() || frame.height != encoder.height() {
+            //
+            // Compare rounded, because that is what the encoder was
+            // built at: `H264Encoder::new` rounds down to even and
+            // reports the rounded size. Comparing the raw frame size
+            // against it makes every frame of an odd surface look
+            // like a resize, so the encoder is rebuilt each tick and
+            // then rejects the odd buffer anyway.
+            let (want_w, want_h) = even_dimensions(frame.width, frame.height);
+            let mut encodable = true;
+            if want_w != encoder.width() || want_h != encoder.height() {
                 tracing::info!(
                     "EncoderTask: surface resized {}x{} -> {}x{}; rebuilding encoder",
                     encoder.width(),
                     encoder.height(),
-                    frame.width,
-                    frame.height
+                    want_w,
+                    want_h
                 );
-                encoder = H264Encoder::new(frame.width, frame.height, fps_cap)?;
-                keyframe_pending = true;
+                match H264Encoder::new(frame.width, frame.height, fps_cap) {
+                    Ok(e) => {
+                        encoder = e;
+                        keyframe_pending = true;
+                        consecutive_errors = 0;
+                    }
+                    Err(e) => {
+                        // Keep the old encoder and skip this frame.
+                        // The next dirty frame retries; a fault that
+                        // persists trips the budget below.
+                        consecutive_errors += 1;
+                        tracing::warn!(
+                            "EncoderTask: rebuilding for {}x{} failed ({}); \
+                             skipping frame {}/{}",
+                            frame.width,
+                            frame.height,
+                            e,
+                            consecutive_errors,
+                            MAX_CONSECUTIVE_ERRORS
+                        );
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            return Err(e);
+                        }
+                        // Fall through to the frame-budget sleep
+                        // rather than `continue`, so a persistent
+                        // rebuild failure retries at the frame rate
+                        // instead of spinning a blocking thread.
+                        encodable = false;
+                    }
+                }
             }
 
             let force_kf = keyframe_pending;
-            match encoder.encode(frame.rgba, force_kf) {
-                Ok(mut encoded) => {
-                    encoded.timestamp_us = frame.timestamp_us;
-                    if force_kf {
-                        keyframe_pending = false;
+            if encodable {
+                match encoder.encode_cropped(frame.rgba, frame.width, frame.height, force_kf) {
+                    Ok(mut encoded) => {
+                        consecutive_errors = 0;
+                        encoded.timestamp_us = frame.timestamp_us;
+                        if force_kf {
+                            keyframe_pending = false;
+                        }
+                        // blocking_send provides backpressure: if the receiver
+                        // is slow the task stalls rather than dropping frames.
+                        if output.blocking_send(encoded).is_err() {
+                            // Receiver dropped; nothing left to do.
+                            return Ok(());
+                        }
                     }
-                    // blocking_send provides backpressure: if the receiver
-                    // is slow the task stalls rather than dropping frames.
-                    if output.blocking_send(encoded).is_err() {
-                        // Receiver dropped; nothing left to do.
-                        return Ok(());
+                    Err(e) => {
+                        // One bad frame should not end the session's
+                        // video: nothing restarts this task, so
+                        // returning here leaves the viewer with a
+                        // frozen picture until it renegotiates. Skip
+                        // the frame instead, and only give up once
+                        // failures stop looking transient.
+                        consecutive_errors += 1;
+                        tracing::warn!(
+                            "EncoderTask: encode failed ({}); skipping frame {}/{}",
+                            e,
+                            consecutive_errors,
+                            MAX_CONSECUTIVE_ERRORS
+                        );
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            return Err(e);
+                        }
                     }
-                }
-                Err(e) => {
-                    // Encoder error — propagate. The caller decides
-                    // whether to recreate the encoder.
-                    return Err(e);
                 }
             }
         }
@@ -223,60 +288,61 @@ mod tests {
         assert!(frames[0].keyframe, "first frame should be a keyframe");
     }
 
-    /// Yields `first` frames at one size then switches to another,
-    /// as the surface mirror does when vdagent resizes the guest.
+    /// An opaque RGBA frame of the given size, alpha set so the
+    /// buffer is not entirely zero.
+    fn solid_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; (width as usize) * (height as usize) * 4];
+        for px in buf.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+        buf
+    }
+
+    /// Yields `switch_after` frames at one size then switches to
+    /// another, as the surface mirror does when vdagent resizes the
+    /// guest.
     struct ResizingFrameSource {
-        small: Vec<u8>,
-        large: Vec<u8>,
+        before: (u32, u32, Vec<u8>),
+        after: (u32, u32, Vec<u8>),
         produced: u32,
         switch_after: u32,
+    }
+
+    impl ResizingFrameSource {
+        fn new(before: (u32, u32), after: (u32, u32), switch_after: u32) -> Self {
+            Self {
+                before: (before.0, before.1, solid_frame(before.0, before.1)),
+                after: (after.0, after.1, solid_frame(after.0, after.1)),
+                produced: 0,
+                switch_after,
+            }
+        }
     }
 
     impl FrameSource for ResizingFrameSource {
         fn next_frame(&mut self) -> Option<FrameRef<'_>> {
             let timestamp_us = (self.produced as u64) * 33_333;
-            let small = self.produced < self.switch_after;
+            let first = self.produced < self.switch_after;
             self.produced += 1;
-            Some(if small {
-                FrameRef {
-                    width: 64,
-                    height: 64,
-                    rgba: &self.small,
-                    timestamp_us,
-                }
-            } else {
-                FrameRef {
-                    width: 32,
-                    height: 32,
-                    rgba: &self.large,
-                    timestamp_us,
-                }
+            let (width, height, rgba) = if first { &self.before } else { &self.after };
+            Some(FrameRef {
+                width: *width,
+                height: *height,
+                rgba,
+                timestamp_us,
             })
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_mid_session_resize_rebuilds_the_encoder() {
-        // Before this was handled, the first frame at the new size
-        // failed H264Encoder::encode's length check, the task
-        // returned Err, and the viewer's video froze until the
-        // next offer restarted the pipeline.
-        let mut small = vec![0u8; 64 * 64 * 4];
-        for i in 0..(64 * 64) {
-            small[i * 4 + 3] = 255;
-        }
-        let mut large = vec![0u8; 32 * 32 * 4];
-        for i in 0..(32 * 32) {
-            large[i * 4 + 3] = 255;
-        }
-
-        let encoder = H264Encoder::new(64, 64, 30).expect("init");
-        let source = ResizingFrameSource {
-            small,
-            large,
-            produced: 0,
-            switch_after: 2,
-        };
+    /// Drive a resizing source and return the frames it produced,
+    /// asserting the task neither died nor stalled.
+    async fn frames_across_resize(
+        start: (u32, u32),
+        end: (u32, u32),
+        want: usize,
+    ) -> Vec<EncodedFrame> {
+        let encoder = H264Encoder::new(start.0, start.1, 30).expect("init");
+        let source = ResizingFrameSource::new(start, end, 2);
         let (tx, mut rx) = mpsc::channel(16);
         let (ctl_tx, ctl_rx) = mpsc::channel(4);
         let handle = EncoderTask::spawn(encoder, source, tx, ctl_rx, 60);
@@ -285,7 +351,7 @@ mod tests {
         let drain = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while let Some(frame) = rx.recv().await {
                 frames.push(frame);
-                if frames.len() == 4 {
+                if frames.len() == want {
                     break;
                 }
             }
@@ -298,8 +364,12 @@ mod tests {
         // the loop then exits cleanly having collected too few.
         assert_eq!(
             frames.len(),
-            4,
-            "encoder stopped producing across the resize"
+            want,
+            "encoder stopped producing across the resize {}x{} -> {}x{}",
+            start.0,
+            start.1,
+            end.0,
+            end.1
         );
         ctl_tx.send(EncoderControl::Stop).await.expect("send stop");
 
@@ -309,12 +379,55 @@ mod tests {
             .expect("join")
             .expect("task returned error across the resize");
 
+        frames
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mid_session_resize_rebuilds_the_encoder() {
+        // Before this was handled, the first frame at the new size
+        // failed H264Encoder::encode's length check, the task
+        // returned Err, and the viewer's video froze until the
+        // next offer restarted the pipeline.
+        let frames = frames_across_resize((64, 64), (32, 32), 4).await;
+
         // The first frame at the new size must be an IDR: the
         // decoder needs the new SPS/PPS before it can use anything
         // that follows.
         assert!(
             frames[2].keyframe,
             "first frame after the resize should be a keyframe"
+        );
+    }
+
+    /// The same resize, but to a size with both dimensions odd.
+    ///
+    /// This is the shape the browser actually produces: it asks the
+    /// guest for `Math.round()` of a CSS viewport, and X grants odd
+    /// modes. The resize check used to compare the raw frame size
+    /// against the encoder's rounded-down size, so an odd surface
+    /// never compared equal — the encoder was rebuilt on every single
+    /// frame and then failed its length check, killing the task on
+    /// the first frame after the resize this feature exists to
+    /// support.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resize_to_odd_dimensions_keeps_encoding() {
+        let frames = frames_across_resize((64, 64), (63, 45), 4).await;
+        assert!(
+            frames[2].keyframe,
+            "first frame after the odd resize should be a keyframe"
+        );
+    }
+
+    /// An odd source that does not change its *rounded* size must not
+    /// count as a resize. 65x65 and 64x64 both round to 64x64, so the
+    /// encoder is already correct for it and rebuilding would throw
+    /// away the reference frames for nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_odd_source_that_rounds_the_same_is_not_a_resize() {
+        let frames = frames_across_resize((64, 64), (65, 65), 4).await;
+        assert!(
+            !frames[2].keyframe,
+            "rounding to the same size should not have forced a keyframe"
         );
     }
 

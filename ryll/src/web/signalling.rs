@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use shakenfist_spice_renderer::{
-    EncodedFrame, EncoderControl, EncoderTask, H264Encoder, RealFrameSource, SurfaceMirror,
+    even_dimensions, EncodedFrame, EncoderControl, EncoderTask, H264Encoder, RealFrameSource,
+    SurfaceMirror,
 };
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 use tokio::sync::{mpsc, Mutex};
@@ -126,9 +127,10 @@ impl EncoderInfra {
         // an odd-sized primary (rare, but possible at startup
         // before the guest's vdagent settles) round down by
         // one pixel — losing a single column/row is invisible
-        // and avoids a hard error from H264Encoder::new.
-        let width = width & !1;
-        let height = height & !1;
+        // and avoids a hard error from H264Encoder::new. The
+        // frame source keeps reporting the odd size, which
+        // `H264Encoder::encode_cropped` crops to match.
+        let (width, height) = even_dimensions(width, height);
         if width == 0 || height == 0 {
             return Err(anyhow::anyhow!(RESTART_ERR_NO_PRIMARY));
         }
