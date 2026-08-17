@@ -217,9 +217,10 @@ Older libvirt templates often include:
 
 The `always` setting forces the server's "wan" code path on every
 image, regardless of what the client advertises. This is what causes
-ryll's `LZ4_COMPRESSION` capability and its `PREF_COMPRESSION`
-preference message to be silently ignored — the server has been
-told "I don't care what the client wants, always use this."
+ryll's `LZ4_COMPRESSION` and `PREF_COMPRESSION` capabilities, and
+the `PREFERRED_COMPRESSION` message it sends on the strength of the
+latter, to be silently ignored — the server has been told "I don't
+care what the client wants, always use this."
 
 Use `auto` instead so the server picks dynamically based on the
 client's capabilities and the actual image characteristics.
@@ -492,10 +493,12 @@ heavier-handed but applies to every VM the host runs.
 
 The server makes the encoding decisions. Ryll can:
 
-- Advertise capabilities (`LZ4_COMPRESSION`, `STREAM_REPORT`, etc.)
-  so the server *can* use efficient paths.
-- Send preference messages (`PREF_COMPRESSION`,
-  `PREF_VIDEO_CODEC_TYPE`) at link-up to bias server choices.
+- Advertise capabilities (`LZ4_COMPRESSION`, `STREAM_REPORT`,
+  `PREF_COMPRESSION`, `PREF_VIDEO_CODEC_TYPE`, etc.) so the server
+  *can* use efficient paths.
+- Send the preference messages those last two capabilities unlock
+  (`PREFERRED_COMPRESSION`, `PREFERRED_VIDEO_CODEC_TYPE`) at
+  link-up, to bias server choices.
 - Decode whatever arrives as fast as the host hardware allows.
 
 But ryll cannot override a server config that says

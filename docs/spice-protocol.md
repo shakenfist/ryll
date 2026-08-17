@@ -32,15 +32,14 @@ sequenceDiagram
 
 ### Message Format
 
-All SPICE messages use a 6-byte mini-header:
+All SPICE messages use a 6-byte mini-header, immediately followed
+by the payload:
 
-```mermaid
-flowchart LR
-    subgraph hdr ["6-byte mini-header"]
-        t["message_type<br/>(u16 LE)"] ~~~ s["message_size<br/>(u32 LE)"]
-    end
-    hdr -- followed by --> p["payload<br/>(message_size bytes)"]
-```
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 2 | `message_type` (u16 LE) |
+| 2 | 4 | `message_size` (u32 LE) |
+| 6 | `message_size` | payload |
 
 ### Channel Types
 
