@@ -670,6 +670,26 @@
     {
       "path": "docs/session-lifecycle.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/device-redirection.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/spice-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

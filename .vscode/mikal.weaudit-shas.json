@@ -81,12 +81,20 @@
       "sha": "cc4008e89c214de5ef3b0e3f4351286fd6ee22d0",
       "date": "2026-08-17"
     },
+    "docs/device-redirection.md": {
+      "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
+      "date": "2026-08-17"
+    },
     "docs/diagnostics.md": {
       "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
     },
     "docs/features.md": {
       "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
+      "date": "2026-08-17"
+    },
+    "docs/index.md": {
+      "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
     },
     "docs/installation.md": {
@@ -113,8 +121,20 @@
       "sha": "738d24db111f6a1261fae44356a20c8c83a308e0",
       "date": "2026-08-17"
     },
+    "docs/rendering-pipeline.md": {
+      "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
+      "date": "2026-08-17"
+    },
     "docs/session-lifecycle.md": {
       "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
+      "date": "2026-08-17"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "4060287b29d3f7f5c280a4967db78f04db50c964",
+      "date": "2026-08-17"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
     },
     "examples/control-socket-demo.py": {
