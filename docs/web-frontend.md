@@ -295,6 +295,22 @@ If that never appears, the guest is not being told to resize — the
 usual cause is no `spice-vdagent` in the guest, since the resize is
 delivered as a `VDAgentMonitorsConfig` message.
 
+Two known limits, neither of which is a fault to chase:
+
+- **The viewport is sent once per connection.** Resizing or
+  maximising the browser window mid-session leaves the guest at the
+  resolution it was given when the datachannel opened, and the
+  browser goes back to upscaling. Reload the page to resize the
+  guest.
+- **Sizes are in CSS pixels.** On a HiDPI display the guest is
+  asked for fewer pixels than the panel physically has, so the
+  image is scaled up by the device pixel ratio no matter what the
+  guest does.
+
+Odd sizes are rounded down by one pixel before the guest is asked,
+because H.264 cannot encode an odd dimension. A one-pixel border is
+not what "blurry" looks like.
+
 ### The guest pointer does not move, or lands in the wrong place
 
 Check the negotiated mouse mode in ryll's log:
@@ -316,6 +332,20 @@ That is the ack window wedged — the server acknowledges only the
 pointer messages it consumes, so a client sending the form the
 server did not negotiate fills the window once and drops
 everything after it.
+
+In server mode specifically, expect the guest pointer and your own
+to drift apart over a session. The browser reports absolute
+positions and ryll converts consecutive ones into deltas, but the
+guest then applies its own pointer acceleration to those deltas, so
+the two diverge — and there is no warp in server mode to
+re-synchronise them. The same conversion means that once your
+pointer reaches the edge of the video element, no further movement
+is reported in that direction and the guest pointer stops even
+though the guest desktop has room. Both go away with Pointer Lock,
+which the web frontend does not implement yet; installing
+`spice-vdagent` in the guest avoids the whole class of problem by
+getting you client mode. Moving your pointer back to the middle of
+the window and continuing is the workaround.
 
 ### No audio, video works
 
