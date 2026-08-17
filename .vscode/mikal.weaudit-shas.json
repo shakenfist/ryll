@@ -77,10 +77,6 @@
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
     },
-    "docs/development.md": {
-      "sha": "cc4008e89c214de5ef3b0e3f4351286fd6ee22d0",
-      "date": "2026-08-17"
-    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
@@ -96,10 +92,6 @@
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "1f1fa47a196baaacdd860ebc96f71e6071092814",
-      "date": "2026-08-17"
     },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
@@ -121,10 +113,6 @@
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
     },
-    "docs/web-mode-internals.md": {
-      "sha": "761bd08ac337a2f752baade21a0d463d2fc0089a",
-      "date": "2026-08-17"
-    },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
       "date": "2026-08-02"
@@ -139,10 +127,6 @@
     },
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
-      "date": "2026-07-26"
-    },
-    "ryll/src/capture.rs": {
-      "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
       "date": "2026-07-26"
     },
     "ryll/src/clipboard_arboard.rs": {
@@ -173,28 +157,12 @@
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
     },
-    "ryll/src/web/assets/app.js": {
-      "sha": "d8a02a95d1ce091ba822c286772829dd0ab2a06b",
-      "date": "2026-08-08"
-    },
     "ryll/src/web/assets/index.html": {
       "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
       "date": "2026-08-08"
     },
     "ryll/src/web/audio.rs": {
       "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
-      "date": "2026-07-26"
-    },
-    "ryll/src/web/cursor.rs": {
-      "sha": "23e6f0acd4364fbc078e158303ed63764016d1de",
-      "date": "2026-07-26"
-    },
-    "ryll/src/web/inputs.rs": {
-      "sha": "bbef6a32df50ba89d4555daee7fde1d7bfda6683",
-      "date": "2026-07-26"
-    },
-    "ryll/src/web/mod.rs": {
-      "sha": "71e9e32f4b98b11df6a457c74425127db1ac180c",
       "date": "2026-07-26"
     },
     "scripts/check-rust.sh": {
@@ -325,10 +293,6 @@
       "sha": "829bdc44838acc1a85321b97d8f360ac23d01efb",
       "date": "2026-07-18"
     },
-    "shakenfist-spice-renderer/src/channels/inputs.rs": {
-      "sha": "0a348f92200b5b3a3092cab7c1ce16c87ad382c4",
-      "date": "2026-07-18"
-    },
     "shakenfist-spice-renderer/src/channels/main_channel.rs": {
       "sha": "96687566c03f82f8860db66b9772fb7202dedb09",
       "date": "2026-07-19"
@@ -389,24 +353,8 @@
       "sha": "f7ebd1659b4fd7239df78d418be8ede3f393a52e",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/encoder/h264.rs": {
-      "sha": "06365ddb3615588f32f60c478a8f5891bb501979",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/encoder/mod.rs": {
-      "sha": "4e9e0a2fffcff1f2882a4af6b4de551ed31e7053",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/encoder/task.rs": {
-      "sha": "df4f32c7567e9dbd328863e3d272582b3c980356",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/lib.rs": {
-      "sha": "f9a7c59108d3c6f7b8ad3221d714e9082e311d73",
       "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
@@ -471,14 +419,6 @@
     },
     "shakenfist-spice-renderer/tests/control_socket.rs": {
       "sha": "a5ae5409b7c1682b5bf4c521202abf1c9287f9ff",
-      "date": "2026-07-27"
-    },
-    "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
-      "sha": "989da3054ef4383e0726b6a4e73ed786694a9fe2",
-      "date": "2026-07-27"
-    },
-    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
-      "sha": "da7fb947a225857ed9d05cde2e2685eb5dcf3aa5",
       "date": "2026-07-27"
     },
     "shakenfist-spice-usbredir/README.md": {
