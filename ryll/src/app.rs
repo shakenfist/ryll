@@ -2275,9 +2275,9 @@ impl RyllApp {
     /// when the dialog opened; `precomputed_screenshot_png`
     /// carries the PNG that the background encoder produced
     /// from the trigger-time surface. Both are `None` if the
-    /// dialog wasn't open when this was called (e.g. the
-    /// dev-only F8 path used to trigger reports without a
-    /// dialog, though that doesn't exist today) — `BugReport`
+    /// dialog wasn't open when this was called (e.g. a
+    /// dev-only path that triggers reports without a
+    /// dialog, though none exists today) — `BugReport`
     /// falls back to the submit-time behaviour in that case.
     pub fn generate_bug_report(
         &self,
@@ -2320,8 +2320,9 @@ impl RyllApp {
         report.write_zip(&output_dir)
     }
 
-    /// Resolve the output directory for a manual (F8) or
-    /// auto-disconnect bug report. Priority:
+    /// Resolve the output directory for a manual (F12 /
+    /// Menu → Report) or auto-disconnect bug report.
+    /// Priority:
     ///   1. --bug-report-dir if set
     ///   2. <--capture>/bug-reports/ if --capture is set
     ///   3. current working directory

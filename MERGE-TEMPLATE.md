@@ -67,46 +67,24 @@ The guiding principles for merging external PRs:
 
 ## Process overview
 
-```
-Step 0: Operator sets the teachy level for this PR
-        Assistant copies REVIEW-STATE-TEMPLATE.md into
-        the worktree as REVIEW-STATE.md and starts
-        filling it in
-   │
-   ▼
-Step 1: Operator does a first-pass read (already done
-        before invoking this template)
-   │
-   ▼
-Step 2: Assistant runs deterministic scanners (wave 0)
-   │
-   ▼
-Step 3: Assistant runs wave 1 (safety sub-agents, parallel)
-   │
-   ▼
-Step 4: Assistant runs wave 2 (quality sub-agents, parallel)
-   │
-   ▼
-Step 5: Operator + assistant triage findings into:
-        - blocking (fix on contributor's branch pre-merge)
-        - follow-up (our own PR post-merge)
-        - teach (post as PR comment, if teachy mode)
-        - ignore
-   │
-   ▼
-Step 6: Assistant drafts the follow-up plan file
-   │
-   ▼
-Step 7: Operator runs CI on the PR
-   │
-   ▼
-Step 8: Operator merges, then our follow-up PR goes in
-        immediately after
+```mermaid
+flowchart TB
+    s0["Step 0: operator sets the teachy level for this PR;<br/>assistant copies REVIEW-STATE-TEMPLATE.md into the worktree<br/>as REVIEW-STATE.md and starts filling it in"]
+    s1["Step 1: operator does a first-pass read<br/>(already done before invoking this template)"]
+    s2["Step 2: assistant runs deterministic scanners (wave 0)"]
+    s3["Step 3: assistant runs wave 1 (safety sub-agents, parallel)"]
+    s4["Step 4: assistant runs wave 2 (quality sub-agents, parallel)"]
+    s5["Step 5: operator + assistant triage findings into:<br/>blocking (fix on contributor's branch pre-merge),<br/>follow-up (our own PR post-merge),<br/>teach (post as PR comment, if teachy mode),<br/>ignore"]
+    s6["Step 6: assistant drafts the follow-up plan file"]
+    s7["Step 7: operator runs CI on the PR"]
+    s8["Step 8: operator merges, then our follow-up PR<br/>goes in immediately after"]
 
-Throughout: REVIEW-STATE.md is updated whenever a step
-            completes, an action is taken on the PR, the
-            contributor responds, or CI returns a result.
+    s0 --> s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> s7 --> s8
 ```
+
+Throughout, REVIEW-STATE.md is updated whenever a step completes, an
+action is taken on the PR, the contributor responds, or CI returns a
+result.
 
 ## Step 0: Teachy level and state file
 

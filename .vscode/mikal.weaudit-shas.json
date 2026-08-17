@@ -57,13 +57,73 @@
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
+    "docs/ci.md": {
+      "sha": "042bf7c62c659a54c4c4119ff08e2b7a62275bed",
+      "date": "2026-08-17"
+    },
+    "docs/configuration.md": {
+      "sha": "5f4aee4f262c90d50bbd9d96579ae920ec6eca06",
+      "date": "2026-08-17"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
+      "date": "2026-08-17"
+    },
+    "docs/design-decisions.md": {
+      "sha": "e1545e351e993a569080b6b166edfc376b9eeb98",
+      "date": "2026-08-17"
+    },
+    "docs/development-macos.md": {
+      "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
+      "date": "2026-08-17"
+    },
+    "docs/development.md": {
+      "sha": "cc4008e89c214de5ef3b0e3f4351286fd6ee22d0",
+      "date": "2026-08-17"
+    },
+    "docs/device-redirection.md": {
+      "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
+      "date": "2026-08-17"
+    },
+    "docs/diagnostics.md": {
+      "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
+      "date": "2026-08-17"
+    },
+    "docs/index.md": {
+      "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
+      "date": "2026-08-17"
+    },
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "1f1fa47a196baaacdd860ebc96f71e6071092814",
+      "date": "2026-08-17"
+    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
+    },
+    "docs/releasing.md": {
+      "sha": "738d24db111f6a1261fae44356a20c8c83a308e0",
+      "date": "2026-08-17"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
+      "date": "2026-08-17"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
+      "date": "2026-08-17"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
+      "date": "2026-08-17"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "761bd08ac337a2f752baade21a0d463d2fc0089a",
+      "date": "2026-08-17"
     },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
@@ -77,17 +137,9 @@
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
     },
-    "ryll/src/app.rs": {
-      "sha": "ef2d5550c7e14ec394b82a9a2547a6161d13740f",
-      "date": "2026-07-26"
-    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
       "date": "2026-07-26"
-    },
-    "ryll/src/bugreport.rs": {
-      "sha": "d8ac1f0838ae816970c7ae77200c11ab5c33f874",
-      "date": "2026-08-03"
     },
     "ryll/src/capture.rs": {
       "sha": "de4e99234ccda6021884c5ffe566852c63812e75",
@@ -96,10 +148,6 @@
     "ryll/src/clipboard_arboard.rs": {
       "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
       "date": "2026-07-26"
-    },
-    "ryll/src/config.rs": {
-      "sha": "a2dc713690c96528e4d3bf75f7898f4351202c33",
-      "date": "2026-08-02"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",

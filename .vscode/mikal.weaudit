@@ -356,10 +356,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/auto_snapshot.rs",
       "author": "mikal"
     },
@@ -504,10 +500,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-usbredir/README.md",
       "author": "mikal"
     },
@@ -557,10 +549,6 @@
     },
     {
       "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
     {
@@ -629,6 +617,66 @@
     },
     {
       "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/control-socket-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development-macos.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/multi-mode-parity.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/session-lifecycle.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/device-redirection.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/troubleshooting.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-mode-internals.md",
       "author": "mikal"
     }
   ],

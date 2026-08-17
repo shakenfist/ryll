@@ -1594,7 +1594,7 @@ impl BugReport {
 
     /// Auto-generate a bug report for a just-seen gap, write it to
     /// `dir`, and return the path.  Used by --pedantic mode; shares
-    /// all the assemble-and-write plumbing with the F8 flow.
+    /// all the assemble-and-write plumbing with the manual F12 flow.
     ///
     /// The output filename encodes the gap_key (colons replaced with
     /// hyphens) so users can identify which gap produced which zip
