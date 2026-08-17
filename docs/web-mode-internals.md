@@ -312,29 +312,50 @@ silence (and a one-time warning is logged).
 
 ### End-to-end data flow
 
-```
-SPICE server
-    │
-    ▼
-shakenfist-spice-renderer::run_connection
-    │
-    ├─► DisplayChannel ──► broadcast ChannelEvent ──► SurfaceMirror
-    │                                              └─► CursorRelay (cursor.rs)
-    │
-    ├─► PlaybackChannel ──► OpusPacketSink (audio.rs) ──► WebRTC audio track
-    │
-    └─► InputsChannel ◄── web inputs relay (inputs.rs) ◄── control DC ◄── browser
-                                                                              │
-shakenfist-spice-webrtc::WebrtcBridge                                         │
-    ├─► video track ◄── EncoderTask ◄── RealFrameSource ◄── SurfaceMirror    │
-    ├─► audio track ◄── WebOpusSink ◄── PlaybackChannel (Opus path)          │
-    └─► control DC ◄──────────────────────────────────── cursor/input relay ──┘
-    │
-    ▼
-Browser (RTCPeerConnection)
-    ├─ <video> H.264 display
-    ├─ <audio> Opus audio
-    └─ datachannel: cursor overlay + input events
+```mermaid
+flowchart TB
+    spice["SPICE server"]
+    run["shakenfist-spice-renderer::run_connection"]
+    dc["DisplayChannel"]
+    pc["PlaybackChannel"]
+    ic["InputsChannel"]
+    ev["broadcast ChannelEvent"]
+    mirror["SurfaceMirror"]
+    crelay["CursorRelay (cursor.rs)"]
+    sink["WebOpusSink / OpusPacketSink (audio.rs)"]
+    frames["RealFrameSource"]
+    enc["EncoderTask"]
+    irelay["web inputs relay (inputs.rs)"]
+
+    subgraph bridge["shakenfist-spice-webrtc::WebrtcBridge"]
+        vtrack["video track"]
+        atrack["audio track"]
+        ctrl["control datachannel"]
+    end
+
+    subgraph browser["Browser (RTCPeerConnection)"]
+        video["video element: H.264 display"]
+        audio["audio element: Opus audio"]
+        data["datachannel: cursor overlay + input events"]
+    end
+
+    spice --> run
+    run --> dc
+    run --> pc
+    run --> ic
+    dc --> ev
+    ev --> mirror
+    ev --> crelay
+    pc -- Opus path --> sink
+    mirror --> frames --> enc --> vtrack
+    sink --> atrack
+    crelay --> ctrl
+    vtrack --> video
+    atrack --> audio
+    ctrl --> data
+    data -- input events --> ctrl
+    ctrl --> irelay
+    irelay --> ic
 ```
 
 The handler-methods-must-never-block webrtc-rs rule (documented

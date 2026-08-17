@@ -10,28 +10,36 @@ sit in the crate layout.
 
 ### Connection Sequence
 
-```
-1. TCP connect to server
-2. TLS handshake (if secure port)
-3. Link handshake (exchange capabilities)
-4. Authentication (RSA-OAEP encrypted password)
-5. Main channel: receive session ID and channel list
-6. Connect secondary channels (display, cursor, inputs)
-7. Event loop: process messages, render display, send input
+```mermaid
+sequenceDiagram
+    participant R as ryll
+    participant S as SPICE server
+
+    R->>S: TCP connect (plus TLS handshake on a secure port)
+    R->>S: SpiceLinkMess (common and per-channel capabilities)
+    S->>R: SpiceLinkReply (capabilities, RSA public key)
+    R->>S: Auth mechanism, then RSA-OAEP encrypted password
+    S->>R: Auth result
+    S->>R: MAIN INIT (session id, mouse modes, agent state)
+    R->>S: MAIN ATTACH_CHANNELS
+    S->>R: MAIN CHANNELS_LIST
+    R->>S: Link and auth again per secondary channel<br/>(display, cursor, inputs, ...)
+    loop Event loop
+        S->>R: Display, cursor and audio messages
+        R->>S: Keyboard and pointer events
+    end
 ```
 
 ### Message Format
 
 All SPICE messages use a 6-byte mini-header:
 
-```
-┌──────────────┬──────────────────────┐
-│ message_type │    message_size      │
-│   (u16 LE)   │      (u32 LE)        │
-├──────────────┴──────────────────────┤
-│            payload                   │
-│         (variable length)            │
-└─────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph hdr ["6-byte mini-header"]
+        t["message_type<br/>(u16 LE)"] ~~~ s["message_size<br/>(u32 LE)"]
+    end
+    hdr -- followed by --> p["payload<br/>(message_size bytes)"]
 ```
 
 ### Channel Types

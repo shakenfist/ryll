@@ -62,27 +62,20 @@ features (egui-only UI panels, browser-only clipboard APIs) should be
 documented as such so the parity gaps are visible. The current gap
 list is in `docs/multi-mode-parity.md`.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         ryll                                 │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
-│  │  Main   │  │ Display │  │  Cursor │  │  Inputs │        │
-│  │ Channel │  │ Channel │  │ Channel │  │ Channel │        │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
-│       │            │            │            │              │
-│       └────────────┴─────┬──────┴────────────┘              │
-│                          │                                   │
-│                    ┌─────▼─────┐                            │
-│                    │  SpiceClient                           │
-│                    │  (TLS/TCP)│                            │
-│                    └─────┬─────┘                            │
-└──────────────────────────┼──────────────────────────────────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │ SPICE Server│
-                    │   (QEMU)    │
-                    └─────────────┘
+```mermaid
+flowchart TB
+    subgraph ryll["ryll"]
+        main["Main channel"]
+        display["Display channel"]
+        cursor["Cursor channel"]
+        inputs["Inputs channel"]
+        client["SpiceClient<br/>(TLS / TCP)"]
+        main --> client
+        display --> client
+        cursor --> client
+        inputs --> client
+    end
+    client --> server["SPICE server<br/>(QEMU)"]
 ```
 
 ## Crate boundaries
@@ -248,27 +241,18 @@ communication between tasks.
 
 ### Channel communication
 
-```
-                    ┌──────────────┐
-                    │   UI Thread  │
-                    │    (egui)    │
-                    └──────┬───────┘
-                           │
-              ┌────────────┼────────────┐
-              │            │            │
-              ▼            │            ▼
-        ┌─────────┐        │      ┌──────────┐
-        │event_rx │◀───────┼──────│ input_tx │
-        │(receive │        │      │  (send   │
-        │ events) │        │      │  input)  │
-        └─────────┘        │      └──────────┘
-              ▲            │            │
-              │            │            ▼
-    ┌─────────┴────┐       │     ┌─────────────┐
-    │ Display/Main │       │     │   Inputs    │
-    │   Channels   │───────┘     │   Channel   │
-    └──────────────┘             └─────────────┘
-         event_tx                   input_rx
+```mermaid
+flowchart TB
+    ui["UI thread<br/>(egui)"]
+    erx["event_rx<br/>(receive events)"]
+    itx["input_tx<br/>(send input)"]
+    chans["Display / Main channels"]
+    inputs["Inputs channel"]
+
+    chans -- event_tx --> erx
+    erx --> ui
+    ui --> itx
+    itx -- input_rx --> inputs
 ```
 
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)

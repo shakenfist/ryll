@@ -55,18 +55,12 @@ it is now a practical client for real workloads, not just test ones.
 
 ## The Testing Setup
 
-```
-┌─────────┐         ┌───────────┐         ┌─────────────┐
-│  ryll   │────────▶│ kerbside  │────────▶│ SPICE server│
-│ (client)│         │  (proxy)  │         │   (QEMU)    │
-└─────────┘         └───────────┘         └─────────────┘
-     │                    │                      │
-     │                    │                      │
-     ▼                    ▼                      ▼
-  Metrics:            Metrics:              Metrics:
-  - Latency           - Throughput          - Server-side
-  - Frame rate        - Connection time       processing
-  - Bytes in/out      - Protocol overhead
+```mermaid
+flowchart LR
+    ryll["ryll<br/>(client)"] --> kerbside["kerbside<br/>(proxy)"] --> server["SPICE server<br/>(QEMU)"]
+    ryll -.-> rm["Metrics:<br/>latency<br/>frame rate<br/>bytes in / out"]
+    kerbside -.-> km["Metrics:<br/>throughput<br/>connection time<br/>protocol overhead"]
+    server -.-> sm["Metrics:<br/>server-side processing"]
 ```
 
 With ryll, we can:
