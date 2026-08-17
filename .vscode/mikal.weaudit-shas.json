@@ -77,6 +77,10 @@
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
     },
+    "docs/development.md": {
+      "sha": "4caf5a811e110f71f46a66219f7db95e7c426f4c",
+      "date": "2026-08-18"
+    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
@@ -85,6 +89,10 @@
       "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
     },
+    "docs/features.md": {
+      "sha": "4027fad8f45878989daa71ac06139b3ab9f33190",
+      "date": "2026-08-18"
+    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -92,6 +100,18 @@
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
+    },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "140f0967ffd948f38b168dcb85d541073ebcdc7a",
+      "date": "2026-08-18"
+    },
+    "docs/macos-metrics-verification.md": {
+      "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
+      "date": "2026-08-18"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "0ce51313f10dfac71f37e1f635704ccedc20f066",
+      "date": "2026-08-18"
     },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
@@ -109,9 +129,21 @@
       "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
       "date": "2026-08-17"
     },
+    "docs/spice-protocol.md": {
+      "sha": "8c8f41105dfd43a3c380c9738dae330f0e13e3e0",
+      "date": "2026-08-18"
+    },
     "docs/troubleshooting.md": {
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
+    },
+    "docs/web-frontend.md": {
+      "sha": "f35462ac4c61419d48d392f52a51e3c66eccd12c",
+      "date": "2026-08-18"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "945d2e7a26389242d43b84cd5dc27b3aa8a35b59",
+      "date": "2026-08-18"
     },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
