@@ -710,6 +710,18 @@
     {
       "path": "ryll/src/web/signalling.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/encoder_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

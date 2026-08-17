@@ -529,6 +529,14 @@
       "sha": "a5ae5409b7c1682b5bf4c521202abf1c9287f9ff",
       "date": "2026-07-27"
     },
+    "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
+      "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
+      "sha": "2c7e4206b8cb3cab44e87a74ee28d5fe35d35fcb",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-usbredir/README.md": {
       "sha": "0187a350db60c8203eb81818b207d89bc35ea77d",
       "date": "2026-08-02"
