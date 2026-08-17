@@ -313,6 +313,14 @@ async fn pcap_writer_task(
 
 // ── Video capture ───────────────────────────────────────
 
+/// Nominal frame rate handed to the H.264 encoder's rate
+/// controller. Capture has no cadence of its own — it encodes
+/// whatever the SPICE session delivers, whenever it arrives — but
+/// the encoder needs a number to budget against, and the MP4
+/// sample writer already assumes ~30fps (the 33ms placeholder
+/// duration on the first sample, below).
+const CAPTURE_NOMINAL_FPS: u32 = 30;
+
 /// H.264 video writer with lazy initialisation.
 ///
 /// Created on the first frame() call once we know the
@@ -338,13 +346,12 @@ impl VideoWriter {
         timestamp_ms: u64,
     ) -> Option<Self> {
         use mp4::{AvcConfig, MediaConfig, Mp4Config, TrackConfig, TrackType};
-        use shakenfist_spice_renderer::H264Encoder;
+        use shakenfist_spice_renderer::{even_dimensions, H264Encoder};
 
         // openh264 requires even dimensions; H264Encoder enforces this.
-        let w = width & !1;
-        let h = height & !1;
+        let (w, h) = even_dimensions(width, height);
 
-        let mut encoder = match H264Encoder::new(w, h) {
+        let mut encoder = match H264Encoder::new(w, h, CAPTURE_NOMINAL_FPS) {
             Ok(e) => e,
             Err(e) => {
                 warn!("capture: failed to create H.264 encoder: {}", e);
@@ -352,23 +359,24 @@ impl VideoWriter {
             }
         };
 
-        let pixel_count = (w * h) as usize;
-        if pixels.len() < pixel_count * 4 {
+        let source_len = (width as usize) * (height as usize) * 4;
+        if pixels.len() < source_len {
             warn!(
                 "capture: first frame too short: {} bytes, need {}",
                 pixels.len(),
-                pixel_count * 4
+                source_len
             );
             return None;
         }
-        // Pass the first w*h*4 bytes. When source dims are odd this
-        // reads slightly into the next row, which matches the
-        // pre-existing behaviour. TODO: repack when source dims are odd.
-        let rgba = &pixels[..pixel_count * 4];
+        // Hand the encoder the *source* rectangle and let it crop.
+        // Taking the first w*h*4 bytes of an odd-width surface reads
+        // across row boundaries and shears the picture by a pixel per
+        // row, which is what this used to do.
+        let rgba = &pixels[..source_len];
 
         // First frame is implicitly an IDR (openh264 default); no need
         // to force_keyframe.
-        let frame = match encoder.encode(rgba, false) {
+        let frame = match encoder.encode_cropped(rgba, width, height, false) {
             Ok(f) => f,
             Err(e) => {
                 warn!("capture: failed to encode first frame: {}", e);
@@ -502,21 +510,26 @@ impl VideoWriter {
 
     /// Encode and write a subsequent frame.
     fn write_frame(&mut self, pixels: &[u8], width: u32, height: u32, timestamp_ms: u64) {
-        if width != self.width || height != self.height {
+        // `self.width`/`self.height` are the encoder's rounded size,
+        // so the incoming size has to be rounded before it is
+        // compared — otherwise an odd surface reads as a resolution
+        // change on its second frame and video stops.
+        let (w, h) = shakenfist_spice_renderer::even_dimensions(width, height);
+        if w != self.width || h != self.height {
             warn!(
                 "capture: surface dimensions changed {}x{} -> {}x{}, stopping video",
-                self.width, self.height, width, height
+                self.width, self.height, w, h
             );
             return;
         }
 
-        let pixel_count = (self.width * self.height) as usize;
-        if pixels.len() < pixel_count * 4 {
+        let source_len = (width as usize) * (height as usize) * 4;
+        if pixels.len() < source_len {
             return;
         }
-        let rgba = &pixels[..pixel_count * 4];
+        let rgba = &pixels[..source_len];
 
-        let frame = match self.encoder.encode(rgba, false) {
+        let frame = match self.encoder.encode_cropped(rgba, width, height, false) {
             Ok(f) => f,
             Err(e) => {
                 warn!("capture: H.264 encode failed: {}", e);

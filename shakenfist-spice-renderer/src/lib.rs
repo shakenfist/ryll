@@ -41,8 +41,8 @@ pub use clipboard::ClipboardBackend;
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
 pub use encoder::{
-    EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder, RealFrameSource,
-    SyntheticFrameSource,
+    even_dimensions, EncodedFrame, EncoderControl, EncoderTask, FrameRef, FrameSource, H264Encoder,
+    RealFrameSource, SyntheticFrameSource,
 };
 pub use image_cache::{BoundedImageCache, InsertOutcome, RefusedReason};
 pub use log_config::LogConfig;

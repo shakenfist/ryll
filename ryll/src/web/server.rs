@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,16 @@ pub struct WebState {
     /// Single-viewer enforcement: a new offer replaces the
     /// existing bridge.
     pub bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    /// Producer end of the outbound control queue. Cloned into the
+    /// cursor relay, the mouse-mode tracker and each input relay; see
+    /// [`super::control`] for why those producers do not touch
+    /// `bridge_slot` themselves.
+    pub(crate) control_tx: super::control::ControlSink,
+    /// Consumer end, taken exactly once by `run_web` when it spawns
+    /// [`super::control::run_control_writer`]. Left in place by unit
+    /// tests, which read it directly to see what the browser would
+    /// have been sent.
+    pub(crate) control_rx: Mutex<Option<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
     /// Per-launch encoder pipeline (synthetic source +
     /// `H264Encoder` + `EncoderTask`). `EncoderInfra::restart`
     /// stops any existing encoder and spawns a fresh one for
@@ -124,6 +134,16 @@ pub struct WebState {
     /// lock hold time is microseconds and no `.await` is held
     /// while the guard is live.
     pub last_offer_at: std::sync::Mutex<Instant>,
+    /// The SPICE session's current mouse mode, maintained by
+    /// [`crate::web::inputs::run_mouse_mode_tracker`] and read by
+    /// each bridge's input relay to choose between absolute and
+    /// relative pointer messages.
+    ///
+    /// Lives in shared state rather than in the relay because the
+    /// mode is announced at session-init, seconds before any
+    /// browser connects: a `broadcast::Receiver` subscribed when
+    /// the relay spawns would never see that message.
+    pub mouse_mode: Arc<AtomicU32>,
 }
 
 impl WebState {
@@ -176,9 +196,12 @@ impl WebState {
             let _ = write!(acc, "{:02x}", b);
             acc
         });
+        let (control_tx, control_rx) = super::control::control_queue();
         Self {
             token,
             bridge_slot: Arc::new(Mutex::new(None)),
+            control_tx,
+            control_rx: Mutex::new(Some(control_rx)),
             encoder: Arc::new(Mutex::new(EncoderInfra::new())),
             input_tx,
             resize_tx,
@@ -190,6 +213,12 @@ impl WebState {
             // Initialise 60 s in the past so the first offer
             // always succeeds without a cold-start delay.
             last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),
+            // Default to client mode: it is what a guest running
+            // vdagent negotiates, and it keeps the pre-session
+            // behaviour identical to what it was before the mode
+            // was tracked at all. The tracker corrects this within
+            // milliseconds of session-init in any real session.
+            mouse_mode: Arc::new(AtomicU32::new(shakenfist_spice_protocol::MOUSE_MODE_CLIENT)),
         }
     }
 }

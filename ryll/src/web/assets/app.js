@@ -43,6 +43,15 @@
     const videoEl = document.getElementById('video');
     const cursorEl = document.getElementById('cursor');
 
+    // SPICE mouse modes (shakenfist-spice-protocol constants.rs).
+    const MOUSE_MODE_SERVER = 1;
+    const MOUSE_MODE_CLIENT = 2;
+    // Corrected by the server's `mouse-mode` message, which arrives
+    // once per connection right after the answer. Defaults to client
+    // mode because that is what any guest running vdagent
+    // negotiates.
+    let mouseMode = MOUSE_MODE_CLIENT;
+
     const params = new URLSearchParams(window.location.search);
     const TOKEN = params.get('token');
     if (!TOKEN) {
@@ -232,14 +241,21 @@
     // input listeners registered once continue to work across
     // reconnects without re-registration.
     // ---------------------------------------------------------------
+    // Returns whether the message actually went out. Input events
+    // are fire-and-forget — a lost mousemove is replaced by the
+    // next one — but anything sent once per connection has to know,
+    // or a message dropped before the channel opened is lost for
+    // the life of the session.
     const sendCtrl = (obj) => {
         if (!dc || dc.readyState !== 'open') {
-            return;
+            return false;
         }
         try {
             dc.send(JSON.stringify(obj));
+            return true;
         } catch (err) {
             console.warn('[ryll] dc.send failed:', err);
+            return false;
         }
     };
 
@@ -285,6 +301,16 @@
         const norm = pointerToNorm(e);
         if (!norm) return;
         sendCtrl({ type: 'pointer-move', x_norm: norm.x_norm, y_norm: norm.y_norm });
+        // In client mouse mode the viewer owns the pointer
+        // position, and a SPICE server in that mode sends few or no
+        // cursor-position updates because it expects the client to
+        // already know. Drawing the overlay only from what the
+        // server reports leaves it frozen wherever it last was; the
+        // GUI makes the same distinction in ryll/src/app.rs.
+        if (mouseMode === MOUSE_MODE_CLIENT) {
+            cursorLastNorm = { x: norm.x_norm, y: norm.y_norm };
+            positionCursor(norm.x_norm, norm.y_norm);
+        }
     });
 
     videoEl.addEventListener('mousedown', (e) => {
@@ -426,15 +452,34 @@
                 cursorHotX = msg.hot_x ?? 0;
                 cursorHotY = msg.hot_y ?? 0;
                 cursorEl.hidden = false;
+                // Only now is there a SPICE cursor worth preferring
+                // over the browser's own. Until this point the host
+                // cursor stays visible; a QXL guest draws its
+                // pointer as a hardware cursor, so it is not in the
+                // video at all, and hiding the host cursor before
+                // having a replacement leaves the viewer with no
+                // pointer whatsoever.
+                videoEl.classList.add('spice-cursor');
                 if (cursorLastNorm) {
                     positionCursor(cursorLastNorm.x, cursorLastNorm.y);
                 }
+                break;
+            case 'mouse-mode':
+                mouseMode = msg.mode;
+                console.log('[ryll] mouse mode:', mouseMode === MOUSE_MODE_SERVER
+                    ? 'server (relative)' : 'client (absolute)');
                 break;
             case 'cursor-pos':
                 cursorLastNorm = { x: msg.x_norm, y: msg.y_norm };
                 positionCursor(msg.x_norm, msg.y_norm);
                 break;
             case 'cursor-hide':
+                // Deliberately leaves .spice-cursor on the video, so
+                // the viewer has no pointer at all until cursor-show.
+                // The guest asked for a hidden cursor — full-screen
+                // video players and some games do — and revealing the
+                // host arrow instead would contradict it. spice-gtk
+                // behaves the same way.
                 cursorEl.hidden = true;
                 break;
             case 'cursor-show':
@@ -456,6 +501,12 @@
     async function connect() {
         setStatus('Negotiating…');
 
+        // Drop any cursor state from the previous session: the new
+        // one re-sends a shape if it has one, and until it does the
+        // host cursor is the only pointer the viewer has.
+        cursorEl.hidden = true;
+        videoEl.classList.remove('spice-cursor');
+
         // Build a brand-new PC each time so we never reuse a failed
         // connection object (some browsers cache failed PCs briefly).
         pc = new RTCPeerConnection();
@@ -468,6 +519,20 @@
 
         dc.onopen = () => {
             console.log('[ryll] data channel open');
+            // Ask for the mouse mode. The server cannot push it
+            // unprompted: it learns the mode from SPICE session-init,
+            // seconds before this page loaded, and send_control drops
+            // anything written before this channel opened. This
+            // message is the server's proof that it is open.
+            sendCtrl({ type: 'hello' });
+            // The other half of the race in sendViewport(): if the
+            // peer connection reached `connected` before SCTP
+            // opened this channel, that attempt found nothing to
+            // send on and this one is the one that lands.
+            // sendViewport is declared later in this same scope but
+            // is only ever called from a callback, long after
+            // connect() has returned.
+            sendViewport();
         };
         dc.onclose = () => {
             console.log('[ryll] data channel closed');
@@ -525,8 +590,21 @@
             const w = Math.round(rect.width);
             const h = Math.round(rect.height);
             if (w <= 0 || h <= 0) return;
+            // Latch only on a send that happened. The peer
+            // connection reaches `connected` when ICE and DTLS
+            // finish, which is before SCTP has opened the
+            // datachannel, so this is routinely called with
+            // nothing to send on. Setting the flag first made that
+            // ordinary race permanent: the guest never learned the
+            // viewport, never resized, and the browser spent the
+            // session upscaling whatever resolution the guest had
+            // booted at. Both callers below fire, and whichever
+            // happens second is the one that gets through.
+            if (!sendCtrl({ type: 'viewport', width: w, height: h })) {
+                console.log('[ryll] viewport deferred: control channel not open');
+                return;
+            }
             viewportSent = true;
-            sendCtrl({ type: 'viewport', width: w, height: h });
             console.log('[ryll] viewport sent:', w, 'x', h);
         };
 

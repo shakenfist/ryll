@@ -26,6 +26,60 @@ use super::{ChannelEvent, InputEvent};
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
 
+/// Consecutive throttled pointer moves, with no `MOUSE_MOTION_ACK`
+/// in between, that make the ack window look wedged rather than
+/// briefly busy. At a browser's pointer event rate a genuine burst
+/// clears in a handful of events, so this is roughly a second of a
+/// pointer that is going nowhere.
+const MOTION_WEDGE_THRESHOLD: u32 = 100;
+
+/// Tracks whether the motion ack window is merely busy or wedged.
+///
+/// The window drains only on `MOUSE_MOTION_ACK`, and a server does
+/// not acknowledge what it never consumed — so sending the pointer
+/// message form the negotiated mouse mode does not use fills the
+/// window once and then drops every move for the rest of the session,
+/// silently. A short run of drops, by contrast, is an ordinary burst.
+///
+/// Separated from [`InputsChannel`] so the "warn once per wedge, and
+/// again if it wedges a second time" rule can be tested without a
+/// SPICE stream.
+#[derive(Default)]
+struct MotionWedgeDetector {
+    /// Consecutive throttled moves since the last ack.
+    drops_since_ack: u32,
+    /// Whether the current run has already been reported.
+    warned: bool,
+}
+
+impl MotionWedgeDetector {
+    /// Record a throttled move. Returns `true` when the caller should
+    /// emit the warning — at most once per run of drops.
+    fn note_drop(&mut self) -> bool {
+        self.drops_since_ack = self.drops_since_ack.saturating_add(1);
+        if self.drops_since_ack >= MOTION_WEDGE_THRESHOLD && !self.warned {
+            self.warned = true;
+            return true;
+        }
+        false
+    }
+
+    /// Record an ack. The window is draining, so the run of drops was
+    /// a busy burst rather than a wedge — and the warning is armed
+    /// again, because a session that wedges, recovers and wedges a
+    /// second time is two faults, and reporting only the first hides
+    /// the one the user is looking at.
+    fn note_ack(&mut self) {
+        self.drops_since_ack = 0;
+        self.warned = false;
+    }
+
+    /// Drops in the current run, for the warning message.
+    fn drops(&self) -> u32 {
+        self.drops_since_ack
+    }
+}
+
 /// Maximum number of recent input events to keep in the snapshot.
 const MAX_RECENT_EVENTS: usize = 50;
 
@@ -72,6 +126,9 @@ pub struct InputsChannel {
     last_key_time: Option<Instant>,
     button_state: u32,
     motion_count: u32,
+    /// Distinguishes a busy ack window from a wedged one. See
+    /// [`MotionWedgeDetector`].
+    motion_wedge: MotionWedgeDetector,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -152,6 +209,7 @@ impl InputsChannel {
             last_key_time: None,
             button_state: 0,
             motion_count: 0,
+            motion_wedge: MotionWedgeDetector::default(),
             capture,
             byte_counter,
             traffic,
@@ -455,6 +513,7 @@ impl InputsChannel {
 
             inputs_server::MOUSE_MOTION_ACK => {
                 self.motion_count = self.motion_count.saturating_sub(MOTION_ACK_BUNCH);
+                self.motion_wedge.note_ack();
                 debug!("inputs: mouse motion ack (pending={})", self.motion_count);
             }
 
@@ -626,6 +685,8 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
                     self.motion_count += 1;
+                } else {
+                    self.note_motion_throttled();
                 }
             }
 
@@ -652,6 +713,8 @@ impl InputsChannel {
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
                     self.motion_count += 1;
+                } else {
+                    self.note_motion_throttled();
                 }
             }
 
@@ -847,6 +910,43 @@ impl InputsChannel {
         }
 
         Ok(())
+    }
+
+    /// Note a pointer move dropped by the ack-window throttle, and
+    /// complain once per session if the throttle looks wedged
+    /// rather than merely busy.
+    ///
+    /// The throttle matches spice-gtk (`channel-inputs.c`): at most
+    /// `MOTION_ACK_BUNCH * 2` motions may be outstanding, and the
+    /// server returns a `MOUSE_MOTION_ACK` for every
+    /// `MOTION_ACK_BUNCH` it consumes. A burst of input can fill
+    /// that window briefly, which is normal and not worth a word.
+    ///
+    /// What is not normal is the window never draining. The count
+    /// only falls on an ack, so if the server acks nothing the
+    /// window stays full for the rest of the session and every
+    /// later pointer move is discarded — the guest pointer just
+    /// stops moving. A client sending the wrong message type for
+    /// the negotiated mouse mode produces exactly that, because
+    /// the server does not ack what it did not consume.
+    ///
+    /// [`MOTION_WEDGE_THRESHOLD`] consecutive drops with no
+    /// intervening ack is the line between the two. Below it, say
+    /// nothing; above it, say so once. The original failure had no
+    /// log line at all, which made an input problem look like a
+    /// rendering or transport one.
+    fn note_motion_throttled(&mut self) {
+        if self.motion_wedge.note_drop() {
+            warn!(
+                "inputs: {} consecutive pointer moves dropped with {} \
+                 motions outstanding and no MOUSE_MOTION_ACK in between; \
+                 further motion will be dropped silently. If the guest \
+                 pointer is not moving, check the negotiated mouse mode — \
+                 the server does not acknowledge messages it ignores.",
+                self.motion_wedge.drops(),
+                self.motion_count
+            );
+        }
     }
 
     /// Record an input event in the local deque.
@@ -1453,9 +1553,50 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        scancode_for_logical_key, translate_paste, Direction, LogicalKey, PasteError, PasteKey,
-        WSKey,
+        scancode_for_logical_key, translate_paste, Direction, LogicalKey, MotionWedgeDetector,
+        PasteError, PasteKey, WSKey, MOTION_WEDGE_THRESHOLD,
     };
+
+    /// A burst that clears is not a wedge, and must say nothing.
+    #[test]
+    fn a_short_run_of_drops_does_not_warn() {
+        let mut d = MotionWedgeDetector::default();
+        for _ in 0..(MOTION_WEDGE_THRESHOLD - 1) {
+            assert!(!d.note_drop(), "warned before the threshold");
+        }
+        d.note_ack();
+        assert_eq!(d.drops(), 0, "an ack should clear the run");
+    }
+
+    /// Past the threshold, warn — but only once, or a wedged session
+    /// emits a line per pointer event for as long as it lasts.
+    #[test]
+    fn a_wedged_window_warns_exactly_once() {
+        let mut d = MotionWedgeDetector::default();
+        let warnings = (0..(MOTION_WEDGE_THRESHOLD * 3))
+            .filter(|_| d.note_drop())
+            .count();
+        assert_eq!(warnings, 1, "expected one warning for one wedge");
+    }
+
+    /// A session that wedges, recovers and wedges again is two
+    /// faults. Reporting only the first hides the one the user is
+    /// looking at, so an ack re-arms the warning.
+    #[test]
+    fn a_second_wedge_after_recovery_warns_again() {
+        let mut d = MotionWedgeDetector::default();
+        let first = (0..MOTION_WEDGE_THRESHOLD)
+            .filter(|_| d.note_drop())
+            .count();
+        assert_eq!(first, 1);
+
+        d.note_ack();
+
+        let second = (0..MOTION_WEDGE_THRESHOLD)
+            .filter(|_| d.note_drop())
+            .count();
+        assert_eq!(second, 1, "the second wedge went unreported");
+    }
 
     // make_scancode logic for reference:
     //   normal key:   press = base,            release = base | 0x80

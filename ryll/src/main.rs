@@ -632,6 +632,22 @@ fn run_web(
         let repaint_notify = Arc::new(tokio::sync::Notify::new());
         let volume_control = shakenfist_spice_renderer::channels::VolumeControl::new();
 
+        // Subscribe every long-lived consumer of the event bus
+        // *before* the session that produces the events is spawned.
+        //
+        // A `broadcast::Receiver` only sees what is sent after it was
+        // created, and the events these three care about — the first
+        // surface, the first cursor shape, and the negotiated mouse
+        // mode — all arrive during session-init. Subscribing after
+        // the spawn means the ordering is decided by how long a TCP
+        // connect, link handshake and auth take, which is a race that
+        // happens to be won by a wide margin rather than one that
+        // cannot be lost. Losing it would strand the mouse mode at
+        // its default for the whole session with nothing logged.
+        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
+        let cursor_event_rx = event_broadcast_tx.subscribe();
+        let mouse_mode_event_rx = event_broadcast_tx.subscribe();
+
         // Spawn the renderer's session orchestrator. The web
         // mode has no clipboard backend (clipboard sync is
         // out of scope for the MVP) and never enables paste-as-
@@ -687,7 +703,6 @@ fn run_web(
         // operational problem it's a Phase 6 perf item
         // (larger broadcast capacity or a backpressure scheme).
         let mirror_for_task = surface_mirror.clone();
-        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
         let mirror_handle = tokio::spawn(async move {
             loop {
                 match event_rx_for_mirror.recv().await {
@@ -715,11 +730,10 @@ fn run_web(
         // raised SHUTDOWN_REQUESTED, or axum::serve errored)
         // we tear the rest down before returning.
         //
-        // Step 5d: clone the bus subscription + surface mirror
-        // handle here (before `with_channels` moves the broadcast
-        // sender) so we can spawn the cursor relay against the
-        // same `bridge_slot` the signalling handler installs into.
-        let cursor_event_rx = event_broadcast_tx.subscribe();
+        // Step 5d: the cursor relay runs against the same
+        // `bridge_slot` the signalling handler installs into. Its bus
+        // subscription, and the mouse-mode tracker's, were taken
+        // before the session was spawned; see the comment there.
         let cursor_mirror = surface_mirror.clone();
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
@@ -728,11 +742,28 @@ fn run_web(
             surface_mirror,
             active_opus_tx,
         ));
-        let cursor_bridge_slot = state.bridge_slot.clone();
+        // Drain the outbound control queue onto whichever bridge is
+        // installed. One writer for the process, like the relays that
+        // feed it: the queue outlives any single browser connection.
+        let control_rx = state
+            .control_rx
+            .lock()
+            .await
+            .take()
+            .expect("control queue receiver is taken exactly once, here");
+        let control_writer_handle = tokio::spawn(crate::web::control::run_control_writer(
+            control_rx,
+            state.bridge_slot.clone(),
+        ));
         let cursor_handle = tokio::spawn(crate::web::cursor::run_cursor_relay(
             cursor_event_rx,
-            cursor_bridge_slot,
+            state.control_tx.clone(),
             cursor_mirror,
+        ));
+        let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
+            mouse_mode_event_rx,
+            state.mouse_mode.clone(),
+            state.control_tx.clone(),
         ));
 
         // Phase 6b: spawn the bridge reaper. It watches the
@@ -796,6 +827,8 @@ fn run_web(
         forwarder_handle.abort();
         mirror_handle.abort();
         cursor_handle.abort();
+        mouse_mode_handle.abort();
+        control_writer_handle.abort();
 
         server_result
     });

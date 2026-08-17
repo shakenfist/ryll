@@ -182,7 +182,7 @@ async fn loopback_video_audio_datachannel() {
     //
     // 64x64 keeps openh264 cheap in debug builds; the test only
     // cares that packets flow, not that the resolution is realistic.
-    let encoder = H264Encoder::new(64, 64).expect("encoder init");
+    let encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
     let source = SyntheticFrameSource::new(64, 64);
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let _enc_handle = EncoderTask::spawn(encoder, source, frame_tx, server_enc_rx, 30);
@@ -326,7 +326,7 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
         .await
         .expect("client PC did not reach Connected");
 
-    let encoder = H264Encoder::new(64, 64).expect("encoder init");
+    let encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
     let source = SyntheticFrameSource::new(64, 64);
     let (frame_tx, frame_rx) = mpsc::channel(32);
     let _enc_handle = EncoderTask::spawn(encoder, source, frame_tx, server_enc_rx, 30);

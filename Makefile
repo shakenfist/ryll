@@ -15,6 +15,16 @@ OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS := /usr/share/OVMF/OVMF_VARS_4M.fd
 QEMU_VARS_COPY := /tmp/ryll-test-ovmf-vars.fd
 
+# Desktop test guest, used for manual --web verification. Unlike the
+# UEFI latency guest above this is a real XFCE desktop with
+# spice-vdagent, an audio device and a cursor, which is what makes
+# mouse mode, viewport resize, audio and cursor shape testable at all.
+DESKTOP_IMAGE_URL := https://images.shakenfist.com/debian-xfce:13/latest.qcow2
+DESKTOP_BASE_IMAGE := testdata/debian-xfce-13.qcow2
+DESKTOP_OVERLAY := testdata/debian-xfce-13-overlay.qcow2
+DESKTOP_SEED := testdata/debian-xfce-13-seed.iso
+DESKTOP_PASSWORD := ryll
+
 # Detect user/group for permission-safe container builds
 UID := $(shell id -u)
 GID := $(shell id -g)
@@ -48,7 +58,7 @@ DOCKER_RUN := docker run --rm \
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache lint lint-fix test help \
 	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
-	test-qemu test-qemu-usb test-qemu-stop test-k1-idle \
+	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console check-windows
 
@@ -82,6 +92,7 @@ help:
 	@echo "Test SPICE server:"
 	@echo "  make test-qemu              - Start a QEMU instance with SPICE on port $(QEMU_SPICE_PORT)"
 	@echo "  make test-qemu-usb          - Same, with USB redirection enabled"
+	@echo "  make test-qemu-desktop      - Start an XFCE desktop guest (vdagent, audio, cursor)"
 	@echo "  make test-qemu-stop         - Stop the test QEMU instance"
 
 # Build the devcontainer image
@@ -319,6 +330,10 @@ clean:
 # Clean test data files
 clean-testdata:
 	rm -f testdata/usb-test.raw
+	rm -f $(DESKTOP_OVERLAY) $(DESKTOP_SEED)
+	rm -f $(DESKTOP_OVERLAY:.qcow2=-ovmf-vars.fd)
+	rm -f $(DESKTOP_BASE_IMAGE).tmp
+	@echo "Kept $(DESKTOP_BASE_IMAGE) (delete by hand to re-download ~770MB)"
 
 # Clean devcontainer image
 clean-devcontainer:
@@ -356,6 +371,50 @@ test-qemu-stop:
 		echo "Stopped test QEMU instance"; \
 	fi
 	@rm -f $(QEMU_VARS_COPY)
+
+# Download the XFCE desktop test image (~770MB, cached in testdata/).
+#
+# Download to a temporary name and rename on success. Without --fail,
+# curl writes an HTTP error page to the target and exits 0; without
+# the rename, an interrupted transfer leaves a truncated file that
+# make then treats as up to date. At 770MB neither is hypothetical.
+$(DESKTOP_BASE_IMAGE):
+	mkdir -p testdata
+	curl -fL -o $(DESKTOP_BASE_IMAGE).tmp $(DESKTOP_IMAGE_URL)
+	mv $(DESKTOP_BASE_IMAGE).tmp $(DESKTOP_BASE_IMAGE)
+
+# Build the cloud-init seed ISO that gives the guest a password and
+# saves it from waiting out cloud-init's datasource search.
+#
+# Depends on the Makefile as well as the script, because
+# DESKTOP_PASSWORD is defined here: without it, changing the password
+# left the old seed in place and the login this target prints was
+# wrong.
+$(DESKTOP_SEED): tools/make-cloud-seed.sh Makefile
+	./tools/make-cloud-seed.sh --output $(DESKTOP_SEED) \
+		--password $(DESKTOP_PASSWORD)
+
+# Start the XFCE desktop test guest: SPICE, vdagent, audio and
+# networking, which together make video, audio, keyboard, mouse,
+# cursor and viewport resize all testable from a browser.
+#
+# Runs from a fresh qcow2 overlay each time, so the base image stays
+# pristine and every run starts from the same state. Connect with
+# `ryll --web --direct localhost:$(QEMU_SPICE_PORT)`; see
+# docs/development.md for the manual verification checklist.
+test-qemu-desktop: test-qemu-stop $(DESKTOP_BASE_IMAGE) $(DESKTOP_SEED)
+	rm -f $(DESKTOP_OVERLAY)
+	qemu-img create -q -f qcow2 -F qcow2 \
+		-b $(notdir $(DESKTOP_BASE_IMAGE)) $(DESKTOP_OVERLAY)
+	./tools/start-desktop-qemu.sh \
+		--qcow2 $(DESKTOP_OVERLAY) \
+		--seed $(DESKTOP_SEED) \
+		--ovmf-code $(OVMF_CODE) \
+		--ovmf-vars $(OVMF_VARS) \
+		--spice-port $(QEMU_SPICE_PORT) \
+		--pid-file $(QEMU_PID_FILE)
+	@echo "Connect with: ryll --web --direct localhost:$(QEMU_SPICE_PORT)"
+	@echo "Guest login: debian / $(DESKTOP_PASSWORD) (xfce autologins)"
 
 # Long-idle regression test for K1 (main-channel-wedge). Requires a
 # SPICE server reachable at $(HOST_PORT) — typically start one with

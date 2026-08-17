@@ -155,8 +155,13 @@ ryll/src/
     │                    #   bridge lifecycle
     ├── assets.rs        # Embedded browser shell, {{TOKEN}} substitution
     ├── audio.rs         # WebOpusSink (implements OpusPacketSink)
+    ├── control.rs       # Server → browser control messages, the
+    │                    #   outbound queue the relays feed, and the
+    │                    #   writer task that drains it onto the bridge
     ├── cursor.rs        # Cursor relay → control datachannel
-    ├── inputs.rs        # Input relay ← control datachannel
+    ├── inputs.rs        # Input relay ← control datachannel, plus the
+    │                    #   mouse-mode tracker that chooses between
+    │                    #   absolute and relative pointer messages
     └── lifecycle.rs     # run_bridge_reaper: waits on the dead
                          #   signal or a bridge replacement, reaps
                          #   bridge + encoder once the bridge it

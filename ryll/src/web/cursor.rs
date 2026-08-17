@@ -37,7 +37,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Serialize;
 use shakenfist_spice_renderer::{ChannelEvent, CursorImage, SurfaceMirror};
-use shakenfist_spice_webrtc::WebrtcBridge;
+
+use super::control::{send_to_bridge, ControlSink};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, warn};
 
@@ -68,19 +69,19 @@ enum CursorMsg<'a> {
 /// position is corrected by the next `CursorPosition`.
 pub async fn run_cursor_relay(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
-    bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
+    control_tx: ControlSink,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
 ) {
     loop {
         match event_rx.recv().await {
             Ok(ChannelEvent::CursorShape(image)) => match encode_shape(&image) {
-                Ok(payload) => send_to_bridge(&bridge_slot, &payload).await,
+                Ok(payload) => send_to_bridge(&control_tx, payload),
                 Err(e) => warn!("web cursor: failed to encode shape: {}", e),
             },
             Ok(ChannelEvent::CursorPosition { x, y, visible }) => {
                 if !visible {
                     if let Ok(payload) = serde_json::to_vec(&CursorMsg::Hide) {
-                        send_to_bridge(&bridge_slot, &payload).await;
+                        send_to_bridge(&control_tx, payload);
                     }
                     continue;
                 }
@@ -99,7 +100,7 @@ pub async fn run_cursor_relay(
                         continue;
                     }
                 };
-                send_to_bridge(&bridge_slot, &payload).await;
+                send_to_bridge(&control_tx, payload);
                 // After re-showing the cursor (visible=true) make
                 // sure the overlay isn't hidden from a previous
                 // hide.  The browser only reveals the overlay
@@ -108,7 +109,7 @@ pub async fn run_cursor_relay(
                 // position keeps the overlay visible without
                 // flicker.
                 if let Ok(p) = serde_json::to_vec(&CursorMsg::Show) {
-                    send_to_bridge(&bridge_slot, &p).await;
+                    send_to_bridge(&control_tx, p);
                 }
             }
             Ok(_) => {}
@@ -165,19 +166,6 @@ fn encode_position(x: u16, y: u16, width: u32, height: u32) -> anyhow::Result<Ve
         y_norm: (y as f32) / h,
     };
     Ok(serde_json::to_vec(&msg)?)
-}
-
-/// Send a payload over the currently active bridge's control
-/// DC. If there's no bridge (no viewer connected) drop the
-/// message silently — the next `CursorShape` / `CursorPosition`
-/// will re-deliver state once a viewer attaches.
-async fn send_to_bridge(slot: &Arc<Mutex<Option<WebrtcBridge>>>, payload: &[u8]) {
-    let guard = slot.lock().await;
-    if let Some(bridge) = guard.as_ref() {
-        if let Err(e) = bridge.send_control(payload).await {
-            debug!("web cursor: send_control failed: {}", e);
-        }
-    }
 }
 
 #[cfg(test)]
