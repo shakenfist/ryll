@@ -602,6 +602,210 @@
     {
       "path": "docs/troubleshooting.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/features.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/libvirt-spice-recommendations.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/macos-metrics-verification.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/multi-mode-parity.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/spice-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-frontend.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-mode-internals.md",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "MERGE-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
+    },
+    {
+      "path": "README.md",
+      "author": "mikal"
+    },
+    {
+      "path": "STYLEGUIDE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/control.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/encoder_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bind_addrs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/test_client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/h264.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder/task.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/encoder",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/make-cloud-seed.sh",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/start-desktop-qemu.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/channels",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/app.js",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

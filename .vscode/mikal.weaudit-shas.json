@@ -5,6 +5,10 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "3ac56419fb6f3580acb5198997e3ac987300de4b",
+      "date": "2026-08-18"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
@@ -49,9 +53,37 @@
       "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
       "date": "2026-08-05"
     },
+    "AGENTS.md": {
+      "sha": "8df3b465acfd467da5245995c1443a2d348b6983",
+      "date": "2026-08-18"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "fbe810c11deb10e34e2b2a4ee0a8481c74bef746",
+      "date": "2026-08-18"
+    },
+    "MERGE-TEMPLATE.md": {
+      "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
+      "date": "2026-08-18"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "a017c28861a1ec3f59c4174f3ea573c441b9261e",
+      "date": "2026-08-18"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "81ecd826fd3a4eea3c6a87d92156f4d48059c2ab",
+      "date": "2026-08-18"
+    },
+    "README.md": {
+      "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
+      "date": "2026-08-18"
+    },
     "REVIEW-STATE-TEMPLATE.md": {
       "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
       "date": "2026-07-29"
+    },
+    "STYLEGUIDE.md": {
+      "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
+      "date": "2026-08-18"
     },
     "docs/channel-diagnostics-audit.md": {
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
@@ -77,6 +109,10 @@
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
     },
+    "docs/development.md": {
+      "sha": "4caf5a811e110f71f46a66219f7db95e7c426f4c",
+      "date": "2026-08-18"
+    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
@@ -85,6 +121,10 @@
       "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
     },
+    "docs/features.md": {
+      "sha": "4027fad8f45878989daa71ac06139b3ab9f33190",
+      "date": "2026-08-18"
+    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -92,6 +132,18 @@
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
+    },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "140f0967ffd948f38b168dcb85d541073ebcdc7a",
+      "date": "2026-08-18"
+    },
+    "docs/macos-metrics-verification.md": {
+      "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
+      "date": "2026-08-18"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "0ce51313f10dfac71f37e1f635704ccedc20f066",
+      "date": "2026-08-18"
     },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
@@ -109,9 +161,21 @@
       "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
       "date": "2026-08-17"
     },
+    "docs/spice-protocol.md": {
+      "sha": "8c8f41105dfd43a3c380c9738dae330f0e13e3e0",
+      "date": "2026-08-18"
+    },
     "docs/troubleshooting.md": {
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
+    },
+    "docs/web-frontend.md": {
+      "sha": "f35462ac4c61419d48d392f52a51e3c66eccd12c",
+      "date": "2026-08-18"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "945d2e7a26389242d43b84cd5dc27b3aa8a35b59",
+      "date": "2026-08-18"
     },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
@@ -125,13 +189,29 @@
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
     },
+    "ryll/src/app.rs": {
+      "sha": "f5bded842de2de0baa20ec7273d803e3bd315d48",
+      "date": "2026-08-18"
+    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
       "date": "2026-07-26"
     },
+    "ryll/src/bugreport.rs": {
+      "sha": "4a708eceb2bc06d01f9e5c713f94d54e2d3ee8d5",
+      "date": "2026-08-18"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "521bd6cde30efaaabe9393e1f77ea0722e1629cf",
+      "date": "2026-08-18"
+    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
       "date": "2026-07-26"
+    },
+    "ryll/src/config.rs": {
+      "sha": "14045efe189426435316929a461afc32176278b0",
+      "date": "2026-08-18"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -140,6 +220,10 @@
     "ryll/src/input_egui.rs": {
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
+    },
+    "ryll/src/main.rs": {
+      "sha": "472098fd3630fce87fcd08144614423aad1964a5",
+      "date": "2026-08-18"
     },
     "ryll/src/notifications.rs": {
       "sha": "288c18f9f3f8422fbbe3bedc35b88207449f5e07",
@@ -157,6 +241,10 @@
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
     },
+    "ryll/src/web/assets/app.js": {
+      "sha": "b9aa90bf0421a510eeb9dcf793995e32250981ce",
+      "date": "2026-08-18"
+    },
     "ryll/src/web/assets/index.html": {
       "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
       "date": "2026-08-08"
@@ -164,6 +252,34 @@
     "ryll/src/web/audio.rs": {
       "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
       "date": "2026-07-26"
+    },
+    "ryll/src/web/control.rs": {
+      "sha": "7b48cc2d8f5b848e9bb9c95b3755d5d255075e8f",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/cursor.rs": {
+      "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/inputs.rs": {
+      "sha": "a81232937c738b4d05158d667641d358320f0668",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "0b42f39fc6219b2b6bf721f8476754c4d0ed2a57",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/mod.rs": {
+      "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "07f11e9090706aed51d87d172271df7a4cbadc53",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "35e57c54c1b00f1944dcb603d5fb104d8631da35",
+      "date": "2026-08-18"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -293,6 +409,10 @@
       "sha": "829bdc44838acc1a85321b97d8f360ac23d01efb",
       "date": "2026-07-18"
     },
+    "shakenfist-spice-renderer/src/channels/inputs.rs": {
+      "sha": "1280d56f9eab14ba6064eea16306f4106d2555e2",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-renderer/src/channels/main_channel.rs": {
       "sha": "96687566c03f82f8860db66b9772fb7202dedb09",
       "date": "2026-07-19"
@@ -353,9 +473,25 @@
       "sha": "f7ebd1659b4fd7239df78d418be8ede3f393a52e",
       "date": "2026-07-21"
     },
+    "shakenfist-spice-renderer/src/encoder/h264.rs": {
+      "sha": "5bea35f6284d9fe3b9edb8f0246861a255c040e4",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/src/encoder/mod.rs": {
+      "sha": "62fd67b8792f8630769b1fd86e9402c6b37d0ed9",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/src/encoder/task.rs": {
+      "sha": "7020c30c224f81aba0616670c4dabce481c72a1f",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
       "date": "2026-07-21"
+    },
+    "shakenfist-spice-renderer/src/lib.rs": {
+      "sha": "5c9380c706a38baf82dd19d2bde72fdd856fc7d7",
+      "date": "2026-08-18"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
@@ -421,6 +557,14 @@
       "sha": "a5ae5409b7c1682b5bf4c521202abf1c9287f9ff",
       "date": "2026-07-27"
     },
+    "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
+      "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
+      "sha": "2c7e4206b8cb3cab44e87a74ee28d5fe35d35fcb",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-usbredir/README.md": {
       "sha": "0187a350db60c8203eb81818b207d89bc35ea77d",
       "date": "2026-08-02"
@@ -445,9 +589,33 @@
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
     },
+    "shakenfist-spice-webrtc/src/bind_addrs.rs": {
+      "sha": "8d2525a486113f05153c8fe1f021fca04fb14adc",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "694ab1e37223cbee0f84a0b51f279b3efae1e7db",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/src/lib.rs": {
+      "sha": "035b468c5e94598bb6174aaf0fcb50e0e1991959",
+      "date": "2026-08-18"
+    },
     "shakenfist-spice-webrtc/src/sticky.rs": {
       "sha": "78e4793c82858d1b6f3a40415d7dca3f419a3139",
       "date": "2026-08-15"
+    },
+    "shakenfist-spice-webrtc/src/test_client.rs": {
+      "sha": "b77ce81cadd559b48590b8b54ee72bcd5d1808d5",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
+      "sha": "fad8f97e7a71d809f4fbc1988ae0d12378811e08",
+      "date": "2026-08-18"
+    },
+    "shakenfist-spice-webrtc/tests/loopback.rs": {
+      "sha": "52bd9b4b2428eba95f3f7fcec71eb33ac3098298",
+      "date": "2026-08-18"
     },
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
@@ -481,6 +649,10 @@
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
       "date": "2026-07-26"
     },
+    "tools/make-cloud-seed.sh": {
+      "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
+      "date": "2026-08-18"
+    },
     "tools/pcap-inspect.py": {
       "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
       "date": "2026-07-26"
@@ -508,6 +680,10 @@
     "tools/sign-release-tag.sh": {
       "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
       "date": "2026-07-26"
+    },
+    "tools/start-desktop-qemu.sh": {
+      "sha": "18e1d798477e9750a82a03f2beeb2f2a1f72cc39",
+      "date": "2026-08-18"
     },
     "tools/tag-release.sh": {
       "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",
