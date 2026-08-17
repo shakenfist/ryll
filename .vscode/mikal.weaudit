@@ -682,6 +682,34 @@
     {
       "path": "ryll/src/main.rs",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/control.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/cursor.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/mod.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

@@ -245,6 +245,34 @@
       "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
       "date": "2026-07-26"
     },
+    "ryll/src/web/control.rs": {
+      "sha": "7b48cc2d8f5b848e9bb9c95b3755d5d255075e8f",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/cursor.rs": {
+      "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/inputs.rs": {
+      "sha": "a81232937c738b4d05158d667641d358320f0668",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "0b42f39fc6219b2b6bf721f8476754c4d0ed2a57",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/mod.rs": {
+      "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "07f11e9090706aed51d87d172271df7a4cbadc53",
+      "date": "2026-08-18"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "35e57c54c1b00f1944dcb603d5fb104d8631da35",
+      "date": "2026-08-18"
+    },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
       "date": "2026-08-02"
