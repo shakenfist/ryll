@@ -479,7 +479,7 @@ is Linux-only for the MVP; see [portability](portability.md)).
 
 ## Project status
 
-`--web` mode ships end-to-end: display, audio, inputs,
+The `--web` mode ships end-to-end: display, audio, inputs,
 cursor, reconnect, CI packaging, native TLS, and operator
 documentation. See [the web frontend plan](plans/PLAN-web-frontend.md)
 for the development history.

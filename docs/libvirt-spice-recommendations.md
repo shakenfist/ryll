@@ -85,7 +85,9 @@ virtio-gpu does not exhibit.
 
 **Resolution cliff.** Measured on Debian 11 with QXL across four
 guest resolutions and three VRAM allocations, video streaming
-degrades sharply between roughly 1280 and 1600 pixels wide:
+degrades sharply between roughly 1280 and 1600 pixels wide. The
+raw evidence behind this section is in
+[`PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md`](plans/PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md).
 
 | Guest resolution | Video streaming behaviour |
 |---|---|
@@ -119,10 +121,14 @@ re-engaging streaming for the rest of the session. This is why the
 1920×1440 workload at 64 MiB, 128 MiB, and 256 MiB VRAM does not
 restore stable streaming at any of the three sizes:
 
-- **VRAM does not unlock streaming.** At all three sizes the
-  server still creates a stream, still tears it down, and still
-  fails to re-engage — so a `vram` bump on its own does not
-  restore video performance.
+- **VRAM does not unlock streaming.** None of the three sizes
+  produced stable video, so a `vram` bump on its own does not
+  restore video performance. The three-size comparison predates
+  the logging fix described below, so it cannot distinguish
+  "no stream was created" from "the stream was invisible to the
+  instrumentation"; the create-then-teardown-then-never-recreate
+  cycle in the table above comes from the one 1920×1440 run with
+  working server-side debug logging.
 - **VRAM plausibly affects the OOM rate**, and therefore stream
   *survival* and *re-engagement*, indirectly. Whether a larger
   `vram` reduces OOM frequency enough to keep a stream alive is

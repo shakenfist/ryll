@@ -12,19 +12,21 @@ The Mach FFI surface in `metrics.rs` cannot be compiled on
 the Linux devcontainer, so the platform-independent unit
 tests for delta math and JSON shape do not catch FFI-level
 mistakes. The `#[cfg(target_os = "macos")]`-gated tests do
-cover the FFI shape end-to-end, but nothing runs them
-automatically: the macOS cell of `.github/workflows/ci.yml`
-only builds ryll, never `cargo test`. Lifting that is
-[`PLAN-ci-platform-matrix.md`](plans/PLAN-ci-platform-matrix.md),
-which has not started.
+cover the FFI shape end-to-end, and CI does run them: the
+macOS cell of the build matrix in
+`.github/workflows/ci.yml` runs `cargo test --workspace`
+with no `runner.os` guard. That job is in the merge tier,
+though, so its `if:` restricts it to `merge_group` and
+`workflow_dispatch` events — the macOS test signal arrives
+when a change is enqueued to land, not on every push to a
+pull request.
 
-So until macOS CI grows a test step, these six tests plus
-the soak are the *only* thing that has ever executed the
-Mach code paths. Even afterwards they will still be worth
-running, because automated tests cannot judge the
-"plausibility" of the values — CPU% against Activity
-Monitor, RSS against real memory usage, port-leak safety
-over hours.
+What no automated test can do is judge whether the values
+are *plausible*: CPU% against Activity Monitor, RSS
+against real memory usage, port-leak safety over hours.
+That judgement is the whole point of the six tests and the
+soak below, so they stay worth running even though the FFI
+shape itself is covered automatically.
 
 ## Prerequisites
 
