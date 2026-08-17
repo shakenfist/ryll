@@ -690,6 +690,14 @@
     {
       "path": "docs/troubleshooting.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/web-frontend.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/web-mode-internals.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

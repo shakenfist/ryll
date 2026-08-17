@@ -137,6 +137,14 @@
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
     },
+    "docs/web-frontend.md": {
+      "sha": "7640e546649f50038f9f4f40ec1f78dd093f830f",
+      "date": "2026-08-17"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "761bd08ac337a2f752baade21a0d463d2fc0089a",
+      "date": "2026-08-17"
+    },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
       "date": "2026-08-02"
