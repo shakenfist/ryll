@@ -43,6 +43,15 @@
     const videoEl = document.getElementById('video');
     const cursorEl = document.getElementById('cursor');
 
+    // SPICE mouse modes (shakenfist-spice-protocol constants.rs).
+    const MOUSE_MODE_SERVER = 1;
+    const MOUSE_MODE_CLIENT = 2;
+    // Corrected by the server's `mouse-mode` message, which arrives
+    // once per connection right after the answer. Defaults to client
+    // mode because that is what any guest running vdagent
+    // negotiates.
+    let mouseMode = MOUSE_MODE_CLIENT;
+
     const params = new URLSearchParams(window.location.search);
     const TOKEN = params.get('token');
     if (!TOKEN) {
@@ -285,6 +294,16 @@
         const norm = pointerToNorm(e);
         if (!norm) return;
         sendCtrl({ type: 'pointer-move', x_norm: norm.x_norm, y_norm: norm.y_norm });
+        // In client mouse mode the viewer owns the pointer
+        // position, and a SPICE server in that mode sends few or no
+        // cursor-position updates because it expects the client to
+        // already know. Drawing the overlay only from what the
+        // server reports leaves it frozen wherever it last was; the
+        // GUI makes the same distinction in ryll/src/app.rs.
+        if (mouseMode === MOUSE_MODE_CLIENT) {
+            cursorLastNorm = { x: norm.x_norm, y: norm.y_norm };
+            positionCursor(norm.x_norm, norm.y_norm);
+        }
     });
 
     videoEl.addEventListener('mousedown', (e) => {
@@ -426,9 +445,22 @@
                 cursorHotX = msg.hot_x ?? 0;
                 cursorHotY = msg.hot_y ?? 0;
                 cursorEl.hidden = false;
+                // Only now is there a SPICE cursor worth preferring
+                // over the browser's own. Until this point the host
+                // cursor stays visible; a QXL guest draws its
+                // pointer as a hardware cursor, so it is not in the
+                // video at all, and hiding the host cursor before
+                // having a replacement leaves the viewer with no
+                // pointer whatsoever.
+                videoEl.classList.add('spice-cursor');
                 if (cursorLastNorm) {
                     positionCursor(cursorLastNorm.x, cursorLastNorm.y);
                 }
+                break;
+            case 'mouse-mode':
+                mouseMode = msg.mode;
+                console.log('[ryll] mouse mode:', mouseMode === MOUSE_MODE_SERVER
+                    ? 'server (relative)' : 'client (absolute)');
                 break;
             case 'cursor-pos':
                 cursorLastNorm = { x: msg.x_norm, y: msg.y_norm };
@@ -455,6 +487,12 @@
     // ---------------------------------------------------------------
     async function connect() {
         setStatus('Negotiating…');
+
+        // Drop any cursor state from the previous session: the new
+        // one re-sends a shape if it has one, and until it does the
+        // host cursor is the only pointer the viewer has.
+        cursorEl.hidden = true;
+        videoEl.classList.remove('spice-cursor');
 
         // Build a brand-new PC each time so we never reuse a failed
         // connection object (some browsers cache failed PCs briefly).

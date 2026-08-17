@@ -26,9 +26,16 @@ exchanges SDP via `POST /offer`, and starts streaming.
 
 - **Display**: SPICE display channel rendered in the browser
   via H.264 over WebRTC.
-- **Inputs**: keyboard and mouse from the browser to SPICE.
-- **Cursor**: rendered as a `<img>` overlay above the
-  `<video>`; the host browser cursor is hidden.
+- **Inputs**: keyboard and mouse from the browser to SPICE, in
+  both mouse modes — absolute positions when the guest runs
+  vdagent, relative deltas when it does not.
+- **Cursor**: rendered as an `<img>` overlay above the
+  `<video>`, positioned from the viewer's own pointer in client
+  mouse mode and from the guest's reported position in server
+  mode. The host browser cursor is hidden only once the SPICE
+  server has actually sent a cursor shape, so a guest that sends
+  none leaves you with the ordinary browser pointer rather than
+  with no pointer at all.
 - **Audio**: Opus passthrough from SPICE (no re-encoding) when
   the server negotiated Opus. PCM-only SPICE servers currently
   produce silent audio (a warning is logged).

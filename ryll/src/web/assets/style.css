@@ -3,13 +3,20 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
 #enable-audio { position: absolute; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
 #enable-audio:hover { background: rgba(255, 255, 255, 0.25); }
 #enable-audio[hidden] { display: none; }
-#video { display: block; width: 100vw; height: 100vh; object-fit: contain; cursor: none; }
+#video { display: block; width: 100vw; height: 100vh; object-fit: contain; }
 /* SPICE cursor overlay rendered above the <video> element. The
    server forwards CursorShape (PNG-encoded, base64'd) and
    CursorPosition (normalised) over the control DC; app.js
    denormalises the position over the actually-rendered video
-   area (letterbox-aware) before placing the overlay. The host
-   browser cursor is hidden over the video so the overlay wins. */
+   area (letterbox-aware) before placing the overlay.
+
+   The host cursor is hidden only once a real SPICE cursor shape
+   has arrived, at which point app.js adds .spice-cursor. Hiding it
+   unconditionally is wrong: a QXL guest draws its pointer as a
+   hardware cursor, so the pointer is never in the video stream,
+   and a server that sends no shape at all (which happens) would
+   leave the viewer with no pointer of any kind. */
+#video.spice-cursor { cursor: none; }
 #reconnect-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 0.6rem 1.2rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 1rem; cursor: pointer; z-index: 20; }
 #reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
 #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }

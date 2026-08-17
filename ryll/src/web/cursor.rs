@@ -38,6 +38,8 @@ use base64::Engine;
 use serde::Serialize;
 use shakenfist_spice_renderer::{ChannelEvent, CursorImage, SurfaceMirror};
 use shakenfist_spice_webrtc::WebrtcBridge;
+
+use super::control::send_to_bridge;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{debug, warn};
 
@@ -171,15 +173,6 @@ fn encode_position(x: u16, y: u16, width: u32, height: u32) -> anyhow::Result<Ve
 /// DC. If there's no bridge (no viewer connected) drop the
 /// message silently — the next `CursorShape` / `CursorPosition`
 /// will re-deliver state once a viewer attaches.
-async fn send_to_bridge(slot: &Arc<Mutex<Option<WebrtcBridge>>>, payload: &[u8]) {
-    let guard = slot.lock().await;
-    if let Some(bridge) = guard.as_ref() {
-        if let Err(e) = bridge.send_control(payload).await {
-            debug!("web cursor: send_control failed: {}", e);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

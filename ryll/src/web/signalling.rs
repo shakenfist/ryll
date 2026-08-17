@@ -404,6 +404,21 @@ pub async fn post_offer(
     // later bridge. See `crate::web::lifecycle::run_bridge_reaper`.
     state.bridge_replaced.notify_one();
 
+    // Catch the new browser up on the mouse mode. The SPICE server
+    // announces it at session-init, which is normally long before
+    // any browser connects, so the tracker's own broadcast of the
+    // change has already been and gone by the time there is a
+    // bridge to send it over. Without this the browser would sit on
+    // its default until the mode next changed — which, on a healthy
+    // session, is never.
+    crate::web::control::send_msg(
+        &state.bridge_slot,
+        &crate::web::control::ControlMsg::MouseMode {
+            mode: state.mouse_mode.load(Ordering::Relaxed),
+        },
+    )
+    .await;
+
     info!("web: /offer answered (answer_sdp_len={})", answer_sdp.len());
     Ok(Json(OfferRes {
         res_type: "answer",

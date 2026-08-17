@@ -35,8 +35,11 @@ use std::sync::Arc;
 use serde::Deserialize;
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_webrtc::WebrtcBridge;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, info, warn};
+
+use super::control::{send_msg, ControlMsg};
 
 /// Wire-format browser → server input messages. The `type`
 /// discriminator matches the JSON envelopes built by `app.js`.
@@ -88,12 +91,19 @@ enum BrowserMsg {
 pub async fn run_mouse_mode_tracker(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
     mouse_mode: Arc<AtomicU32>,
+    bridge_slot: Arc<Mutex<Option<WebrtcBridge>>>,
 ) {
     loop {
         match event_rx.recv().await {
             Ok(ChannelEvent::MouseMode(mode)) => {
                 mouse_mode.store(mode, Ordering::Relaxed);
                 info!("web inputs: mouse mode is now {}", mode);
+                // The browser draws the cursor differently per
+                // mode, so it needs to know too. A browser that
+                // connects after this point is caught up by
+                // `post_offer`, which sends the current mode once
+                // the bridge is installed.
+                send_msg(&bridge_slot, &ControlMsg::MouseMode { mode }).await;
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -449,7 +459,10 @@ mod tests {
     async fn mouse_mode_tracker_records_the_latest_mode() {
         let (event_tx, event_rx) = broadcast::channel::<ChannelEvent>(8);
         let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
-        let handle = tokio::spawn(run_mouse_mode_tracker(event_rx, mode.clone()));
+        // No bridge: the tracker's send to the browser is a no-op,
+        // which is the normal state before anyone connects.
+        let slot = Arc::new(Mutex::new(None));
+        let handle = tokio::spawn(run_mouse_mode_tracker(event_rx, mode.clone(), slot));
 
         event_tx
             .send(ChannelEvent::MouseMode(MOUSE_MODE_SERVER))

@@ -743,6 +743,7 @@ fn run_web(
         let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
             mouse_mode_event_rx,
             state.mouse_mode.clone(),
+            state.bridge_slot.clone(),
         ));
 
         // Phase 6b: spawn the bridge reaper. It watches the
