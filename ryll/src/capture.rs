@@ -313,6 +313,14 @@ async fn pcap_writer_task(
 
 // ── Video capture ───────────────────────────────────────
 
+/// Nominal frame rate handed to the H.264 encoder's rate
+/// controller. Capture has no cadence of its own — it encodes
+/// whatever the SPICE session delivers, whenever it arrives — but
+/// the encoder needs a number to budget against, and the MP4
+/// sample writer already assumes ~30fps (the 33ms placeholder
+/// duration on the first sample, below).
+const CAPTURE_NOMINAL_FPS: u32 = 30;
+
 /// H.264 video writer with lazy initialisation.
 ///
 /// Created on the first frame() call once we know the
@@ -344,7 +352,7 @@ impl VideoWriter {
         let w = width & !1;
         let h = height & !1;
 
-        let mut encoder = match H264Encoder::new(w, h) {
+        let mut encoder = match H264Encoder::new(w, h, CAPTURE_NOMINAL_FPS) {
             Ok(e) => e,
             Err(e) => {
                 warn!("capture: failed to create H.264 encoder: {}", e);

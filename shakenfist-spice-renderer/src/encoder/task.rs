@@ -165,7 +165,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn task_emits_frames_with_propagated_timestamps() {
-        let encoder = H264Encoder::new(64, 64).expect("init");
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
         let source = CountedFrameSource::new(64, 64, 5);
         let (tx, mut rx) = mpsc::channel(16);
         let (ctl_tx, ctl_rx) = mpsc::channel(4);
@@ -202,7 +202,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn request_keyframe_marks_next_frame_idr() {
-        let encoder = H264Encoder::new(64, 64).expect("init");
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
         let source = CountedFrameSource::new(64, 64, 10);
         let (tx, mut rx) = mpsc::channel(16);
         let (ctl_tx, ctl_rx) = mpsc::channel(4);
@@ -250,7 +250,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stop_terminates_task() {
-        let encoder = H264Encoder::new(64, 64).expect("init");
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
         let source = CountedFrameSource::new(64, 64, 1000);
         let (tx, _rx) = mpsc::channel(16);
         let (ctl_tx, ctl_rx) = mpsc::channel(4);
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn rejects_zero_fps() {
         // Run the inner `run` directly to sidestep the tokio runtime.
-        let encoder = H264Encoder::new(64, 64).expect("init");
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
         let source = CountedFrameSource::new(64, 64, 1);
         let (tx, _rx) = mpsc::channel(1);
         let (_ctl_tx, ctl_rx) = mpsc::channel(1);

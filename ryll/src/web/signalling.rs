@@ -154,7 +154,7 @@ impl EncoderInfra {
         }
 
         // Build new pipeline at the SPICE-derived dimensions.
-        let encoder = H264Encoder::new(width, height)
+        let encoder = H264Encoder::new(width, height, ENCODER_FPS)
             .map_err(|e| anyhow::anyhow!("H264Encoder::new: {}", e))?;
         let source = RealFrameSource::new(surface_mirror.clone());
         let (frame_tx, frame_rx) = mpsc::channel::<EncodedFrame>(32);

@@ -12,6 +12,43 @@
 //! step 2c).
 
 use anyhow::Result;
+use openh264::encoder::{BitRate, EncoderConfig, FrameRate, UsageType};
+use openh264::OpenH264API;
+
+/// Bits per pixel per frame used to derive the encoder's target
+/// bitrate, in thousandths (so 100 means 0.1 bits per pixel per
+/// frame).
+///
+/// openh264's own default is a flat 120 kbit/s whatever the
+/// resolution, which is a webcam-era number: a 1024x768 desktop at
+/// 30fps through 120 kbit/s is unreadable. 0.1 bits per pixel per
+/// frame gives ~2.4 Mbit/s at 1024x768@30 and ~6.2 Mbit/s at
+/// 1920x1080@30, inside the 0.2-50 Mbit/s range we have measured
+/// for real SPICE console traffic.
+///
+/// Held in thousandths, and the derivation done in integers,
+/// because a float version rounds unpredictably at the `as u32`
+/// truncation and makes the policy hard to state in a test.
+const MILLIBITS_PER_PIXEL_PER_FRAME: u64 = 100;
+
+/// Floor for the derived bitrate. Small surfaces would otherwise
+/// derive a target so low that even a static desktop cannot be
+/// coded cleanly.
+const MIN_BITRATE_BPS: u32 = 1_000_000;
+
+/// Ceiling for the derived bitrate, so a 4K surface cannot ask for
+/// more bandwidth than a viewer is likely to have.
+const MAX_BITRATE_BPS: u32 = 20_000_000;
+
+/// Derive a target bitrate from the surface size and frame rate.
+///
+/// Kept separate from [`H264Encoder::new`] so the policy can be
+/// tested without constructing an encoder.
+fn target_bitrate_bps(width: u32, height: u32, fps: u32) -> u32 {
+    let pixels_per_second = (width as u64) * (height as u64) * (fps as u64);
+    let bps = pixels_per_second * MILLIBITS_PER_PIXEL_PER_FRAME / 1000;
+    bps.clamp(MIN_BITRATE_BPS as u64, MAX_BITRATE_BPS as u64) as u32
+}
 
 /// One encoded frame's NAL units in Annex-B framing.
 #[derive(Debug, Clone)]
@@ -85,12 +122,27 @@ pub struct H264Encoder {
 }
 
 impl H264Encoder {
-    /// Create a new encoder for `width × height` RGBA frames.
+    /// Create a new encoder for `width × height` RGBA frames fed at
+    /// `fps` frames per second.
     ///
     /// openh264 requires even dimensions, so both values are rounded
     /// down to the nearest even number. Returns `Err` if either
-    /// rounded dimension is 0.
-    pub fn new(width: u32, height: u32) -> Result<Self> {
+    /// rounded dimension is 0, or if `fps` is 0.
+    ///
+    /// # Why this does not use `Encoder::new()`
+    ///
+    /// `Encoder::new()` takes openh264's default `EncoderConfig`,
+    /// which is wrong for a desktop in three separate ways: a flat
+    /// 120 kbit/s target bitrate, a `max_frame_rate` of 0 (so rate
+    /// control does not know the cadence it is budgeting for), and
+    /// `UsageType::CameraVideoRealTime`, which is tuned for camera
+    /// noise rather than for the sharp edges and large flat regions
+    /// of a UI. All three are set explicitly here.
+    ///
+    /// `fps` is a parameter rather than a constant because the
+    /// caller owns the frame cadence — `EncoderTask` is handed an
+    /// `fps_cap` and the rate controller needs the same number.
+    pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
         let w = width & !1;
         let h = height & !1;
         if w == 0 || h == 0 {
@@ -100,7 +152,16 @@ impl H264Encoder {
                 height
             );
         }
-        let inner = openh264::encoder::Encoder::new()
+        if fps == 0 {
+            anyhow::bail!("H264Encoder: fps must be > 0");
+        }
+
+        let config = EncoderConfig::new()
+            .bitrate(BitRate::from_bps(target_bitrate_bps(w, h, fps)))
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
+            .usage_type(UsageType::ScreenContentRealTime);
+
+        let inner = openh264::encoder::Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| anyhow::anyhow!("H264Encoder: openh264 init failed: {}", e))?;
         Ok(Self {
             inner,
@@ -216,12 +277,50 @@ mod tests {
     #[test]
     fn rejects_zero_dimensions_after_rounding() {
         // 1x1 rounds down to 0x0.
-        assert!(H264Encoder::new(1, 1).is_err());
+        assert!(H264Encoder::new(1, 1, 30).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_fps() {
+        assert!(H264Encoder::new(64, 64, 0).is_err());
+    }
+
+    #[test]
+    fn bitrate_scales_with_pixels_and_clamps_at_both_ends() {
+        // A desktop-sized surface has to land far above openh264's
+        // own 120 kbit/s default; that default is the bug this
+        // policy exists to fix.
+        assert_eq!(target_bitrate_bps(1024, 768, 30), 2_359_296);
+        assert!(target_bitrate_bps(1920, 1080, 30) > target_bitrate_bps(1024, 768, 30));
+
+        // Tiny surfaces hit the floor, 4K hits the ceiling.
+        assert_eq!(target_bitrate_bps(64, 64, 30), MIN_BITRATE_BPS);
+        assert_eq!(target_bitrate_bps(3840, 2160, 30), MAX_BITRATE_BPS);
+    }
+
+    #[test]
+    fn sps_still_advertises_baseline_profile() {
+        // `negotiated_h264_payload_type` in shakenfist-spice-webrtc
+        // prefers an SDP `profile-level-id` beginning `42`, on the
+        // strength of openh264 resolving `uiProfileIdc` to
+        // PRO_BASELINE when nothing enables CABAC. Choosing
+        // ScreenContentRealTime must not quietly move us off
+        // baseline, or the payload type we stamp stops agreeing
+        // with the bitstream we send.
+        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
+        let frame = enc.encode(&black_frame(64, 64), false).expect("encode");
+        let sps = frame
+            .nal_units
+            .iter()
+            .find(|n| n[4] & 0x1F == 7)
+            .expect("SPS present");
+        // NAL: [0,0,0,1, header, profile_idc, ...]
+        assert_eq!(sps[5], 0x42, "profile_idc should still be baseline");
     }
 
     #[test]
     fn first_frame_emits_idr_with_sps_and_pps() {
-        let mut enc = H264Encoder::new(64, 64).expect("init");
+        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
         // First frame is implicitly an IDR (openh264 default).
         let frame = enc.encode(&black_frame(64, 64), false).expect("encode");
         assert!(frame.keyframe, "first frame should be a keyframe");
@@ -235,7 +334,7 @@ mod tests {
 
     #[test]
     fn subsequent_frames_smaller_than_keyframe() {
-        let mut enc = H264Encoder::new(64, 64).expect("init");
+        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
         let kf = enc.encode(&black_frame(64, 64), false).expect("kf");
         let p1 = enc.encode(&black_frame(64, 64), false).expect("p1");
 
@@ -254,7 +353,7 @@ mod tests {
 
     #[test]
     fn forced_keyframe_marks_idr() {
-        let mut enc = H264Encoder::new(64, 64).expect("init");
+        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
         let _ = enc.encode(&black_frame(64, 64), false).expect("kf");
         let _ = enc.encode(&black_frame(64, 64), false).expect("p1");
         let kf2 = enc.encode(&black_frame(64, 64), true).expect("forced kf");
@@ -263,7 +362,7 @@ mod tests {
 
     #[test]
     fn annex_b_start_codes_present() {
-        let mut enc = H264Encoder::new(64, 64).expect("init");
+        let mut enc = H264Encoder::new(64, 64, 30).expect("init");
         let frame = enc.encode(&black_frame(64, 64), false).expect("encode");
         for nal in &frame.nal_units {
             assert!(nal.len() >= 5, "NAL too short: {} bytes", nal.len());

@@ -55,7 +55,7 @@ const STAPA_NALU_TYPE: u8 = 24;
 
 #[test]
 fn webrtc_h264_payloader_accepts_encoder_output() {
-    let mut encoder = H264Encoder::new(64, 64).expect("encoder init");
+    let mut encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
     let mut source = SyntheticFrameSource::new(64, 64);
 
     // Encode 3 frames: the first will be an IDR (with SPS/PPS),

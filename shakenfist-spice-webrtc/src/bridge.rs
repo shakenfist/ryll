@@ -2179,7 +2179,7 @@ mod tests {
         .expect("bridge");
 
         // Encoder pipeline driven by a synthetic source.
-        let encoder = H264Encoder::new(64, 64).expect("encoder init");
+        let encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
         let source = SyntheticFrameSource::new(64, 64);
         let (frame_tx, frame_rx) = mpsc::channel(32);
         let (enc_ctl_tx, enc_ctl_rx) = mpsc::channel(4);

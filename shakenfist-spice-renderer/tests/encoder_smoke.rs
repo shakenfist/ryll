@@ -40,7 +40,7 @@ const MIN_FRAMES: usize = if cfg!(debug_assertions) { 10 } else { 60 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn encoder_smoke_writes_playable_h264() {
-    let encoder = H264Encoder::new(WIDTH, HEIGHT).expect("encoder init");
+    let encoder = H264Encoder::new(WIDTH, HEIGHT, FPS).expect("encoder init");
     let source = SyntheticFrameSource::new(WIDTH, HEIGHT);
     let (out_tx, mut out_rx) = mpsc::channel::<EncodedFrame>(64);
     let (ctl_tx, ctl_rx) = mpsc::channel::<EncoderControl>(4);
