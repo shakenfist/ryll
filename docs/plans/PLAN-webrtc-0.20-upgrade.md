@@ -299,8 +299,16 @@ minutes.
 
 - A real browser session against a real SPICE guest, held long
   enough to see steady-state behaviour, with the latency HUD and
-  runtime metrics captured.
+  runtime metrics captured. **Listen to the audio** while it is
+  open: phase 02's browser session confirmed the playback channel
+  negotiated Opus but nobody confirmed sound by ear, so that
+  Definition-of-done clause is inherited here.
 - Chrome and Firefox at minimum; Safari if a Mac is available.
+  **Firefox is a known blocker inherited from phase 02**: a Firefox
+  that does not offer H.264 gets no video at all, because ryll
+  encodes H.264 only. Land #289 (tell the viewer) before soaking,
+  and settle whether a Firefox with a working OpenH264 plugin is
+  enough for this criterion or whether ryll needs a second codec.
 - Compare RSS and CPU against a 0.17 baseline captured before
   the bump — take that baseline during phase 01 while we are
   still on the old version.
@@ -318,7 +326,7 @@ minutes.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Complete — baseline captured, 1g agrees within noise |
-| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Code complete — awaiting the browser session, the one check the test suite cannot stand in for |
+| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Complete — Chromium session on `7e2fb58e` confirms the bind address. Firefox has no video, for a reason that is not a port regression (#289, #290); it is phase 04's gate, as is the audio check nobody performed by ear |
 | 3. Socket binding configuration | PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md | Not started |
 | 4. Soak validation and docs | PLAN-webrtc-0.20-upgrade-phase-04-soak.md | Not started |
 
