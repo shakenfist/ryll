@@ -632,6 +632,22 @@ fn run_web(
         let repaint_notify = Arc::new(tokio::sync::Notify::new());
         let volume_control = shakenfist_spice_renderer::channels::VolumeControl::new();
 
+        // Subscribe every long-lived consumer of the event bus
+        // *before* the session that produces the events is spawned.
+        //
+        // A `broadcast::Receiver` only sees what is sent after it was
+        // created, and the events these three care about — the first
+        // surface, the first cursor shape, and the negotiated mouse
+        // mode — all arrive during session-init. Subscribing after
+        // the spawn means the ordering is decided by how long a TCP
+        // connect, link handshake and auth take, which is a race that
+        // happens to be won by a wide margin rather than one that
+        // cannot be lost. Losing it would strand the mouse mode at
+        // its default for the whole session with nothing logged.
+        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
+        let cursor_event_rx = event_broadcast_tx.subscribe();
+        let mouse_mode_event_rx = event_broadcast_tx.subscribe();
+
         // Spawn the renderer's session orchestrator. The web
         // mode has no clipboard backend (clipboard sync is
         // out of scope for the MVP) and never enables paste-as-
@@ -687,7 +703,6 @@ fn run_web(
         // operational problem it's a Phase 6 perf item
         // (larger broadcast capacity or a backpressure scheme).
         let mirror_for_task = surface_mirror.clone();
-        let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
         let mirror_handle = tokio::spawn(async move {
             loop {
                 match event_rx_for_mirror.recv().await {
@@ -715,18 +730,11 @@ fn run_web(
         // raised SHUTDOWN_REQUESTED, or axum::serve errored)
         // we tear the rest down before returning.
         //
-        // Step 5d: clone the bus subscription + surface mirror
-        // handle here (before `with_channels` moves the broadcast
-        // sender) so we can spawn the cursor relay against the
-        // same `bridge_slot` the signalling handler installs into.
-        let cursor_event_rx = event_broadcast_tx.subscribe();
+        // Step 5d: the cursor relay runs against the same
+        // `bridge_slot` the signalling handler installs into. Its bus
+        // subscription, and the mouse-mode tracker's, were taken
+        // before the session was spawned; see the comment there.
         let cursor_mirror = surface_mirror.clone();
-        // Subscribed here, before `with_channels` moves the
-        // broadcast sender. The mouse mode arrives at session-init,
-        // which has usually already happened by the time a browser
-        // posts its first offer, so this subscription has to exist
-        // for the whole run rather than per bridge.
-        let mouse_mode_event_rx = event_broadcast_tx.subscribe();
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
             resize_tx,
