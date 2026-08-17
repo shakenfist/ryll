@@ -662,6 +662,26 @@
     {
       "path": "docs/multi-mode-parity.md",
       "author": "mikal"
+    },
+    {
+      "path": "docs/design-decisions.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/index.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/releasing.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/rendering-pipeline.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/session-lifecycle.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

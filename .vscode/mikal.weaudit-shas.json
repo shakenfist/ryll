@@ -69,6 +69,10 @@
       "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
       "date": "2026-08-17"
     },
+    "docs/design-decisions.md": {
+      "sha": "e1545e351e993a569080b6b166edfc376b9eeb98",
+      "date": "2026-08-17"
+    },
     "docs/development-macos.md": {
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
@@ -87,6 +91,10 @@
     },
     "docs/features.md": {
       "sha": "199a6b296e2b0c1ca60301f9495ccf79a2467679",
+      "date": "2026-08-17"
+    },
+    "docs/index.md": {
+      "sha": "1f48defae407c147b8629ee260c990dc20704137",
       "date": "2026-08-17"
     },
     "docs/installation.md": {
@@ -108,6 +116,18 @@
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
+    },
+    "docs/releasing.md": {
+      "sha": "738d24db111f6a1261fae44356a20c8c83a308e0",
+      "date": "2026-08-17"
+    },
+    "docs/rendering-pipeline.md": {
+      "sha": "204767097daebddef6d1d2213934a5b649a191c0",
+      "date": "2026-08-17"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
+      "date": "2026-08-17"
     },
     "examples/control-socket-demo.py": {
       "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
