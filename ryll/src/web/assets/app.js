@@ -241,14 +241,21 @@
     // input listeners registered once continue to work across
     // reconnects without re-registration.
     // ---------------------------------------------------------------
+    // Returns whether the message actually went out. Input events
+    // are fire-and-forget — a lost mousemove is replaced by the
+    // next one — but anything sent once per connection has to know,
+    // or a message dropped before the channel opened is lost for
+    // the life of the session.
     const sendCtrl = (obj) => {
         if (!dc || dc.readyState !== 'open') {
-            return;
+            return false;
         }
         try {
             dc.send(JSON.stringify(obj));
+            return true;
         } catch (err) {
             console.warn('[ryll] dc.send failed:', err);
+            return false;
         }
     };
 
@@ -506,6 +513,14 @@
 
         dc.onopen = () => {
             console.log('[ryll] data channel open');
+            // The other half of the race in sendViewport(): if the
+            // peer connection reached `connected` before SCTP
+            // opened this channel, that attempt found nothing to
+            // send on and this one is the one that lands.
+            // sendViewport is declared later in this same scope but
+            // is only ever called from a callback, long after
+            // connect() has returned.
+            sendViewport();
         };
         dc.onclose = () => {
             console.log('[ryll] data channel closed');
@@ -563,8 +578,21 @@
             const w = Math.round(rect.width);
             const h = Math.round(rect.height);
             if (w <= 0 || h <= 0) return;
+            // Latch only on a send that happened. The peer
+            // connection reaches `connected` when ICE and DTLS
+            // finish, which is before SCTP has opened the
+            // datachannel, so this is routinely called with
+            // nothing to send on. Setting the flag first made that
+            // ordinary race permanent: the guest never learned the
+            // viewport, never resized, and the browser spent the
+            // session upscaling whatever resolution the guest had
+            // booted at. Both callers below fire, and whichever
+            // happens second is the one that gets through.
+            if (!sendCtrl({ type: 'viewport', width: w, height: h })) {
+                console.log('[ryll] viewport deferred: control channel not open');
+                return;
+            }
             viewportSent = true;
-            sendCtrl({ type: 'viewport', width: w, height: h });
             console.log('[ryll] viewport sent:', w, 'x', h);
         };
 

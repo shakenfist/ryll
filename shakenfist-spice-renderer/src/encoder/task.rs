@@ -83,6 +83,29 @@ fn run<S: FrameSource>(
 
         // Try to pull a fresh frame and encode it.
         if let Some(frame) = source.next_frame() {
+            // The guest can change resolution mid-session — the
+            // browser's viewport message drives vdagent, which
+            // resizes the primary surface underneath us. The
+            // encoder is built for one size and rejects a buffer
+            // of any other, so without this the first frame after
+            // a resize kills the task and the viewer's video
+            // freezes until the next offer.
+            //
+            // Rebuilding costs an IDR, which is the same price a
+            // resolution change costs anywhere else, and browsers
+            // take the new SPS/PPS in stride.
+            if frame.width != encoder.width() || frame.height != encoder.height() {
+                tracing::info!(
+                    "EncoderTask: surface resized {}x{} -> {}x{}; rebuilding encoder",
+                    encoder.width(),
+                    encoder.height(),
+                    frame.width,
+                    frame.height
+                );
+                encoder = H264Encoder::new(frame.width, frame.height, fps_cap)?;
+                keyframe_pending = true;
+            }
+
             let force_kf = keyframe_pending;
             match encoder.encode(frame.rgba, force_kf) {
                 Ok(mut encoded) => {
@@ -198,6 +221,101 @@ mod tests {
         assert_eq!(frames[0].timestamp_us, 0);
         assert_eq!(frames[1].timestamp_us, 33_333);
         assert!(frames[0].keyframe, "first frame should be a keyframe");
+    }
+
+    /// Yields `first` frames at one size then switches to another,
+    /// as the surface mirror does when vdagent resizes the guest.
+    struct ResizingFrameSource {
+        small: Vec<u8>,
+        large: Vec<u8>,
+        produced: u32,
+        switch_after: u32,
+    }
+
+    impl FrameSource for ResizingFrameSource {
+        fn next_frame(&mut self) -> Option<FrameRef<'_>> {
+            let timestamp_us = (self.produced as u64) * 33_333;
+            let small = self.produced < self.switch_after;
+            self.produced += 1;
+            Some(if small {
+                FrameRef {
+                    width: 64,
+                    height: 64,
+                    rgba: &self.small,
+                    timestamp_us,
+                }
+            } else {
+                FrameRef {
+                    width: 32,
+                    height: 32,
+                    rgba: &self.large,
+                    timestamp_us,
+                }
+            })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mid_session_resize_rebuilds_the_encoder() {
+        // Before this was handled, the first frame at the new size
+        // failed H264Encoder::encode's length check, the task
+        // returned Err, and the viewer's video froze until the
+        // next offer restarted the pipeline.
+        let mut small = vec![0u8; 64 * 64 * 4];
+        for i in 0..(64 * 64) {
+            small[i * 4 + 3] = 255;
+        }
+        let mut large = vec![0u8; 32 * 32 * 4];
+        for i in 0..(32 * 32) {
+            large[i * 4 + 3] = 255;
+        }
+
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
+        let source = ResizingFrameSource {
+            small,
+            large,
+            produced: 0,
+            switch_after: 2,
+        };
+        let (tx, mut rx) = mpsc::channel(16);
+        let (ctl_tx, ctl_rx) = mpsc::channel(4);
+        let handle = EncoderTask::spawn(encoder, source, tx, ctl_rx, 60);
+
+        let mut frames = Vec::new();
+        let drain = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(frame) = rx.recv().await {
+                frames.push(frame);
+                if frames.len() == 4 {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(drain.is_ok(), "timed out draining frames");
+        // The drain loop also ends when the sender is dropped, so
+        // count the frames rather than trust that it finished: an
+        // encoder that dies at the resize closes the channel, and
+        // the loop then exits cleanly having collected too few.
+        assert_eq!(
+            frames.len(),
+            4,
+            "encoder stopped producing across the resize"
+        );
+        ctl_tx.send(EncoderControl::Stop).await.expect("send stop");
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("task didn't stop in time")
+            .expect("join")
+            .expect("task returned error across the resize");
+
+        // The first frame at the new size must be an IDR: the
+        // decoder needs the new SPS/PPS before it can use anything
+        // that follows.
+        assert!(
+            frames[2].keyframe,
+            "first frame after the resize should be a keyframe"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

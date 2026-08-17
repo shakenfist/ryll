@@ -41,7 +41,10 @@ exchanges SDP via `POST /offer`, and starts streaming.
   produce silent audio (a warning is logged).
 - **Resolution**: the SPICE guest resizes to match the browser
   viewport at connect time (via vdagent
-  `VDAgentMonitorsConfig`).
+  `VDAgentMonitorsConfig`), and the encoder follows the guest
+  through the resize. Without vdagent in the guest the resize
+  does not happen and the browser scales whatever resolution the
+  guest booted at, which looks soft.
 - Ctrl-C cleanly stops the binary.
 
 ## Reconnect behaviour
@@ -271,6 +274,26 @@ pattern.
   to ~1 second. If no frame arrives after 10 seconds,
   the encoder task is wedged — restart ryll and file a
   bug.
+
+### Video is soft or blurry
+
+Most often the guest never resized, so the browser is scaling a
+smaller desktop up to fill the window. Check what the encoder is
+actually running at:
+
+    web: encoder restarted at 1024x768@30fps
+
+and compare it to the browser window. In the browser console,
+`[ryll] viewport sent: W x H` says the viewport message went out;
+`[ryll] viewport deferred` means the control channel was not open
+yet and it will be re-sent when it opens. Server-side, run with
+`RUST_LOG=info,ryll::web=debug` and look for:
+
+    web inputs: viewport WxH
+
+If that never appears, the guest is not being told to resize — the
+usual cause is no `spice-vdagent` in the guest, since the resize is
+delivered as a `VDAgentMonitorsConfig` message.
 
 ### The guest pointer does not move, or lands in the wrong place
 

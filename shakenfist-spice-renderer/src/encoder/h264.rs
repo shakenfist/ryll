@@ -159,7 +159,15 @@ impl H264Encoder {
         let config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(target_bitrate_bps(w, h, fps)))
             .max_frame_rate(FrameRate::from_hz(fps as f32))
-            .usage_type(UsageType::ScreenContentRealTime);
+            .usage_type(UsageType::ScreenContentRealTime)
+            // Both default to on, and openh264 supports neither for
+            // screen content: it turns them off itself and prints a
+            // warning to stderr while doing so, once per encoder —
+            // which now means once per browser connection. Setting
+            // them changes no behaviour and stops the config
+            // claiming something the encoder is not doing.
+            .adaptive_quantization(false)
+            .background_detection(false);
 
         let inner = openh264::encoder::Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| anyhow::anyhow!("H264Encoder: openh264 init failed: {}", e))?;
