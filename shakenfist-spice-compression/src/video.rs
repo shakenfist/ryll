@@ -7,7 +7,7 @@
 //! `Box<dyn VideoDecoder>` selected at `STREAM_CREATE` by
 //! [`for_stream`].
 //!
-//! Today MJPEG (`MJpegVideoDecoder`) wraps the phase-3
+//! Today MJPEG (`MJpegVideoDecoder`) wraps the per-platform
 //! [`JpegDecoder`] backend and absorbs the DHT extract/inject
 //! state that used to live on `StreamState`. H.264
 //! (`H264VideoDecoder`) wraps `openh264::decoder::Decoder` for
@@ -144,7 +144,7 @@ pub fn for_stream(
 
 /// Video decoder for SPICE MJPEG streams.
 ///
-/// Wraps the phase-3 [`JpegDecoder`] backend and maintains a
+/// Wraps the per-platform [`JpegDecoder`] backend and maintains a
 /// per-stream DHT cache. SPICE's MJPEG framing omits the
 /// Huffman tables (`DHT` segment) from every frame after the
 /// first. `MJpegVideoDecoder` extracts the DHT from the first
@@ -229,7 +229,7 @@ impl VideoDecoder for MJpegVideoDecoder {
 ///
 /// `consecutive_failures` is a small counter used to escalate
 /// persistent decoder errors from `debug!` to `warn!` after three
-/// failures in a row, per the phase-6 plan (Q5). It resets on any
+/// failures in a row. It resets on any
 /// successful decode (including `Ok(None)`, which is a normal
 /// "need more data" outcome — not an error).
 pub struct H264VideoDecoder {
@@ -244,10 +244,10 @@ pub struct H264VideoDecoder {
     /// any non-error return (including the "not enough data yet"
     /// `Ok(None)` case).
     consecutive_failures: u32,
-    /// Phase 6 follow-up: the SPICE wire convention we assume is
-    /// Annex B framing (NALU start codes), but the assumption has
-    /// not been validated against a real H.264-capable spice-server
-    /// (the 6F operator smoke test is still pending). On the first
+    /// The SPICE wire convention we assume is Annex B framing
+    /// (NALU start codes), but the assumption has not been
+    /// validated against a real H.264-capable spice-server. On the
+    /// first
     /// decode call per decoder instance, log the leading-byte
     /// pattern at INFO so a bug-report reader can tell whether the
     /// server is actually sending Annex B (`00 00 00 01` /
@@ -293,8 +293,8 @@ impl VideoDecoder for H264VideoDecoder {
         // emits Annex B, so the round-trip unit test below
         // exercises the same framing the real SPICE server uses.
         //
-        // Phase 6 follow-up: log the leading-byte pattern of the
-        // first packet so a bug-report reader can see whether the
+        // Log the leading-byte pattern of the first packet so a
+        // bug-report reader can see whether the
         // server's wire framing matches the assumption. Quiet
         // after the first hit per decoder instance.
         if !self.framing_logged {
@@ -590,8 +590,8 @@ mod mjpeg_round_trip_tests {
     /// Encode a small frame via `mozjpeg::Compress`, then decode it
     /// through `MJpegVideoDecoder`, and assert the RGBA is within
     /// JPEG-lossy tolerance. Mirrors the `mozjpeg_round_trip_within_tolerance`
-    /// test in `jpeg.rs` (phase 3B pattern) but exercises the new
-    /// `VideoDecoder` trait wrapper.
+    /// test in `jpeg.rs`, but exercises the `VideoDecoder` trait
+    /// wrapper.
     #[test]
     fn mjpeg_video_decoder_round_trip_within_tolerance() {
         const W: u32 = 16;

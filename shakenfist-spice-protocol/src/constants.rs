@@ -574,7 +574,7 @@ mod tests {
 
     #[test]
     fn display_stream_destroy_all_opcode_pinned() {
-        // Phase 05 (K5) guard. The opcode value is defined in
+        // The opcode value is defined in
         // spice-protocol/spice/enums.h:497 and any drift would
         // silently break ryll's handler. The opcode is also
         // exercised end-to-end via display.rs's match arm —
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn display_pref_message_opcodes_pinned() {
-        // Phase 07 guard. PREFERRED_COMPRESSION is the third
+        // PREFERRED_COMPRESSION is the third
         // entry in the SPICE_MSGC_DISPLAY_* enum starting at
         // INIT=101; PREFERRED_VIDEO_CODEC_TYPE is the fifth.
         // Counted from spice-protocol/spice/enums.h:523-530:
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn display_pref_capabilities_pinned() {
-        // Phase 07 guard. SPICE_DISPLAY_CAP_PREF_COMPRESSION is
+        // SPICE_DISPLAY_CAP_PREF_COMPRESSION is
         // bit 6 and SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE is
         // bit 12 in spice-protocol/spice/protocol.h:137-153
         // (zero-indexed list: SIZED_STREAM=0 ... PREF_COMPRESSION=6
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn image_compression_auto_glz_value_pinned() {
-        // Phase 07 guard. AUTO_GLZ is the value the link-up
+        // AUTO_GLZ is the value the link-up
         // PREFERRED_COMPRESSION message sends (changed from
         // AUTO_LZ after session 006 showed AUTO_LZ disabled
         // server-side GLZ entirely, costing 25% bandwidth on a

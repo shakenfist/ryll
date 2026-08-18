@@ -16,8 +16,7 @@
 //! undetectable by our own test suite: two Rust peers on one host
 //! both see `0.0.0.0`, agree about it, and connect happily, so
 //! `tests/loopback.rs` would stay green on a build no browser could
-//! reach. See Decision 4 of
-//! `docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md` for the
+//! reach. See `docs/plans/PLAN-webrtc-0.20-upgrade.md` for the
 //! full argument. This module is the fix: reproduce what 0.17 did
 //! internally, so 0.20 gets addresses that produce routable
 //! candidates.
@@ -37,8 +36,8 @@
 //!
 //! Deliberately not covered by an automated test here: enumerating
 //! the *real* interfaces of the host running the test. That is
-//! exactly the host-coupled flake that phase 01 had to hide behind
-//! the `RYLL_GATHERING_SOAK` environment variable — a CI runner's
+//! exactly the host-coupled flake that the `RYLL_GATHERING_SOAK`
+//! environment variable exists to hide — a CI runner's
 //! interface set (typically just `lo` and a container bridge) says
 //! nothing about a deployment's, and a test that passed only because
 //! of what happened to be plugged in that day is worse than no test.
@@ -62,7 +61,7 @@
 //! *mechanical* reason to reject them the way there is for the three
 //! cases above. Whether they are *useful* candidates is a policy
 //! question for whoever decides what a deployment should advertise,
-//! which is phase 03's job (see Decision 4), not this module's.
+//! not this module's.
 //!
 //! ## What an empty result means
 //!
@@ -88,7 +87,7 @@
 //! building a bridge nobody can connect to.
 //! This module does not make that call itself, because it has no way
 //! to know whether a future caller might have a different bind
-//! source (e.g. a phase 03 configuration override) to fall back to.
+//! source (e.g. a configuration override) to fall back to.
 
 use std::net::{IpAddr, SocketAddr};
 

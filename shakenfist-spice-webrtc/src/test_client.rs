@@ -16,7 +16,7 @@
 //! `add_transceiver_from_kind`, `gathering_complete_promise`,
 //! `connection_state`). Collapsing them here meant the 0.20 port
 //! rewrote this once rather than four times across two crates. See
-//! `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md` step 1c.
+//! `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
 //!
 //! ## Availability
 //!
@@ -66,9 +66,9 @@ const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// webrtc-rs 0.17's own `OnTrackHdlrFn`; 0.20 has no equivalent public
 /// type — `on_track` is a `PeerConnectionEventHandler` method taking
 /// only the track, with the receiver and transceiver arguments gone —
-/// so the alias is now written out here. That was the point of
-/// introducing it in phase 01 step 2a: this line changes, and the
-/// hook's callers keep their shape.
+/// so the alias is now written out here. That is the point of the
+/// alias: this line changes, and the hook's callers keep their
+/// shape.
 pub type OnTrackHook = Box<
     dyn Fn(Arc<dyn TrackRemote>) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
         + Send
@@ -122,7 +122,7 @@ impl TestPeerBuilder {
     /// association never opens, and the bridge's `on_data_channel`
     /// never fires on either side. Tests that exchange control
     /// messages — or that just need the handshake to complete — need
-    /// this. Found the hard way in phase 3 step 3f.
+    /// this. Found the hard way.
     pub fn seed_data_channel(mut self, label: &str) -> Self {
         self.seed_data_channel = Some(label.to_owned());
         self

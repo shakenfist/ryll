@@ -787,8 +787,7 @@ impl JpegDecoder for WicDecoder {
 ///
 /// # Decode path — currently delegated to mozjpeg
 ///
-/// Per the phase 3E brief (clarifications #4 and #5 in the
-/// step prompt), the actual VA-API decode path — populating
+/// The actual VA-API decode path — populating
 /// `VAPictureParameterBufferJPEGBaseline`,
 /// `VAIQMatrixBufferJPEGBaseline`,
 /// `VAHuffmanTableBufferJPEGBaseline`, and
@@ -851,8 +850,8 @@ pub struct VaapiDecoder {
     /// libva-drm.so.2 handle. Same lifetime story as `libva`.
     #[allow(dead_code)]
     libva_drm: libloading::Library,
-    /// Fallback decoder. Per the phase 3E plan, the actual
-    /// VA-API decode path is deferred to a follow-up; today
+    /// Fallback decoder. The actual VA-API decode path is
+    /// deferred to a follow-up; today
     /// every `decode()` call delegates here. Embedded rather
     /// than constructed per-call so we share the (currently
     /// stateless) `MozJpegDecoder` instance.
@@ -1513,8 +1512,8 @@ mod mozjpeg_tests {
 
 /// Tests for the macOS ImageIO decoder backend. These compile and
 /// run only on macOS — Linux/Windows CI never executes them. The
-/// real cross-platform smoke test lives in step 3H of the phase 3
-/// plan and is operator-driven.
+/// real cross-platform smoke test is operator-driven; see
+/// `docs/plans/PLAN-stream-caps-and-flap.md`.
 ///
 /// The fixture is a 32x32 JPEG with four 16x16 quadrants painted
 /// red / green / blue / yellow, generated at quality 85 by
@@ -1634,8 +1633,8 @@ mod imageio_tests {
 
 /// Tests for the Windows WIC decoder backend. These compile and
 /// run only on Windows — Linux/macOS CI never executes them. The
-/// real cross-platform smoke test lives in step 3H of the phase 3
-/// plan and is operator-driven.
+/// real cross-platform smoke test is operator-driven; see
+/// `docs/plans/PLAN-stream-caps-and-flap.md`.
 ///
 /// Uses the same `swatches.jpg` fixture as the macOS test (32x32,
 /// four 16x16 quadrants painted red / green / blue / yellow at

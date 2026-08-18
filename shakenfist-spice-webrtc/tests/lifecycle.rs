@@ -1,5 +1,5 @@
-//! Phase 6 step 6a integration test: exercises the bridge's
-//! "dead" signal end-to-end.
+//! Integration test for the bridge's "dead" signal,
+//! end-to-end.
 //!
 //! Two peers run in the same process. The "server" peer is the
 //! production [`WebrtcBridge`]; the "client" peer is a
