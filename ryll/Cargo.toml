@@ -23,8 +23,8 @@ workspace = true
 # `cargo build --no-default-features -p ryll` is the slim
 # headless build used by the kerbside loadtest and direct-qemu
 # CI lane: no eframe, no arboard, no rfd, no cpal, no opus-
-# decoder.  See docs/control-socket-protocol.md and PLAN-test-
-# harness-phase-06-digest-decoding.md for the rationale.
+# decoder.  See docs/control-socket-protocol.md and
+# docs/plans/PLAN-test-harness.md for the rationale.
 default = ["capture", "gui", "audio"]
 
 # `gui` carries the egui/eframe display, the arboard host-side
@@ -206,8 +206,8 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 # Self-signed cert generation for the --web TLS integration tests.
 rcgen = "0.14"
-# Phase 4 step 4c drives an SDP offer through the in-process axum
-# router from a real client peer connection. That peer now comes
+# The --web tests drive an SDP offer through the in-process axum
+# router from a real client peer connection. That peer comes
 # from shakenfist-spice-webrtc's `test-support` feature rather than
 # a hand-rolled RTCPeerConnection here, so ryll no longer depends on
 # the `webrtc` crate directly at all -- one fewer manifest for the
@@ -228,8 +228,8 @@ priority = "optional"
 # $auto scans the binary's NEEDED entries and picks up libopus0
 # (introduced by --web mode via audiopus_sys dynamic-linking to
 # libopus.so.0), libasound2, libxcb1, etc. automatically.
-# Phase 7b installs libopus-dev on Linux CI runners so the binary
-# dynamic-links libopus; $auto therefore captures the runtime dep.
+# Linux CI runners install libopus-dev so the binary dynamic-links
+# libopus; $auto therefore captures the runtime dep.
 depends = "$auto"
 assets = [
     ["target/release/ryll", "usr/bin/", "755"],

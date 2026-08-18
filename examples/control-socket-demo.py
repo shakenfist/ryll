@@ -7,7 +7,7 @@ latency events, sends a spacebar press (scancode 0x39), and pastes the text
 "hi".  It reads events for ~3 seconds (or until 5 latency samples arrive) then
 exits cleanly.
 
-Intended role: copy-paste starter for the phase-4 latency loadtest port.
+Intended role: copy-paste starter for a latency loadtest client.
 The output format (one arrow-prefixed JSON line per message) is structured
 enough to appear verbatim in debug logs.
 

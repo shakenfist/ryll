@@ -600,8 +600,8 @@ mod tests {
         );
         assert!(
             body.contains("createDataChannel"),
-            "app.js should create a data channel before offer \
-             (Phase 3 finding): missing"
+            "app.js should create a data channel before the offer: \
+             missing"
         );
         assert!(
             body.contains("recvonly"),
@@ -614,17 +614,17 @@ mod tests {
         );
         assert!(
             body.contains("async function connect"),
-            "app.js should expose connect() as a callable function \
-             (Phase 6c): missing"
+            "app.js should expose connect() as a callable function: \
+             missing"
         );
         assert!(
             body.contains("1000"),
-            "app.js should contain the 1 s backoff value (Phase 6c): missing"
+            "app.js should contain the 1 s backoff value: missing"
         );
         assert!(
             body.contains("reconnect-btn"),
-            "app.js should reference the reconnect button id \
-             (Phase 6c): missing"
+            "app.js should reference the reconnect button id: \
+             missing"
         );
     }
 

@@ -116,7 +116,7 @@ confidence-threshold = 0.93
 # permissive font licence; we accept it under the SPDX id the crate
 # actually emits.
 #
-# `mozjpeg` (Cisco's libjpeg-turbo wrapper, pulled in by phase 03's
+# `mozjpeg` (Cisco's libjpeg-turbo wrapper, pulled in by
 # `MozJpegDecoder`) declares IJG (Independent JPEG Group) — the
 # canonical libjpeg licence. `mozjpeg-sys` declares
 # `IJG AND Zlib AND BSD-3-Clause` (Zlib + BSD-3-Clause already in

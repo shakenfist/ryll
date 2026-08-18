@@ -14,8 +14,8 @@ workspace = true
 [features]
 # `audio` pulls in the cpal/opus/rtrb playback stack and the
 # `channels::playback` module that depends on them.  Default-on
-# so existing builds (GUI ryll, the loadtest before phase 6,
-# CI lanes that did not opt out) keep their behaviour.
+# so existing builds (GUI ryll, the loadtest, CI lanes that did
+# not opt out) keep their behaviour.
 default = ["audio"]
 audio = ["dep:cpal", "dep:opus-decoder", "dep:rtrb"]
 
@@ -94,10 +94,10 @@ libc = "0.2"
 flate2 = "1"
 
 # JPEG decoding for SPICE JPEG image type. The `jpeg-decoder` crate
-# has moved to `shakenfist-spice-compression` (phase 3 step 3A) where
-# it backs `JpegDecoderRsDecoder`. The `image` crate is still needed
-# for its own JPEG-adjacent uses elsewhere in the renderer, plus
-# the `png` feature for the control socket's `screenshot` verb (3e).
+# has moved to `shakenfist-spice-compression`, where it backs
+# `JpegDecoderRsDecoder`. The `image` crate is still needed for its
+# own JPEG-adjacent uses elsewhere in the renderer, plus the `png`
+# feature for the control socket's `screenshot` verb.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 # Base64 encoding for the control socket's `screenshot` verb (3e):
@@ -105,15 +105,15 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # the NDJSON response.
 base64 = "0.23"
 
-# H.264 encoding for the web frontend encoder pipeline (Phase 2+)
+# H.264 encoding for the web frontend encoder pipeline.
 openh264 = "0.9"
 
 # Visual digest decoder for the `digest-decode` feature.  Pulled
 # in only when the test harness opts in; production builds carry
 # no QR decoder.  `qr` enables the rqrr-backed RGBA→bytes path
 # and the `decode()` parser; `serde` makes `Digest`/`Event` JSON-
-# serialisable for the control-socket wire event.  See phase 6
-# step 6c of the kerbside test-harness plan.
+# serialisable for the control-socket wire event.  See
+# docs/plans/PLAN-test-harness.md.
 shakenfist-visual-digest = { version = "0.1.1", features = ["qr", "serde"], optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)
@@ -128,8 +128,8 @@ http-body-util = "0.1"
 [dev-dependencies]
 tempfile = "3"
 
-# Phase 2 step 2e pre-flight: smoke-test that webrtc-rs's H.264
-# RTP payloader accepts the NAL output our H264Encoder produces.
+# Smoke-test that webrtc-rs's H.264 RTP payloader accepts the NAL
+# output our H264Encoder produces.
 # `rtp` was the standalone crate the umbrella `webrtc` crate
 # re-exported as `webrtc::rtp` on 0.17; `webrtc` 0.20 replaced it
 # with the sans-io `rtc` core (reached as `rtc::rtp`) and does not
