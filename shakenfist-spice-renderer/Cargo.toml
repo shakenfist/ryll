@@ -113,7 +113,7 @@ openh264 = "0.9"
 # no QR decoder.  `qr` enables the rqrr-backed RGBA→bytes path
 # and the `decode()` parser; `serde` makes `Digest`/`Event` JSON-
 # serialisable for the control-socket wire event.  See
-# docs/plans/PLAN-test-harness.md.
+# shakenfist/kerbside/docs/plans/PLAN-test-harness.md.
 shakenfist-visual-digest = { version = "0.1.1", features = ["qr", "serde"], optional = true }
 
 # WebDAV server (RFC 4918 handler with LocalFs backend)

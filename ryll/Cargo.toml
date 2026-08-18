@@ -24,7 +24,8 @@ workspace = true
 # headless build used by the kerbside loadtest and direct-qemu
 # CI lane: no eframe, no arboard, no rfd, no cpal, no opus-
 # decoder.  See docs/control-socket-protocol.md and
-# docs/plans/PLAN-test-harness.md for the rationale.
+# shakenfist/kerbside/docs/plans/PLAN-test-harness.md for the
+# rationale.
 default = ["capture", "gui", "audio"]
 
 # `gui` carries the egui/eframe display, the arboard host-side
