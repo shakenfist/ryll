@@ -32,24 +32,22 @@ use super::signalling::EncoderInfra;
 /// would simply lose old messages with `RecvError::Lagged`,
 /// which is fine because the events are stateless deltas.
 pub const EVENT_BROADCAST_CAPACITY: usize = 1024;
-/// Capacity of the `InputEvent` mpsc that 5c will feed once
-/// browser keyboard/mouse messages start flowing. 5a creates
-/// the channel but nothing sends on it.
+/// Capacity of the `InputEvent` mpsc fed by browser
+/// keyboard/mouse messages.
 pub const INPUT_CHANNEL_CAPACITY: usize = 256;
-/// Capacity of the `(width, height)` resize mpsc that 5c will
-/// feed when the browser sends its initial viewport message.
+/// Capacity of the `(width, height)` resize mpsc fed when the
+/// browser sends its initial viewport message.
 pub const RESIZE_CHANNEL_CAPACITY: usize = 16;
 
 /// Per-launch state shared across handlers. Holds the
 /// auth token plus the per-viewer bridge + encoder slots
-/// that 4c's `POST /offer` handler manipulates.
+/// that the `POST /offer` handler manipulates.
 ///
-/// Phase 5a additions: channel handles that bridge the renderer
-/// (running inside `run_connection`) to web-mode consumers and
-/// producers. The senders are owned by the future input/cursor/
-/// audio relays (5b–5e); the broadcast `event_tx` lets multiple
-/// observers subscribe to `ChannelEvent`s without restructuring
-/// when later steps add their consumers.
+/// Also holds the channel handles that bridge the renderer
+/// (running inside `run_connection`) to web-mode consumers
+/// and producers. The senders are owned by the input, cursor
+/// and audio relays; the broadcast `event_tx` lets multiple
+/// observers subscribe to `ChannelEvent`s independently.
 pub struct WebState {
     pub token: String,
     /// Holds the active [`WebrtcBridge`] when one exists.
@@ -285,8 +283,8 @@ async fn check_token(
 
 /// Load a [`RustlsConfig`] from PEM-encoded cert and key files.
 /// Surfaces an `anyhow` error chain on missing / malformed files.
-/// Phase 8a uses this from `run_web` to build the config before
-/// handing it to [`run_with_tls`].
+/// `run_web` uses this to build the config before handing it
+/// to [`run_with_tls`].
 pub async fn load_tls_config(cert: &Path, key: &Path) -> Result<RustlsConfig> {
     RustlsConfig::from_pem_file(cert, key)
         .await
@@ -308,9 +306,9 @@ pub async fn load_tls_config(cert: &Path, key: &Path) -> Result<RustlsConfig> {
 /// Plain-HTTP entry point. For HTTPS, see [`run_with_tls`]. Both
 /// branches drive `axum_server` so the graceful-shutdown wiring
 /// (a `Handle` + a SHUTDOWN_REQUESTED watcher task) is uniform
-/// regardless of TLS mode. The Phase 6 explicit-bridge-close
-/// sequence in `main::run_web` runs after this future returns
-/// either way.
+/// regardless of TLS mode. The explicit-bridge-close sequence
+/// in `main::run_web` runs after this future returns either
+/// way.
 pub async fn run(state: Arc<WebState>, host: &str, port: u16) -> Result<()> {
     run_inner(state, host, port, None, &crate::SHUTDOWN_REQUESTED).await
 }
@@ -346,14 +344,14 @@ async fn run_inner(
     // discover the ephemeral port post-bind) and
     // `graceful_shutdown(timeout)` (replacing the
     // `with_graceful_shutdown(future)` pattern that
-    // axum::serve used pre-Phase-8a).
+    // axum::serve uses).
     let handle = Handle::new();
 
     // Watcher task: poll SHUTDOWN_REQUESTED at the same 100 ms
     // cadence the old `shutdown_signal` future used. When the
     // flag flips, signal `axum_server` to drain in-flight
     // requests and stop accepting new ones, with a 5 s ceiling
-    // matching the Phase 6 graceful-shutdown budget.
+    // matching the graceful-shutdown budget.
     let shutdown_handle = handle.clone();
     let watcher = tokio::spawn(async move {
         use std::sync::atomic::Ordering;
@@ -609,10 +607,10 @@ mod tests {
             body.contains("recvonly"),
             "app.js should request recvonly transceivers: missing"
         );
-        // Phase 6c: auto-reconnect assertions.
+        // Auto-reconnect assertions.
         assert!(
             body.contains("scheduleReconnect"),
-            "app.js should contain scheduleReconnect (Phase 6c): missing"
+            "app.js should contain scheduleReconnect: missing"
         );
         assert!(
             body.contains("async function connect"),

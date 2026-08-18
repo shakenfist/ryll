@@ -1,4 +1,4 @@
-/// Auto-snapshot bug-report mode (Phase 5 of PLAN-stream-caps-and-flap).
+/// Auto-snapshot bug-report mode.
 ///
 /// When `--auto-snapshot-interval N` is set, a background task fires a
 /// complete `BugReport` every N seconds into a rolling

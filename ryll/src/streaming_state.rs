@@ -1,7 +1,7 @@
-//! Phase 8: derived state for the live streaming status-bar
-//! indicator and the flap-notification heuristic.
+//! Derived state for the live streaming status-bar indicator
+//! and the flap-notification heuristic.
 //!
-//! Reads the per-stream snapshot fields added in phase 1
+//! Reads the per-stream snapshot fields
 //! (`streams_active`, `streams_recently_destroyed`) and
 //! produces a single `StreamingState` value plus an optional
 //! `NotificationToFire` for the caller to feed into

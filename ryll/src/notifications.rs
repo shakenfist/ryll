@@ -1,4 +1,4 @@
-//! In-app notification store. See `docs/plans/PLAN-notifications-phase-01-store.md`.
+//! In-app notification store. See `docs/plans/PLAN-notifications.md`.
 //!
 //! The store lives ryll-side; the data types
 //! (`NotificationEntry`, `NotificationSource`) live in the

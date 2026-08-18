@@ -100,7 +100,7 @@ fn main() -> Result<()> {
     // macOS it forces the LazyLock<Instant> that backs
     // `process.uptime_secs` so the field measures from
     // here rather than the first bug-report trigger. See
-    // PLAN-macos-runtime-metrics-phase-03-integration.md.
+    // `docs/plans/PLAN-macos-runtime-metrics.md`.
     shakenfist_spice_renderer::metrics::init_at_startup();
 
     // Install Ctrl+C handler so graceful shutdown works on all platforms.
@@ -118,8 +118,8 @@ fn main() -> Result<()> {
     // and silently auto-detects; macOS resolves with both enabled
     // and panics. Installing a default explicitly at startup
     // covers every entry path. `shakenfist-spice-webrtc` no longer
-    // has a rustls dependency of its own (the webrtc-0.20 port; see
-    // docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md), so this
+    // has a rustls dependency of its own (see
+    // docs/plans/PLAN-webrtc-0.20-upgrade.md), so this
     // call is now the only thing installing a provider for the
     // SPICE TLS and axum-server paths.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -215,10 +215,9 @@ fn main() -> Result<()> {
         env!("RYLL_GIT_SHA"),
     );
 
-    // Load configuration. Phase 5 step 5a removed the
-    // `--web` stub: every mode now requires a real `.vv` /
-    // `--url` / `--direct` because `run_web` now spawns
-    // `run_connection` and actually connects to SPICE.
+    // Load configuration. Every mode requires a real `.vv` /
+    // `--url` / `--direct`, including `--web`: `run_web`
+    // spawns `run_connection` and actually connects to SPICE.
     let config = Config::from_args(&args)?;
     info!(
         "Connecting to {}:{} (TLS: {})",
@@ -511,8 +510,8 @@ fn run_web(
     let result = runtime.block_on(async move {
         // Idempotent rustls CryptoProvider install, matching the
         // one in `main()` above. `shakenfist-spice-webrtc` has no
-        // rustls dependency (the webrtc-0.20 port removed it; see
-        // docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md), so
+        // rustls dependency of its own (see
+        // docs/plans/PLAN-webrtc-0.20-upgrade.md), so
         // this call is what installs a provider for the SPICE TLS
         // and axum-server paths in the `--web` entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -611,7 +610,7 @@ fn run_web(
             shakenfist_spice_renderer::SurfaceMirror::new(),
         ));
 
-        // Phase 5e: build the Opus passthrough sink. The sink
+        // Build the Opus passthrough sink. The sink
         // is handed to `run_connection` so the playback channel
         // taps every Opus packet into it; the matching slot is
         // stashed in `WebState` so each `/offer` can plug a
@@ -700,8 +699,8 @@ fn run_web(
         // bad because surface state diverges from what SPICE
         // sent — log a warning but continue rather than
         // tearing the session down. If lag becomes a real
-        // operational problem it's a Phase 6 perf item
-        // (larger broadcast capacity or a backpressure scheme).
+        // operational problem, revisit it with a larger
+        // broadcast capacity or a backpressure scheme.
         let mirror_for_task = surface_mirror.clone();
         let mirror_handle = tokio::spawn(async move {
             loop {
@@ -766,7 +765,7 @@ fn run_web(
             state.control_tx.clone(),
         ));
 
-        // Phase 6b: spawn the bridge reaper. It watches the
+        // Spawn the bridge reaper. It watches the
         // active bridge's dead signal and tears down the bridge
         // + encoder + audio pump when the browser disconnects.
         // The SPICE session is left untouched. The handle is
@@ -774,7 +773,7 @@ fn run_web(
         // path after axum::serve returns.
         let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(state.clone()));
 
-        // Phase 8a: load the optional TLS config before binding.
+        // Load the optional TLS config before binding.
         // Clap's `requires =` enforces both-or-neither, so seeing
         // one flag without the other here would already have
         // been rejected at parse time.
@@ -790,7 +789,7 @@ fn run_web(
             None => crate::web::run(state.clone(), &web_host, web_port).await,
         };
 
-        // Phase 6b: explicit bridge close. After axum::serve
+        // Explicit bridge close. After axum::serve
         // returns (Ctrl+C raised SHUTDOWN_REQUESTED, or axum
         // errored), close any active bridge so DTLS/SRTP tears
         // down cleanly before the runtime drops. Use a 2-second

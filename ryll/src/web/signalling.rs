@@ -36,8 +36,7 @@ use super::server::WebState;
 
 /// Encoder FPS cap. 30 fps matches master plan Resolution §4.
 /// The encoder dimensions come from the SurfaceMirror's primary
-/// surface at restart time (Phase 5), not a hard-coded constant
-/// (Phase 4 used 1280×720; that's gone now).
+/// surface at restart time rather than a hard-coded constant.
 const ENCODER_FPS: u32 = 30;
 
 /// Sentinel error message returned by [`EncoderInfra::restart`]
@@ -179,7 +178,7 @@ impl EncoderInfra {
     }
 
     /// Stop the active encoder task without restarting. Used
-    /// by the bridge reaper (Phase 6b) when the browser
+    /// by the bridge reaper when the browser
     /// disconnects and no immediate replacement is expected,
     /// and by the shutdown path in `run_web` to release
     /// resources before the runtime drops.
@@ -317,7 +316,7 @@ pub async fn post_offer(
     // exits when its rx closes (driven by the next /offer
     // overwriting `active_opus_tx`, dropping this Sender).
     let _video_handle = bridge.spawn_video_pump(frame_rx);
-    // Phase 5e: real Opus passthrough from the SPICE playback
+    // Real Opus passthrough from the SPICE playback
     // channel. Build a fresh per-viewer mpsc and plug the
     // Sender into the shared slot the renderer-side
     // `WebOpusSink` reads from. The previous bridge's Sender
@@ -461,7 +460,7 @@ mod tests {
         let state = Arc::new(WebState::new());
         // Seed the surface mirror with a primary so the
         // encoder restart path doesn't return the 503 sentinel.
-        // 1280x720 matches what Phase 4's hard-coded source used.
+        // 1280x720 is an arbitrary but realistic primary size.
         {
             let mut m = state.surface_mirror.lock().await;
             m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
@@ -477,8 +476,8 @@ mod tests {
         // Build a client-side PC to generate a real SDP
         // offer.
         //
-        // Phase 3 step 3f finding: the offer must carry an
-        // m=application section, or the bridge's data-channel
+        // The offer must carry an m=application section, or
+        // the bridge's data-channel
         // expectations don't match the answer side. That is
         // what the seed datachannel is for.
         //

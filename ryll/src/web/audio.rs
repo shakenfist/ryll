@@ -17,8 +17,8 @@
 //!
 //! For SPICE servers that negotiated raw PCM rather than Opus
 //! (rare; xspice and QEMU default to Opus), the sink logs a
-//! warn-once message and discards the samples. Full PCM-to-Opus
-//! encoding is tracked as a Phase 5+ future-work item.
+//! warn-once message and discards the samples. PCM-to-Opus
+//! encoding is not implemented.
 
 use std::sync::{Arc, Mutex, Once};
 
@@ -48,7 +48,7 @@ pub type ActiveSenderSlot = Arc<Mutex<Option<OpusSender>>>;
 
 /// `OpusPacketSink` implementation that forwards Opus packets to
 /// whichever bridge is currently active. PCM is logged once and
-/// discarded (Phase 5 MVP).
+/// discarded.
 pub struct WebOpusSink {
     inner: ActiveSenderSlot,
 }

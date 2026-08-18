@@ -71,19 +71,20 @@ pub struct TrafficEntry {
     /// segment and the rest live in `additional_segments`.
     /// Used by `drain_to_pcap()` for bug-report export.
     ///
-    /// `Arc<[u8]>` so Phase 10's snapshot-on-notification
-    /// path (F2 — "file this notification as a bug report")
-    /// can clone the ring buffer's entries in O(N atomic
-    /// refcount bumps) rather than O(total bytes). See
+    /// `Arc<[u8]>` so the snapshot-on-notification path
+    /// ("file this notification as a bug report") can clone
+    /// the ring buffer's entries in O(N atomic refcount
+    /// bumps) rather than O(total bytes). See
     /// `traffic_entry_clone_shares_pcap_frame_via_arc` in
     /// this file's tests for the cheap-clone invariant.
     pub pcap_frame: Arc<[u8]>,
     /// Additional TCP segments produced when a SPICE message
-    /// exceeds the IPv4 frame limit (Phase 08 / K2 fix).
+    /// exceeds the IPv4 frame limit.
     /// Empty in the common case where the message fits in a
     /// single segment; a few entries for larger display-
     /// channel messages. Each segment is an independent
-    /// `Arc<[u8]>` so clones (Phase 10 snapshot path) remain
+    /// `Arc<[u8]>` so clones (the notification-snapshot
+    /// path) remain
     /// O(N atomic refcount bumps). An empty `Vec` does not
     /// allocate, so the common case has zero per-entry
     /// overhead.
@@ -124,10 +125,10 @@ fn entry_bytes(entry: &TrafficEntry) -> usize {
 
 /// Per-channel ring buffer of recent protocol traffic.
 ///
-/// `Clone` is derived (cheap thanks to Phase 07 / Phase 08:
-/// each `TrafficEntry` clones in O(N atomic refcount bumps)
-/// for its `pcap_frame` and `additional_segments` Arc<[u8]>
-/// payloads). Used by Phase 10's notification-snapshot store.
+/// `Clone` is derived and is cheap: each `TrafficEntry`
+/// clones in O(N atomic refcount bumps) for its `pcap_frame`
+/// and `additional_segments` `Arc<[u8]>` payloads. Used by
+/// the notification-snapshot store.
 #[derive(Clone)]
 pub struct TrafficRingBuffer {
     /// Ring of entries, newest at the back.
@@ -156,7 +157,7 @@ impl TrafficRingBuffer {
 
     /// Push a new entry, evicting oldest entries if the byte
     /// cap would be exceeded. Accounts for the full segmented
-    /// payload (Phase 08): an entry's byte cost is its
+    /// payload: an entry's byte cost is its
     /// `pcap_frame` plus any `additional_segments`.
     pub fn push(&mut self, entry: TrafficEntry) {
         self.total_bytes += entry_bytes(&entry);
@@ -204,12 +205,11 @@ impl TrafficRingBuffer {
                 entry.timestamp,
                 entry.pcap_frame.len() as u32,
                 // Explicit slice borrow: &entry.pcap_frame
-                // would be &Arc<[u8]> after the Phase 07
-                // refactor and PcapPacket wants &[u8].
+                // is &Arc<[u8]> and PcapPacket wants &[u8].
                 &entry.pcap_frame[..],
             );
             pcap.write_packet(&packet).ok();
-            // Additional segments (Phase 08) for SPICE messages
+            // Additional segments for SPICE messages
             // that exceeded the IPv4 frame limit. Written at
             // the same timestamp — matches what the live
             // capture writer produces for the same payload.
@@ -218,8 +218,7 @@ impl TrafficRingBuffer {
                 pcap.write_packet(&seg_packet).ok();
             }
             // `count` reflects the number of SPICE messages,
-            // not segments — preserve the pre-Phase-08 return-
-            // value semantics.
+            // not segments.
             count += 1;
         }
 
@@ -249,7 +248,7 @@ impl TrafficRingBuffer {
 }
 
 // Per-channel ring-buffer caps. Total = 50 MB, weighted by
-// observed session-001 traffic rates (Phase 06 plan). Weights
+// observed session-001 traffic rates. Weights
 // are documented per-line so a retune is a one-line edit. The
 // `const _: () = assert!(...)` immediately below pins the sum.
 //
@@ -346,13 +345,12 @@ impl TrafficBuffers {
         self.start
     }
 
-    /// Cheap deep-copy of the live ring state (Phase 10 / F2).
+    /// Cheap deep-copy of the live ring state.
     ///
     /// Per-channel locks are held briefly to clone each ring;
     /// the underlying `TrafficEntry` clones are O(N atomic
-    /// refcount bumps) thanks to Phase 07's `Arc<[u8]>` for
-    /// `pcap_frame` and Phase 08's `Vec<Arc<[u8]>>` for
-    /// `additional_segments`.
+    /// refcount bumps) because `pcap_frame` is an `Arc<[u8]>`
+    /// and `additional_segments` a `Vec<Arc<[u8]>>`.
     ///
     /// The returned `TrafficBuffers` is a standalone value
     /// suitable for handing to `BugReport::assemble` /
@@ -379,12 +377,10 @@ impl TrafficBuffers {
     /// (`shakenfist-spice-renderer/src/channels/webdav.rs`)
     /// does not call `traffic.record_*` today, so plumbing a
     /// `Mutex<TrafficRingBuffer>` for it would yield an
-    /// always-empty ring. Phase 06's per-channel cap
-    /// rebalance noted this gap as out-of-scope (would
-    /// require channel-side recording plumbing plus a budget
-    /// slice from display); it's tracked in
-    /// `PLAN-session-001-feedback-phase-06-channel-rebalance.md`
-    /// "Out of scope". `ChannelSnapshots` does carry a
+    /// always-empty ring. Covering it would require
+    /// channel-side recording plumbing plus a slice of the
+    /// byte budget taken from display, and has not been
+    /// done. `ChannelSnapshots` does carry a
     /// `webdav` field for protocol-level state — that
     /// asymmetry is intentional, not an oversight.
     fn buffer_for(&self, channel: &str) -> Option<&Mutex<TrafficRingBuffer>> {
@@ -478,8 +474,8 @@ impl TrafficBuffers {
     /// Build one or more pcap frames for the given message,
     /// updating TCP sequence numbers on the ring buffer.
     /// Messages above the IPv4 frame limit are split via the
-    /// shared `capture::segment_payload` helper — the Phase 08
-    /// (K2) fix. Always returns at least one frame.
+    /// shared `capture::segment_payload` helper. Always
+    /// returns at least one frame.
     #[cfg(feature = "capture")]
     fn build_segmented_frames(
         &self,
@@ -509,8 +505,7 @@ impl TrafficBuffers {
     /// Stub when capture feature is disabled — produce a
     /// single empty frame since pcap construction is
     /// unavailable. Callers will treat this as "one entry,
-    /// zero useful pcap data" which matches the pre-Phase-08
-    /// behaviour.
+    /// zero useful pcap data".
     #[cfg(not(feature = "capture"))]
     fn build_segmented_frames(
         &self,
@@ -702,7 +697,7 @@ pub struct AppSnapshot {
     /// session has accumulated. 0 for a session that never lost
     /// its connection; rising values indicate a rocky session.
     pub auto_reconnect_count: u32,
-    /// Phase-03 "video not keeping up" diagnostic: number of
+    /// "Video not keeping up" diagnostic: number of
     /// display frames dropped because the H.264 encoder task's
     /// bounded queue was full when `CaptureSession::frame()`
     /// tried to enqueue. Cumulative since session start; zero
@@ -710,18 +705,18 @@ pub struct AppSnapshot {
     /// implicates encoder CPU (or downstream MP4 write speed)
     /// rather than decode or socket-read when triaging a
     /// "video not keeping up" report. See
-    /// PLAN-video-keeping-up-phase-03.
+    /// `docs/plans/PLAN-video-keeping-up.md`.
     pub video_drop_count: u64,
-    /// Phase-04 "video not keeping up" diagnostic: min / max /
+    /// "Video not keeping up" diagnostic: min / max /
     /// mean microseconds of mpsc-queue lag between the display
     /// channel emitting `ImageReady*` events and the egui
     /// frame loop processing them. Computed over a bounded
     /// recent window (cap `RECENT_LAG_RING_CAP` in `app.rs`).
-    /// A high mean here when phase-1 decode and socket-fill
+    /// A high mean here when the decode and socket-fill
     /// metrics look healthy implicates the egui loop / GUI
     /// thread as the bottleneck. Within-batch samples are
     /// correlated; `max` is the most informative single
-    /// number. See PLAN-video-keeping-up-phase-04.
+    /// number. See `docs/plans/PLAN-video-keeping-up.md`.
     pub image_ready_lag_recent_min_us: u32,
     pub image_ready_lag_recent_max_us: u32,
     pub image_ready_lag_recent_mean_us: u32,
@@ -731,7 +726,7 @@ pub struct AppSnapshot {
     pub display_mark_lag_recent_min_us: u32,
     pub display_mark_lag_recent_max_us: u32,
     pub display_mark_lag_recent_mean_us: u32,
-    /// Phase 5 auto-snapshot counters. Both are 0 when
+    /// Auto-snapshot counters. Both are 0 when
     /// `--auto-snapshot-interval` is not set. The stats panel
     /// renders `"Auto-snapshot: {saved}/{cap}"` when the mode
     /// is active; the line is hidden when mode is disabled.
@@ -908,8 +903,8 @@ pub(crate) struct PedanticConfig {
 /// some reason.
 pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
-/// Whether a notification-derived bug report (Phase 10 / F2)
-/// captured its ring-buffer payload from a live snapshot at
+/// Whether a notification-derived bug report captured its
+/// ring-buffer payload from a live snapshot at
 /// the moment the notification fired, or only from the
 /// post-event ring state. Serialised into the report's
 /// metadata.json via `BugReportType::Notification`.
@@ -951,7 +946,7 @@ pub enum BugReportType {
         channel: String,
     },
     /// User clicked the "File bug report" button on a
-    /// notification entry (Phase 10 / F2).
+    /// notification entry.
     /// `notification_id` is the entry's stable id within the
     /// session's `NotificationStore`; `snapshot_state` records
     /// whether the report's traffic payload came from a live
@@ -960,8 +955,8 @@ pub enum BugReportType {
         notification_id: u64,
         snapshot_state: NotificationSnapshotState,
     },
-    /// Auto-generated periodically by `--auto-snapshot-interval`
-    /// (Phase 5). Captures full session state across all channels
+    /// Auto-generated periodically by `--auto-snapshot-interval`.
+    /// Captures full session state across all channels
     /// so a single zip carries everything needed to diagnose any
     /// channel's behaviour at the moment of the snapshot.
     /// `channel_name()` returns `"all"` to trigger the merged
@@ -1001,12 +996,12 @@ impl BugReportType {
                 "webdav" => "webdav",
                 _ => "main",
             },
-            // Phase 10: notification reports are session-level
+            // Notification reports are session-level
             // — the pcap covers all channels, and the
             // channel-state.json defaults to main as a
             // sensible session anchor.
             BugReportType::Notification { .. } => "main",
-            // Phase 5: auto-snapshots embed every channel so a single
+            // Auto-snapshots embed every channel so a single
             // zip tells the full story.  The "all" arm in
             // ChannelSnapshots::snapshot_json_for merges all channels
             // into one JSON object.
@@ -1038,8 +1033,8 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
-    /// Idle keepalives this client sent on this channel
-    /// (Phase 02 K1 fix). Today only the inputs channel sends
+    /// Idle keepalives this client sent on this channel.
+    /// Today only the inputs channel sends
     /// these; the field is present on every entry for
     /// uniform JSON shape, with 0 / None where unimplemented.
     pub client_keepalive_send_count: u32,
@@ -1207,10 +1202,9 @@ impl DisconnectCause {
 /// submitted zip can record when the user *saw* the bug in
 /// addition to when they *submitted* the report.
 ///
-/// Phase 1 of the trigger-snapshot work plumbs this through
-/// with every caller passing `None` (which falls back to
-/// submit time); phase 2 wires up real trigger-time capture
-/// from the app.
+/// Callers that pass `None` fall back to submit time; the
+/// GUI captures real trigger timestamps when the dialog
+/// opens.
 #[derive(Debug, Clone)]
 pub struct TriggerTimestamps {
     /// ISO 8601 UTC timestamp (same format as
@@ -1784,8 +1778,8 @@ impl BugReport {
         Ok(path)
     }
 
-    /// Phase 10 (F2): write a bug-report zip triggered by the
-    /// user clicking "File bug report" on a notification entry.
+    /// Write a bug-report zip triggered by the user clicking
+    /// "File bug report" on a notification entry.
     /// The `traffic` argument is either a live snapshot
     /// captured at notification-fire time (`AtFire`) or the
     /// current `TrafficBuffers` (`PostEventOnly`); the
@@ -2059,7 +2053,7 @@ mod tests {
             image_cache_ids: vec![1, 2, 3],
             image_cache_bytes: 12345,
             bytes_in: 100_000,
-            // Phase-01 "video not keeping up" diagnostic fields.
+            // "Video not keeping up" diagnostic fields.
             decode_total_count: 7,
             decode_failed_count: 1,
             decode_from_cache_count: 2,
@@ -2071,9 +2065,9 @@ mod tests {
             socket_max_chunk_bytes: 262_144,
             ack_send_count: 3,
             last_ack_send_ts_secs: Some(4.25),
-            // Phase-02 pcap writer-queue drop counter.
+            // Pcap writer-queue drop counter.
             writer_dropped_count: 11,
-            // Phase-07 link-up preference-message send markers.
+            // Link-up preference-message send markers.
             pref_compression_sent: true,
             pref_video_codec_type_sent: true,
             ..Default::default()
@@ -2128,14 +2122,14 @@ mod tests {
         snap.stream_data_orphan_count = 3;
         snap.stream_reports_sent_total = 17;
         snap.stream_reports_unsupported_signals_sent = 2;
-        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        // Aggregate MJPEG decode duration fields.
         snap.mjpeg_decode_recent_min_us = 1_200;
         snap.mjpeg_decode_recent_max_us = 45_000;
         snap.mjpeg_decode_recent_mean_us = 8_500;
         snap.mjpeg_decode_total_count = 350;
         snap.mjpeg_decode_failed_count = 2;
-        // Phase-06 step 6B: aggregate H.264 decode duration fields
-        // (same shape as MJPEG aggregates).
+        // Aggregate H.264 decode duration fields (same shape as
+        // the MJPEG aggregates).
         snap.h264_decode_recent_min_us = 5_000;
         snap.h264_decode_recent_max_us = 28_000;
         snap.h264_decode_recent_mean_us = 12_500;
@@ -2177,7 +2171,8 @@ mod tests {
         assert!(json.contains("\"image_cache_entries\": 3"));
         assert!(json.contains("\"image_type\": \"GlzRgb\""));
         assert!(json.contains("\"bytes_in\": 100000"));
-        // Phase-01 fields visible in channel-state.json.
+        // Decode, socket-read and ack fields visible in
+        // channel-state.json.
         assert!(json.contains("\"decode_duration_us\": 1234"));
         assert!(json.contains("\"decode_total_count\": 7"));
         assert!(json.contains("\"decode_failed_count\": 1"));
@@ -2191,7 +2186,7 @@ mod tests {
         assert!(json.contains("\"ack_send_count\": 3"));
         assert!(json.contains("\"last_ack_send_ts_secs\": 4.25"));
         assert!(json.contains("\"recent_ack_intervals_secs\""));
-        // Phase-02 field.
+        // Pcap writer-queue drop counter.
         assert!(json.contains("\"writer_dropped_count\": 11"));
         // Stream-diagnostics fields. The presence of these in the
         // serialised display channel state is what lets a bug
@@ -2230,34 +2225,34 @@ mod tests {
         assert!(json.contains("\"last_report_last_frame_delay\": -42"));
         assert!(json.contains("\"stream_reports_sent_total\": 17"));
         assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
-        // Phase-03 step 3A: MJPEG decoder backend name visible in
-        // bug reports so a report identifies which path ran.
+        // MJPEG decoder backend name visible in bug reports so a
+        // report identifies which decode path ran.
         assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
-        // Phase-03 step 3F: aggregate MJPEG decode duration fields.
+        // Aggregate MJPEG decode duration fields.
         assert!(json.contains("\"mjpeg_decode_recent_min_us\": 1200"));
         assert!(json.contains("\"mjpeg_decode_recent_max_us\": 45000"));
         assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
         assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
         assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
-        // Phase-06 step 6D: general-purpose video_decoder_backend field
+        // General-purpose video_decoder_backend field
         // visible for every stream regardless of codec. For MJPEG streams
         // this matches mjpeg_decoder_backend; for H.264 it would show
         // "H264 (openh264)" while mjpeg_decoder_backend is empty.
         assert!(json.contains("\"video_decoder_backend\": \"jpeg-decoder\""));
-        // Phase-06 step 6B: aggregate H.264 decode duration fields
-        // (same shape and naming convention as the MJPEG aggregates).
+        // Aggregate H.264 decode duration fields (same shape and
+        // naming convention as the MJPEG aggregates).
         assert!(json.contains("\"h264_decode_recent_min_us\": 5000"));
         assert!(json.contains("\"h264_decode_recent_max_us\": 28000"));
         assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
         assert!(json.contains("\"h264_decode_total_count\": 120"));
         assert!(json.contains("\"h264_decode_failed_count\": 1"));
-        // Phase-07: link-up preference-message send markers must
+        // Link-up preference-message send markers must
         // appear in channel-state.json so a bug-report reader can
         // confirm the client asked for AUTO_LZ and the H264/MJPEG
         // codec ordering without reading the pcap.
         assert!(json.contains("\"pref_compression_sent\": true"));
         assert!(json.contains("\"pref_video_codec_type_sent\": true"));
-        // Phase-12B: bounded image-cache eviction and cap fields.
+        // Bounded image-cache eviction and cap fields.
         // These must appear in bug reports so an operator can tell
         // how much eviction pressure the session experienced and
         // what cap was in effect.
@@ -2265,9 +2260,9 @@ mod tests {
         snap.image_cache_evicted_bytes_total = 441_450_496;
         // 256 MiB default cap.
         snap.image_cache_cap_bytes = 268_435_456;
-        // Phase-12F: GLZ-dictionary cache stats now live in their
-        // own snapshot fields rather than being summed into
-        // image_cache_*. A bug report must surface both sets so an
+        // GLZ-dictionary cache stats live in their own snapshot
+        // fields rather than being summed into `image_cache_*`.
+        // A bug report must surface both sets so an
         // operator can tell which cache is under pressure.
         snap.glz_dictionary_entries = 17;
         snap.glz_dictionary_bytes = 4_194_304;
@@ -2355,13 +2350,13 @@ mod tests {
             bytes_in: 500,
             bytes_out: 100,
             writer_dropped_count: 2,
-            // Phase-01 STREAM_REPORT mm_time visibility.
+            // STREAM_REPORT mm_time visibility.
             mm_time_now: 123_456,
             mm_time_set_count: 7,
             last_mm_time_set_ts_secs: Some(12.5),
             unknown_opcode_count: 2,
             last_unknown_opcode: Some(0x1234),
-            // Phase-09A vdagent reply-lag tracking.
+            // Vdagent reply-lag tracking.
             agent_request_count: 5,
             agent_reply_count: 4,
             agent_reply_error_count: 1,
@@ -2388,7 +2383,7 @@ mod tests {
         assert!(json.contains("\"5\": 8"));
         assert!(json.contains("\"last_unknown_opcode\": 4660"));
         assert!(json.contains("\"unknown_opcode_count\": 2"));
-        // Phase-09A: vdagent reply-lag fields.
+        // Vdagent reply-lag fields.
         assert!(json.contains("\"agent_request_count\": 5"));
         assert!(json.contains("\"agent_reply_count\": 4"));
         assert!(json.contains("\"agent_reply_error_count\": 1"));
@@ -2618,7 +2613,7 @@ mod tests {
             fps: 59.9,
             connected: true,
             video_drop_count: 13,
-            // Phase-04 render-latency aggregates.
+            // Render-latency aggregates.
             image_ready_lag_recent_min_us: 50,
             image_ready_lag_recent_max_us: 9000,
             image_ready_lag_recent_mean_us: 750,
@@ -2636,9 +2631,9 @@ mod tests {
         assert!(json.contains("\"fps\": 59.9"));
         assert!(json.contains("\"connected\": true"));
         assert!(json.contains("\"surface_id\": 0"));
-        // Phase-03 field.
+        // Encoder-queue drop counter.
         assert!(json.contains("\"video_drop_count\": 13"));
-        // Phase-04 fields.
+        // Render-latency aggregates.
         assert!(json.contains("\"image_ready_lag_recent_min_us\": 50"));
         assert!(json.contains("\"image_ready_lag_recent_max_us\": 9000"));
         assert!(json.contains("\"image_ready_lag_recent_mean_us\": 750"));
@@ -3969,11 +3964,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // ── Phase 06 rebalance ─────────────────────────────────
+    // ── Per-channel ring-buffer caps ───────────────────────
 
     #[test]
     fn traffic_buffer_per_channel_caps_match_plan() {
-        // Pin each channel's ring buffer to its Phase 06 cap.
+        // Pin each channel's ring buffer to its documented cap.
         // Catches a silent regression to the old even-split
         // (~8.33 MB everywhere) or a typo in any of the named
         // constants.
@@ -4043,16 +4038,15 @@ mod tests {
         assert!(DISPLAY_BUFFER_BYTES > USBREDIR_BUFFER_BYTES);
     }
 
-    // ── Phase 07: cheap-clone invariant ─────────────────────
+    // ── Cheap-clone invariant ──────────────────────────────
 
     #[test]
     fn traffic_entry_clone_shares_pcap_frame_via_arc() {
-        // Phase 07 (no user-visible behaviour change) guard.
-        // The cheap-clone property is the whole point of the
-        // refactor — without this test a future change that
+        // The cheap-clone property is what keeps ring snapshots
+        // affordable — without this test a future change that
         // turns pcap_frame back into Vec<u8> would compile and
-        // silently regress the Phase 10 snapshot path's cost
-        // model from O(N atomic increments) to O(total bytes).
+        // silently regress the snapshot path's cost model from
+        // O(N atomic increments) to O(total bytes).
         let entry = TrafficEntry {
             timestamp: Duration::from_millis(0),
             channel: "main",
@@ -4069,13 +4063,13 @@ mod tests {
             Arc::ptr_eq(&entry.pcap_frame, &cloned.pcap_frame),
             "Clone must share the payload allocation; if this \
              fires, pcap_frame's type was changed back to \
-             Vec<u8> (or another deep-copy type) and Phase 10's \
+             Vec<u8> (or another deep-copy type) and the \
              snapshot cost model is broken."
         );
-        // Phase 08: the same invariant for additional_segments.
-        // Cloning a Vec<Arc<[u8]>> deep-copies the Vec spine but
-        // each Arc<[u8]> stays shared — that's the property the
-        // segmented ring needs for cheap Phase 10 snapshots.
+        // The same invariant for additional_segments. Cloning a
+        // Vec<Arc<[u8]>> deep-copies the Vec spine but each
+        // Arc<[u8]> stays shared — that's the property the
+        // segmented ring needs for cheap snapshots.
         for (orig, clone) in entry
             .additional_segments
             .iter()
@@ -4089,7 +4083,7 @@ mod tests {
         }
     }
 
-    // ── Phase 08 segmentation ───────────────────────────────
+    // ── Segmentation ───────────────────────────────────────
 
     #[cfg(feature = "capture")]
     #[test]
@@ -4117,8 +4111,8 @@ mod tests {
         );
         // The total bytes the ring holds must match the framed
         // size, not the raw payload size — and crucially must be
-        // > 65 KB, proving the pre-Phase-08 drop-on-overflow
-        // path did not fire.
+        // > 65 KB, proving the drop-on-overflow path did not
+        // fire.
         let total = entry.pcap_frame.len()
             + entry
                 .additional_segments
