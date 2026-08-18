@@ -6,18 +6,17 @@
 /// On **Linux**, these are read from `/proc/self/stat`,
 /// `/proc/self/status`, and `/proc/self/task/<tid>/stat`.
 ///
-/// On **macOS** (phases 1–3 of `PLAN-macos-runtime-metrics`):
-/// process-level metrics via a single
-/// `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot
-/// (phase 1) plus per-thread enumeration via `task_threads` +
+/// On **macOS**: process-level metrics via a single
+/// `task_info(MACH_TASK_BASIC_INFO)` syscall per snapshot,
+/// plus per-thread enumeration via `task_threads` +
 /// two `thread_info` calls per port (THREAD_BASIC_INFO and
 /// THREAD_IDENTIFIER_INFO) plus `pthread_getname_np` for the
-/// name (phase 2). The Mach port array from `task_threads` is
+/// name. The Mach port array from `task_threads` is
 /// wrapped in a `MachThreadList` RAII guard so each port
 /// reference and the array memory are released on every exit
 /// path, including panic. Uptime is baselined by
 /// `init_at_startup()`, which the caller invokes at the top
-/// of `main()` (phase 3); `uptime_secs` then measures from
+/// of `main()`; `uptime_secs` then measures from
 /// process start.
 ///
 /// On other platforms the struct records that metrics are
@@ -377,7 +376,7 @@ mod linux {
 // compiled on every platform — including Linux CI, where the
 // FFI surface of `mod macos` is unavailable. The helpers take
 // integer fields rather than `libc::time_value_t` for the same
-// reason. See PLAN-macos-runtime-metrics review feedback #2.
+// reason.
 //
 // `allow(dead_code)` because on non-macOS builds only the
 // `#[cfg(test)]` tests reference these items; the real
@@ -497,10 +496,9 @@ mod macos_math {
 
 // ── macOS implementation ───────────────────────────────────
 
-/// macOS metrics implementation per `PLAN-macos-runtime-
-/// metrics`: phase 1 added process-level metrics via
-/// `task_info(MACH_TASK_BASIC_INFO)`; phase 2 added per-
-/// thread enumeration via `task_threads` + per-port
+/// macOS metrics implementation: process-level metrics via
+/// `task_info(MACH_TASK_BASIC_INFO)`, plus per-thread
+/// enumeration via `task_threads` + per-port
 /// `thread_info` (THREAD_BASIC_INFO + THREAD_IDENTIFIER_INFO)
 /// + `pthread_getname_np`, with the `MachThreadList` RAII
 /// guard handling the Mach port lifecycle.
@@ -511,8 +509,7 @@ mod macos_math {
 /// top of `main()`. As long as that ordering holds,
 /// `uptime_secs` measures from process start. If a
 /// `sample()` runs before `init_at_startup()`, the baseline
-/// is the first-sample moment instead — see phase-3's plan
-/// for the ordering-requirement risk note.
+/// is the first-sample moment instead.
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::CStr;
@@ -530,7 +527,7 @@ mod macos {
     // the `mach2` crate. Both symbols are documented and stable
     // Mach ABI; local extern declarations are simpler than
     // pulling in `mach2` for two items.
-    // See PLAN-macos-runtime-metrics-phase-02-threads.md.
+    // See `docs/plans/PLAN-macos-runtime-metrics.md`.
     extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
@@ -570,7 +567,7 @@ mod macos {
     /// `vm_deallocate` on Drop, including the panic path. The
     /// only constructor is the struct literal below; wrapping
     /// is enforced by `task_threads` writing directly into the
-    /// fields. See PLAN-macos-runtime-metrics-phase-02.
+    /// fields. See `docs/plans/PLAN-macos-runtime-metrics.md`.
     struct MachThreadList {
         ports: *mut libc::thread_act_t,
         count: libc::mach_msg_type_number_t,
@@ -858,8 +855,8 @@ pub fn sample(window: Duration) -> RuntimeMetrics {
 /// Idempotent and cheap; safe to call more than once. If a
 /// `sample()` already ran before `init_at_startup`, the
 /// LazyLock is already set and this call is a no-op — see
-/// `PLAN-macos-runtime-metrics-phase-03-integration.md`
-/// "Risks" for the ordering requirement.
+/// `docs/plans/PLAN-macos-runtime-metrics.md` for the
+/// ordering requirement.
 pub fn init_at_startup() {
     #[cfg(target_os = "macos")]
     {
@@ -1003,7 +1000,7 @@ VmData:\t   65536 kB\n\
 
     #[test]
     fn test_init_at_startup_runs_without_panic() {
-        // Phase-3 contract: init_at_startup() is unconditionally
+        // init_at_startup() is unconditionally
         // callable on every platform and idempotent. On Linux
         // it is a no-op; on macOS it forces the PROCESS_START
         // LazyLock. Either way, calling it twice in a row from
@@ -1104,10 +1101,9 @@ VmData:\t   65536 kB\n\
     fn test_macos_sample_returns_populated_variant() {
         // End-to-end smoke test on a real Mac: call sample()
         // with a short window and confirm a populated MacOS
-        // variant comes back, not Unavailable. After phase 2
-        // also asserts the threads list is populated and at
-        // least one thread has a name (tokio names its
-        // workers).
+        // variant comes back, not Unavailable. Also asserts
+        // the threads list is populated and at least one
+        // thread has a name (tokio names its workers).
         let m = sample(std::time::Duration::from_millis(100));
         match m {
             RuntimeMetrics::MacOS {
@@ -1118,7 +1114,7 @@ VmData:\t   65536 kB\n\
             } => {
                 assert_eq!(platform, "macos");
                 assert_eq!(sample_window_ms, 100);
-                // Phase 2: every Mac process has at least the
+                // Every Mac process has at least the
                 // main thread. The test binary itself has more.
                 assert!(!threads.is_empty(), "expected non-empty threads");
                 for t in &threads {
@@ -1242,8 +1238,7 @@ VmData:\t   65536 kB\n\
     #[test]
     fn test_macos_compute_thread_metrics_zero_window() {
         // Zero-window must produce finite percent for every
-        // thread (the .max(1) µs guard from phase 1
-        // generalises).
+        // thread (the .max(1) µs guard generalises).
         use super::macos_math::compute_thread_metrics;
         let a = vec![ts(1, 1_000_000, 0, "w")];
         let b = vec![ts(1, 1_050_000, 0, "w")];

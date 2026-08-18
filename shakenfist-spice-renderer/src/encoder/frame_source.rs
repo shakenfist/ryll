@@ -4,12 +4,10 @@
 //! Two production-shaped impls live here:
 //!
 //! - [`SyntheticFrameSource`] — deterministic test pattern,
-//!   used by encoder unit tests and the `--web` Phase 4
-//!   bring-up.
+//!   used by encoder unit tests and `--web` bring-up.
 //! - [`RealFrameSource`] — reads from a [`SurfaceMirror`] under
 //!   a non-blocking [`tokio::sync::Mutex::try_lock`]; this is
-//!   the Phase 5 substrate that turns SPICE pixels into encoder
-//!   input.
+//!   the substrate that turns SPICE pixels into encoder input.
 
 /// A reference to one frame's pixel data.
 ///
@@ -29,8 +27,7 @@ pub struct FrameRef<'a> {
     /// Wall-clock timestamp in microseconds. The origin is
     /// chosen by the producer (e.g. encoder start instant) and
     /// must increase monotonically across successive frames.
-    /// Used by the task layer to derive RTP timestamps in
-    /// Phase 3+.
+    /// Used by the task layer to derive RTP timestamps.
     pub timestamp_us: u64,
 }
 
@@ -76,11 +73,11 @@ pub trait FrameSource: Send + 'static {
 ///    self-owned buffer, freeing the apply-event task to write
 ///    new frames concurrently.
 ///
-/// The `try_lock` path is the right shape for the Phase 5 MVP:
-/// the apply-event task holds the lock for the duration of one
+/// The `try_lock` path is the right shape here: the
+/// apply-event task holds the lock for the duration of one
 /// `apply_event` call (microseconds). A persistently contended
 /// lock would surface as dropped frames rather than encoder
-/// stalls — investigate as a Phase 6 perf item if it shows up.
+/// stalls — investigate as a perf item if it shows up.
 pub struct RealFrameSource {
     mirror: std::sync::Arc<tokio::sync::Mutex<crate::SurfaceMirror>>,
     /// Reused RGBA buffer; resized only when the primary

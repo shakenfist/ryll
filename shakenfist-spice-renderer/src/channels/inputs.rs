@@ -155,7 +155,7 @@ pub struct InputsChannel {
     /// Count of unrecognised receive opcodes.
     unknown_opcode_count: u64,
     /// Most recent KEY_MODIFIERS value we've sent. Restated by
-    /// the idle keepalive (Phase 02 K1 fix) with the same value
+    /// the idle keepalive, with the same value
     /// to keep the inputs channel non-idle without changing
     /// guest state.
     last_modifiers_sent: u16,
@@ -175,15 +175,15 @@ pub struct InputsChannel {
     shift_held: bool,
     alt_held: bool,
     paste_state: Option<PasteState>,
-    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    /// See `MainChannel::capture_dropped_count`.
     capture_dropped_count: u64,
 }
 
 /// Idle window before the inputs-channel keepalive fires.
 /// Conservative against the empirically observed
 /// 300 s server-side per-channel silence threshold (see
-/// session-001b data and the Phase 02 plan's Diagnosis section);
-/// 10 s leaves ample headroom for jitter and clock skew.
+/// session-001b data); 10 s leaves ample headroom for jitter
+/// and clock skew.
 const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl InputsChannel {
@@ -404,7 +404,7 @@ impl InputsChannel {
                     self.advance_paste().await?;
                 }
 
-                // Idle keepalive (Phase 02 K1 fix). When the channel
+                // Idle keepalive. When the channel
                 // has been silent in both directions for KEEPALIVE_IDLE,
                 // re-send the most recent KEY_MODIFIERS value. The
                 // guest sees no change (same modifier state); the

@@ -43,7 +43,7 @@ pub struct CursorChannel {
     ping_recv_count: u32,
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
-    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    /// See `MainChannel::capture_dropped_count`.
     capture_dropped_count: u64,
     /// Per-opcode receive counts; flushed to snapshot by
     /// `update_snapshot`.

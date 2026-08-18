@@ -106,7 +106,7 @@ pub struct WebdavChannel {
     // WebDAV server (None until sharing is started)
     server: Option<WebdavServer>,
 
-    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    /// See `MainChannel::capture_dropped_count`.
     /// WebDAV is not in `CHANNELS` so the CaptureSink accepts
     /// items unconditionally; this counter therefore stays at
     /// zero in normal operation and only rises if the writer

@@ -24,7 +24,7 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 30;
 #[derive(Debug)]
 pub enum EncoderControl {
     /// Force the next encoded frame to be an IDR keyframe.
-    /// Phase 3+ calls this whenever a new viewer attaches.
+    /// Sent whenever a new viewer attaches.
     RequestKeyframe,
     /// Stop the task. The task returns `Ok(())` after the
     /// current encode (if any) completes.

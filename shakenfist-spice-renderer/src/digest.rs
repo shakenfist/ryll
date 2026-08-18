@@ -6,7 +6,7 @@
 //! the last observed value -- broadcasts a
 //! [`ChannelEvent::DigestUpdated`].
 //!
-//! Phase 6 step 6c.  Off in production builds: gated by
+//! Off in production builds: gated by
 //! `#[cfg(feature = "digest-decode")]` end to end so the
 //! shakenfist-visual-digest dep, the rqrr QR backend, and the
 //! `image` decode path do not land in a default ryll.
@@ -26,7 +26,7 @@ use crate::surface_mirror::SurfaceMirror;
 /// enough that a Sextant phase transition is observed inside
 /// half a frame, long enough that the task does not dominate CPU
 /// time when no digest is present.  Tunable later behind a CLI
-/// flag if phase 7 ever needs it.
+/// flag if that is ever needed.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Run the polling task until `cancel` flips to true.

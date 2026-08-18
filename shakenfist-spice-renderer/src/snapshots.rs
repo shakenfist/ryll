@@ -104,8 +104,7 @@ pub struct StreamSnapshot {
     /// `"VA-API"`, `"libjpeg-turbo"`, `"jpeg-decoder"`.
     /// Identical for all streams in the same session because
     /// the backend is chosen once at `DisplayChannel::new`.
-    /// Empty string in snapshots produced before phase 3, and
-    /// empty string for non-MJPEG streams (H.264, etc.) —
+    /// Empty string for non-MJPEG streams (H.264, etc.) —
     /// use `video_decoder_backend` as the general-purpose
     /// field; this one is kept for backwards compat with
     /// existing bug-report consumers that key on it.
@@ -204,13 +203,13 @@ pub struct DisplaySnapshot {
     /// `RECENT_ACK_INTERVALS_CAP` constant in the display
     /// channel for the cap.
     pub recent_ack_intervals_secs: VecDeque<f64>,
-    /// Phase-02 "video not keeping up" diagnostic: number of
+    /// "Video not keeping up" diagnostic: number of
     /// pcap-capture packets dropped because the writer-task
     /// queue was full. Cumulative since session start; zero
     /// when `--capture` is not in use. A non-zero value
     /// implicates disk speed rather than decode or socket-read
     /// when triaging a "video not keeping up" report. See
-    /// PLAN-video-keeping-up-phase-02-pcap-thread.md.
+    /// `docs/plans/PLAN-video-keeping-up.md`.
     pub writer_dropped_count: u64,
     /// Currently-open SPICE video streams (one entry per active
     /// `STREAM_CREATE`). Empty when the server has not promoted
@@ -241,9 +240,9 @@ pub struct DisplaySnapshot {
     pub stream_reports_sent_total: u64,
     /// Cumulative count of "unsupported codec" wildcard reports
     /// (num_frames=0, num_drops=UINT32_MAX) sent to the server.
-    /// Currently always zero; written by phase 4 when we accept
-    /// multi-codec streams and need to tell the server to give
-    /// up on one.
+    /// Currently always zero: nothing sends these yet. They
+    /// would be written when a multi-codec stream needs the
+    /// server told to give up on one codec.
     pub stream_reports_unsupported_signals_sent: u64,
     /// Min MJPEG decode duration (µs) over the most recent
     /// `MAX_RECENT_DECODES` calls. Zero when no MJPEG frame
@@ -282,10 +281,10 @@ pub struct DisplaySnapshot {
     /// Total bytes currently held in the SPICE GLZ decompression
     /// dictionary. Distinct from `image_cache_bytes` (which only
     /// counts the CACHE_ME-flagged decoded RGBA frames the
-    /// renderer keeps). Prior to phase 12F this was summed into
-    /// `image_cache_bytes`; that summing obscured the 002g/003a
-    /// failure mode where the GLZ dictionary, not the image
-    /// cache, was the source of the leak.
+    /// renderer keeps). Kept separate because summing the two
+    /// obscured the 002g/003a failure mode where the GLZ
+    /// dictionary, not the image cache, was the source of the
+    /// leak.
     pub glz_dictionary_bytes: usize,
     /// Number of entries currently in the GLZ dictionary.
     /// Parallel to `image_cache_entries`.
@@ -322,14 +321,14 @@ pub struct DisplaySnapshot {
     /// start. Subset of `h264_decode_total_count`; `Ok(None)`
     /// is not counted as a failure.
     pub h264_decode_failed_count: u64,
-    /// Phase-07: true once the link-up
+    /// True once the link-up
     /// `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION` (opcode 103)
     /// message has been sent. One-shot per channel lifetime —
     /// never flips back to false, since the client only sends
     /// the preference at link-up. Lets a bug-report reader tell
     /// at a glance whether the server received our preference.
     pub pref_compression_sent: bool,
-    /// Phase-07: true once the link-up
+    /// True once the link-up
     /// `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` (opcode
     /// 105) message has been sent. One-shot per channel lifetime
     /// for the same reason as `pref_compression_sent`.
@@ -901,7 +900,7 @@ impl ChannelSnapshots {
                 let snap = self.webdav.lock().expect("lock poisoned").clone();
                 Some(serde_json::to_string_pretty(&snap))
             }
-            // Phase 5 (auto-snapshot): merge every channel's snapshot
+            // Merge every channel's snapshot
             // into a single JSON object keyed by channel name. A single
             // zip then carries the full session picture without the
             // caller needing to know which channel is "most interesting".

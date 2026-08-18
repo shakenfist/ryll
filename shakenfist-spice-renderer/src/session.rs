@@ -201,7 +201,7 @@ pub async fn run_connection(
     // Shared mm_time clock. The main channel writes to it from
     // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel
     // reads from it when building `STREAM_REPORT` payloads
-    // (phase 1F). Constructed here so both channels share the
+    // Constructed here so both channels share the
     // same `Arc<MmClock>`; not exposed through `run_connection`'s
     // public signature because it is purely internal plumbing
     // — host callers never see it.
@@ -580,8 +580,7 @@ pub async fn run_headless(
     // visual digest and broadcasts a `DigestUpdated` event when
     // the frame_counter changes.  The control server's event
     // translator turns that into a `digest_updated` wire event.
-    // See `crate::digest` and the kerbside test-harness phase 6
-    // step 6c plan.
+    // See `crate::digest`.
     #[cfg(feature = "digest-decode")]
     let _digest_handle = {
         let mirror_for_digest = surface_mirror.clone();

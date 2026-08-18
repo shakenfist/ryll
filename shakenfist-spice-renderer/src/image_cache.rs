@@ -9,10 +9,9 @@
 //! enums are all provided by the shared `ByteBoundedLru` in the
 //! compression crate so the GLZ dictionary can reuse them.
 //!
-//! See phase 12E of
-//! `docs/plans/PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md`
-//! for the refactor that moved the underlying data structure into the
-//! compression crate.
+//! See `docs/plans/PLAN-stream-caps-and-flap.md` for the refactor
+//! that moved the underlying data structure into the compression
+//! crate.
 
 pub use shakenfist_spice_compression::byte_bounded_lru::{InsertOutcome, RefusedReason};
 

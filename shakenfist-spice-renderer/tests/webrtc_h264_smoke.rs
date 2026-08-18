@@ -1,5 +1,5 @@
-//! Phase 2 step 2e pre-flight: confirm webrtc-rs's H.264 RTP
-//! payloader accepts the NAL output our H264Encoder produces.
+//! Confirms webrtc-rs's H.264 RTP payloader accepts the NAL
+//! output our H264Encoder produces.
 //!
 //! The encoder emits Annex-B-framed NAL units. The webrtc-rs
 //! H264Payloader expects raw NAL bodies (no start codes), so
@@ -32,12 +32,11 @@
 //!
 //! ## Pass / fail signal
 //!
-//! If this test passes, Phase 2 ships H.264 by default. If it
-//! fails (e.g. the payloader returns an error or fails to
-//! bundle SPS+PPS into a STAP-A on the IDR), the contingency
-//! is to swap to VP8 via vpx-encode in a follow-up commit; see
-//! docs/plans/PLAN-web-frontend-phase-02-encoder.md, Approach
-//! section "VP8 contingency pre-flight (step 2e)".
+//! `--web` ships H.264 by default on the strength of this
+//! test. If it fails (e.g. the payloader returns an error or
+//! fails to bundle SPS+PPS into a STAP-A on the IDR), the
+//! contingency is to swap to VP8 via vpx-encode; see
+//! docs/plans/PLAN-web-frontend.md.
 
 use bytes::Bytes;
 use rtp::codecs::h264::{H264Payloader, FUA_NALU_TYPE, PPS_NALU_TYPE, SPS_NALU_TYPE};
