@@ -8,8 +8,8 @@
 //! forced keyframe.
 //!
 //! Timestamps are not handled here; [`EncodedFrame::timestamp_us`] is
-//! always set to 0 and is populated by the caller (the encoder task in
-//! step 2c).
+//! always set to 0 and is populated by the caller (the encoder
+//! task).
 
 use anyhow::Result;
 use openh264::encoder::{BitRate, EncoderConfig, FrameRate, UsageType};
@@ -278,8 +278,8 @@ impl H264Encoder {
 
         Ok(EncodedFrame {
             nal_units,
-            // Populated by EncoderTask in step 2c; the encoder
-            // itself is timestamp-agnostic.
+            // Populated by EncoderTask; the encoder itself is
+            // timestamp-agnostic.
             timestamp_us: 0,
             keyframe: is_idr,
         })

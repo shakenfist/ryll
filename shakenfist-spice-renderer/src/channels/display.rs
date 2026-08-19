@@ -612,7 +612,7 @@ pub struct DisplayChannel {
     stream_data_orphan_count: u64,
     /// Cumulative count of STREAM_REPORT messages sent to the
     /// server since session start. Mirrored into
-    /// `DisplaySnapshot::stream_reports_sent_total` by step 1G.
+    /// `DisplaySnapshot::stream_reports_sent_total`.
     stream_reports_sent_total: u64,
     /// Bounded ring of recently-destroyed `StreamState`s captured
     /// at teardown so per-stream counters survive `STREAM_DESTROY`.
@@ -1428,7 +1428,7 @@ impl DisplayChannel {
                     if msg_type == display_server::STREAM_DATA_SIZED {
                         // SpiceMsgDisplayStreamDataSized layout (spice.proto):
                         //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  4: multi_media_time (u32)
                         //   offset  8: width (u32)
                         //   offset 12: height (u32)
                         //   offset 16: dest_top (u32)
@@ -1457,7 +1457,7 @@ impl DisplayChannel {
                     } else {
                         // SpiceMsgDisplayStreamData layout (spice.proto):
                         //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)  ← step 1C
+                        //   offset  4: multi_media_time (u32)
                         //   offset  8: data_size (u32)
                         //   offset 12: data
                         if payload.len() < 12 {
@@ -2863,8 +2863,9 @@ impl DisplayChannel {
             buf.extend_from_slice(&stream.report_num_frames.to_le_bytes());
             buf.extend_from_slice(&stream.report_num_drops.to_le_bytes());
             buf.extend_from_slice(&last_frame_delay.to_le_bytes());
-            // audio_delay = UINT32_MAX (no audio latency surfaced
-            // yet — see phase plan "Scope > Out of scope").
+            // audio_delay = UINT32_MAX: no audio latency is
+            // surfaced yet, and measuring it was left out of
+            // scope for the stream-caps work.
             buf.extend_from_slice(&u32::MAX.to_le_bytes());
 
             // Mirror counters into last_report_* and reset rolling.
@@ -2952,7 +2953,7 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // JpegDecoderRsDecoder tests (replaces old decode_mjpeg_frame tests;
-    // the function moved to shakenfist-spice-compression::jpeg in step 3A).
+    // the function moved to shakenfist-spice-compression::jpeg).
     // -------------------------------------------------------------------------
 
     #[test]

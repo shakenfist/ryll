@@ -799,7 +799,8 @@ mod tests {
     /// `register_h264` asks for `42e01f`. Since the explicit
     /// registration is dropped, the bridge negotiates 42001f while
     /// its encoder emits 42e01f. Browsers tolerate the constraint-set
-    /// difference, and untangling it is not this phase's job.
+    /// difference, and untangling it has not been worth the
+    /// churn.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn register_h264_is_redundant_with_default_codecs() {
         // What TestPeer builds: defaults plus the explicit H.264.

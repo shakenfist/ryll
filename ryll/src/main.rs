@@ -729,7 +729,7 @@ fn run_web(
         // raised SHUTDOWN_REQUESTED, or axum::serve errored)
         // we tear the rest down before returning.
         //
-        // Step 5d: the cursor relay runs against the same
+        // The cursor relay runs against the same
         // `bridge_slot` the signalling handler installs into. Its bus
         // subscription, and the mouse-mode tracker's, were taken
         // before the session was spawned; see the comment there.

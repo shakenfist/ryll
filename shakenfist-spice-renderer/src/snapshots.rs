@@ -371,11 +371,11 @@ pub struct InputsSnapshot {
     /// See `DisplaySnapshot::last_ping_recv_ts_secs`.
     pub last_ping_recv_ts_secs: Option<f64>,
     /// Number of unsolicited KEY_MODIFIERS messages we've sent
-    /// to the server as a client-driven idle keepalive (Phase
-    /// 02 K1 fix). Restating the modifier state with the same
-    /// value is a no-op for the guest but keeps the inputs
-    /// channel non-idle, which the K1 hypothesis suggests may
-    /// also be enough to keep the whole session alive.
+    /// to the server as a client-driven idle keepalive.
+    /// Restating the modifier state with the same value is a
+    /// no-op for the guest but keeps the inputs channel
+    /// non-idle, which may also be enough to keep the whole
+    /// session alive.
     pub client_keepalive_send_count: u32,
     /// Session-relative seconds at the most recent keepalive
     /// send. None until the first one fires.

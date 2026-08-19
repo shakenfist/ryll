@@ -772,9 +772,8 @@ impl JpegDecoder for WicDecoder {
 ///   2. `Library::new("libva-drm.so.2")` — same fallback
 ///      ladder for older sonames.
 ///   3. `open("/dev/dri/renderD128")` — the typical first GPU.
-///      We do NOT enumerate `renderD*` — that's Q3 in the
-///      phase plan, deferred until a real multi-GPU report
-///      surfaces.
+///      We do NOT enumerate `renderD*`; that is deferred
+///      until a real multi-GPU report surfaces.
 ///   4. `vaGetDisplayDRM(fd)` + `vaInitialize(...)`.
 ///   5. `vaQueryConfigProfiles()` — scan for
 ///      `VAProfileJPEGBaseline` (id 19).
@@ -1286,9 +1285,9 @@ impl JpegDecoder for VaapiDecoder {
 ///   other   →                  MozJpegDecoder → JpegDecoderRsDecoder
 /// ```
 ///
-/// Steps 3A–3D have landed: pure-Rust + libjpeg-turbo
-/// cross-platform, ImageIO on macOS, and WIC on Windows. VA-API
-/// lands in step 3E. `MozJpegDecoder` is only present when the
+/// Pure-Rust + libjpeg-turbo are available cross-platform,
+/// ImageIO on macOS, and WIC on Windows; VA-API is the newest
+/// addition. `MozJpegDecoder` is only present when the
 /// `mozjpeg` Cargo feature is enabled (defaulted on); building
 /// without it falls back to the pure-Rust path.
 ///

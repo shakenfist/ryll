@@ -149,7 +149,7 @@ release: ensure-cache
 # toolchain to compile its vendored BoringSSL C sources -- but the
 # gnu triple shares the cfg(windows)/windows-sys surface with msvc,
 # so it catches the common case cheaply. See
-# docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md.
+# docs/plans/PLAN-two-stage-ci.md.
 check-windows: ensure-cache
 	$(DOCKER_RUN) \
 		$(RYLL_IMAGE) \

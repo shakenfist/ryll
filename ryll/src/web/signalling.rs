@@ -337,7 +337,7 @@ pub async fn post_offer(
     }
     let _audio_handle = bridge.spawn_audio_pump(opus_rx);
 
-    // Step 5c: spawn the browser → renderer input relay. Each
+    // Spawn the browser → renderer input relay. Each
     // bridge owns exactly one control DC; `control_rx()` is
     // single-shot, so taking it here is correct. We only spawn
     // the relay when the renderer-side senders are populated
@@ -366,8 +366,8 @@ pub async fn post_offer(
     // `bridge_slot` yet, so nothing else will ever reap it, and on
     // 0.20 dropping it detaches the driver task rather than stopping
     // it — the peer connection, its UDP sockets (one per non-loopback
-    // interface), the control-DC pump, and the input relay spawned at
-    // step 5c would all outlive the failed request. A client posting
+    // interface), the control-DC pump, and the input relay spawned
+    // above would all outlive the failed request. A client posting
     // malformed SDP in a loop would accumulate them for the life of
     // the process; the offer cooldown bounds the rate, not the total.
     // `WebrtcBridge`'s `Drop` is a backstop for paths that forget,

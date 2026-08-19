@@ -78,10 +78,9 @@ struct HeadlessStats {
 /// `spice_connected` is conservative: we report `true` as long as
 /// the connection task handle is still alive (it exits only once the
 /// main channel disconnects).  `agent_connected` reflects the latest
-/// `ChannelEvent::AgentConnected` observed by the broadcast fan-out
-/// (step 3d).  `surfaces` is populated from the live `SurfaceMirror`
-/// (step 3e) so a `status` reply matches what the `screenshot` verb
-/// would observe.
+/// `ChannelEvent::AgentConnected` observed by the broadcast fan-out.
+/// `surfaces` is populated from the live `SurfaceMirror` so a
+/// `status` reply matches what the `screenshot` verb would observe.
 struct HeadlessStatus {
     /// True while the connection task is running.  The control server
     /// reads this via the `StatusProvider` trait.
@@ -200,11 +199,11 @@ pub async fn run_connection(
 
     // Shared mm_time clock. The main channel writes to it from
     // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel
-    // reads from it when building `STREAM_REPORT` payloads
-    // Constructed here so both channels share the
-    // same `Arc<MmClock>`; not exposed through `run_connection`'s
-    // public signature because it is purely internal plumbing
-    // — host callers never see it.
+    // reads from it when building `STREAM_REPORT` payloads.
+    // Constructed here so both channels share the same
+    // `Arc<MmClock>`; not exposed through `run_connection`'s
+    // public signature because it is purely internal
+    // plumbing — host callers never see it.
     let mm_clock = Arc::new(MmClock::new());
 
     // Connect main channel and run it. The main channel sends

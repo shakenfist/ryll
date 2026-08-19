@@ -273,9 +273,9 @@ const MAIN_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
 const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
 
 /// Budget shared across all per-channel ring buffers. Pinned
-/// at 50 MB; dynamic sizing keyed on system memory is the
-/// master plan's "Future work" item and explicitly out of
-/// scope for this phase.
+/// at 50 MB rather than sized from system memory: modern
+/// machines have the headroom, and a fixed cap keeps the
+/// per-channel weights below predictable.
 const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
 // Compile-time arithmetic guard: the per-channel caps must
@@ -2211,7 +2211,7 @@ mod tests {
         assert!(json.contains("\"streams_recently_destroyed\""));
         assert!(json.contains("\"stream_id\": 37"));
         assert!(json.contains("\"destroyed_at_secs\": 6.25"));
-        // STREAM_ACTIVATE_REPORT fields (step 1D): verify that
+        // STREAM_ACTIVATE_REPORT fields: verify that
         // activation state and last-sent-report mirrors are
         // visible in channel-state.json.
         assert!(json.contains("\"report_is_active\": true"));
