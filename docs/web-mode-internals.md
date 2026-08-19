@@ -249,9 +249,9 @@ no RTCP PLI (Picture Loss Indication) handler requesting a
 keyframe on a viewer-initiated refresh: `bridge.rs` registers no
 `on_rtcp_packet`-equivalent handling, so a browser that loses the
 IDR has no way to ask for another one and must reconnect. The
-WebRTC bring-up explicitly allowed stubbing this — see
-[`PLAN-web-frontend.md`](plans/PLAN-web-frontend.md) — and it has
-not been implemented since.
+WebRTC bring-up explicitly allowed stubbing this, and it is
+carried as future work in
+[`PLAN-web-frontend.md`](plans/PLAN-web-frontend.md).
 
 ### webrtc-rs convention: handler methods must never block
 

@@ -120,6 +120,22 @@ actually hot.
    is unmeasurable without external instrumentation. See
    `PLAN-video-keeping-up-phase-04-render-latency.md`.
 
+4. **Asynchronous MP4 finalisation**, accepted as a
+   deliberate regression when phase 3 moved encoding off the
+   GUI event loop. `CaptureSession::close()` drops the frame
+   sender and returns immediately; the encoder task drains
+   its queue and writes the moov atom afterwards, on the
+   tokio runtime. A bug report assembled within milliseconds
+   of `close()` can therefore capture an unfinalised
+   (unplayable) MP4, and an abrupt shutdown can tear the
+   runtime down before the final `write_end()`. Finalising
+   synchronously was rejected because it would have put the
+   caller back to blocking on the encoder draining, which is
+   exactly the stall the phase was removing. In practice the
+   queue is a few frames deep so the window is small. See
+   `PLAN-video-keeping-up-phase-03-video-encode-thread.md`
+   for the full analysis of both scenarios.
+
 ## Acceptance criteria
 
 A "video stream not keeping up" bug report is self-diagnosing

@@ -935,6 +935,13 @@ We will know the MVP has landed when:
   lets the operator run multiple sessions per machine.
 - **Per-rect dirty tracking** for partial-frame encodes.
   Meaningful CPU/bandwidth win on mostly-static desktops.
+- **RTCP PLI (Picture Loss Indication) handling.** The
+  WebRTC bring-up deliberately stubbed this: the bridge
+  forces a keyframe when the peer connection reaches
+  `Connected`, but never in response to a viewer-initiated
+  refresh, so a browser that loses the IDR has to reconnect
+  to recover. Wiring the incoming PLI through to
+  `EncoderControl::RequestKeyframe` closes that gap.
 - **Multi-session / multi-tenant** mode — one daemon, many
   desktops, many viewers. Hard-blocked on the
   authentication and TLS items above.

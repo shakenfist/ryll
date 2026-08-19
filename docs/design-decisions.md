@@ -45,8 +45,9 @@ produced.
    encoder task after the sender drops, so a bug report assembled within
    milliseconds of `CaptureSession::close()` may see an unfinalised MP4. That
    was accepted deliberately: finalising synchronously would have blocked the
-   caller on the encoder draining. See [`PLAN-capture.md`](plans/PLAN-capture.md)
-   for the trade-off.
+   caller on the encoder draining. See
+   [`PLAN-video-keeping-up.md`](plans/PLAN-video-keeping-up.md) for the
+   trade-off.
 
 7. **Display channel capabilities** - Ryll advertises COMPOSITE,
    MONITORS_CONFIG, SIZED_STREAM, A8_SURFACE, plus seven more added by the
