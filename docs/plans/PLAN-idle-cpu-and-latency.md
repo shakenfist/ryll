@@ -195,7 +195,7 @@ guest). Out of scope for this plan.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Profile idle CPU | PLAN-idle-cpu-and-latency-phase-01-profile.md | Complete |
-| 2. Repaint cadence fix | PLAN-idle-cpu-and-latency-phase-02-repaint.md | Code landed; awaiting user verification |
+| 2. Repaint cadence fix | PLAN-idle-cpu-and-latency-phase-02-repaint.md | In progress |
 | 3. Demote protocol logging | PLAN-idle-cpu-and-latency-phase-03-logging.md | Complete |
 | 4. Real latency from PING/PONG | PLAN-idle-cpu-and-latency-phase-04-latency.md | Complete |
 | 5. Capture runtime metrics in bug reports | PLAN-idle-cpu-and-latency-phase-05-metrics.md | Complete |
@@ -210,6 +210,11 @@ readability and a missing is_verbose() guard on the
 playback channel.*  Phase 4 is independent of 1-3 but
 should land last so its sparkline data is visible once the
 other CPU-eating problems are fixed.
+
+Phase 2 is `In progress` rather than `Complete`: the repaint
+bridge code landed, but the CPU reduction it is supposed to
+deliver has not been confirmed on the reporter's machine, so
+the phase stays open until a user run verifies it.
 
 Phase 5 was added after the original incident: had ryll
 captured its own per-thread CPU into bug reports, the user
