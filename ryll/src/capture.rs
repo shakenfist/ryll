@@ -260,10 +260,10 @@ fn channel_static(name: &str) -> Option<&'static str> {
 
 // ── Pcap writer task ────────────────────────────────────
 
-/// Bound on the queue feeding the dedicated pcap writer task.
-/// In steady state with a keeping-up writer the queue sits near
-/// zero; the cap exists so a slow disk burst is dropped rather
-/// than allowed to back-pressure the SPICE socket. See
+/// Bound on the queue feeding the dedicated pcap writer task. In
+/// steady state with a keeping-up writer the queue sits near zero;
+/// the cap exists so a slow disk burst is dropped rather than
+/// allowed to back-pressure the SPICE socket. See
 /// `docs/plans/PLAN-video-keeping-up.md`.
 const PCAP_QUEUE_CAPACITY: usize = 1024;
 
@@ -605,12 +605,12 @@ fn chrono_now() -> String {
 
 // ── Video writer task ───────────────────────────────────
 
-/// Bound on the queue feeding the dedicated video encoder
-/// task. Smaller than `PCAP_QUEUE_CAPACITY` because per-item
-/// payload is dominated by full RGBA surface bytes (~8 MB at
-/// 1080p, ~33 MB at 4K). Eight slots absorb ~100-250 ms of
-/// encoder backlog at typical SPICE presentation rates before
-/// drops begin. See `docs/plans/PLAN-video-keeping-up.md`.
+/// Bound on the queue feeding the dedicated video encoder task.
+/// Smaller than `PCAP_QUEUE_CAPACITY` because per-item payload is
+/// dominated by full RGBA surface bytes (~8 MB at 1080p, ~33 MB
+/// at 4K). Eight slots absorb ~100-250 ms of encoder backlog at
+/// typical SPICE presentation rates before drops begin. See
+/// `docs/plans/PLAN-video-keeping-up.md`.
 const VIDEO_QUEUE_CAPACITY: usize = 8;
 
 /// One queued frame for the encoder task. `pixels` is
@@ -630,10 +630,10 @@ struct VideoQueueItem {
 
 /// Long-lived task that owns the `VideoWriter`. Lazily
 /// initialises it from the first received frame's dimensions
-/// rather than requiring them up front.
-/// When the sender drops, drains any in-flight items, then
-/// finalises the MP4 by calling `VideoWriter::close()` —
-/// which writes the moov atom and makes the file playable.
+/// rather than requiring them up front. When the sender drops,
+/// drains any in-flight items, then finalises the MP4 by calling
+/// `VideoWriter::close()` — which writes the moov atom and makes
+/// the file playable.
 async fn video_writer_task(mut rx: mpsc::Receiver<VideoQueueItem>, dir: PathBuf) {
     let mut writer: Option<VideoWriter> = None;
     let mut init_attempted = false;
@@ -688,15 +688,14 @@ pub struct CaptureSession {
     /// after the sender is dropped to guarantee the queue has
     /// drained before this `CaptureSession` is destroyed.
     writer_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Sender side of the queue feeding the dedicated
-    /// H.264/MP4 encoder task. Held inside
-    /// `Option<Mutex<>>` so `close()` can `take()` it and
-    /// drop it, signalling the encoder task to drain,
-    /// finalise the MP4 (moov atom), and exit.
+    /// Sender side of the queue feeding the dedicated H.264/MP4
+    /// encoder task. Held inside `Option<Mutex<>>` so `close()`
+    /// can `take()` it and drop it, signalling the encoder task
+    /// to drain, finalise the MP4 (moov atom), and exit.
     video_tx: Mutex<Option<mpsc::Sender<VideoQueueItem>>>,
-    /// Join handle for the encoder task. Detached
-    /// at `close()` time; the task continues on the runtime
-    /// until it has drained the queue and finalised the MP4.
+    /// Join handle for the encoder task. Detached at `close()` time;
+    /// the task continues on the runtime until it has drained the
+    /// queue and finalised the MP4.
     video_handle: Mutex<Option<JoinHandle<()>>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
@@ -942,9 +941,8 @@ mod tests {
 
     #[test]
     fn segment_payload_split_at_max() {
-        // A 130 000-byte payload must produce 2 frames: the
-        // first with 65 495 bytes of payload, the second with
-        // the 64 505-byte tail.
+        // A 130 000-byte payload must produce 2 frames: the first with
+        // 65 495 bytes of payload, the second with the 64 505-byte tail.
         let payload = vec![0u8; 130_000];
         let frames = segment_payload(CLIENT_IP, 10002, SERVER_IP, SERVER_PORT, 0, 0, &payload);
         assert_eq!(frames.len(), 2, "130KB payload should split into 2 frames");
@@ -1031,15 +1029,14 @@ mod tests {
 
     #[test]
     fn build_tcp_frame_oversized_payload_returns_empty_vec() {
-        // Regression guard for the defensive branch in
-        // build_tcp_frame: an over-65515-byte tcp_payload_len
-        // must return Vec::new() (and warn), not panic. The
-        // warn itself is instrumented with a one-shot
-        // backtrace; this test just pins the return contract
-        // so a future refactor doesn't silently turn the warn
-        // into a panic or a partial frame. We use 100 000 bytes
-        // — comfortably past the 65515 ceiling and matching the
-        // range this has been observed at in live sessions.
+        // Regression guard for the defensive branch in build_tcp_frame: an
+        // over-65515-byte tcp_payload_len must return Vec::new() (and
+        // warn), not panic. The warn itself is instrumented with a
+        // one-shot backtrace; this test just pins the return contract so a
+        // future refactor doesn't silently turn the warn into a panic or a
+        // partial frame. We use 100 000 bytes — comfortably past the 65515
+        // ceiling and matching the range this has been observed at in live
+        // sessions.
         let payload = vec![0u8; 100_000];
         let frame = build_tcp_frame(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &payload);
         assert!(

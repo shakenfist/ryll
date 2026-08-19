@@ -78,16 +78,13 @@ pub struct TrafficEntry {
     /// `traffic_entry_clone_shares_pcap_frame_via_arc` in
     /// this file's tests for the cheap-clone invariant.
     pub pcap_frame: Arc<[u8]>,
-    /// Additional TCP segments produced when a SPICE message
-    /// exceeds the IPv4 frame limit.
-    /// Empty in the common case where the message fits in a
-    /// single segment; a few entries for larger display-
-    /// channel messages. Each segment is an independent
-    /// `Arc<[u8]>` so clones (the notification-snapshot
-    /// path) remain
-    /// O(N atomic refcount bumps). An empty `Vec` does not
-    /// allocate, so the common case has zero per-entry
-    /// overhead.
+    /// Additional TCP segments produced when a SPICE message exceeds
+    /// the IPv4 frame limit. Empty in the common case where the
+    /// message fits in a single segment; a few entries for larger
+    /// display- channel messages. Each segment is an independent
+    /// `Arc<[u8]>` so clones (the notification-snapshot path) remain
+    /// O(N atomic refcount bumps). An empty `Vec` does not allocate,
+    /// so the common case has zero per-entry overhead.
     pub additional_segments: Vec<Arc<[u8]>>,
 }
 
@@ -155,10 +152,10 @@ impl TrafficRingBuffer {
         }
     }
 
-    /// Push a new entry, evicting oldest entries if the byte
-    /// cap would be exceeded. Accounts for the full segmented
-    /// payload: an entry's byte cost is its
-    /// `pcap_frame` plus any `additional_segments`.
+    /// Push a new entry, evicting oldest entries if the byte cap
+    /// would be exceeded. Accounts for the full segmented payload: an
+    /// entry's byte cost is its `pcap_frame` plus any
+    /// `additional_segments`.
     pub fn push(&mut self, entry: TrafficEntry) {
         self.total_bytes += entry_bytes(&entry);
         self.entries.push_back(entry);
@@ -204,21 +201,19 @@ impl TrafficRingBuffer {
             let packet = PcapPacket::new(
                 entry.timestamp,
                 entry.pcap_frame.len() as u32,
-                // Explicit slice borrow: &entry.pcap_frame
-                // is &Arc<[u8]> and PcapPacket wants &[u8].
+                // Explicit slice borrow: &entry.pcap_frame is &Arc<[u8]> and
+                // PcapPacket wants &[u8].
                 &entry.pcap_frame[..],
             );
             pcap.write_packet(&packet).ok();
-            // Additional segments for SPICE messages
-            // that exceeded the IPv4 frame limit. Written at
-            // the same timestamp — matches what the live
-            // capture writer produces for the same payload.
+            // Additional segments for SPICE messages that exceeded the IPv4
+            // frame limit. Written at the same timestamp — matches what the
+            // live capture writer produces for the same payload.
             for seg in &entry.additional_segments {
                 let seg_packet = PcapPacket::new(entry.timestamp, seg.len() as u32, &seg[..]);
                 pcap.write_packet(&seg_packet).ok();
             }
-            // `count` reflects the number of SPICE messages,
-            // not segments.
+            // `count` reflects the number of SPICE messages, not segments.
             count += 1;
         }
 
@@ -471,11 +466,11 @@ impl TrafficBuffers {
         guard.push(entry);
     }
 
-    /// Build one or more pcap frames for the given message,
-    /// updating TCP sequence numbers on the ring buffer.
-    /// Messages above the IPv4 frame limit are split via the
-    /// shared `capture::segment_payload` helper. Always
-    /// returns at least one frame.
+    /// Build one or more pcap frames for the given message, updating
+    /// TCP sequence numbers on the ring buffer. Messages above the
+    /// IPv4 frame limit are split via the shared
+    /// `capture::segment_payload` helper. Always returns at least
+    /// one frame.
     #[cfg(feature = "capture")]
     fn build_segmented_frames(
         &self,
@@ -502,10 +497,9 @@ impl TrafficBuffers {
             .collect()
     }
 
-    /// Stub when capture feature is disabled — produce a
-    /// single empty frame since pcap construction is
-    /// unavailable. Callers will treat this as "one entry,
-    /// zero useful pcap data".
+    /// Stub when capture feature is disabled — produce a single
+    /// empty frame since pcap construction is unavailable. Callers
+    /// will treat this as "one entry, zero useful pcap data".
     #[cfg(not(feature = "capture"))]
     fn build_segmented_frames(
         &self,
@@ -697,26 +691,24 @@ pub struct AppSnapshot {
     /// session has accumulated. 0 for a session that never lost
     /// its connection; rising values indicate a rocky session.
     pub auto_reconnect_count: u32,
-    /// "Video not keeping up" diagnostic: number of
-    /// display frames dropped because the H.264 encoder task's
-    /// bounded queue was full when `CaptureSession::frame()`
-    /// tried to enqueue. Cumulative since session start; zero
-    /// when `--capture` is not in use. A non-zero value
-    /// implicates encoder CPU (or downstream MP4 write speed)
-    /// rather than decode or socket-read when triaging a
-    /// "video not keeping up" report. See
+    /// "Video not keeping up" diagnostic: number of display frames
+    /// dropped because the H.264 encoder task's bounded queue was full
+    /// when `CaptureSession::frame()` tried to enqueue. Cumulative
+    /// since session start; zero when `--capture` is not in use. A
+    /// non-zero value implicates encoder CPU (or downstream MP4 write
+    /// speed) rather than decode or socket-read when triaging a "video
+    /// not keeping up" report. See
     /// `docs/plans/PLAN-video-keeping-up.md`.
     pub video_drop_count: u64,
-    /// "Video not keeping up" diagnostic: min / max /
-    /// mean microseconds of mpsc-queue lag between the display
-    /// channel emitting `ImageReady*` events and the egui
-    /// frame loop processing them. Computed over a bounded
-    /// recent window (cap `RECENT_LAG_RING_CAP` in `app.rs`).
-    /// A high mean here when the decode and socket-fill
-    /// metrics look healthy implicates the egui loop / GUI
-    /// thread as the bottleneck. Within-batch samples are
-    /// correlated; `max` is the most informative single
-    /// number. See `docs/plans/PLAN-video-keeping-up.md`.
+    /// "Video not keeping up" diagnostic: min / max / mean
+    /// microseconds of mpsc-queue lag between the display channel
+    /// emitting `ImageReady*` events and the egui frame loop
+    /// processing them. Computed over a bounded recent window (cap
+    /// `RECENT_LAG_RING_CAP` in `app.rs`). A high mean here when the
+    /// decode and socket-fill metrics look healthy implicates the egui
+    /// loop / GUI thread as the bottleneck. Within-batch samples are
+    /// correlated; `max` is the most informative single number. See
+    /// `docs/plans/PLAN-video-keeping-up.md`.
     pub image_ready_lag_recent_min_us: u32,
     pub image_ready_lag_recent_max_us: u32,
     pub image_ready_lag_recent_mean_us: u32,
@@ -727,9 +719,9 @@ pub struct AppSnapshot {
     pub display_mark_lag_recent_max_us: u32,
     pub display_mark_lag_recent_mean_us: u32,
     /// Auto-snapshot counters. Both are 0 when
-    /// `--auto-snapshot-interval` is not set. The stats panel
-    /// renders `"Auto-snapshot: {saved}/{cap}"` when the mode
-    /// is active; the line is hidden when mode is disabled.
+    /// `--auto-snapshot-interval` is not set. The stats panel renders
+    /// `"Auto-snapshot: {saved}/{cap}"` when the mode is active; the
+    /// line is hidden when mode is disabled.
     pub auto_snapshots_saved: u64,
     pub auto_snapshots_pruned: u64,
 }
@@ -904,10 +896,10 @@ pub(crate) struct PedanticConfig {
 pub(crate) const PEDANTIC_REPORT_CAP: usize = 50;
 
 /// Whether a notification-derived bug report captured its
-/// ring-buffer payload from a live snapshot at
-/// the moment the notification fired, or only from the
-/// post-event ring state. Serialised into the report's
-/// metadata.json via `BugReportType::Notification`.
+/// ring-buffer payload from a live snapshot at the moment the
+/// notification fired, or only from the post-event ring
+/// state. Serialised into the report's metadata.json via
+/// `BugReportType::Notification`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NotificationSnapshotState {
     /// The snapshot store had a live capture for this
@@ -945,22 +937,20 @@ pub enum BugReportType {
     Disconnect {
         channel: String,
     },
-    /// User clicked the "File bug report" button on a
-    /// notification entry.
-    /// `notification_id` is the entry's stable id within the
-    /// session's `NotificationStore`; `snapshot_state` records
-    /// whether the report's traffic payload came from a live
-    /// snapshot at fire time or only post-event ring contents.
+    /// User clicked the "File bug report" button on a notification
+    /// entry. `notification_id` is the entry's stable id within the
+    /// session's `NotificationStore`; `snapshot_state` records whether
+    /// the report's traffic payload came from a live snapshot at fire
+    /// time or only post-event ring contents.
     Notification {
         notification_id: u64,
         snapshot_state: NotificationSnapshotState,
     },
     /// Auto-generated periodically by `--auto-snapshot-interval`.
-    /// Captures full session state across all channels
-    /// so a single zip carries everything needed to diagnose any
-    /// channel's behaviour at the moment of the snapshot.
-    /// `channel_name()` returns `"all"` to trigger the merged
-    /// all-channel embedding in `channel-state.json`.
+    /// Captures full session state across all channels so a single zip
+    /// carries everything needed to diagnose any channel's behaviour at
+    /// the moment of the snapshot. `channel_name()` returns `"all"` to
+    /// trigger the merged all-channel embedding in `channel-state.json`.
     AutoSnapshot,
 }
 
@@ -996,10 +986,9 @@ impl BugReportType {
                 "webdav" => "webdav",
                 _ => "main",
             },
-            // Notification reports are session-level
-            // — the pcap covers all channels, and the
-            // channel-state.json defaults to main as a
-            // sensible session anchor.
+            // Notification reports are session-level — the pcap
+            // covers all channels, and the channel-state.json
+            // defaults to main as a sensible session anchor.
             BugReportType::Notification { .. } => "main",
             // Auto-snapshots embed every channel so a single
             // zip tells the full story.  The "all" arm in
@@ -1033,10 +1022,10 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
-    /// Idle keepalives this client sent on this channel.
-    /// Today only the inputs channel sends
-    /// these; the field is present on every entry for
-    /// uniform JSON shape, with 0 / None where unimplemented.
+    /// Idle keepalives this client sent on this channel. Today only
+    /// the inputs channel sends these; the field is present on every
+    /// entry for uniform JSON shape, with 0 / None where
+    /// unimplemented.
     pub client_keepalive_send_count: u32,
     pub last_client_keepalive_send_ts_secs: Option<f64>,
 }
@@ -2128,8 +2117,8 @@ mod tests {
         snap.mjpeg_decode_recent_mean_us = 8_500;
         snap.mjpeg_decode_total_count = 350;
         snap.mjpeg_decode_failed_count = 2;
-        // Aggregate H.264 decode duration fields (same shape as
-        // the MJPEG aggregates).
+        // Aggregate H.264 decode duration fields (same shape as the MJPEG
+        // aggregates).
         snap.h264_decode_recent_min_us = 5_000;
         snap.h264_decode_recent_max_us = 28_000;
         snap.h264_decode_recent_mean_us = 12_500;
@@ -2225,8 +2214,8 @@ mod tests {
         assert!(json.contains("\"last_report_last_frame_delay\": -42"));
         assert!(json.contains("\"stream_reports_sent_total\": 17"));
         assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
-        // MJPEG decoder backend name visible in bug reports so a
-        // report identifies which decode path ran.
+        // MJPEG decoder backend name visible in bug reports so a report
+        // identifies which decode path ran.
         assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
         // Aggregate MJPEG decode duration fields.
         assert!(json.contains("\"mjpeg_decode_recent_min_us\": 1200"));
@@ -2234,36 +2223,35 @@ mod tests {
         assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
         assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
         assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
-        // General-purpose video_decoder_backend field
-        // visible for every stream regardless of codec. For MJPEG streams
-        // this matches mjpeg_decoder_backend; for H.264 it would show
-        // "H264 (openh264)" while mjpeg_decoder_backend is empty.
+        // General-purpose video_decoder_backend field visible for every stream
+        // regardless of codec. For MJPEG streams this matches mjpeg_decoder_backend;
+        // for H.264 it would show "H264 (openh264)" while mjpeg_decoder_backend is
+        // empty.
         assert!(json.contains("\"video_decoder_backend\": \"jpeg-decoder\""));
-        // Aggregate H.264 decode duration fields (same shape and
-        // naming convention as the MJPEG aggregates).
+        // Aggregate H.264 decode duration fields (same shape and naming
+        // convention as the MJPEG aggregates).
         assert!(json.contains("\"h264_decode_recent_min_us\": 5000"));
         assert!(json.contains("\"h264_decode_recent_max_us\": 28000"));
         assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
         assert!(json.contains("\"h264_decode_total_count\": 120"));
         assert!(json.contains("\"h264_decode_failed_count\": 1"));
-        // Link-up preference-message send markers must
-        // appear in channel-state.json so a bug-report reader can
-        // confirm the client asked for AUTO_LZ and the H264/MJPEG
-        // codec ordering without reading the pcap.
+        // Link-up preference-message send markers must appear in
+        // channel-state.json so a bug-report reader can confirm the client
+        // asked for AUTO_LZ and the H264/MJPEG codec ordering without
+        // reading the pcap.
         assert!(json.contains("\"pref_compression_sent\": true"));
         assert!(json.contains("\"pref_video_codec_type_sent\": true"));
-        // Bounded image-cache eviction and cap fields.
-        // These must appear in bug reports so an operator can tell
-        // how much eviction pressure the session experienced and
-        // what cap was in effect.
+        // Bounded image-cache eviction and cap fields. These must appear in
+        // bug reports so an operator can tell how much eviction pressure the
+        // session experienced and what cap was in effect.
         snap.image_cache_evictions_total = 42;
         snap.image_cache_evicted_bytes_total = 441_450_496;
         // 256 MiB default cap.
         snap.image_cache_cap_bytes = 268_435_456;
-        // GLZ-dictionary cache stats live in their own snapshot
-        // fields rather than being summed into `image_cache_*`.
-        // A bug report must surface both sets so an
-        // operator can tell which cache is under pressure.
+        // GLZ-dictionary cache stats live in their own snapshot fields
+        // rather than being summed into `image_cache_*`. A bug report must
+        // surface both sets so an operator can tell which cache is under
+        // pressure.
         snap.glz_dictionary_entries = 17;
         snap.glz_dictionary_bytes = 4_194_304;
         // 256 MiB default cap (matches the image-cache default).
@@ -3968,10 +3956,9 @@ mod tests {
 
     #[test]
     fn traffic_buffer_per_channel_caps_match_plan() {
-        // Pin each channel's ring buffer to its documented cap.
-        // Catches a silent regression to the old even-split
-        // (~8.33 MB everywhere) or a typo in any of the named
-        // constants.
+        // Pin each channel's ring buffer to its documented cap. Catches a
+        // silent regression to the old even-split (~8.33 MB everywhere) or
+        // a typo in any of the named constants.
         let bufs = TrafficBuffers::new();
         assert_eq!(
             bufs.main.lock().unwrap().max_bytes(),
@@ -4042,11 +4029,10 @@ mod tests {
 
     #[test]
     fn traffic_entry_clone_shares_pcap_frame_via_arc() {
-        // The cheap-clone property is what keeps ring snapshots
-        // affordable — without this test a future change that
-        // turns pcap_frame back into Vec<u8> would compile and
-        // silently regress the snapshot path's cost model from
-        // O(N atomic increments) to O(total bytes).
+        // The cheap-clone property is what keeps ring snapshots affordable
+        // — without this test a future change that turns pcap_frame back
+        // into Vec<u8> would compile and silently regress the snapshot
+        // path's cost model from O(N atomic increments) to O(total bytes).
         let entry = TrafficEntry {
             timestamp: Duration::from_millis(0),
             channel: "main",
@@ -4067,9 +4053,9 @@ mod tests {
              snapshot cost model is broken."
         );
         // The same invariant for additional_segments. Cloning a
-        // Vec<Arc<[u8]>> deep-copies the Vec spine but each
-        // Arc<[u8]> stays shared — that's the property the
-        // segmented ring needs for cheap snapshots.
+        // Vec<Arc<[u8]>> deep-copies the Vec spine but each Arc<[u8]>
+        // stays shared — that's the property the segmented ring needs for
+        // cheap snapshots.
         for (orig, clone) in entry
             .additional_segments
             .iter()

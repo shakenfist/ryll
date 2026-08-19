@@ -106,12 +106,11 @@ pub struct WebdavChannel {
     // WebDAV server (None until sharing is started)
     server: Option<WebdavServer>,
 
-    /// See `MainChannel::capture_dropped_count`.
-    /// WebDAV is not in `CHANNELS` so the CaptureSink accepts
-    /// items unconditionally; this counter therefore stays at
-    /// zero in normal operation and only rises if the writer
-    /// task's queue itself is full. Surfaced for uniformity
-    /// with the other channels.
+    /// See `MainChannel::capture_dropped_count`. WebDAV is not in
+    /// `CHANNELS` so the CaptureSink accepts items unconditionally;
+    /// this counter therefore stays at zero in normal operation and
+    /// only rises if the writer task's queue itself is full. Surfaced
+    /// for uniformity with the other channels.
     capture_dropped_count: u64,
 }
 

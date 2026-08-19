@@ -315,11 +315,10 @@ impl AudioThread {
             }
         };
 
-        // Clone the per-format counter Arcs once so each closure
-        // captures its own handle. The authoritative underrun
-        // signal is
-        // `consumer.slots() == 0` at the top of the callback —
-        // checked here before draining.
+        // Clone the per-format counter Arcs once so each closure captures
+        // its own handle. The authoritative underrun signal is
+        // `consumer.slots() == 0` at the top of the callback — checked here
+        // before draining.
         let stream = match default_config.sample_format() {
             cpal::SampleFormat::I16 => {
                 let vol = vol.clone();

@@ -72,10 +72,10 @@ pub enum ChannelEvent {
         pixels: Vec<u8>, // RGBA
         #[allow(dead_code)]
         image_id: u64,
-        /// Session-relative seconds at the moment the emitting
-        /// channel called `event_tx.send`. Used by the app to
-        /// compute mpsc-queue lag for renderer-side latency
-        /// diagnostics. See `docs/plans/PLAN-video-keeping-up.md`.
+        /// Session-relative seconds at the moment the emitting channel called
+        /// `event_tx.send`. Used by the app to compute mpsc-queue lag for
+        /// renderer-side latency diagnostics. See
+        /// `docs/plans/PLAN-video-keeping-up.md`.
         produced_at_secs: f64,
     },
 

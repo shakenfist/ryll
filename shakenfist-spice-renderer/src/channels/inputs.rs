@@ -154,10 +154,9 @@ pub struct InputsChannel {
     last_unknown_opcode: Option<u16>,
     /// Count of unrecognised receive opcodes.
     unknown_opcode_count: u64,
-    /// Most recent KEY_MODIFIERS value we've sent. Restated by
-    /// the idle keepalive, with the same value
-    /// to keep the inputs channel non-idle without changing
-    /// guest state.
+    /// Most recent KEY_MODIFIERS value we've sent. Restated by the
+    /// idle keepalive, with the same value to keep the inputs channel
+    /// non-idle without changing guest state.
     last_modifiers_sent: u16,
     /// Wall-clock time (tokio runtime) of the last inbound *or*
     /// outbound activity on the channel. The idle keepalive
@@ -180,10 +179,9 @@ pub struct InputsChannel {
 }
 
 /// Idle window before the inputs-channel keepalive fires.
-/// Conservative against the empirically observed
-/// 300 s server-side per-channel silence threshold (see
-/// session-001b data); 10 s leaves ample headroom for jitter
-/// and clock skew.
+/// Conservative against the empirically observed 300 s
+/// server-side per-channel silence threshold (see session-001b
+/// data); 10 s leaves ample headroom for jitter and clock skew.
 const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl InputsChannel {
@@ -404,14 +402,12 @@ impl InputsChannel {
                     self.advance_paste().await?;
                 }
 
-                // Idle keepalive. When the channel
-                // has been silent in both directions for KEEPALIVE_IDLE,
-                // re-send the most recent KEY_MODIFIERS value. The
-                // guest sees no change (same modifier state); the
-                // server sees a client→server byte and resets its
-                // per-channel idle timer. Hypothesis under test:
-                // keeping inputs busy may also keep main alive,
-                // sidestepping the K1 main-channel rcc disconnect.
+                // Idle keepalive. When the channel has been silent in both directions for
+                // KEEPALIVE_IDLE, re-send the most recent KEY_MODIFIERS value. The guest
+                // sees no change (same modifier state); the server sees a client→server
+                // byte and resets its per-channel idle timer. Hypothesis under test:
+                // keeping inputs busy may also keep main alive, sidestepping the K1
+                // main-channel rcc disconnect.
                 _ = tokio::time::sleep_until(keepalive_deadline) => {
                     self.send_idle_keepalive().await?;
                 }

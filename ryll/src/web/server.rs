@@ -283,8 +283,8 @@ async fn check_token(
 
 /// Load a [`RustlsConfig`] from PEM-encoded cert and key files.
 /// Surfaces an `anyhow` error chain on missing / malformed files.
-/// `run_web` uses this to build the config before handing it
-/// to [`run_with_tls`].
+/// `run_web` uses this to build the config before handing it to
+/// [`run_with_tls`].
 pub async fn load_tls_config(cert: &Path, key: &Path) -> Result<RustlsConfig> {
     RustlsConfig::from_pem_file(cert, key)
         .await
@@ -343,15 +343,14 @@ async fn run_inner(
     // axum-server's Handle exposes both `listening()` (so we can
     // discover the ephemeral port post-bind) and
     // `graceful_shutdown(timeout)` (replacing the
-    // `with_graceful_shutdown(future)` pattern that
-    // axum::serve uses).
+    // `with_graceful_shutdown(future)` pattern that axum::serve uses).
     let handle = Handle::new();
 
     // Watcher task: poll SHUTDOWN_REQUESTED at the same 100 ms
-    // cadence the old `shutdown_signal` future used. When the
-    // flag flips, signal `axum_server` to drain in-flight
-    // requests and stop accepting new ones, with a 5 s ceiling
-    // matching the graceful-shutdown budget.
+    // cadence the old `shutdown_signal` future used. When the flag
+    // flips, signal `axum_server` to drain in-flight requests and
+    // stop accepting new ones, with a 5 s ceiling matching the
+    // graceful-shutdown budget.
     let shutdown_handle = handle.clone();
     let watcher = tokio::spawn(async move {
         use std::sync::atomic::Ordering;

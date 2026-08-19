@@ -215,9 +215,8 @@ pub fn warn_once_count() -> usize {
     registry().lock().expect("registry lock poisoned").len()
 }
 
-/// Snapshot of the fired keys (in some order). Caller does not hold
-/// the registry lock. Used by the pedantic popup / bug-report
-/// assembly.
+/// Snapshot of the fired keys (in some order). Caller does not hold the
+/// registry lock. Used by the pedantic popup / bug-report assembly.
 pub fn warn_once_keys() -> Vec<&'static str> {
     registry()
         .lock()

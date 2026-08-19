@@ -133,10 +133,10 @@ pub struct Args {
     /// Diagnostic flag for a hang investigation. When set, ryll's
     /// per-connection tokio runtime is built with
     /// `Builder::new_current_thread()` instead of the default
-    /// multi-threaded `Runtime::new()`. Disambiguates a real
-    /// blocking call (would still hang) from a multi-threaded
-    /// scheduler / Waker registration bug (would not hang).
-    /// Will be removed once that investigation is closed.
+    /// multi-threaded `Runtime::new()`. Disambiguates a real blocking
+    /// call (would still hang) from a multi-threaded scheduler / Waker
+    /// registration bug (would not hang). Will be removed once that
+    /// investigation is closed.
     #[arg(long)]
     pub debug_single_thread_runtime: bool,
 
@@ -194,12 +194,11 @@ pub struct Args {
     #[arg(long, default_value_t = 256)]
     pub image_cache_cap_mib: u64,
 
-    /// Maximum total bytes for the shared SPICE GLZ dictionary,
-    /// in MiB. Defaults to 256. The dictionary holds decoded
-    /// RGBA for GLZ images so cross-frame references resolve;
-    /// without a cap, full-screen ZlibGlzRgb workloads observed
-    /// in sessions 003a / 004d-g consumed gigabytes (~30 MiB/s
-    /// of growth).
+    /// Maximum total bytes for the shared SPICE GLZ dictionary, in MiB.
+    /// Defaults to 256. The dictionary holds decoded RGBA for GLZ
+    /// images so cross-frame references resolve; without a cap,
+    /// full-screen ZlibGlzRgb workloads observed in sessions 003a /
+    /// 004d-g consumed gigabytes (~30 MiB/s of growth).
     #[arg(long, default_value_t = 256)]
     pub glz_dictionary_cap_mib: u64,
 }

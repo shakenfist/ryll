@@ -539,14 +539,12 @@ pub struct WebrtcBridge {
     /// `Arc` but the receiver can only be consumed once.
     incoming_control: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     /// Raised once when the underlying `RTCPeerConnection` reaches a
-    /// terminal state (`Failed`, `Disconnected`, or `Closed`).
-    /// External waiters can clone this via
-    /// [`WebrtcBridge::dead_signal`] or await it directly via
-    /// [`WebrtcBridge::wait_for_dead`]. The server-side reaper
-    /// uses it to tear down the bridge and encoder when the
-    /// browser disconnects. Sticky
-    /// ([`StickySignal`]) so a waiter that subscribes after the
-    /// bridge already died still returns.
+    /// terminal state (`Failed`, `Disconnected`, or `Closed`). External
+    /// waiters can clone this via [`WebrtcBridge::dead_signal`] or await it
+    /// directly via [`WebrtcBridge::wait_for_dead`]. The server-side reaper
+    /// uses it to tear down the bridge and encoder when the browser
+    /// disconnects. Sticky ([`StickySignal`]) so a waiter that subscribes
+    /// after the bridge already died still returns.
     dead: Arc<StickySignal>,
     /// Latest peer connection state, shadowed by [`BridgeEvents`].
     /// Read by the `#[cfg(test)]` `connection_state` accessor rather
@@ -666,12 +664,11 @@ impl WebrtcBridge {
 
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
-        // Bridge lifecycle signal, raised once when the PC reaches a
-        // terminal state (`Failed` / `Disconnected` / `Closed`). The
-        // reaper task waits on this to tear down the
-        // bridge and encoder when the browser disconnects. Sticky
-        // (see `StickySignal`) so late subscribers — callers that
-        // begin awaiting after the PC already died — return
+        // Bridge lifecycle signal, raised once when the PC reaches a terminal
+        // state (`Failed` / `Disconnected` / `Closed`). The reaper task waits
+        // on this to tear down the bridge and encoder when the browser
+        // disconnects. Sticky (see `StickySignal`) so late subscribers —
+        // callers that begin awaiting after the PC already died — return
         // immediately.
         let dead = Arc::new(StickySignal::new());
 
@@ -703,15 +700,13 @@ impl WebrtcBridge {
             dc_pumps: dc_pumps.clone(),
         });
 
-        // Which local addresses to bind the ICE sockets to. 0.20 makes
-        // this the caller's problem — the bound addresses are the only
-        // input to host-candidate generation and nothing downstream
-        // filters them — so an empty list is not a degraded bridge, it
-        // is a bridge that can only ever advertise candidates no
-        // browser will use. Fail here rather than hand back something
-        // that passes every test we have and reaches nobody. See
-        // `crate::bind_addrs` and
-        // `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
+        // Which local addresses to bind the ICE sockets to. 0.20 makes this the
+        // caller's problem — the bound addresses are the only input to
+        // host-candidate generation and nothing downstream filters them — so an
+        // empty list is not a degraded bridge, it is a bridge that can only ever
+        // advertise candidates no browser will use. Fail here rather than hand
+        // back something that passes every test we have and reaches nobody. See
+        // `crate::bind_addrs` and `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
         let udp_addrs = host_udp_bind_addrs();
         if udp_addrs.is_empty() {
             return Err(anyhow!(
@@ -868,13 +863,13 @@ impl WebrtcBridge {
         self.dead.wait().await;
     }
 
-    /// Return a clone of the [`StickySignal`] that is raised once
-    /// when the bridge's PC reaches a terminal state. Used by the
-    /// server-side reaper so it can wait on the signal
-    /// without holding the `bridge_slot` lock or borrowing `&self`
-    /// across an `.await`. `handle.wait().await` is equivalent to
-    /// [`WebrtcBridge::wait_for_dead`], including the
-    /// late-subscriber fast-path.
+    /// Return a clone of the [`StickySignal`] that is raised once when the
+    /// bridge's PC reaches a terminal state. Used by the server-side
+    /// reaper so it can wait on the signal without holding the
+    /// `bridge_slot` lock or borrowing `&self` across an `.await`.
+    /// `handle.wait().await` is equivalent to
+    /// [`WebrtcBridge::wait_for_dead`], including the late-subscriber
+    /// fast-path.
     pub fn dead_signal(&self) -> Arc<StickySignal> {
         self.dead.clone()
     }
@@ -1241,8 +1236,8 @@ async fn attach_tracks_and_control_dc(
     pc.add_track(audio_track.clone() as Arc<dyn TrackLocal>)
         .await?;
 
-    // Control datachannel. Ordered + reliable for input events
-    // and cursor overlay.
+    // Control datachannel. Ordered + reliable for input events and
+    // cursor overlay.
     let control_dc = pc
         .create_data_channel(
             "control",
@@ -1524,8 +1519,8 @@ async fn run_video_pump(
 
         for annex_b_nal in &frame.nal_units {
             // Defensive: every NAL produced by H264Encoder is
-            // 4-byte-start-code framed; skip
-            // anything too short to be a real NAL body.
+            // 4-byte-start-code framed; skip anything too short to be a real
+            // NAL body.
             if annex_b_nal.len() < 5 {
                 continue;
             }
@@ -2212,14 +2207,14 @@ mod tests {
         bridge.close().await.expect("close");
     }
 
-    /// Smoke test: spawn the synthetic audio pump and let it run
-    /// for a few hundred ms. The pump runs forever, so we abort
-    /// after a brief sleep. We don't assert exact packet counts —
-    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
-    /// without a connected peer (they're buffered/dropped at the
-    /// transport), and the in-process inspect path lives in
-    /// `tests/loopback.rs`. The success criterion here is "no
-    /// panics, no encoder errors, the track accepts writes".
+    /// Smoke test: spawn the synthetic audio pump and let it run for a
+    /// few hundred ms. The pump runs forever, so we abort after a brief
+    /// sleep. We don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even without a
+    /// connected peer (they're buffered/dropped at the transport), and
+    /// the in-process inspect path lives in `tests/loopback.rs`. The
+    /// success criterion here is "no panics, no encoder errors, the track
+    /// accepts writes".
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn synthetic_audio_pump_emits_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
@@ -2245,14 +2240,14 @@ mod tests {
         bridge.close().await.expect("close");
     }
 
-    /// Smoke test: spawn the real Opus passthrough pump and feed
-    /// it a handful of synthetic Opus packets. As with the
-    /// synthetic pump, we don't assert exact packet counts —
-    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
-    /// without a connected peer (they're buffered/dropped at the
-    /// transport). The success criterion here is "no
-    /// panics, payloader accepts the bytes, the track accepts
-    /// writes, the pump exits cleanly when the channel closes".
+    /// Smoke test: spawn the real Opus passthrough pump and feed it a
+    /// handful of synthetic Opus packets. As with the synthetic pump, we
+    /// don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even without a
+    /// connected peer (they're buffered/dropped at the transport). The
+    /// success criterion here is "no panics, payloader accepts the
+    /// bytes, the track accepts writes, the pump exits cleanly when the
+    /// channel closes".
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn audio_pump_forwards_real_opus_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);

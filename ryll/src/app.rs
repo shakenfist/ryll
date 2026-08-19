@@ -79,11 +79,10 @@ const LATENCY_HISTORY_LEN: usize = 60;
 /// Number of recent frame timestamps kept for the FPS sliding window.
 const FPS_WINDOW_SIZE: usize = 120;
 
-/// Number of recent mpsc-queue lag samples (μs) retained
-/// per event kind for render-side latency
-/// diagnostics. Per-event cadence is typically several Hz to
-/// hundreds of Hz; 32 entries cover seconds of recent activity
-/// without bloating session.json. See
+/// Number of recent mpsc-queue lag samples (μs) retained per event
+/// kind for render-side latency diagnostics. Per-event cadence is
+/// typically several Hz to hundreds of Hz; 32 entries cover
+/// seconds of recent activity without bloating session.json. See
 /// `docs/plans/PLAN-video-keeping-up.md`.
 const RECENT_LAG_RING_CAP: usize = 32;
 
@@ -110,19 +109,18 @@ const RECONNECT_BACKOFF_SECS: [u64; MAX_RECONNECT_ATTEMPTS as usize] = [1, 4, 16
 const RECONNECT_CLUSTER_RESET: Duration = Duration::from_secs(5 * 60);
 
 /// How long a notification's traffic-buffer snapshot is kept
-/// before being treated as expired. The
-/// "File bug report" button on a notification entry switches
-/// to post-event-only mode after this window elapses.
+/// before being treated as expired. The "File bug report" button
+/// on a notification entry switches to post-event-only mode
+/// after this window elapses.
 const NOTIFICATION_SNAPSHOT_TTL: Duration = Duration::from_secs(60);
 
-/// Maximum number of live notification snapshots retained at
-/// any one time. Oldest is evicted when a
-/// sixth notification fires.
+/// Maximum number of live notification snapshots retained at any
+/// one time. Oldest is evicted when a sixth notification fires.
 const NOTIFICATION_SNAPSHOT_CAP: usize = 5;
 
 /// Single entry in the notification-snapshot store. Owns a
-/// captured `TrafficBuffers` (cheap thanks to its
-/// Arc-shared payloads).
+/// captured `TrafficBuffers` (cheap thanks to its Arc-shared
+/// payloads).
 struct NotificationSnapshotEntry {
     captured_at: Instant,
     traffic: TrafficBuffers,
@@ -130,10 +128,10 @@ struct NotificationSnapshotEntry {
 
 /// Bounded LRU+TTL store of traffic-buffer snapshots keyed by
 /// `NotificationEntry::id`. Every fresh notification push
-/// captures one entry; entries are pruned
-/// on overflow (cap) or expiry (TTL). The notifications panel
-/// uses `has_live` to render the button's visual state, and
-/// `take` to consume the snapshot when the user clicks.
+/// captures one entry; entries are pruned on overflow (cap) or
+/// expiry (TTL). The notifications panel uses `has_live` to
+/// render the button's visual state, and `take` to consume the
+/// snapshot when the user clicks.
 struct NotificationSnapshotStore {
     by_id: HashMap<u64, NotificationSnapshotEntry>,
     /// Notification ids in insertion order, oldest first.
@@ -668,11 +666,10 @@ pub struct RyllApp {
     // In-app notification store (shared with all channels and producers).
     notifications: SharedNotifications,
 
-    // Bounded snapshot store keyed by notification id.
-    // Captured on every push_notification
-    // call so the "File bug report" button on a notification
-    // entry can produce a report with pcap/state from the
-    // moment the notification fired. Wrapped in Mutex for
+    // Bounded snapshot store keyed by notification id. Captured on
+    // every push_notification call so the "File bug report" button
+    // on a notification entry can produce a report with pcap/state
+    // from the moment the notification fired. Wrapped in Mutex for
     // the same multi-producer reasons SharedNotifications is.
     notification_snapshots: std::sync::Mutex<NotificationSnapshotStore>,
 
@@ -680,11 +677,11 @@ pub struct RyllApp {
     channel_snapshots: ChannelSnapshots,
     app_snapshot: Arc<std::sync::Mutex<AppSnapshot>>,
 
-    // Count of display frames dropped because the encoder
-    // task's queue was full at CaptureSession::frame
-    // call time. Mirrored into AppSnapshot::video_drop_count
-    // by update_app_snapshot(). Stays zero unless --capture
-    // is active. See `docs/plans/PLAN-video-keeping-up.md`.
+    // Count of display frames dropped because the encoder task's
+    // queue was full at CaptureSession::frame call time. Mirrored
+    // into AppSnapshot::video_drop_count by update_app_snapshot().
+    // Stays zero unless --capture is active. See
+    // `docs/plans/PLAN-video-keeping-up.md`.
     video_drop_count: u64,
 
     // Bounded rings of mpsc-queue lag samples (μs) for
@@ -790,12 +787,11 @@ pub struct RyllApp {
     /// `SHUTDOWN_REQUESTED` flag, scoped per attempt.
     connection_cancel: Option<Arc<AtomicBool>>,
 
-    /// True while ryll's window is focused. Updated on every
-    /// `update()` call from `ctx.input(|i| i.focused)`. Read by
-    /// the `FocusGatedClipboard` decorator so the host
-    /// pasteboard is only polled while the user is looking at
-    /// ryll, following the spawn_blocking fix in commit
-    /// 54155e99.
+    /// True while ryll's window is focused. Updated on every `update()`
+    /// call from `ctx.input(|i| i.focused)`. Read by the
+    /// `FocusGatedClipboard` decorator so the host pasteboard is only
+    /// polled while the user is looking at ryll, following the
+    /// spawn_blocking fix in commit 54155e99.
     app_focused: Arc<AtomicBool>,
 
     /// Persisted copy of the `--debug-single-thread-runtime`
@@ -813,15 +809,14 @@ pub struct RyllApp {
     /// reconnect passes the same value each time.
     glz_dictionary_cap_bytes: usize,
 
-    // Auto-snapshot config. `None` means the mode is
-    // disabled. A fresh task is spawned per session: on each
-    // `SessionInitialized` the previous task (if any) is signalled
-    // via `auto_snapshot_cancel` to retire, then a new task is
-    // spawned with fresh `traffic` / `channel_snapshots` Arcs. The
-    // retire-and-respawn pattern is needed because `reconnect()`
-    // replaces those Arcs wholesale; a long-lived task would
-    // capture clones of the old Arcs and write zips full of stale
-    // / empty data after the first reconnect.
+    // Auto-snapshot config. `None` means the mode is disabled. A fresh
+    // task is spawned per session: on each `SessionInitialized` the
+    // previous task (if any) is signalled via `auto_snapshot_cancel` to
+    // retire, then a new task is spawned with fresh `traffic` /
+    // `channel_snapshots` Arcs. The retire-and-respawn pattern is needed
+    // because `reconnect()` replaces those Arcs wholesale; a long-lived
+    // task would capture clones of the old Arcs and write zips full of
+    // stale / empty data after the first reconnect.
     auto_snapshot_interval: Option<u64>,
     auto_snapshot_cap: usize,
     /// Cancel handle for the currently-running auto-snapshot task,
@@ -834,13 +829,12 @@ pub struct RyllApp {
     /// so per-reconnect respawns don't repeat the notification.
     auto_snapshot_startup_notified: bool,
 
-    /// Most recent time the streaming-flap notification
-    /// fired. Used by `streaming_state::classify` to enforce the
-    /// 60 s cool-down between repeat warnings. `None` until the
-    /// first fire of the session; never cleared (reconnect resets
-    /// the snapshot data the heuristic reads from, so a stale
-    /// timestamp only suppresses the next legitimate flap during
-    /// its remaining cool-down — acceptable for v1).
+    /// Most recent time the streaming-flap notification fired. Used by
+    /// `streaming_state::classify` to enforce the 60 s cool-down between
+    /// repeat warnings. `None` until the first fire of the session; never
+    /// cleared (reconnect resets the snapshot data the heuristic reads
+    /// from, so a stale timestamp only suppresses the next legitimate
+    /// flap during its remaining cool-down — acceptable for v1).
     last_flap_notification_ts: Option<Instant>,
 }
 
@@ -1360,9 +1354,9 @@ impl RyllApp {
     /// failed manual attempt re-arms the full 3-attempt budget
     /// rather than going straight back to Modal.
     fn reconnect_manual(&mut self) {
-        // Surface the click in the bell history
-        // so the user has visible confirmation that the button
-        // registered before the connection actually completes.
+        // Surface the click in the bell history so the user has visible
+        // confirmation that the button registered before the connection
+        // actually completes.
         self.push_connection_event(NotifySeverity::Info, "Reconnecting (manual)…".to_string());
         self.reconnect_state = ReconnectState::Idle;
         self.awaiting_reconnect_outcome = false;
@@ -1411,15 +1405,14 @@ impl RyllApp {
         if let ReconnectState::Pending { attempt, .. } = &new_state {
             self.auto_reconnect_count = self.auto_reconnect_count.saturating_add(1);
             if *attempt == 1 {
-                // Initial disconnect — announce the start of the
-                // auto-retry cycle.
+                // Initial disconnect — announce the start of the auto-retry cycle.
                 self.push_connection_event(
                     NotifySeverity::Warn,
                     "Connection lost — reconnecting…".to_string(),
                 );
             } else {
-                // attempt > 1: the previous attempt just failed.
-                // Recorded under NotificationSource::Connection.
+                // attempt > 1: the previous attempt just failed. Recorded under
+                // NotificationSource::Connection.
                 self.push_connection_event(
                     NotifySeverity::Warn,
                     format!("Reconnect attempt {} failed: {}", attempt - 1, message),
@@ -1440,11 +1433,10 @@ impl RyllApp {
                     ),
                 );
             }
-            // Also surface the Modal entry itself
-            // as a connection event so the bell history records
-            // the cycle's terminal state. The modal pops in
-            // parallel; users who dismiss it reflexively still
-            // see the event in the notification log.
+            // Also surface the Modal entry itself as a connection event so the
+            // bell history records the cycle's terminal state. The modal pops
+            // in parallel; users who dismiss it reflexively still see the
+            // event in the notification log.
             let (severity, modal_msg) = modal_variant_notification(variant);
             self.push_connection_event(severity, modal_msg);
             // Clock-skew check: when we land in Generic Modal,
@@ -1483,13 +1475,12 @@ impl RyllApp {
 
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
-            // Record mpsc-queue lag from event emit to app
-            // pickup for renderer-side latency diagnostics.
-            // See `docs/plans/PLAN-video-keeping-up.md`.
-            // Within-batch correlation noted: events drained
-            // in one process_events() call share this read,
-            // so several samples from one egui frame will be
-            // close in time.
+            // Record mpsc-queue lag from event emit to app pickup for
+            // renderer-side latency diagnostics. See
+            // `docs/plans/PLAN-video-keeping-up.md`. Within-batch
+            // correlation noted: events drained in one process_events()
+            // call share this read, so several samples from one egui frame
+            // will be close in time.
             let consumed_at_secs = self.traffic.elapsed().as_secs_f64();
             match &event {
                 ChannelEvent::ImageReady {
@@ -1525,22 +1516,19 @@ impl RyllApp {
                         self.reconnect_state = ReconnectState::Idle;
                     }
                     self.awaiting_reconnect_outcome = false;
-                    // Surface the link in the bell
-                    // history. Fires on initial connect and on
-                    // every reconnect success; the 30 s dedup
-                    // collapses storm reconnects to a single entry.
+                    // Surface the link in the bell history. Fires on initial connect and
+                    // on every reconnect success; the 30 s dedup collapses storm
+                    // reconnects to a single entry.
                     self.push_connection_event(
                         NotifySeverity::Info,
                         format!("Connected to {}:{}", self.target_host, self.target_port),
                     );
 
-                    // Spawn the auto-snapshot interval task.
-                    // Retire-and-respawn per session: `reconnect()`
-                    // replaces `self.traffic` and `self.channel_snapshots`
-                    // with fresh instances, so any task spawned for the
-                    // previous session is holding stale Arcs. Signal it
-                    // to retire (it will exit within ~500 ms), then
-                    // spawn a fresh task with the current Arcs.
+                    // Spawn the auto-snapshot interval task. Retire-and-respawn per session:
+                    // `reconnect()` replaces `self.traffic` and `self.channel_snapshots` with
+                    // fresh instances, so any task spawned for the previous session is holding
+                    // stale Arcs. Signal it to retire (it will exit within ~500 ms), then spawn a
+                    // fresh task with the current Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
                         if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
                             prev_cancel.store(true, Ordering::Relaxed);
@@ -1781,9 +1769,8 @@ impl RyllApp {
                         self.stats.frame_times.remove(0);
                     }
 
-                    // Capture a video frame if enabled. frame()
-                    // is a non-blocking enqueue returning bool;
-                    // false means the encoder task's queue was
+                    // Capture a video frame if enabled. frame() is a non-blocking
+                    // enqueue returning bool; false means the encoder task's queue was
                     // full and the frame was dropped.
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self
@@ -1843,11 +1830,9 @@ impl RyllApp {
 
                 ChannelEvent::Error { channel, message } => {
                     error!("app: {} channel error: {}", channel.name(), message);
-                    // Surface the raw error in the
-                    // bell history before the state-machine path
-                    // can swallow it into the modal. handle_*
-                    // below also pushes the resulting connection-
-                    // lost / modal-entry notifications.
+                    // Surface the raw error in the bell history before the state-machine
+                    // path can swallow it into the modal. handle_* below also pushes the
+                    // resulting connection- lost / modal-entry notifications.
                     self.push_connection_event(
                         NotifySeverity::Error,
                         format!("{} channel error: {}", channel.name(), message),
@@ -1936,10 +1921,9 @@ impl RyllApp {
                 ChannelEvent::AgentConnected(connected) => {
                     info!("app: vdagent connected={}", connected);
                     self.agent_connected = connected;
-                    // Record the agent-state
-                    // transition. Affects clipboard sync, paste,
-                    // and resolution updates — useful for the
-                    // user to see when those features come or go.
+                    // Record the agent-state transition. Affects clipboard sync, paste,
+                    // and resolution updates — useful for the user to see when those
+                    // features come or go.
                     self.push_connection_event(
                         NotifySeverity::Info,
                         if connected {
@@ -2002,10 +1986,8 @@ impl RyllApp {
                                 "app: non-critical channel {} disconnected, session continues",
                                 channel.name()
                             );
-                            // Non-critical disconnect goes to
-                            // the bell as Info. Surfaces e.g.
-                            // usbredir / webdav drops without
-                            // disrupting the user.
+                            // Non-critical disconnect goes to the bell as Info. Surfaces
+                            // e.g. usbredir / webdav drops without disrupting the user.
                             self.push_connection_event(
                                 NotifySeverity::Info,
                                 format!("{} channel disconnected", channel.name()),
@@ -2285,10 +2267,10 @@ impl RyllApp {
         trigger: Option<TriggerTimestamps>,
         precomputed_screenshot_png: Option<Vec<u8>>,
     ) -> anyhow::Result<std::path::PathBuf> {
-        // Keep the live surface-pixels fallback path. It's the
-        // safety net when the background encoder wasn't spawned
-        // or hasn't finished, and `BugReport::new` also crops
-        // it to produce the submit-time region image.
+        // Keep the live surface-pixels fallback path. It's the safety net
+        // when the background encoder wasn't spawned or hasn't finished,
+        // and `BugReport::new` also crops it to produce the submit-time
+        // region image.
         let surface_data = if report_type == BugReportType::Display {
             self.surfaces
                 .values()
@@ -2406,12 +2388,11 @@ impl RyllApp {
         }
     }
 
-    /// Push a notification entry into the shared store. After
-    /// the push lands, also capture a `TrafficBuffers`
-    /// snapshot keyed by the entry's id, so
-    /// the "File bug report" button on the notification can
-    /// later produce a report with pcap/state from the
-    /// moment the notification fired.
+    /// Push a notification entry into the shared store. After the
+    /// push lands, also capture a `TrafficBuffers` snapshot keyed by
+    /// the entry's id, so the "File bug report" button on the
+    /// notification can later produce a report with pcap/state from
+    /// the moment the notification fired.
     fn push_notification(
         &self,
         severity: NotifySeverity,
@@ -2435,21 +2416,20 @@ impl RyllApp {
         }
     }
 
-    /// Push a connection-state transition.
-    /// Wraps `push_notification` with
-    /// `NotificationSource::Connection` so every connection
-    /// event lands under a single label in the side panel.
+    /// Push a connection-state transition. Wraps
+    /// `push_notification` with `NotificationSource::Connection` so
+    /// every connection event lands under a single label in the
+    /// side panel.
     fn push_connection_event(&self, severity: NotifySeverity, message: impl Into<String>) {
         self.push_notification(severity, NotificationSource::Connection, message);
     }
 
-    /// The user clicked "File bug report" on a notification
-    /// row. Looks up the notification, consumes
-    /// any live snapshot for it, and writes a zip via
-    /// `BugReport::write_notification`. Always produces a
-    /// report — when no live snapshot is available, falls
-    /// back to the current live `TrafficBuffers` and tags the
-    /// report `PostEventOnly`.
+    /// The user clicked "File bug report" on a notification row.
+    /// Looks up the notification, consumes any live snapshot for it,
+    /// and writes a zip via `BugReport::write_notification`. Always
+    /// produces a report — when no live snapshot is available, falls
+    /// back to the current live `TrafficBuffers` and tags the report
+    /// `PostEventOnly`.
     fn file_notification_bug_report(&mut self, id: u64) {
         // Resolve the notification entry first so we can use
         // its severity/message in the report description.
@@ -2780,10 +2760,10 @@ impl eframe::App for RyllApp {
         // Process incoming events
         self.process_events();
 
-        // Prune expired notification snapshots
-        // at most once per second so the per-row File-as-bug-
-        // report button visual state honestly reflects the
-        // 60 s TTL without walking the map on every paint.
+        // Prune expired notification snapshots at most once per second
+        // so the per-row File-as-bug- report button visual state
+        // honestly reflects the 60 s TTL without walking the map on
+        // every paint.
         if let Ok(mut store) = self.notification_snapshots.lock() {
             store.maybe_prune(Instant::now());
         }
@@ -2840,10 +2820,9 @@ impl eframe::App for RyllApp {
                 if Instant::now() >= *next_at {
                     let attempt = *attempt;
                     info!("app: auto-reconnect attempt {} firing", attempt);
-                    // Surface the attempt fire in
-                    // the bell history. Per-attempt number in the
-                    // message keeps successive attempts distinct
-                    // across the 30 s dedup window.
+                    // Surface the attempt fire in the bell history. Per-attempt number
+                    // in the message keeps successive attempts distinct across the 30 s
+                    // dedup window.
                     self.push_connection_event(
                         NotifySeverity::Info,
                         format!("Reconnect attempt {}/{}…", attempt, MAX_RECONNECT_ATTEMPTS),
@@ -3005,11 +2984,10 @@ impl eframe::App for RyllApp {
         let stats_frame = egui::Frame::NONE
             .inner_margin(egui::Margin::symmetric(4, 2))
             .fill(ctx.style_of(ctx.theme()).visuals.panel_fill);
-        // Compute the live streaming-state classification
-        // once per frame. The result drives the status-bar
-        // indicator below; a fired notification (Flapping +
-        // cool-down elapsed) is pushed before we render so the
-        // bell can pick it up on the same frame.
+        // Compute the live streaming-state classification once per frame.
+        // The result drives the status-bar indicator below; a fired
+        // notification (Flapping + cool-down elapsed) is pushed before we
+        // render so the bell can pick it up on the same frame.
         let (streaming_state, streams_active_for_tooltip) = {
             let snap = self
                 .channel_snapshots
@@ -3092,9 +3070,8 @@ impl eframe::App for RyllApp {
                         ui.label("Cadence: ON");
                     }
 
-                    // Show the auto-snapshot counter only when the mode
-                    // is active (hiding the line avoids visual noise in normal
-                    // sessions).
+                    // Show the auto-snapshot counter only when the mode is active (hiding the line
+                    // avoids visual noise in normal sessions).
                     if let Some(_interval_secs) = self.auto_snapshot_interval {
                         let (saved, _pruned) = self
                             .app_snapshot
@@ -3137,17 +3114,12 @@ impl eframe::App for RyllApp {
                             vol.set_volume(v as u8);
                         }
 
-                        // Live streaming indicator. Sits to
-                        // the left of the volume controls (which stay
-                        // rightmost as the operator-action zone) and
-                        // to the right of the bandwidth sparkline.
-                        // Glyph: ▶ (U+25B6) — a Unicode triangle that
-                        // egui's default font renders cleanly on
-                        // every platform we ship to. 📹 is a colour
-                        // emoji and renders as a tofu box in egui's
-                        // monochrome font; ▶ keeps the visual cue
-                        // (something "playing") without the font
-                        // problem.
+                        // Live streaming indicator. Sits to the left of the volume controls
+                        // (which stay rightmost as the operator-action zone) and to the right of
+                        // the bandwidth sparkline. Glyph: ▶ (U+25B6) — a Unicode triangle that
+                        // egui's default font renders cleanly on every platform we ship to. 📹 is
+                        // a colour emoji and renders as a tofu box in egui's monochrome font; ▶
+                        // keeps the visual cue (something "playing") without the font problem.
                         let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
                             match &streaming_state {
                                 StreamingState::Off => (
@@ -3447,12 +3419,10 @@ impl eframe::App for RyllApp {
                     ui.label(format!("{} total / {} unread", total, unread));
                     ui.separator();
 
-                    // Collect notification-snapshot
-                    // live-state flags under one lock outside the
-                    // per-row render, so each row's button knows
-                    // whether to render in the at-fire (solid) or
-                    // post-event-only (dim) state without
-                    // re-locking per entry.
+                    // Collect notification-snapshot live-state flags under one lock
+                    // outside the per-row render, so each row's button knows whether to
+                    // render in the at-fire (solid) or post-event-only (dim) state
+                    // without re-locking per entry.
                     let live_now = Instant::now();
                     let live_ids: std::collections::HashSet<u64> = match self
                         .notification_snapshots
@@ -3511,11 +3481,8 @@ impl eframe::App for RyllApp {
                                         if ui.small_button("Dismiss").clicked() {
                                             to_remove.push(entry.id);
                                         }
-                                        // File-as-bug-report button.
-                                        // Always present; visual
-                                        // state and tooltip vary by whether
-                                        // a live snapshot still exists for
-                                        // this notification.
+                                        // File-as-bug-report button. Always present; visual state and tooltip vary by
+                                        // whether a live snapshot still exists for this notification.
                                         let snapshot_live = live_ids.contains(&entry.id);
                                         let (label, tooltip) = if snapshot_live {
                                             (
@@ -4490,21 +4457,20 @@ impl eframe::App for RyllApp {
     }
 }
 
-/// True when an inbound display-channel surface refers to
-/// the primary surface — i.e. display channel 0, surface
-/// id 0. This literal pair is used rather than tracking
-/// "the renderer's current primary key" because the primary
-/// surface key is fixed by the SPICE protocol; centralising
-/// the check here keeps the trigger sites in sync if that
-/// ever changes.
+/// True when an inbound display-channel surface refers to the
+/// primary surface — i.e. display channel 0, surface id 0. This
+/// literal pair is used rather than tracking "the renderer's
+/// current primary key" because the primary surface key is
+/// fixed by the SPICE protocol; centralising the check here
+/// keeps the trigger sites in sync if that ever changes.
 fn is_primary_surface(display_channel_id: u8, surface_id: u32) -> bool {
     display_channel_id == 0 && surface_id == 0
 }
 
 /// Push a lag sample into a bounded ring, evicting the oldest
 /// entry when the cap is exceeded. Factored out of
-/// `process_events` so the cap behaviour is unit-testable.
-/// See `docs/plans/PLAN-video-keeping-up.md`.
+/// `process_events` so the cap behaviour is unit-testable. See
+/// `docs/plans/PLAN-video-keeping-up.md`.
 fn push_with_cap(ring: &mut VecDeque<u32>, value: u32) {
     ring.push_back(value);
     if ring.len() > RECENT_LAG_RING_CAP {
@@ -4647,11 +4613,10 @@ fn resolution_notification_due(
     Some(target)
 }
 
-/// Map an auto-reconnect `ModalVariant` to the
-/// `(severity, message)` pair that surfaces in the notification
-/// pane when the state machine lands in Modal. Pure so it can
-/// be unit-tested apart from the connection-event push sites
-/// that depend on it.
+/// Map an auto-reconnect `ModalVariant` to the `(severity,
+/// message)` pair that surfaces in the notification pane when the
+/// state machine lands in Modal. Pure so it can be unit-tested
+/// apart from the connection-event push sites that depend on it.
 fn modal_variant_notification(variant: &ModalVariant) -> (NotifySeverity, String) {
     match variant {
         ModalVariant::Generic { .. } => (
@@ -5392,13 +5357,12 @@ mod tests {
 
     #[test]
     fn volume_control_round_trip() {
-        // RyllApp::reconnect() must not leave the user's volume
-        // slider back at 80% / unmuted. Not resetting it relies
-        // on the existing
-        // Arc<VolumeControl> surviving the swap, with the same
-        // get/set semantics on both sides of the boundary. Pin
-        // the contract so a future refactor of VolumeControl's
-        // storage cannot quietly re-introduce the regression.
+        // RyllApp::reconnect() must not leave the user's volume slider
+        // back at 80% / unmuted. Not resetting it relies on the existing
+        // Arc<VolumeControl> surviving the swap, with the same get/set
+        // semantics on both sides of the boundary. Pin the contract so a
+        // future refactor of VolumeControl's storage cannot quietly
+        // re-introduce the regression.
         let vc = shakenfist_spice_renderer::channels::VolumeControl::new();
         assert_eq!(vc.volume(), 80);
         assert!(!vc.muted());

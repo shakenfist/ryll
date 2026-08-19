@@ -244,15 +244,13 @@ pub struct H264VideoDecoder {
     /// any non-error return (including the "not enough data yet"
     /// `Ok(None)` case).
     consecutive_failures: u32,
-    /// The SPICE wire convention we assume is Annex B framing
-    /// (NALU start codes), but the assumption has not been
-    /// validated against a real H.264-capable spice-server. On the
-    /// first
-    /// decode call per decoder instance, log the leading-byte
-    /// pattern at INFO so a bug-report reader can tell whether the
-    /// server is actually sending Annex B (`00 00 00 01` /
-    /// `00 00 01`) or something else (AVCC length-prefixed, raw
-    /// NALU, etc.). One log line per stream, then quiet.
+    /// The SPICE wire convention we assume is Annex B framing (NALU start
+    /// codes), but the assumption has not been validated against a real
+    /// H.264-capable spice-server. On the first decode call per decoder
+    /// instance, log the leading-byte pattern at INFO so a bug-report
+    /// reader can tell whether the server is actually sending Annex B (`00
+    /// 00 00 01` / `00 00 01`) or something else (AVCC length-prefixed,
+    /// raw NALU, etc.). One log line per stream, then quiet.
     framing_logged: bool,
 }
 
@@ -587,11 +585,10 @@ mod mjpeg_round_trip_tests {
     use super::*;
     use crate::jpeg::MozJpegDecoder;
 
-    /// Encode a small frame via `mozjpeg::Compress`, then decode it
-    /// through `MJpegVideoDecoder`, and assert the RGBA is within
-    /// JPEG-lossy tolerance. Mirrors the `mozjpeg_round_trip_within_tolerance`
-    /// test in `jpeg.rs`, but exercises the `VideoDecoder` trait
-    /// wrapper.
+    /// Encode a small frame via `mozjpeg::Compress`, then decode it through
+    /// `MJpegVideoDecoder`, and assert the RGBA is within JPEG-lossy tolerance.
+    /// Mirrors the `mozjpeg_round_trip_within_tolerance` test in `jpeg.rs`, but
+    /// exercises the `VideoDecoder` trait wrapper.
     #[test]
     fn mjpeg_video_decoder_round_trip_within_tolerance() {
         const W: u32 = 16;

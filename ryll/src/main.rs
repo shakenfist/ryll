@@ -94,13 +94,12 @@ fn mib_to_usize_bytes(mib: u64) -> usize {
 }
 
 fn main() -> Result<()> {
-    // Baseline the runtime-metrics uptime clock at process
-    // start, before tokio runtime construction or any
-    // metrics::sample() call. On Linux this is a no-op; on
-    // macOS it forces the LazyLock<Instant> that backs
-    // `process.uptime_secs` so the field measures from
-    // here rather than the first bug-report trigger. See
-    // `docs/plans/PLAN-macos-runtime-metrics.md`.
+    // Baseline the runtime-metrics uptime clock at process start,
+    // before tokio runtime construction or any metrics::sample()
+    // call. On Linux this is a no-op; on macOS it forces the
+    // LazyLock<Instant> that backs `process.uptime_secs` so the
+    // field measures from here rather than the first bug-report
+    // trigger. See `docs/plans/PLAN-macos-runtime-metrics.md`.
     shakenfist_spice_renderer::metrics::init_at_startup();
 
     // Install Ctrl+C handler so graceful shutdown works on all platforms.
@@ -109,19 +108,18 @@ fn main() -> Result<()> {
     })
     .expect("failed to set Ctrl+C handler");
 
-    // Idempotent rustls CryptoProvider install. rustls 0.23 panics
-    // at the no-arg `ClientConfig::builder()` call site
-    // (shakenfist-spice-protocol/src/client.rs) when feature
-    // unification across the workspace enables both `ring` and
-    // `aws-lc-rs` and no process-level default has been installed.
-    // The Linux devcontainer's resolver lands on a single provider
-    // and silently auto-detects; macOS resolves with both enabled
-    // and panics. Installing a default explicitly at startup
-    // covers every entry path. `shakenfist-spice-webrtc` no longer
-    // has a rustls dependency of its own (see
-    // docs/plans/PLAN-webrtc-0.20-upgrade.md), so this
-    // call is now the only thing installing a provider for the
-    // SPICE TLS and axum-server paths.
+    // Idempotent rustls CryptoProvider install. rustls 0.23 panics at the
+    // no-arg `ClientConfig::builder()` call site
+    // (shakenfist-spice-protocol/src/client.rs) when feature unification
+    // across the workspace enables both `ring` and `aws-lc-rs` and no
+    // process-level default has been installed. The Linux devcontainer's
+    // resolver lands on a single provider and silently auto-detects;
+    // macOS resolves with both enabled and panics. Installing a default
+    // explicitly at startup covers every entry path.
+    // `shakenfist-spice-webrtc` no longer has a rustls dependency of its
+    // own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this call is
+    // now the only thing installing a provider for the SPICE TLS and
+    // axum-server paths.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Optional tokio-console initialisation for the K1 hang
@@ -215,9 +213,9 @@ fn main() -> Result<()> {
         env!("RYLL_GIT_SHA"),
     );
 
-    // Load configuration. Every mode requires a real `.vv` /
-    // `--url` / `--direct`, including `--web`: `run_web`
-    // spawns `run_connection` and actually connects to SPICE.
+    // Load configuration. Every mode requires a real `.vv` / `--url`
+    // / `--direct`, including `--web`: `run_web` spawns
+    // `run_connection` and actually connects to SPICE.
     let config = Config::from_args(&args)?;
     info!(
         "Connecting to {}:{} (TLS: {})",
@@ -508,12 +506,11 @@ fn run_web(
 
     let capture_for_renderer = capture.clone();
     let result = runtime.block_on(async move {
-        // Idempotent rustls CryptoProvider install, matching the
-        // one in `main()` above. `shakenfist-spice-webrtc` has no
-        // rustls dependency of its own (see
-        // docs/plans/PLAN-webrtc-0.20-upgrade.md), so
-        // this call is what installs a provider for the SPICE TLS
-        // and axum-server paths in the `--web` entry point.
+        // Idempotent rustls CryptoProvider install, matching the one in
+        // `main()` above. `shakenfist-spice-webrtc` has no rustls dependency
+        // of its own (see docs/plans/PLAN-webrtc-0.20-upgrade.md), so this
+        // call is what installs a provider for the SPICE TLS and axum-server
+        // paths in the `--web` entry point.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         // Build the host-side scaffolding the renderer expects.
@@ -610,11 +607,10 @@ fn run_web(
             shakenfist_spice_renderer::SurfaceMirror::new(),
         ));
 
-        // Build the Opus passthrough sink. The sink
-        // is handed to `run_connection` so the playback channel
-        // taps every Opus packet into it; the matching slot is
-        // stashed in `WebState` so each `/offer` can plug a
-        // fresh Sender in for its audio pump.
+        // Build the Opus passthrough sink. The sink is handed to
+        // `run_connection` so the playback channel taps every Opus packet
+        // into it; the matching slot is stashed in `WebState` so each
+        // `/offer` can plug a fresh Sender in for its audio pump.
         let (opus_sink, active_opus_tx) = crate::web::audio::WebOpusSink::new();
         let opus_sink_dyn: Arc<dyn shakenfist_spice_renderer::OpusPacketSink> = opus_sink;
 
@@ -692,15 +688,14 @@ fn run_web(
             }
         });
 
-        // Surface-mirror apply-event task. Subscribes to the
-        // broadcast bus and pipes every ChannelEvent through
-        // `SurfaceMirror::apply_event`. `Lagged` means a slow
-        // subscriber missed N events; for the mirror that's
-        // bad because surface state diverges from what SPICE
-        // sent — log a warning but continue rather than
-        // tearing the session down. If lag becomes a real
-        // operational problem, revisit it with a larger
-        // broadcast capacity or a backpressure scheme.
+        // Surface-mirror apply-event task. Subscribes to the broadcast
+        // bus and pipes every ChannelEvent through
+        // `SurfaceMirror::apply_event`. `Lagged` means a slow subscriber
+        // missed N events; for the mirror that's bad because surface
+        // state diverges from what SPICE sent — log a warning but
+        // continue rather than tearing the session down. If lag becomes
+        // a real operational problem, revisit it with a larger broadcast
+        // capacity or a backpressure scheme.
         let mirror_for_task = surface_mirror.clone();
         let mirror_handle = tokio::spawn(async move {
             loop {
@@ -773,10 +768,9 @@ fn run_web(
         // path after axum::serve returns.
         let reaper_handle = tokio::spawn(crate::web::lifecycle::run_bridge_reaper(state.clone()));
 
-        // Load the optional TLS config before binding.
-        // Clap's `requires =` enforces both-or-neither, so seeing
-        // one flag without the other here would already have
-        // been rejected at parse time.
+        // Load the optional TLS config before binding. Clap's `requires =`
+        // enforces both-or-neither, so seeing one flag without the other
+        // here would already have been rejected at parse time.
         let tls_config = match (&web_tls_cert, &web_tls_key) {
             (Some(cert), Some(key)) => Some(crate::web::server::load_tls_config(cert, key).await?),
             _ => None,
@@ -789,11 +783,10 @@ fn run_web(
             None => crate::web::run(state.clone(), &web_host, web_port).await,
         };
 
-        // Explicit bridge close. After axum::serve
-        // returns (Ctrl+C raised SHUTDOWN_REQUESTED, or axum
-        // errored), close any active bridge so DTLS/SRTP tears
-        // down cleanly before the runtime drops. Use a 2-second
-        // ceiling so a wedged bridge cannot block shutdown
+        // Explicit bridge close. After axum::serve returns (Ctrl+C raised
+        // SHUTDOWN_REQUESTED, or axum errored), close any active bridge so
+        // DTLS/SRTP tears down cleanly before the runtime drops. Use a
+        // 2-second ceiling so a wedged bridge cannot block shutdown
         // indefinitely.
         tracing::info!("web: HTTP server drained");
         {

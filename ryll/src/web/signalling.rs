@@ -34,9 +34,9 @@ use tracing::{info, warn};
 
 use super::server::WebState;
 
-/// Encoder FPS cap. 30 fps matches master plan Resolution §4.
-/// The encoder dimensions come from the SurfaceMirror's primary
-/// surface at restart time rather than a hard-coded constant.
+/// Encoder FPS cap. 30 fps matches master plan Resolution §4. The
+/// encoder dimensions come from the SurfaceMirror's primary surface
+/// at restart time rather than a hard-coded constant.
 const ENCODER_FPS: u32 = 30;
 
 /// Sentinel error message returned by [`EncoderInfra::restart`]
@@ -316,12 +316,12 @@ pub async fn post_offer(
     // exits when its rx closes (driven by the next /offer
     // overwriting `active_opus_tx`, dropping this Sender).
     let _video_handle = bridge.spawn_video_pump(frame_rx);
-    // Real Opus passthrough from the SPICE playback
-    // channel. Build a fresh per-viewer mpsc and plug the
-    // Sender into the shared slot the renderer-side
-    // `WebOpusSink` reads from. The previous bridge's Sender
-    // is replaced atomically; that drops the previous audio
-    // pump's `Receiver` and causes that pump to exit cleanly.
+    // Real Opus passthrough from the SPICE playback channel. Build a
+    // fresh per-viewer mpsc and plug the Sender into the shared slot
+    // the renderer-side `WebOpusSink` reads from. The previous
+    // bridge's Sender is replaced atomically; that drops the
+    // previous audio pump's `Receiver` and causes that pump to exit
+    // cleanly.
     let (opus_tx, opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(64);
     {
         // std::sync::Mutex on the slot — see the rationale in
@@ -458,9 +458,9 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let state = Arc::new(WebState::new());
-        // Seed the surface mirror with a primary so the
-        // encoder restart path doesn't return the 503 sentinel.
-        // 1280x720 is an arbitrary but realistic primary size.
+        // Seed the surface mirror with a primary so the encoder restart
+        // path doesn't return the 503 sentinel. 1280x720 is an arbitrary
+        // but realistic primary size.
         {
             let mut m = state.surface_mirror.lock().await;
             m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {

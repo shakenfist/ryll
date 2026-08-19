@@ -521,13 +521,12 @@ mod macos {
     };
     use super::{ProcessMetrics, RuntimeMetrics};
 
-    // libc 0.2 does not expose mach_port_deallocate on Apple
-    // targets (verified against 0.2.186), and as of libc 0.2.x
-    // the `mach_task_self_` static is deprecated in favour of
-    // the `mach2` crate. Both symbols are documented and stable
-    // Mach ABI; local extern declarations are simpler than
-    // pulling in `mach2` for two items.
-    // See `docs/plans/PLAN-macos-runtime-metrics.md`.
+    // libc 0.2 does not expose mach_port_deallocate on Apple targets
+    // (verified against 0.2.186), and as of libc 0.2.x the
+    // `mach_task_self_` static is deprecated in favour of the `mach2`
+    // crate. Both symbols are documented and stable Mach ABI; local
+    // extern declarations are simpler than pulling in `mach2` for two
+    // items. See `docs/plans/PLAN-macos-runtime-metrics.md`.
     extern "C" {
         fn mach_port_deallocate(
             task: libc::mach_port_t,
@@ -563,11 +562,11 @@ mod macos {
 
     /// RAII wrapper around the Mach-allocated thread-port array
     /// returned by `task_threads`. Releases every port via
-    /// `mach_port_deallocate` and the array memory via
-    /// `vm_deallocate` on Drop, including the panic path. The
-    /// only constructor is the struct literal below; wrapping
-    /// is enforced by `task_threads` writing directly into the
-    /// fields. See `docs/plans/PLAN-macos-runtime-metrics.md`.
+    /// `mach_port_deallocate` and the array memory via `vm_deallocate`
+    /// on Drop, including the panic path. The only constructor is the
+    /// struct literal below; wrapping is enforced by `task_threads`
+    /// writing directly into the fields. See
+    /// `docs/plans/PLAN-macos-runtime-metrics.md`.
     struct MachThreadList {
         ports: *mut libc::thread_act_t,
         count: libc::mach_msg_type_number_t,
@@ -1000,11 +999,10 @@ VmData:\t   65536 kB\n\
 
     #[test]
     fn test_init_at_startup_runs_without_panic() {
-        // init_at_startup() is unconditionally
-        // callable on every platform and idempotent. On Linux
-        // it is a no-op; on macOS it forces the PROCESS_START
-        // LazyLock. Either way, calling it twice in a row from
-        // a test must not panic, return an error, or block.
+        // init_at_startup() is unconditionally callable on every platform
+        // and idempotent. On Linux it is a no-op; on macOS it forces the
+        // PROCESS_START LazyLock. Either way, calling it twice in a row
+        // from a test must not panic, return an error, or block.
         init_at_startup();
         init_at_startup();
     }
@@ -1099,11 +1097,11 @@ VmData:\t   65536 kB\n\
     #[cfg(target_os = "macos")]
     #[test]
     fn test_macos_sample_returns_populated_variant() {
-        // End-to-end smoke test on a real Mac: call sample()
-        // with a short window and confirm a populated MacOS
-        // variant comes back, not Unavailable. Also asserts
-        // the threads list is populated and at least one
-        // thread has a name (tokio names its workers).
+        // End-to-end smoke test on a real Mac: call sample() with a
+        // short window and confirm a populated MacOS variant comes
+        // back, not Unavailable. Also asserts the threads list is
+        // populated and at least one thread has a name (tokio names its
+        // workers).
         let m = sample(std::time::Duration::from_millis(100));
         match m {
             RuntimeMetrics::MacOS {
@@ -1114,8 +1112,8 @@ VmData:\t   65536 kB\n\
             } => {
                 assert_eq!(platform, "macos");
                 assert_eq!(sample_window_ms, 100);
-                // Every Mac process has at least the
-                // main thread. The test binary itself has more.
+                // Every Mac process has at least the main thread. The test binary
+                // itself has more.
                 assert!(!threads.is_empty(), "expected non-empty threads");
                 for t in &threads {
                     assert!(
@@ -1237,8 +1235,8 @@ VmData:\t   65536 kB\n\
 
     #[test]
     fn test_macos_compute_thread_metrics_zero_window() {
-        // Zero-window must produce finite percent for every
-        // thread (the .max(1) µs guard generalises).
+        // Zero-window must produce finite percent for every thread
+        // (the .max(1) µs guard generalises).
         use super::macos_math::compute_thread_metrics;
         let a = vec![ts(1, 1_000_000, 0, "w")];
         let b = vec![ts(1, 1_050_000, 0, "w")];

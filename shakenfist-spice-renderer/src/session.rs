@@ -198,12 +198,11 @@ pub async fn run_connection(
     let client = SpiceClient::new(config)?;
 
     // Shared mm_time clock. The main channel writes to it from
-    // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel
-    // reads from it when building `STREAM_REPORT` payloads.
-    // Constructed here so both channels share the same
-    // `Arc<MmClock>`; not exposed through `run_connection`'s
-    // public signature because it is purely internal
-    // plumbing — host callers never see it.
+    // `MAIN_INIT` and `MULTI_MEDIA_TIME`; the display channel reads
+    // from it when building `STREAM_REPORT` payloads. Constructed
+    // here so both channels share the same `Arc<MmClock>`; not
+    // exposed through `run_connection`'s public signature because it
+    // is purely internal plumbing — host callers never see it.
     let mm_clock = Arc::new(MmClock::new());
 
     // Connect main channel and run it. The main channel sends

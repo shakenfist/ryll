@@ -849,11 +849,10 @@ pub struct VaapiDecoder {
     /// libva-drm.so.2 handle. Same lifetime story as `libva`.
     #[allow(dead_code)]
     libva_drm: libloading::Library,
-    /// Fallback decoder. The actual VA-API decode path is
-    /// deferred to a follow-up; today
-    /// every `decode()` call delegates here. Embedded rather
-    /// than constructed per-call so we share the (currently
-    /// stateless) `MozJpegDecoder` instance.
+    /// Fallback decoder. The actual VA-API decode path is deferred
+    /// to a follow-up; today every `decode()` call delegates here.
+    /// Embedded rather than constructed per-call so we share the
+    /// (currently stateless) `MozJpegDecoder` instance.
     fallback: MozJpegDecoder,
 }
 

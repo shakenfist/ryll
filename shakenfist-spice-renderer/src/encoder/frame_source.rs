@@ -24,10 +24,10 @@ pub struct FrameRef<'a> {
     /// row-major, top-left origin. Length must equal
     /// `width * height * 4`.
     pub rgba: &'a [u8],
-    /// Wall-clock timestamp in microseconds. The origin is
-    /// chosen by the producer (e.g. encoder start instant) and
-    /// must increase monotonically across successive frames.
-    /// Used by the task layer to derive RTP timestamps.
+    /// Wall-clock timestamp in microseconds. The origin is chosen by
+    /// the producer (e.g. encoder start instant) and must increase
+    /// monotonically across successive frames. Used by the task layer
+    /// to derive RTP timestamps.
     pub timestamp_us: u64,
 }
 

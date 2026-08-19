@@ -46,9 +46,8 @@ struct StreamState {
     dest_right: u32,
     /// Per-stream video decoder, selected at `STREAM_CREATE` by
     /// [`shakenfist_spice_compression::video::for_stream`]. Holds any
-    /// codec-specific state (e.g. the MJPEG DHT cache, or H.264
-    /// reference frames). The boxed trait object is
-    /// moved when the stream is retired.
+    /// codec-specific state (e.g. the MJPEG DHT cache, or H.264 reference
+    /// frames). The boxed trait object is moved when the stream is retired.
     video_decoder: Box<dyn VideoDecoder>,
     /// Session-relative seconds at `STREAM_CREATE`.
     created_at_secs: f64,
@@ -68,8 +67,8 @@ struct StreamState {
     report_unique_id: u32,
     report_max_window_size: u32,
     report_timeout_ms: u32,
-    // Rolling window counters, updated per frame and reset on
-    // each STREAM_REPORT send.
+    // Rolling window counters, updated per frame and reset on each
+    // STREAM_REPORT send.
     report_num_frames: u32,
     report_num_drops: u32,
     report_drops_seq_len: u32,
@@ -562,9 +561,9 @@ pub struct DisplayChannel {
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
     /// MJPEG decoder backend selected once at construction via
-    /// `best_for_platform()`. Shared as `Arc<dyn JpegDecoder>`
-    /// so faster backends (ImageIO, WIC, VA-API) can be
-    /// swapped in without changing call sites. See
+    /// `best_for_platform()`. Shared as `Arc<dyn JpegDecoder>` so
+    /// faster backends (ImageIO, WIC, VA-API) can be swapped in
+    /// without changing call sites. See
     /// `docs/plans/PLAN-stream-caps-and-flap.md`.
     jpeg_decoder: Arc<dyn JpegDecoder>,
     image_cache: BoundedImageCache,
@@ -599,8 +598,8 @@ pub struct DisplayChannel {
     ack_send_count: u32,
     last_ack_send_ts_secs: Option<f64>,
     recent_ack_intervals_secs: VecDeque<f64>,
-    /// Count of pcap-capture packets rejected by the writer
-    /// task's queue. Mirrored into
+    /// Count of pcap-capture packets rejected by the writer task's
+    /// queue. Mirrored into
     /// `DisplaySnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
     /// Stream-channel diagnostics mirrored into
@@ -620,13 +619,13 @@ pub struct DisplayChannel {
     /// the diagnostic data we just added.
     recently_destroyed_streams: VecDeque<StreamSnapshot>,
     /// Shared mm_time clock — reader side. `mm_clock.now()`
-    /// evaluates the STREAM_REPORT trigger predicate and
-    /// computes `last_frame_delay` at send time.
+    /// evaluates the STREAM_REPORT trigger predicate and computes
+    /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
-    /// Bounded ring of the most recent MJPEG
-    /// decode durations in microseconds, newest at the back.
-    /// Capped at `MAX_RECENT_DECODES` to match the non-stream
-    /// recent-decode ring. Used by `update_snapshot` to compute
+    /// Bounded ring of the most recent MJPEG decode durations in
+    /// microseconds, newest at the back. Capped at `MAX_RECENT_DECODES`
+    /// to match the non-stream recent-decode ring. Used by
+    /// `update_snapshot` to compute
     /// `mjpeg_decode_recent_min/max/mean_us`.
     mjpeg_recent_durations: VecDeque<u32>,
     /// Cumulative count of MJPEG decode attempts (success +
@@ -635,31 +634,30 @@ pub struct DisplayChannel {
     /// Cumulative count of MJPEG decode attempts that
     /// returned `None` since session start.
     mjpeg_decode_failed_count: u64,
-    /// Bounded ring of the most recent H.264
-    /// decode durations in microseconds, newest at the back.
-    /// Capped at `MAX_RECENT_DECODES`. Used by `update_snapshot`
-    /// to compute `h264_decode_recent_min/max/mean_us`. Parallel
-    /// to `mjpeg_recent_durations`; the dispatch site selects
-    /// which ring receives the sample based on
-    /// `stream.codec_type`.
+    /// Bounded ring of the most recent H.264 decode durations in
+    /// microseconds, newest at the back. Capped at `MAX_RECENT_DECODES`.
+    /// Used by `update_snapshot` to compute
+    /// `h264_decode_recent_min/max/mean_us`. Parallel to
+    /// `mjpeg_recent_durations`; the dispatch site selects which ring
+    /// receives the sample based on `stream.codec_type`.
     h264_recent_durations: VecDeque<u32>,
     /// Cumulative count of H.264 decode attempts (success +
     /// failure) since session start.
     h264_decode_total_count: u64,
-    /// Cumulative count of H.264 decode attempts that
-    /// returned `Err` since session start.
-    /// `Ok(None)` (needs more data) is not counted as a failure.
+    /// Cumulative count of H.264 decode attempts that returned `Err`
+    /// since session start. `Ok(None)` (needs more data) is not counted
+    /// as a failure.
     h264_decode_failed_count: u64,
-    /// Set to true after we have successfully sent the
-    /// link-up `PREFERRED_COMPRESSION` (opcode 103) message.
-    /// Mirrored into `DisplaySnapshot::pref_compression_sent` so
-    /// a bug report can confirm the preference actually went out.
-    /// One-shot per channel lifetime.
+    /// Set to true after we have successfully sent the link-up
+    /// `PREFERRED_COMPRESSION` (opcode 103) message. Mirrored into
+    /// `DisplaySnapshot::pref_compression_sent` so a bug report can
+    /// confirm the preference actually went out. One-shot per channel
+    /// lifetime.
     pref_compression_sent: bool,
-    /// Set to true after we have successfully sent the
-    /// link-up `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message.
-    /// Mirrored into `DisplaySnapshot::pref_video_codec_type_sent`.
-    /// One-shot per channel lifetime.
+    /// Set to true after we have successfully sent the link-up
+    /// `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message. Mirrored into
+    /// `DisplaySnapshot::pref_video_codec_type_sent`. One-shot per channel
+    /// lifetime.
     pref_video_codec_type_sent: bool,
 }
 
@@ -839,23 +837,21 @@ impl DisplayChannel {
         // Send display init message
         self.send_init().await?;
 
-        // One-shot link-up preference messages. spice-gtk
-        // fires both right after the channel reaches STATE_LINKED
-        // (channel-display.c:984-995). In ryll the channel is
-        // already linked by the time run_loop starts (link/auth
-        // happened during session connect), so just after INIT is
-        // the equivalent point. Failures here are not fatal — the
-        // server falls back to its default codec / compression
-        // choice if the messages never arrive — but we propagate
-        // any IO error since it indicates the socket is unhealthy
-        // and the read loop is about to fail anyway.
-        // Session 006 measurement: advertising AUTO_LZ here caused
-        // the server to stop using GLZ entirely (006c vs 006a:
-        // glz_dictionary_entries 23 → 0, evictions 1345 → 0,
-        // bytes_in 2.78 GB → 3.51 GB = +25%). For our UI-heavy
-        // workload the GLZ shared dictionary is the win; AUTO_GLZ
-        // lets the server still pick QUIC for photographic content
-        // but keep the dictionary for repeating UI elements.
+        // One-shot link-up preference messages. spice-gtk fires both right
+        // after the channel reaches STATE_LINKED (channel-display.c:984-995).
+        // In ryll the channel is already linked by the time run_loop starts
+        // (link/auth happened during session connect), so just after INIT is
+        // the equivalent point. Failures here are not fatal — the server
+        // falls back to its default codec / compression choice if the
+        // messages never arrive — but we propagate any IO error since it
+        // indicates the socket is unhealthy and the read loop is about to
+        // fail anyway. Session 006 measurement: advertising AUTO_LZ here
+        // caused the server to stop using GLZ entirely (006c vs 006a:
+        // glz_dictionary_entries 23 → 0, evictions 1345 → 0, bytes_in 2.78 GB
+        // → 3.51 GB = +25%). For our UI-heavy workload the GLZ shared
+        // dictionary is the win; AUTO_GLZ lets the server still pick QUIC for
+        // photographic content but keep the dictionary for repeating UI
+        // elements.
         self.send_preferred_compression(image_compression::AUTO_GLZ)
             .await?;
         self.send_preferred_video_codec_type(&[
@@ -892,12 +888,10 @@ impl DisplayChannel {
                 break;
             }
 
-            // Socket-read fill stats. A read that comes
-            // back at the full chunk size means the OS recv buffer
-            // had at least that much waiting when we read, which
-            // is a cheap proxy for "the read loop is behind the
-            // arrival rate". See
-            // `docs/plans/PLAN-video-keeping-up.md`.
+            // Socket-read fill stats. A read that comes back at the full chunk
+            // size means the OS recv buffer had at least that much waiting when
+            // we read, which is a cheap proxy for "the read loop is behind the
+            // arrival rate". See `docs/plans/PLAN-video-keeping-up.md`.
             self.socket_read_count = self.socket_read_count.saturating_add(1);
             if n == chunk.len() {
                 self.socket_reads_at_chunk_cap = self.socket_reads_at_chunk_cap.saturating_add(1);
@@ -1555,13 +1549,10 @@ impl DisplayChannel {
                     let decode_duration_us =
                         u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
 
-                    // Aggregate decode duration tracking per
-                    // codec. Gate on
-                    // codec_type so each ring receives only its own
-                    // samples — keeping the two streams separate lets
-                    // bug reports tell MJPEG and H.264 cost apart.
-                    // `Ok(None)` (H.264 "needs more data") counts
-                    // toward total but not toward failures.
+                    // Aggregate decode duration tracking per codec. Gate on codec_type so
+                    // each ring receives only its own samples — keeping the two streams
+                    // separate lets bug reports tell MJPEG and H.264 cost apart. `Ok(None)`
+                    // (H.264 "needs more data") counts toward total but not toward failures.
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         self.mjpeg_decode_total_count =
                             self.mjpeg_decode_total_count.saturating_add(1);
@@ -2151,12 +2142,11 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Jpeg) => {
-                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream).
-                // Route through the per-platform `JpegDecoder` selected in
-                // `best_for_platform()` (ImageIO / WIC / mozjpeg / pure-Rust)
-                // rather than the `image` crate's pure-Rust path. Session
-                // 006 measured the old path at ~263 ms / frame at 1920×1472
-                // on a Mac that has ImageIO available.
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream). Route through the
+                // per-platform `JpegDecoder` selected in `best_for_platform()` (ImageIO / WIC /
+                // mozjpeg / pure-Rust) rather than the `image` crate's pure-Rust path. Session
+                // 006 measured the old path at ~263 ms / frame at 1920×1472 on a Mac that has
+                // ImageIO available.
                 if image_data.len() < 4 {
                     warn_once!(
                         "display:decode_failure:jpeg:short_data",
@@ -2527,8 +2517,8 @@ impl DisplayChannel {
     async fn handle_draw_invers(&mut self, payload: &[u8]) -> Result<()> {
         log_draw_base_if_verbose(self.log_config, payload, "draw_invers");
         // DRAW_INVERS shares its wire format (DrawBase + SpiceQMask) with
-        // DRAW_BLACKNESS / DRAW_WHITENESS, so the shared solid-fill
-        // decoder slots in unchanged — only the paint semantic differs.
+        // DRAW_BLACKNESS / DRAW_WHITENESS, so the shared solid-fill decoder slots in
+        // unchanged — only the paint semantic differs.
         let SolidFillOutcome::Paint {
             base,
             masked_fallback,
@@ -2738,12 +2728,11 @@ impl DisplayChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
-        // The image_cache_* snapshot fields are scoped to the
-        // renderer's BoundedImageCache only. Summing the GLZ
-        // dictionary into them made a 5 GiB image_cache_bytes
-        // reading ambiguous between the two caches and so
-        // untriageable from a bug report alone. The GLZ
-        // dictionary has its own parallel snapshot fields.
+        // The image_cache_* snapshot fields are scoped to the renderer's
+        // BoundedImageCache only. Summing the GLZ dictionary into them
+        // made a 5 GiB image_cache_bytes reading ambiguous between the
+        // two caches and so untriageable from a bug report alone. The
+        // GLZ dictionary has its own parallel snapshot fields.
         snap.image_cache_entries = self.image_cache.len();
         snap.image_cache_bytes = self.image_cache.bytes();
         snap.image_cache_ids = {
@@ -2761,10 +2750,9 @@ impl DisplayChannel {
         snap.glz_dictionary_evicted_bytes_total = self.glz_dictionary.evicted_bytes_total();
         snap.recent_decodes = self.recent_decodes.clone();
 
-        // Cumulative decode counters and recent-window
-        // decode duration stats. The recent-window aggregate
-        // excludes cache hits and failures so it characterises
-        // actual decoder cost.
+        // Cumulative decode counters and recent-window decode duration
+        // stats. The recent-window aggregate excludes cache hits and
+        // failures so it characterises actual decoder cost.
         snap.decode_total_count = self.decode_total_count;
         snap.decode_failed_count = self.decode_failed_count;
         snap.decode_from_cache_count = self.decode_from_cache_count;
@@ -2803,10 +2791,9 @@ impl DisplayChannel {
         snap.stream_reports_sent_total = self.stream_reports_sent_total;
         snap.stream_reports_unsupported_signals_sent = 0; // never written yet
 
-        // Aggregate MJPEG decode duration stats.
-        // Mirrors the non-stream decode_recent_* pattern but draws
-        // from the MJPEG-only duration ring rather than the
-        // per-image decode ring.
+        // Aggregate MJPEG decode duration stats. Mirrors the non-stream
+        // decode_recent_* pattern but draws from the MJPEG-only duration ring
+        // rather than the per-image decode ring.
         let (mjpeg_min, mjpeg_max, mjpeg_mean) = mjpeg_duration_stats(&self.mjpeg_recent_durations);
         snap.mjpeg_decode_recent_min_us = mjpeg_min;
         snap.mjpeg_decode_recent_max_us = mjpeg_max;
@@ -2814,10 +2801,9 @@ impl DisplayChannel {
         snap.mjpeg_decode_total_count = self.mjpeg_decode_total_count;
         snap.mjpeg_decode_failed_count = self.mjpeg_decode_failed_count;
 
-        // Aggregate H.264 decode duration stats.
-        // Parallel to the MJPEG block above. Reuses the same
-        // `mjpeg_duration_stats` helper (renaming would just add
-        // churn; the function is codec-agnostic).
+        // Aggregate H.264 decode duration stats. Parallel to the MJPEG
+        // block above. Reuses the same `mjpeg_duration_stats` helper
+        // (renaming would just add churn; the function is codec-agnostic).
         let (h264_min, h264_max, h264_mean) = mjpeg_duration_stats(&self.h264_recent_durations);
         snap.h264_decode_recent_min_us = h264_min;
         snap.h264_decode_recent_max_us = h264_max;
@@ -2825,11 +2811,10 @@ impl DisplayChannel {
         snap.h264_decode_total_count = self.h264_decode_total_count;
         snap.h264_decode_failed_count = self.h264_decode_failed_count;
 
-        // Link-up preference-message send markers. Both
-        // flip from false to true once and never reset for the
-        // life of the channel — they let a bug report confirm the
-        // preferences actually went out without having to read
-        // the pcap.
+        // Link-up preference-message send markers. Both flip from false to
+        // true once and never reset for the life of the channel — they let a
+        // bug report confirm the preferences actually went out without
+        // having to read the pcap.
         snap.pref_compression_sent = self.pref_compression_sent;
         snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
     }
@@ -2902,9 +2887,8 @@ impl DisplayChannel {
         self.send_with_log(display_client::ACK, &msg).await?;
         self.last_ack = self.message_count;
 
-        // Record ACK cadence so a bug report can show whether
-        // ACK sends stalled. See
-        // `docs/plans/PLAN-video-keeping-up.md`.
+        // Record ACK cadence so a bug report can show whether ACK sends
+        // stalled. See `docs/plans/PLAN-video-keeping-up.md`.
         let now = self.traffic.elapsed().as_secs_f64();
         if let Some(prev) = self.last_ack_send_ts_secs {
             push_ack_interval(&mut self.recent_ack_intervals_secs, now - prev);
@@ -2945,10 +2929,10 @@ impl DisplayChannel {
 mod tests {
     use super::*;
 
-    // -------------------------------------------------------------------------
-    // Note: extract_dht_segments / inject_dht tests have moved to
-    // shakenfist_spice_compression::video (video.rs) alongside the
-    // functions themselves.
+    // ------------------------------------------------------------------------- Note:
+    // extract_dht_segments / inject_dht tests have moved to
+    // shakenfist_spice_compression::video (video.rs) alongside the functions
+    // themselves.
     // -------------------------------------------------------------------------
 
     // -------------------------------------------------------------------------
@@ -3533,8 +3517,8 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // "Video not keeping up" instrumentation
+    // ------------------------------------------------------------------------- "Video
+    // not keeping up" instrumentation
     // -------------------------------------------------------------------------
 
     fn decode(success: bool, from_cache: bool, decode_duration_us: u32) -> DecodeResult {
