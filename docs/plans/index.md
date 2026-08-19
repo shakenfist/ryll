@@ -9,6 +9,21 @@ New plans should follow the structure in `PLAN-TEMPLATE.md` at the repo
 root. For pre-push audits of our own work see `PUSH-AUDIT.md`; for
 reviewing and merging external contributor PRs see `MERGE-TEMPLATE.md`.
 
+The `Status` column below uses exactly four values, so the index can be
+skimmed for what is live. This vocabulary is for the index only — each
+plan's own header and phase table describe their state in whatever detail
+that plan needs.
+
+| Status | Meaning |
+|--------|---------|
+| Complete | Every phase has landed and nothing is outstanding. |
+| In progress | At least one phase is being worked, or has landed but is not yet verified. |
+| Not started | Phases are written but none has been started. |
+| Proposed | A concept: the intent is recorded but no phases are drafted. |
+
+Where a plan is `In progress` for a reason the phase table does not make
+obvious, that reason belongs in the plan itself rather than in this table.
+
 ## Master plans
 
 | Date | Plan | Intent | Status | Phases |
