@@ -219,11 +219,11 @@ Five phases plus inline docs.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Store and ring buffer | PLAN-notifications-phase-01-store.md | Complete (a16f6781) |
-| 2. SPICE_MSG_NOTIFY parser and channel plumbing | PLAN-notifications-phase-02-spice-notify.md | Complete (b3e520b1) |
-| 3. Migrate Gaps and bug-report status as sources | PLAN-notifications-phase-03-existing-sources.md | Complete (3780be03) |
-| 4. GUI: bell, side panel, mark-read | PLAN-notifications-phase-04-gui.md | Complete (ed3f91db) |
-| 5. Docs and bug-report serialisation | PLAN-notifications-phase-05-docs.md | Complete (a2d35d8b) |
+| 1. Store and ring buffer | [PLAN-notifications-phase-01-store.md](PLAN-notifications-phase-01-store.md) | Complete (a16f6781) |
+| 2. SPICE_MSG_NOTIFY parser and channel plumbing | [PLAN-notifications-phase-02-spice-notify.md](PLAN-notifications-phase-02-spice-notify.md) | Complete (b3e520b1) |
+| 3. Migrate Gaps and bug-report status as sources | [PLAN-notifications-phase-03-existing-sources.md](PLAN-notifications-phase-03-existing-sources.md) | Complete (3780be03) |
+| 4. GUI: bell, side panel, mark-read | [PLAN-notifications-phase-04-gui.md](PLAN-notifications-phase-04-gui.md) | Complete (ed3f91db) |
+| 5. Docs and bug-report serialisation | [PLAN-notifications-phase-05-docs.md](PLAN-notifications-phase-05-docs.md) | Complete (a2d35d8b) |
 
 **Phase 1 — Store and ring buffer (high effort, opus)**.
 Define `NotificationEntry { id: u64, when: SystemTime,

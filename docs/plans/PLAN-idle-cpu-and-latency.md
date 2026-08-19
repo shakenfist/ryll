@@ -194,11 +194,11 @@ guest). Out of scope for this plan.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Profile idle CPU | PLAN-idle-cpu-and-latency-phase-01-profile.md | Complete |
-| 2. Repaint cadence fix | PLAN-idle-cpu-and-latency-phase-02-repaint.md | In progress |
-| 3. Demote protocol logging | PLAN-idle-cpu-and-latency-phase-03-logging.md | Complete |
-| 4. Real latency from PING/PONG | PLAN-idle-cpu-and-latency-phase-04-latency.md | Complete |
-| 5. Capture runtime metrics in bug reports | PLAN-idle-cpu-and-latency-phase-05-metrics.md | Complete |
+| 1. Profile idle CPU | [PLAN-idle-cpu-and-latency-phase-01-profile.md](PLAN-idle-cpu-and-latency-phase-01-profile.md) | Complete |
+| 2. Repaint cadence fix | [PLAN-idle-cpu-and-latency-phase-02-repaint.md](PLAN-idle-cpu-and-latency-phase-02-repaint.md) | In progress |
+| 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete |
+| 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete |
+| 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete |
 
 Phase 1 informs phase 2: if profiling shows logging is the
 dominant cost, swap their order.  *Profiling result: the
