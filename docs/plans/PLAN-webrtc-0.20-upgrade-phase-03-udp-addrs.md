@@ -285,6 +285,69 @@ of it.
 | 3c — flags and plumbing | 2 hours |
 | 3d — documentation | 2 hours |
 
+## Status
+
+Complete. All four steps landed, `make test`, `make lint`,
+`make web-smoke`, `make web-smoke-tls` and
+`pre-commit run --all-files` are clean, and both browser-visible
+Definition-of-done items were checked against the built binary
+rather than only asserted in tests:
+
+    $ ryll --web --direct 127.0.0.1:5900 --web-media-addr 0.0.0.0
+    Error: --web-media-addr: 0.0.0.0 cannot be used as a media
+    bind address: it binds successfully and then advertises itself
+    verbatim as an ICE host candidate, which every browser
+    discards …
+
+## What landed
+
+Nineteen `WebrtcBridgeConfig` construction sites moved to
+`WebrtcBridgeConfig::new`, which matches the "about twenty" the
+survey estimated.
+
+Five things differ from the plan as written:
+
+1. **Resolved addresses are deduplicated, which the plan did not
+   ask for.** An operator can name an interface and one of its
+   addresses, and a host can report one address on two
+   interfaces. With an ephemeral port a duplicate is cosmetic —
+   two sockets, two candidates — but with a pinned port the
+   second `UdpSocket::bind` on the same address:port fails and
+   takes the whole peer connection with it. `dedup_with_port`
+   applies to the default path too, so the `--web-media-port`
+   pin is safe without any selectors.
+2. **`bindable_udp_addrs` now returns `Vec<IpAddr>`, not
+   `Vec<SocketAddr>`.** The port is applied once, at the end, by
+   `dedup_with_port`, rather than by each filtering path. The
+   existing unit tests kept their assertions verbatim through a
+   `bound()` helper in the test module.
+3. **`WebState::build` carries an
+   `#[allow(clippy::too_many_arguments)]`.** Two more arguments
+   pushed it past the threshold. The alternative — a config
+   struct for the constructor — is a larger refactor than this
+   phase should be doing, and `build` is private with two
+   callers.
+4. **`ARCHITECTURE.md` changed by one annotation.** The plan said
+   to touch it only if the shape of the system changed, and it
+   did not. But its `shakenfist-spice-webrtc/` file-tree
+   annotation named `host_udp_bind_addrs()` as what
+   `bind_addrs.rs` is, which is now the default case of
+   `UdpBindPolicy` rather than the whole module. Corrected in
+   place, not expanded.
+5. **Implemented in the management session, not by sub-agents.**
+   The shared execution-model block calls for one sub-agent per
+   step; the session this ran in had sub-agent spawning
+   disabled, so the steps were executed directly, in order, with
+   `make lint` and the crate's tests run between them. Recorded
+   because the convention exists, not because anything about the
+   output differs.
+
+The two risks the plan named as review-only checks were both
+handled: `WebrtcBridge::new` now distinguishes "no bindable
+network interface" from "no media bind address matched", and a
+`build()` failure under a pinned port is wrapped with the port
+number and the flag that chose it.
+
 ## Back brief
 
 Before executing any step of this plan, back brief the operator

@@ -33,12 +33,9 @@ use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 async fn pc_close_signals_dead() {
     // ── Server: production WebrtcBridge ──────────────────────────
     let (server_enc_tx, _server_enc_rx) = mpsc::channel::<EncoderControl>(4);
-    let server = WebrtcBridge::new(WebrtcBridgeConfig {
-        ice_servers: vec![],
-        encoder_control: server_enc_tx,
-    })
-    .await
-    .expect("server bridge");
+    let server = WebrtcBridge::new(WebrtcBridgeConfig::new(server_enc_tx))
+        .await
+        .expect("server bridge");
 
     // ── Client: TestPeer ────────────────────────────────────────
     //

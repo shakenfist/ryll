@@ -297,8 +297,9 @@ pub async fn post_offer(
 
     // Step 4: build the new bridge.
     let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-        ice_servers: vec![],
+        ice_servers: state.ice_servers.clone(),
         encoder_control,
+        udp_bind: state.udp_bind.clone(),
     })
     .await
     .map_err(|e| {

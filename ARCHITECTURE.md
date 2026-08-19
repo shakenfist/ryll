@@ -217,9 +217,12 @@ shakenfist-spice-webrtc/src/
 │                        #   wait_for_dead() — resolves when the peer
 │                        #   goes away; a local close() usually does
 │                        #   not raise it — and dead_signal()
-├── bind_addrs.rs        # host_udp_bind_addrs(): non-loopback host
-│                        #   addresses for PeerConnectionBuilder
-│                        #   ::with_udp_addrs
+├── bind_addrs.rs        # UdpBindPolicy: which addresses and port to
+│                        #   bind for PeerConnectionBuilder
+│                        #   ::with_udp_addrs. Default is every
+│                        #   non-loopback host address, ephemeral
+│                        #   port; --web-media-addr / --web-media-port
+│                        #   narrow it
 ├── sticky.rs            # StickySignal (Notify + sticky AtomicBool)
 └── test_client.rs       # TestPeer client-side PC for tests
                          #   (`test-support` feature)

@@ -497,6 +497,11 @@ fn run_web(
     let web_port = args.web_port;
     let web_tls_cert = args.web_tls_cert.clone();
     let web_tls_key = args.web_tls_key.clone();
+    // Parsed and validated here, before the runtime starts, so a
+    // malformed or mechanically unusable media address fails the
+    // launch rather than every `POST /offer` once a viewer arrives.
+    let udp_bind = crate::config::web_media_bind_policy(args)?;
+    let ice_servers = args.web_ice_server.clone();
     let monitors = args.monitors;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
@@ -735,6 +740,8 @@ fn run_web(
             event_broadcast_tx,
             surface_mirror,
             active_opus_tx,
+            udp_bind,
+            ice_servers,
         ));
         // Drain the outbound control queue onto whichever bridge is
         // installed. One writer for the process, like the relays that

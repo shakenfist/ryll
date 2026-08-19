@@ -1,4 +1,5 @@
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -6,6 +7,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use configparser::ini::Ini;
 use shakenfist_spice_protocol::ConnectionConfig;
+use shakenfist_spice_webrtc::{BindSelector, UdpBindPolicy};
 use tracing::warn;
 
 // Device-shaped configuration (the value types passed into the
@@ -186,6 +188,32 @@ pub struct Args {
     #[arg(long, requires = "web_tls_cert")]
     pub web_tls_key: Option<PathBuf>,
 
+    /// Local address or interface name to bind the WebRTC media
+    /// (UDP) sockets to in --web mode. Repeatable. Defaults to
+    /// every interface address that is not loopback, unspecified
+    /// or IPv6 link-local. Naming an address explicitly overrides
+    /// that default, which is how a loopback-only host is served:
+    /// --web-media-addr 127.0.0.1. Note this is not --web-host,
+    /// which binds only the HTTP listener.
+    #[arg(long = "web-media-addr", value_name = "ADDR|IFACE")]
+    pub web_media_addr: Vec<String>,
+
+    /// UDP port for the WebRTC media sockets in --web mode.
+    /// Defaults to 0, an ephemeral port per bound address. Pin it
+    /// so a firewall rule can name one port instead of the whole
+    /// ephemeral range; the pinned port applies to every bound
+    /// address, and a port already in use is a hard error rather
+    /// than a silent fallback.
+    #[arg(long, default_value_t = 0u16)]
+    pub web_media_port: u16,
+
+    /// STUN or TURN server URL for --web mode, as
+    /// stun:host:port or turn:host:port. Repeatable. Empty by
+    /// default: ryll assumes browser and host share a LAN, so ICE
+    /// host candidates are usually enough.
+    #[arg(long = "web-ice-server", value_name = "URL")]
+    pub web_ice_server: Vec<String>,
+
     /// Maximum total bytes for the SPICE display image cache,
     /// in MiB. Defaults to 256. The cache holds decoded RGBA
     /// for images the server flagged with CACHE_ME; without a
@@ -201,6 +229,37 @@ pub struct Args {
     /// 004d-g consumed gigabytes (~30 MiB/s of growth).
     #[arg(long, default_value_t = 256)]
     pub glz_dictionary_cap_mib: u64,
+}
+
+/// The WebRTC media socket binding policy `--web-media-addr` and
+/// `--web-media-port` describe.
+///
+/// Called once at startup so a malformed or unusable address fails
+/// the launch, rather than surfacing at the first viewer's
+/// `POST /offer` — the policy itself is re-resolved per bridge, so
+/// this is the only chance to reject bad input early.
+///
+/// Anything that does not parse as an `IpAddr` is taken to be an
+/// interface name. No interface name is a valid IP literal, so the
+/// two cannot collide, and treating an unparseable value as a name
+/// is what lets `--web-media-addr eth0` work without a second flag.
+pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
+    let selectors = args
+        .web_media_addr
+        .iter()
+        .map(|value| match value.parse::<IpAddr>() {
+            Ok(ip) => BindSelector::Addr(ip),
+            Err(_) => BindSelector::Interface(value.clone()),
+        })
+        .collect();
+    let policy = UdpBindPolicy {
+        selectors,
+        port: args.web_media_port,
+    };
+    policy
+        .validate()
+        .map_err(|e| anyhow!("--web-media-addr: {}", e))?;
+    Ok(policy)
 }
 
 /// SPICE connection configuration
@@ -642,5 +701,81 @@ mod tests {
         );
         let cfg = parse(&vv);
         assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    fn web_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["ryll", "--web", "--file", "x.vv"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("args parse")
+    }
+
+    #[test]
+    fn media_addr_takes_an_address_or_an_interface_name() {
+        let args = web_args(&[
+            "--web-media-addr",
+            "192.168.1.42",
+            "--web-media-addr",
+            "eth0",
+        ]);
+        let policy = web_media_bind_policy(&args).expect("policy");
+        assert_eq!(
+            policy.selectors,
+            vec![
+                BindSelector::Addr("192.168.1.42".parse::<IpAddr>().expect("addr")),
+                BindSelector::Interface("eth0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn media_addr_accepts_loopback_explicitly() {
+        // The loopback-only opt-in: the default policy filters
+        // loopback, and naming it is the override.
+        let args = web_args(&["--web-media-addr", "127.0.0.1"]);
+        let policy = web_media_bind_policy(&args).expect("loopback is a supported explicit choice");
+        assert_eq!(
+            policy.selectors,
+            vec![BindSelector::Addr(
+                "127.0.0.1".parse::<IpAddr>().expect("addr")
+            )]
+        );
+    }
+
+    #[test]
+    fn media_addr_rejects_the_wildcard_at_startup() {
+        // 0.0.0.0 binds happily and then advertises itself as an ICE
+        // candidate every browser discards, so it must fail the
+        // launch rather than the first offer.
+        let args = web_args(&["--web-media-addr", "0.0.0.0"]);
+        let err = web_media_bind_policy(&args).expect_err("0.0.0.0 must be refused");
+        assert!(
+            err.to_string().contains("--web-media-addr"),
+            "the error must name the flag the operator typed: {err}"
+        );
+    }
+
+    #[test]
+    fn media_port_defaults_to_ephemeral_and_can_be_pinned() {
+        assert_eq!(
+            web_media_bind_policy(&web_args(&[]))
+                .expect("default policy")
+                .port,
+            0
+        );
+        assert_eq!(
+            web_media_bind_policy(&web_args(&["--web-media-port", "41000"]))
+                .expect("pinned policy")
+                .port,
+            41_000
+        );
+    }
+
+    #[test]
+    fn ice_servers_are_empty_unless_given() {
+        assert!(web_args(&[]).web_ice_server.is_empty());
+        assert_eq!(
+            web_args(&["--web-ice-server", "stun:stun.example.com:3478"]).web_ice_server,
+            vec!["stun:stun.example.com:3478".to_string()]
+        );
     }
 }

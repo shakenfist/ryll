@@ -341,7 +341,7 @@ minutes.
 |-------|------|--------|
 | 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Complete — baseline captured, 1g agrees within noise |
 | 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Complete — Chromium session on `7e2fb58e` confirms the bind address. Firefox has no video, for a reason that is not a port regression (#289, #290); it is phase 04's gate, as is the audio check nobody performed by ear |
-| 3. Socket binding configuration | [PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md](PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md) | Planned — three `--web-media-*` / `--web-ice-server` flags, a bind policy the bridge resolves per offer, and the `WebrtcBridgeConfig` command-line path that does not exist yet |
+| 3. Socket binding configuration | [PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md](PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md) | Complete — `--web-media-addr` (address or interface name), `--web-media-port` and `--web-ice-server`, carried through `WebState` into a `UdpBindPolicy` the bridge resolves per offer. Explicit addresses override the loopback default; `0.0.0.0` is refused at startup |
 | 4. Soak validation and docs | PLAN-webrtc-0.20-upgrade-phase-04-soak.md | Not started |
 
 Phase 01 is a hard prerequisite for 02 only in the sense that it
@@ -367,7 +367,7 @@ two weeks:
 |---|---|
 | 01 — pre-work on 0.17 | 2 days (actual) |
 | 02 — atomic bump | 3–5 days |
-| 03 — socket binding config | 1 day (revised from ½ by the phase plan) |
+| 03 — socket binding config | 1 day (revised from ½ by the phase plan; actual) |
 | 04 — soak and docs | 1 day |
 
 Phase 01 grew by a day after detailed planning surfaced the

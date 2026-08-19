@@ -18,7 +18,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
 use rand::RngCore;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
-use shakenfist_spice_webrtc::WebrtcBridge;
+use shakenfist_spice_webrtc::{UdpBindPolicy, WebrtcBridge};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tracing::info;
@@ -123,6 +123,15 @@ pub struct WebState {
     /// the signal, and a stored permit survives that race where a
     /// broadcast to zero waiters would be lost.
     pub bridge_replaced: Arc<Notify>,
+    /// WebRTC media socket bind policy from `--web-media-addr` and
+    /// `--web-media-port`, validated at startup by
+    /// [`crate::config::web_media_bind_policy`]. Handed to every
+    /// bridge `POST /offer` builds; the bridge re-resolves it each
+    /// time, so an interface that appears mid-session is picked up.
+    pub udp_bind: UdpBindPolicy,
+    /// STUN/TURN URLs from `--web-ice-server`. Empty unless the
+    /// operator supplied some, which is the LAN-only default.
+    pub ice_servers: Vec<String>,
     /// Timestamp of the last accepted `POST /offer`. Used to
     /// enforce a 1-second cooldown between offers so an
     /// authenticated client cannot thrash the openh264 encoder
@@ -158,6 +167,8 @@ impl WebState {
             None,
             Arc::new(Mutex::new(SurfaceMirror::new())),
             Arc::new(std::sync::Mutex::new(None)),
+            UdpBindPolicy::default(),
+            Vec::new(),
         )
     }
 
@@ -171,6 +182,8 @@ impl WebState {
         event_tx: broadcast::Sender<ChannelEvent>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
+        udp_bind: UdpBindPolicy,
+        ice_servers: Vec<String>,
     ) -> Self {
         Self::build(
             Some(input_tx),
@@ -178,15 +191,20 @@ impl WebState {
             Some(event_tx),
             surface_mirror,
             active_opus_tx,
+            udp_bind,
+            ice_servers,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         input_tx: Option<mpsc::Sender<InputEvent>>,
         resize_tx: Option<mpsc::Sender<(u32, u32)>>,
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
+        udp_bind: UdpBindPolicy,
+        ice_servers: Vec<String>,
     ) -> Self {
         let mut bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -208,6 +226,8 @@ impl WebState {
             active_opus_tx,
             bridge_generation: Arc::new(AtomicU64::new(0)),
             bridge_replaced: Arc::new(Notify::new()),
+            udp_bind,
+            ice_servers,
             // Initialise 60 s in the past so the first offer
             // always succeeds without a cold-start delay.
             last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),
