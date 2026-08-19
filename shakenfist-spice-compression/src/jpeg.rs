@@ -1290,6 +1290,12 @@ impl JpegDecoder for VaapiDecoder {
 /// `mozjpeg` Cargo feature is enabled (defaulted on); building
 /// without it falls back to the pure-Rust path.
 ///
+/// `*` `VaapiDecoder` probes for VA-API capability but
+/// currently delegates every `decode()` call to its embedded
+/// `MozJpegDecoder`; the real VA-API decode path is not
+/// implemented yet, which is why it reports its backend as
+/// "VA-API (probed, mozjpeg fallback)".
+///
 /// The result is constructed once at session start
 /// (`DisplayChannel::new`) and stored as `Arc<dyn JpegDecoder>`.
 /// No re-probing happens mid-session.

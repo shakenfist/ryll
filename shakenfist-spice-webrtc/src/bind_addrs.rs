@@ -119,9 +119,9 @@ fn bindable_udp_addrs(addrs: impl IntoIterator<Item = IpAddr>) -> Vec<SocketAddr
 /// `TestPeerBuilder::build` are the callers: both pass the result to
 /// `PeerConnectionBuilder::with_udp_addrs`, and both reject an empty
 /// list rather than build a peer connection that could only ever offer
-/// unroutable candidates. `pub` (and re-exported from `lib.rs`) so an
-/// operator-facing caller in a later phase can reuse the same policy
-/// rather than reimplementing it.
+/// unroutable candidates. `pub` (and re-exported from `lib.rs`) so a
+/// future operator-facing caller can reuse the same policy rather
+/// than reimplementing it.
 pub fn host_udp_bind_addrs() -> Vec<SocketAddr> {
     match if_addrs::get_if_addrs() {
         Ok(interfaces) => bindable_udp_addrs(interfaces.into_iter().map(|iface| iface.ip())),

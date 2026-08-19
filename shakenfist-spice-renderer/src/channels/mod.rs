@@ -256,7 +256,7 @@ pub enum ChannelEvent {
     WebdavSharingStopped,
 
     /// A WebDAV error occurred
-    #[allow(dead_code)] // used in later phases when WebDAV serving is implemented
+    #[allow(dead_code)] // constructed once WebDAV serving is implemented
     WebdavError(String),
 
     /// Channel disconnected
@@ -324,7 +324,6 @@ pub enum InputEvent {
 }
 
 /// Commands sent from the app to the webdav channel.
-#[allow(dead_code)] // variants constructed by the UI panel
 pub enum WebdavCommand {
     /// Start sharing a local directory.
     ShareDirectory { path: PathBuf, read_only: bool },
@@ -345,7 +344,6 @@ pub enum UsbCommand {
 
 /// Decoded cursor image in RGBA format
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used by cursor overlay rendering
 pub struct CursorImage {
     pub width: u16,
     pub height: u16,

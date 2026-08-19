@@ -1549,10 +1549,11 @@ impl DisplayChannel {
                     let decode_duration_us =
                         u32::try_from(decode_start.elapsed().as_micros()).unwrap_or(u32::MAX);
 
-                    // Aggregate decode duration tracking per codec. Gate on codec_type so
-                    // each ring receives only its own samples — keeping the two streams
-                    // separate lets bug reports tell MJPEG and H.264 cost apart. `Ok(None)`
-                    // (H.264 "needs more data") counts toward total but not toward failures.
+                    // Aggregate decode duration tracking per codec. Gate on
+                    // codec_type so each ring receives only its own samples —
+                    // keeping the two streams separate lets bug reports tell
+                    // MJPEG and H.264 cost apart. `Ok(None)` (H.264 "needs more
+                    // data") counts toward total but not toward failures.
                     if stream.codec_type == SPICE_VIDEO_CODEC_TYPE_MJPEG {
                         self.mjpeg_decode_total_count =
                             self.mjpeg_decode_total_count.saturating_add(1);
@@ -2142,11 +2143,12 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Jpeg) => {
-                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream). Route through the
-                // per-platform `JpegDecoder` selected in `best_for_platform()` (ImageIO / WIC /
-                // mozjpeg / pure-Rust) rather than the `image` crate's pure-Rust path. Session
-                // 006 measured the old path at ~263 ms / frame at 1920×1472 on a Mac that has
-                // ImageIO available.
+                // JPEG: BinaryData wrapper (4-byte data_size + JPEG stream).
+                // Route through the per-platform `JpegDecoder` selected in
+                // `best_for_platform()` (ImageIO / WIC / mozjpeg / pure-Rust)
+                // rather than the `image` crate's pure-Rust path. Session 006
+                // measured the old path at ~263 ms / frame at 1920×1472 on a
+                // Mac that has ImageIO available.
                 if image_data.len() < 4 {
                     warn_once!(
                         "display:decode_failure:jpeg:short_data",
@@ -2929,8 +2931,8 @@ impl DisplayChannel {
 mod tests {
     use super::*;
 
-    // ------------------------------------------------------------------------- Note:
-    // extract_dht_segments / inject_dht tests have moved to
+    // -------------------------------------------------------------------------
+    // Note: extract_dht_segments / inject_dht tests have moved to
     // shakenfist_spice_compression::video (video.rs) alongside the functions
     // themselves.
     // -------------------------------------------------------------------------
@@ -3517,8 +3519,8 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------------- "Video
-    // not keeping up" instrumentation
+    // -------------------------------------------------------------------------
+    // "Video not keeping up" instrumentation
     // -------------------------------------------------------------------------
 
     fn decode(success: bool, from_cache: bool, decode_duration_us: u32) -> DecodeResult {

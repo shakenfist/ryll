@@ -671,8 +671,8 @@ impl MainChannel {
                 }
                 _ = vdagent_probe.tick() => {
                     last_arm = "vdagent_probe";
-                    // Send a liveness probe if conditions are met. Skip if agent not connected or no
-                    // agent caps received yet.
+                    // Send a liveness probe if conditions are met. Skip if
+                    // agent not connected or no agent caps received yet.
                     if self.guest_caps_received {
                         // Check suppression: if a real monitors-config send
                         // happened recently, skip the probe — that send is its

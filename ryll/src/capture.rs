@@ -866,14 +866,14 @@ impl CaptureSession {
     /// exit.
     ///
     /// **Caveat**: MP4 finalisation is not synchronous with
-    /// `close()`. A bug report assembled
-    /// within milliseconds of `close()` may see a not-yet-
-    /// finalised (unplayable) MP4. At process exit the tokio
-    /// runtime may also shut down before the encoder task
-    /// drains, in which case the in-progress MP4 will be
-    /// missing its moov atom and unplayable regardless of
-    /// `close()` timing. See `docs/plans/PLAN-video-keeping-up.md`
-    /// for the trade-off and mitigation options.
+    /// `close()`. A bug report assembled within milliseconds
+    /// of `close()` may see a not-yet-finalised (unplayable)
+    /// MP4. At process exit the tokio runtime may also shut
+    /// down before the encoder task drains, in which case the
+    /// in-progress MP4 will be missing its moov atom and
+    /// unplayable regardless of `close()` timing. See
+    /// `docs/plans/PLAN-video-keeping-up.md` for the trade-off
+    /// and mitigation options.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return; // already closed

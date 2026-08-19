@@ -526,8 +526,8 @@ fn run_web(
         // Pedantic-mode bug-report observer. As in headless,
         // `app_snapshot` stays at its default — that field is
         // populated by the GUI loop only. The web frontend may
-        // grow its own equivalent in a later phase; for now we
-        // warn the user the same way headless does so the
+        // grow its own equivalent one day; for now we warn the
+        // user the same way headless does so the
         // pedantic zip clearly indicates the missing data.
         if let Some(pedantic) = pedantic_config {
             let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));

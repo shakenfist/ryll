@@ -1516,19 +1516,20 @@ impl RyllApp {
                         self.reconnect_state = ReconnectState::Idle;
                     }
                     self.awaiting_reconnect_outcome = false;
-                    // Surface the link in the bell history. Fires on initial connect and
-                    // on every reconnect success; the 30 s dedup collapses storm
-                    // reconnects to a single entry.
+                    // Surface the link in the bell history. Fires on initial
+                    // connect and on every reconnect success; the 30 s dedup
+                    // collapses storm reconnects to a single entry.
                     self.push_connection_event(
                         NotifySeverity::Info,
                         format!("Connected to {}:{}", self.target_host, self.target_port),
                     );
 
-                    // Spawn the auto-snapshot interval task. Retire-and-respawn per session:
-                    // `reconnect()` replaces `self.traffic` and `self.channel_snapshots` with
-                    // fresh instances, so any task spawned for the previous session is holding
-                    // stale Arcs. Signal it to retire (it will exit within ~500 ms), then spawn a
-                    // fresh task with the current Arcs.
+                    // Spawn the auto-snapshot interval task. Retire-and-respawn
+                    // per session: `reconnect()` replaces `self.traffic` and
+                    // `self.channel_snapshots` with fresh instances, so any
+                    // task spawned for the previous session is holding stale
+                    // Arcs. Signal it to retire (it will exit within ~500 ms),
+                    // then spawn a fresh task with the current Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
                         if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
                             prev_cancel.store(true, Ordering::Relaxed);
@@ -1830,9 +1831,10 @@ impl RyllApp {
 
                 ChannelEvent::Error { channel, message } => {
                     error!("app: {} channel error: {}", channel.name(), message);
-                    // Surface the raw error in the bell history before the state-machine
-                    // path can swallow it into the modal. handle_* below also pushes the
-                    // resulting connection- lost / modal-entry notifications.
+                    // Surface the raw error in the bell history before the
+                    // state-machine path can swallow it into the modal.
+                    // handle_* below also pushes the resulting connection-lost
+                    // and modal-entry notifications.
                     self.push_connection_event(
                         NotifySeverity::Error,
                         format!("{} channel error: {}", channel.name(), message),
@@ -1986,8 +1988,9 @@ impl RyllApp {
                                 "app: non-critical channel {} disconnected, session continues",
                                 channel.name()
                             );
-                            // Non-critical disconnect goes to the bell as Info. Surfaces
-                            // e.g. usbredir / webdav drops without disrupting the user.
+                            // Non-critical disconnect goes to the bell as Info.
+                            // Surfaces e.g. usbredir / webdav drops without
+                            // disrupting the user.
                             self.push_connection_event(
                                 NotifySeverity::Info,
                                 format!("{} channel disconnected", channel.name()),
@@ -2761,7 +2764,7 @@ impl eframe::App for RyllApp {
         self.process_events();
 
         // Prune expired notification snapshots at most once per second
-        // so the per-row File-as-bug- report button visual state
+        // so the per-row File-as-bug-report button visual state
         // honestly reflects the 60 s TTL without walking the map on
         // every paint.
         if let Ok(mut store) = self.notification_snapshots.lock() {
@@ -3070,8 +3073,9 @@ impl eframe::App for RyllApp {
                         ui.label("Cadence: ON");
                     }
 
-                    // Show the auto-snapshot counter only when the mode is active (hiding the line
-                    // avoids visual noise in normal sessions).
+                    // Show the auto-snapshot counter only when the mode is
+                    // active (hiding the line avoids visual noise in normal
+                    // sessions).
                     if let Some(_interval_secs) = self.auto_snapshot_interval {
                         let (saved, _pruned) = self
                             .app_snapshot
@@ -3114,12 +3118,15 @@ impl eframe::App for RyllApp {
                             vol.set_volume(v as u8);
                         }
 
-                        // Live streaming indicator. Sits to the left of the volume controls
-                        // (which stay rightmost as the operator-action zone) and to the right of
-                        // the bandwidth sparkline. Glyph: ▶ (U+25B6) — a Unicode triangle that
-                        // egui's default font renders cleanly on every platform we ship to. 📹 is
-                        // a colour emoji and renders as a tofu box in egui's monochrome font; ▶
-                        // keeps the visual cue (something "playing") without the font problem.
+                        // Live streaming indicator. Sits to the left of the
+                        // volume controls (which stay rightmost as the
+                        // operator-action zone) and to the right of the
+                        // bandwidth sparkline. Glyph: ▶ (U+25B6) — a Unicode
+                        // triangle that egui's default font renders cleanly on
+                        // every platform we ship to. 📹 is a colour emoji and
+                        // renders as a tofu box in egui's monochrome font; ▶
+                        // keeps the visual cue (something "playing") without
+                        // the font problem.
                         let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
                             match &streaming_state {
                                 StreamingState::Off => (
@@ -3481,8 +3488,10 @@ impl eframe::App for RyllApp {
                                         if ui.small_button("Dismiss").clicked() {
                                             to_remove.push(entry.id);
                                         }
-                                        // File-as-bug-report button. Always present; visual state and tooltip vary by
-                                        // whether a live snapshot still exists for this notification.
+                                        // File-as-bug-report button. Always
+                                        // present; visual state and tooltip
+                                        // vary by whether a live snapshot still
+                                        // exists for this notification.
                                         let snapshot_live = live_ids.contains(&entry.id);
                                         let (label, tooltip) = if snapshot_live {
                                             (
@@ -4637,11 +4646,10 @@ fn modal_variant_notification(variant: &ModalVariant) -> (NotifySeverity, String
 /// Build a `ReportRegion` from the raw drag-start / drag-end
 /// coordinates produced by the region-select widget, iff the
 /// resulting rectangle has strictly positive area. Returns
-/// `None` for click-without-drag — the GUI handler uses
-/// this to keep the user in
-/// region-select mode and surface a "drag a non-zero region"
-/// notification rather than emitting a degenerate
-/// `ReportRegion` into `report.json`.
+/// `None` for click-without-drag — the GUI handler uses this
+/// to keep the user in region-select mode and surface a
+/// "drag a non-zero region" notification rather than emitting
+/// a degenerate `ReportRegion` into `report.json`.
 ///
 /// "Strictly positive area" means `right > left AND
 /// bottom > top` — a deliberate 1-pixel drag is allowed

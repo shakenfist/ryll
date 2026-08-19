@@ -402,11 +402,12 @@ impl InputsChannel {
                     self.advance_paste().await?;
                 }
 
-                // Idle keepalive. When the channel has been silent in both directions for
-                // KEEPALIVE_IDLE, re-send the most recent KEY_MODIFIERS value. The guest
-                // sees no change (same modifier state); the server sees a client→server
-                // byte and resets its per-channel idle timer. Hypothesis under test:
-                // keeping inputs busy may also keep main alive, sidestepping the K1
+                // Idle keepalive. When the channel has been silent in both
+                // directions for KEEPALIVE_IDLE, re-send the most recent
+                // KEY_MODIFIERS value. The guest sees no change (same modifier
+                // state); the server sees a client→server byte and resets its
+                // per-channel idle timer. Hypothesis under test: keeping inputs
+                // busy may also keep main alive, sidestepping the K1
                 // main-channel rcc disconnect.
                 _ = tokio::time::sleep_until(keepalive_deadline) => {
                     self.send_idle_keepalive().await?;

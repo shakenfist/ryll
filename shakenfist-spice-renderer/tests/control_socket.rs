@@ -14,7 +14,7 @@
 //! - A `tokio::sync::mpsc` whose receiver the test inspects to verify
 //!   that `send_key` and `paste` produce the expected `InputEvent`s.
 //! - A `SurfaceMirror` pre-populated via the `with_test_surface` helper
-//!   that step 3f adds to `surface_mirror.rs`.
+//!   in `surface_mirror.rs`.
 //!
 //! Each test binds the server to a temporary Unix-socket path (via
 //! `tempfile::TempDir`), connects a client, drives one or more request/

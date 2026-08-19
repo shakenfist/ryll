@@ -81,7 +81,7 @@ pub struct TrafficEntry {
     /// Additional TCP segments produced when a SPICE message exceeds
     /// the IPv4 frame limit. Empty in the common case where the
     /// message fits in a single segment; a few entries for larger
-    /// display- channel messages. Each segment is an independent
+    /// display-channel messages. Each segment is an independent
     /// `Arc<[u8]>` so clones (the notification-snapshot path) remain
     /// O(N atomic refcount bumps). An empty `Vec` does not allocate,
     /// so the common case has zero per-entry overhead.
@@ -243,8 +243,8 @@ impl TrafficRingBuffer {
 }
 
 // Per-channel ring-buffer caps. Total = 50 MB, weighted by
-// observed session-001 traffic rates. Weights
-// are documented per-line so a retune is a one-line edit. The
+// observed session-001 traffic rates. Weights are documented
+// per-line so a retune is a one-line edit. The
 // `const _: () = assert!(...)` immediately below pins the sum.
 //
 // Why these weights:
@@ -268,9 +268,11 @@ const MAIN_BUFFER_BYTES: usize = 4 * 1024 * 1024; // weight  2
 const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
 
 /// Budget shared across all per-channel ring buffers. Pinned
-/// at 50 MB rather than sized from system memory: modern
-/// machines have the headroom, and a fixed cap keeps the
-/// per-channel weights below predictable.
+/// at 50 MB rather than scaled to system memory: the static
+/// per-channel weights above capture most of the diagnostic
+/// value without the dynamic shrink/grow complexity. Revisit
+/// if real-world reports show display-channel retention is
+/// still too short to be useful.
 const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
 // Compile-time arithmetic guard: the per-channel caps must
