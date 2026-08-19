@@ -282,11 +282,25 @@ behind a firewall or in a container.
 Note that `WebrtcBridgeConfig` currently has *no* path from the
 command line at all — `ice_servers` exists on the struct but ryll
 passes an empty vector unconditionally
-(`ryll/src/web/signalling.rs:299`). So phase 03 builds that
-plumbing rather than extending it, and should carry `ice_servers`
-along with the bind address while it is there.
+(`ryll/src/web/signalling.rs:300-303`, the only production
+construction site; the other twenty are tests). So phase 03 builds
+that plumbing rather than extending it, and should carry
+`ice_servers` along with the bind address while it is there.
 
-Touches `docs/configuration.md` and `docs/web-frontend.md`.
+Phase 03's planning survey corrected two things this section said
+or assumed. The `signalling.rs` line number above drifted by one
+during phase 02. And "touches `docs/configuration.md`" turns out
+to mean *writing* its web section rather than extending it:
+`docs/configuration.md` documents no `--web` flag at all today,
+not even the `--web-host` and `--web-port` that have shipped since
+the web frontend landed. Phase 02's review also deferred two items
+into this phase — an interface allowlist rather than only a port
+pin, and an opt-in for loopback-only hosts — both of which
+[the phase plan](PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md)
+now carries.
+
+Touches `docs/configuration.md`, `docs/web-frontend.md` and
+`docs/web-mode-internals.md`.
 
 ### Phase 04 — Soak validation and docs
 
@@ -327,7 +341,7 @@ minutes.
 |-------|------|--------|
 | 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Complete — baseline captured, 1g agrees within noise |
 | 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Complete — Chromium session on `7e2fb58e` confirms the bind address. Firefox has no video, for a reason that is not a port regression (#289, #290); it is phase 04's gate, as is the audio check nobody performed by ear |
-| 3. Socket binding configuration | PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md | Not started |
+| 3. Socket binding configuration | [PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md](PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md) | Planned — three `--web-media-*` / `--web-ice-server` flags, a bind policy the bridge resolves per offer, and the `WebrtcBridgeConfig` command-line path that does not exist yet |
 | 4. Soak validation and docs | PLAN-webrtc-0.20-upgrade-phase-04-soak.md | Not started |
 
 Phase 01 is a hard prerequisite for 02 only in the sense that it
@@ -353,7 +367,7 @@ two weeks:
 |---|---|
 | 01 — pre-work on 0.17 | 2 days (actual) |
 | 02 — atomic bump | 3–5 days |
-| 03 — socket binding config | ½ day |
+| 03 — socket binding config | 1 day (revised from ½ by the phase plan) |
 | 04 — soak and docs | 1 day |
 
 Phase 01 grew by a day after detailed planning surfaced the
@@ -535,7 +549,10 @@ sized phase 02, and two of them moved work between phases.
   but 0.20's `SettingEngine::set_ip_filter` /
   `set_interface_filter` still compile while doing nothing, so
   there is no way to narrow it today. Raised by the automated
-  review of PR #278.
+  review of PR #278. **Carried into phase 03's plan** as
+  `--web-media-addr`, which takes an interface name as well as an
+  address; phase 02's other deferral, an opt-in for loopback-only
+  hosts, falls out of the same flag.
 
 ### Bugs fixed during this work
 
