@@ -336,11 +336,15 @@ Five things differ from the plan as written:
    place, not expanded.
 5. **Implemented in the management session, not by sub-agents.**
    The shared execution-model block calls for one sub-agent per
-   step; the session this ran in had sub-agent spawning
-   disabled, so the steps were executed directly, in order, with
-   `make lint` and the crate's tests run between them. Recorded
-   because the convention exists, not because anything about the
-   output differs.
+   step. This session ran under Claude Code's auto mode, whose
+   standing policy is not to spawn sub-agents unless the operator
+   asks for them, and the operator's request was "implement the
+   phase plan" rather than "run it as sub-agents" — so the four
+   steps were executed directly, in order, with `make lint` and
+   the crate's tests between them. Nothing was disabled; the
+   capability was available and the mode's default is simply not
+   to reach for it unasked. Recorded because the convention
+   exists, not because anything about the output differs.
 
 The two risks the plan named as review-only checks were both
 handled: `WebrtcBridge::new` now distinguishes "no bindable
