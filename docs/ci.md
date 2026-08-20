@@ -313,6 +313,37 @@ Scheduled, push-to-default, and release workflows must **not**
 enable `cancel-in-progress`. Cancelling a release mid-publish,
 or a renovate run mid-PR-creation, leaves partial state behind.
 
+## Build network isolation
+
+Cargo runs a dependency's `build.rs` as ordinary code at compile
+time, so a compromised crate can execute during a plain `cargo
+build` — before any ryll code runs, and on every job that merely
+compiles. To contain that, the Makefile splits the build in two:
+
+- `make fetch` (`cargo fetch`) downloads every crate named in
+  `Cargo.lock` but compiles nothing, so no build script runs. It
+  is the only build step allowed network access.
+- every compile target then runs in the devcontainer with
+  `--network none` and the cargo cache mounted read-only. A
+  malicious build script cannot reach a C2 or exfiltrate secrets
+  (its download call fails and the build aborts loudly), and it
+  cannot poison the cache for later runs.
+
+This is the same reason docs.rs builds every crate offline, and is
+what would have turned the 2026-08-20 `arrayref` / `proc-macro1`
+build-script dropper (RUSTSEC advisory-db #3161) into a loud build
+failure rather than a silent compromise.
+
+The download cache lives in `.cargo-cache` and is persisted across
+runs by an `actions/cache` step, keyed on `Cargo.lock`, inserted
+after `actions/checkout` — whose default `clean: true` runs `git
+clean -ffdx` and would otherwise delete the gitignored cache every
+run. Point `CARGO_CACHE` at a path outside the checkout to
+relocate it. (The cross-platform merge-tier jobs build cargo
+natively rather than in the devcontainer and use
+`Swatinem/rust-cache`; the `--network none` isolation applies only
+to the containerised Linux builds.)
+
 ## Supply-chain policy
 
 The scanner jobs above enforce policy that lives in files at the

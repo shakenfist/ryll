@@ -35,6 +35,16 @@ make test-qemu-desktop
 make test-qemu-stop
 ```
 
+`make build`, `make release` and `make test` first run `make fetch`
+to populate the cargo cache over the network, then compile inside
+the devcontainer with networking disabled and the cache mounted
+read-only, so a dependency's `build.rs` cannot phone home at compile
+time (see [build network isolation](ci.md#build-network-isolation)).
+Run `make fetch` on its own after changing dependencies to
+pre-download without building. The cache lives in `.cargo-cache`;
+override `CARGO_CACHE` to move it (for example to a location a CI
+runner keeps between jobs).
+
 ## Building with a local Rust installation
 
 If you have Rust installed locally with the required dependencies:
