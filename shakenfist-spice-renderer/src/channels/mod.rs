@@ -256,7 +256,6 @@ pub enum ChannelEvent {
     WebdavSharingStopped,
 
     /// A WebDAV error occurred
-    #[allow(dead_code)] // constructed once WebDAV serving is implemented
     WebdavError(String),
 
     /// Channel disconnected

@@ -36,7 +36,7 @@ Execution section:
 ```
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Parse cursor data | [PLAN-cursor-rendering-phase-01-parse.md](PLAN-cursor-rendering-phase-01-parse.md) | Not started |
+| 1. Parse cursor data | PLAN-cursor-rendering-phase-01-parse.md | Not started |
 | ...   | ...  | ...    |
 ```
 

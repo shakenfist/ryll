@@ -18,7 +18,9 @@
 //! For SPICE servers that negotiated raw PCM rather than Opus
 //! (rare; xspice and QEMU default to Opus), the sink logs a
 //! warn-once message and discards the samples. PCM-to-Opus
-//! encoding is not implemented.
+//! encoding is not implemented; the fallback it would
+//! implement is specified in
+//! `docs/plans/PLAN-web-frontend.md`.
 
 use std::sync::{Arc, Mutex, Once};
 

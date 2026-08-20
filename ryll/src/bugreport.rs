@@ -272,7 +272,8 @@ const INPUTS_BUFFER_BYTES: usize = 2 * 1024 * 1024; // weight  1
 /// per-channel weights above capture most of the diagnostic
 /// value without the dynamic shrink/grow complexity. Revisit
 /// if real-world reports show display-channel retention is
-/// still too short to be useful.
+/// still too short to be useful; the deferral is recorded as
+/// future work in `docs/plans/PLAN-session-001-feedback.md`.
 const TOTAL_TRAFFIC_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
 // Compile-time arithmetic guard: the per-channel caps must

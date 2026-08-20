@@ -1,9 +1,9 @@
 ---
 # This file defines the ordering and page titles for the import of
-# this content into `shakenfist/docs/components/ryll/plans/`. Only
-# master plans and the index are listed here; phase-specific plan
-# files are linked from the index and from each master plan's
-# execution table.
+# this content into `shakenfist/docs/components/ryll/plans/`. Master
+# plans, standalone plans and the index are listed here;
+# phase-specific plan files are linked from the index and from each
+# master plan's execution table.
 
 - index.md: Plans index
 - PLAN-initial.md: Initial porting plan
@@ -44,6 +44,7 @@
 - PLAN-egui-0.34-followups.md: egui / eframe 0.34 follow-ups
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics
 - PLAN-streaming-test-automation.md: Streaming test automation
+- OPEN-QUESTIONS.md: Open questions watch-list
 - PLAN-self-hosted-runners.md: Self-hosted runner migration
 - PLAN-pip-distribution.md: Pip-installable ryll
 - PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade
