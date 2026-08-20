@@ -5,10 +5,6 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "3ac56419fb6f3580acb5198997e3ac987300de4b",
-      "date": "2026-08-18"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
       "date": "2026-08-10"
@@ -101,10 +97,6 @@
       "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
       "date": "2026-08-17"
     },
-    "docs/design-decisions.md": {
-      "sha": "e1545e351e993a569080b6b166edfc376b9eeb98",
-      "date": "2026-08-17"
-    },
     "docs/development-macos.md": {
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
@@ -132,10 +124,6 @@
     "docs/installation.md": {
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
-    },
-    "docs/libvirt-spice-recommendations.md": {
-      "sha": "140f0967ffd948f38b168dcb85d541073ebcdc7a",
-      "date": "2026-08-18"
     },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
@@ -173,14 +161,6 @@
       "sha": "f35462ac4c61419d48d392f52a51e3c66eccd12c",
       "date": "2026-08-18"
     },
-    "docs/web-mode-internals.md": {
-      "sha": "945d2e7a26389242d43b84cd5dc27b3aa8a35b59",
-      "date": "2026-08-18"
-    },
-    "examples/control-socket-demo.py": {
-      "sha": "d4e89ed36ccef481f83eb96e32fcd56dbfeda2d4",
-      "date": "2026-08-02"
-    },
     "examples/ryll-web.service": {
       "sha": "a55c1b607f576ff8e34421401b6e692d9da43052",
       "date": "2026-08-02"
@@ -188,30 +168,6 @@
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
-    },
-    "ryll/src/app.rs": {
-      "sha": "f5bded842de2de0baa20ec7273d803e3bd315d48",
-      "date": "2026-08-18"
-    },
-    "ryll/src/auto_snapshot.rs": {
-      "sha": "3f3c043d10a6fa25e558515c647e42ba6c009488",
-      "date": "2026-07-26"
-    },
-    "ryll/src/bugreport.rs": {
-      "sha": "4a708eceb2bc06d01f9e5c713f94d54e2d3ee8d5",
-      "date": "2026-08-18"
-    },
-    "ryll/src/capture.rs": {
-      "sha": "521bd6cde30efaaabe9393e1f77ea0722e1629cf",
-      "date": "2026-08-18"
-    },
-    "ryll/src/clipboard_arboard.rs": {
-      "sha": "8944b0a95c08e1fbfbe7e61a39995f60d385fbd6",
-      "date": "2026-07-26"
-    },
-    "ryll/src/config.rs": {
-      "sha": "14045efe189426435316929a461afc32176278b0",
-      "date": "2026-08-18"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -221,37 +177,17 @@
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
     },
-    "ryll/src/main.rs": {
-      "sha": "472098fd3630fce87fcd08144614423aad1964a5",
-      "date": "2026-08-18"
-    },
-    "ryll/src/notifications.rs": {
-      "sha": "288c18f9f3f8422fbbe3bedc35b88207449f5e07",
-      "date": "2026-07-26"
-    },
     "ryll/src/settings.rs": {
       "sha": "3c9cfb5286bd15ebbf735f7f95b2f58745978e58",
-      "date": "2026-07-26"
-    },
-    "ryll/src/streaming_state.rs": {
-      "sha": "8e6b91140f23fc40168a9642536f2b9568de40c2",
       "date": "2026-07-26"
     },
     "ryll/src/web/assets.rs": {
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
     },
-    "ryll/src/web/assets/app.js": {
-      "sha": "b9aa90bf0421a510eeb9dcf793995e32250981ce",
-      "date": "2026-08-18"
-    },
     "ryll/src/web/assets/index.html": {
       "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
       "date": "2026-08-08"
-    },
-    "ryll/src/web/audio.rs": {
-      "sha": "4fd4b255e4dd6556a7ce379e5ba42219dcb0e8c9",
-      "date": "2026-07-26"
     },
     "ryll/src/web/control.rs": {
       "sha": "7b48cc2d8f5b848e9bb9c95b3755d5d255075e8f",
@@ -261,24 +197,12 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
-    "ryll/src/web/inputs.rs": {
-      "sha": "a81232937c738b4d05158d667641d358320f0668",
-      "date": "2026-08-18"
-    },
     "ryll/src/web/lifecycle.rs": {
       "sha": "0b42f39fc6219b2b6bf721f8476754c4d0ed2a57",
       "date": "2026-08-18"
     },
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
-      "date": "2026-08-18"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "07f11e9090706aed51d87d172271df7a4cbadc53",
-      "date": "2026-08-18"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "35e57c54c1b00f1944dcb603d5fb104d8631da35",
       "date": "2026-08-18"
     },
     "scripts/check-rust.sh": {
@@ -297,14 +221,6 @@
       "sha": "9949d37a339dccb6939ed53149b2c10810c47986",
       "date": "2026-07-10"
     },
-    "shakenfist-spice-compression/src/glz.rs": {
-      "sha": "8b71fc9aabc4b6052792472e2513b08e0a9dbde1",
-      "date": "2026-07-17"
-    },
-    "shakenfist-spice-compression/src/jpeg.rs": {
-      "sha": "52daa8310f08e63ea2de77cde8f4d733108ae85c",
-      "date": "2026-07-10"
-    },
     "shakenfist-spice-compression/src/lib.rs": {
       "sha": "acfe70b86a1b0cc1b537338bdb3f638fd74dd8bc",
       "date": "2026-07-10"
@@ -313,16 +229,8 @@
       "sha": "6fe93535c1072a69e427c53960a4f40cfefac663",
       "date": "2026-07-10"
     },
-    "shakenfist-spice-compression/src/lz4.rs": {
-      "sha": "17e2f2c2e4e66c6e1a17938b615e9ce09535bd92",
-      "date": "2026-07-10"
-    },
     "shakenfist-spice-compression/src/quic.rs": {
       "sha": "6e93dea56cb55fe0714f83d99f646efa573f004d",
-      "date": "2026-07-10"
-    },
-    "shakenfist-spice-compression/src/video.rs": {
-      "sha": "aa15b7c1965b4bf21a4d353cea043634e62298b4",
       "date": "2026-07-10"
     },
     "shakenfist-spice-protocol/README.md": {
@@ -353,10 +261,6 @@
       "sha": "3fbede8f4b6eab8e3057ffd2146c00b62c55c9b0",
       "date": "2026-07-19"
     },
-    "shakenfist-spice-protocol/src/constants.rs": {
-      "sha": "a37e9323d39e0708c9abc1036806dd50df18a3c6",
-      "date": "2026-07-10"
-    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
@@ -367,14 +271,6 @@
     },
     "shakenfist-spice-protocol/src/link.rs": {
       "sha": "8bf1ba08dd47059e01c486fccf265a7a1aca4e64",
-      "date": "2026-07-17"
-    },
-    "shakenfist-spice-protocol/src/logging.rs": {
-      "sha": "f4a80e3d320f4cd2cf55e528b4911b01932c1dad",
-      "date": "2026-07-17"
-    },
-    "shakenfist-spice-protocol/src/messages.rs": {
-      "sha": "b49acc11b8c7b0dc0bd5ca544307f7a1583cbe2a",
       "date": "2026-07-17"
     },
     "shakenfist-spice-protocol/src/parse.rs": {
@@ -389,52 +285,12 @@
       "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
       "date": "2026-08-02"
     },
-    "shakenfist-spice-renderer/src/audio_sink.rs": {
-      "sha": "5f9c415b50f2ea3b0b2e2edf31e4b78faec2b5e8",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/capture_sink.rs": {
-      "sha": "12b7bbbcb5256fac59d1b9912ba026dc5593f072",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/channels/cursor.rs": {
-      "sha": "d119d8d9bb029b3200b3a4477a294e725326f1c4",
-      "date": "2026-07-18"
-    },
-    "shakenfist-spice-renderer/src/channels/display.rs": {
-      "sha": "829bdc44838acc1a85321b97d8f360ac23d01efb",
-      "date": "2026-07-18"
-    },
-    "shakenfist-spice-renderer/src/channels/inputs.rs": {
-      "sha": "1280d56f9eab14ba6064eea16306f4106d2555e2",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
-      "sha": "96687566c03f82f8860db66b9772fb7202dedb09",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/channels/mod.rs": {
-      "sha": "f78293cf000996c117ba7d19b62da987c34d9eb8",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/channels/playback.rs": {
-      "sha": "21c30e471574d0995608706a4d1374eff4f348e2",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
-      "sha": "3aa17524fcf93724c8e9d2eacc2abcf397035b0f",
-      "date": "2026-07-19"
-    },
     "shakenfist-spice-renderer/src/channels/volume.rs": {
       "sha": "7bdfcb6c3add013748b3df150f799b169c7c65c8",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/channels/webdav.rs": {
-      "sha": "87e755272e72750366f5832d9f140b198300ae15",
       "date": "2026-07-19"
     },
     "shakenfist-spice-renderer/src/clipboard.rs": {
@@ -457,36 +313,12 @@
       "sha": "908c55fe61f547a541546bf450d3835820e76370",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/digest.rs": {
-      "sha": "f41cafcdc21215475802d72d67a54bdac37685f0",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/display/mod.rs": {
       "sha": "970f2a1daf31ac2804c4e949e1e6f46258ba7bec",
       "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/display/surface.rs": {
       "sha": "9457c8de4686abc792bef017c2ac1456655f3cc7",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/encoder/frame_source.rs": {
-      "sha": "f7ebd1659b4fd7239df78d418be8ede3f393a52e",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/encoder/h264.rs": {
-      "sha": "5bea35f6284d9fe3b9edb8f0246861a255c040e4",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/src/encoder/mod.rs": {
-      "sha": "62fd67b8792f8630769b1fd86e9402c6b37d0ed9",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/src/encoder/task.rs": {
-      "sha": "7020c30c224f81aba0616670c4dabce481c72a1f",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/src/image_cache.rs": {
-      "sha": "fe702c9e39c060993a6db6c065f8dbb2b4566e76",
       "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/lib.rs": {
@@ -497,28 +329,12 @@
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/metrics.rs": {
-      "sha": "9842c52afcd1ebb1072873a82b60bcfd0a5e73f4",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/mm_clock.rs": {
       "sha": "2e747d368e8c97208019aa890cab8e5b6cfafc9e",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/src/notification.rs": {
-      "sha": "c3014ea50282a0c1af6324c11bf18a3481e86850",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/notification_sink.rs": {
       "sha": "f7aabbf2ebb263ec595353d3d4bfe6e2397241d0",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/session.rs": {
-      "sha": "71938a56734669fdad226769dfa3b9831aa3ccf3",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/snapshots.rs": {
-      "sha": "d3a9cd8fea85161702ed0bfe45c47c32f25b337d",
       "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/surface_mirror.rs": {
@@ -553,16 +369,8 @@
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
     },
-    "shakenfist-spice-renderer/tests/control_socket.rs": {
-      "sha": "a5ae5409b7c1682b5bf4c521202abf1c9287f9ff",
-      "date": "2026-07-27"
-    },
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
-      "sha": "2c7e4206b8cb3cab44e87a74ee28d5fe35d35fcb",
       "date": "2026-08-18"
     },
     "shakenfist-spice-usbredir/README.md": {
@@ -577,10 +385,6 @@
       "sha": "cad9883642ef2bddad4f2e88c5eb6045bfb6155f",
       "date": "2026-07-22"
     },
-    "shakenfist-spice-usbredir/src/messages.rs": {
-      "sha": "9d72e8d19b7facfe71c4f31270bdf493d6721857",
-      "date": "2026-07-22"
-    },
     "shakenfist-spice-usbredir/src/parser.rs": {
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
@@ -588,34 +392,6 @@
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
-    },
-    "shakenfist-spice-webrtc/src/bind_addrs.rs": {
-      "sha": "8d2525a486113f05153c8fe1f021fca04fb14adc",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-webrtc/src/bridge.rs": {
-      "sha": "694ab1e37223cbee0f84a0b51f279b3efae1e7db",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-webrtc/src/lib.rs": {
-      "sha": "035b468c5e94598bb6174aaf0fcb50e0e1991959",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-webrtc/src/sticky.rs": {
-      "sha": "78e4793c82858d1b6f3a40415d7dca3f419a3139",
-      "date": "2026-08-15"
-    },
-    "shakenfist-spice-webrtc/src/test_client.rs": {
-      "sha": "b77ce81cadd559b48590b8b54ee72bcd5d1808d5",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-webrtc/tests/lifecycle.rs": {
-      "sha": "fad8f97e7a71d809f4fbc1988ae0d12378811e08",
-      "date": "2026-08-18"
-    },
-    "shakenfist-spice-webrtc/tests/loopback.rs": {
-      "sha": "52bd9b4b2428eba95f3f7fcec71eb33ac3098298",
-      "date": "2026-08-18"
     },
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
