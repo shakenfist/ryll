@@ -209,10 +209,12 @@ impl UdpBindPolicy {
         dedup_with_port(addrs, self.port)
     }
 
-    /// Resolve an explicit selector list. Addresses are taken as
-    /// given and interfaces are looked up by name; both are subject
-    /// only to the mechanical rejections, because naming something
-    /// explicitly *is* the override of the default policy.
+    /// Resolve an explicit selector list against this host.
+    ///
+    /// Enumeration is the only host-coupled part, so it happens here
+    /// and the matching itself lives in [`select_from`], which takes
+    /// the interface list as an argument and is therefore testable
+    /// against a synthetic one.
     fn selected_addrs(&self) -> Vec<IpAddr> {
         // Only enumerate when a selector actually needs it. An
         // address-only policy must not fail differently just because
@@ -226,44 +228,61 @@ impl UdpBindPolicy {
         } else {
             Vec::new()
         };
+        select_from(&interfaces, &self.selectors)
+    }
+}
 
-        let mut out = Vec::new();
-        for selector in &self.selectors {
-            match selector {
-                BindSelector::Addr(ip) => {
-                    if is_mechanically_bindable(ip) {
-                        out.push(*ip);
-                    } else {
-                        // validate() rejects these at startup, so
-                        // reaching here means a caller skipped it.
-                        tracing::warn!(
-                            "UdpBindPolicy::resolve: ignoring {} — it can never produce a \
-                             routable ICE candidate",
-                            ip
-                        );
-                    }
+/// Every address in `interfaces` that `selectors` names, in selector
+/// order.
+///
+/// Addresses are taken as given and interfaces are looked up by name;
+/// both are subject only to the mechanical rejections, because naming
+/// something explicitly *is* the override of the default policy. An
+/// interface contributes every address it reports that survives those
+/// rejections, so naming one whose only IPv6 address is link-local
+/// contributes nothing rather than contributing something unusable.
+///
+/// Pure: `interfaces` is whatever the caller enumerated, which is what
+/// lets the hit paths be tested without depending on the addresses of
+/// whichever machine is running the suite. See the module docs for why
+/// enumerating the real host in a test is not an option.
+fn select_from(interfaces: &[(String, IpAddr)], selectors: &[BindSelector]) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    for selector in selectors {
+        match selector {
+            BindSelector::Addr(ip) => {
+                if is_mechanically_bindable(ip) {
+                    out.push(*ip);
+                } else {
+                    // validate() rejects these at startup, so
+                    // reaching here means a caller skipped it.
+                    tracing::warn!(
+                        "UdpBindPolicy::resolve: ignoring {} — it can never produce a \
+                         routable ICE candidate",
+                        ip
+                    );
                 }
-                BindSelector::Interface(name) => {
-                    let mut matched = false;
-                    for (iface, ip) in &interfaces {
-                        if iface == name {
-                            matched = true;
-                            if is_mechanically_bindable(ip) {
-                                out.push(*ip);
-                            }
+            }
+            BindSelector::Interface(name) => {
+                let mut matched = false;
+                for (iface, ip) in interfaces {
+                    if iface == name {
+                        matched = true;
+                        if is_mechanically_bindable(ip) {
+                            out.push(*ip);
                         }
                     }
-                    if !matched {
-                        tracing::warn!(
-                            "UdpBindPolicy::resolve: no interface named {} on this host",
-                            name
-                        );
-                    }
+                }
+                if !matched {
+                    tracing::warn!(
+                        "UdpBindPolicy::resolve: no interface named {} on this host",
+                        name
+                    );
                 }
             }
         }
-        out
     }
+    out
 }
 
 /// True unless binding `ip` could only ever advertise a candidate no
@@ -556,5 +575,101 @@ mod tests {
             "an absent interface may appear later"
         );
         assert!(policy.resolve().is_empty());
+    }
+
+    /// A synthetic interface table with the three shapes that make
+    /// selector matching interesting: an interface carrying more than
+    /// one address, a link-local-only interface, and one address
+    /// present on two interfaces.
+    fn fixture() -> Vec<(String, IpAddr)> {
+        vec![
+            (
+                "eth0".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+            ),
+            (
+                "eth0".to_string(),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            ),
+            (
+                "wg0".to_string(),
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            ),
+            (
+                "eth1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+            ),
+        ]
+    }
+
+    #[test]
+    fn an_interface_selector_takes_every_address_it_reports() {
+        let selected = select_from(&fixture(), &[BindSelector::Interface("eth0".to_string())]);
+        assert_eq!(
+            selected,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+            ],
+            "both of eth0's addresses, and neither of any other interface's"
+        );
+    }
+
+    #[test]
+    fn a_link_local_only_interface_selects_nothing() {
+        // The mechanical rejection still applies to an explicitly
+        // named interface: an fe80::/10 address cannot carry its zone
+        // id into a candidate however it was chosen. The caller sees
+        // the same empty list an unmatched name produces, which is
+        // why `WebrtcBridge::new` phrases that error as "nothing
+        // matched" rather than "no such interface".
+        let selected = select_from(&fixture(), &[BindSelector::Interface("wg0".to_string())]);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn an_address_on_two_interfaces_is_bound_once() {
+        // Naming both interfaces selects the same address twice, and
+        // with a pinned port the second bind would fail. `resolve`
+        // dedups; `select_from` deliberately does not, so the dedup
+        // stays in one place.
+        let policy = UdpBindPolicy {
+            selectors: vec![
+                BindSelector::Interface("eth0".to_string()),
+                BindSelector::Interface("eth1".to_string()),
+            ],
+            port: 5004,
+        };
+        let selected = select_from(&fixture(), &policy.selectors);
+        assert_eq!(selected.len(), 3, "select_from keeps the repeat");
+        assert_eq!(
+            dedup_with_port(selected, policy.port),
+            vec![
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)), 5004),
+                SocketAddr::new(
+                    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+                    5004
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn selectors_are_resolved_in_the_order_given() {
+        let selected = select_from(
+            &fixture(),
+            &[
+                BindSelector::Addr(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+                BindSelector::Interface("eth1".to_string()),
+            ],
+        );
+        assert_eq!(
+            selected,
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+            ],
+            "an address selector needs no interface to match, and order follows the flag order"
+        );
     }
 }

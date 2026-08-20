@@ -748,6 +748,7 @@ impl WebrtcBridge {
             });
         }
         let pinned_port = config.udp_bind.port;
+        let selectors_configured = !config.udp_bind.selectors.is_empty();
 
         // One handler replaces 0.17's four separate callback
         // registrations, and it has to be supplied *before* the peer
@@ -776,19 +777,39 @@ impl WebrtcBridge {
                 .with_udp_addrs(udp_addrs)
                 .build()
                 .await
-                .map_err(|e| match pinned_port {
-                    // A pinned port is the one bind failure an
-                    // operator can act on, and webrtc-rs reports it
-                    // as a bare `UdpSocket::bind` error with no hint
-                    // that a flag chose the port. Do not fall back to
-                    // an ephemeral port: the port was pinned because
-                    // a firewall rule names it, so a quiet fallback
-                    // ships a bridge nothing outside the LAN reaches.
-                    0 => anyhow!("peer connection build: {e}"),
-                    port => anyhow!(
-                        "peer connection build: {e} — the media port {port} was pinned by \
-                         `--web-media-port`; check nothing else holds it"
-                    ),
+                .map_err(|e| {
+                    // Everything this can fail on that an operator
+                    // can act on was chosen by a flag, and webrtc-rs
+                    // reports all of it as a bare `UdpSocket::bind`
+                    // error naming neither. Say which flag chose
+                    // what, for each of the two that could be at
+                    // fault. Do not fall back to an ephemeral port or
+                    // to the default addresses: both were named
+                    // because something external — a firewall rule, a
+                    // routing decision — depends on them, so a quiet
+                    // fallback ships a bridge nothing reaches.
+                    // With neither flag set there is nothing to
+                    // name: the addresses came from enumerating this
+                    // host and the port is ephemeral.
+                    let mut clauses: Vec<String> = Vec::new();
+                    if selectors_configured {
+                        clauses.push(
+                            "the media bind addresses were chosen by `--web-media-addr`; check \
+                             they exist on this host (`ip addr`)"
+                                .to_string(),
+                        );
+                    }
+                    if pinned_port != 0 {
+                        clauses.push(format!(
+                            "the media port {pinned_port} was pinned by `--web-media-port`; \
+                             check nothing else holds it"
+                        ));
+                    }
+                    if clauses.is_empty() {
+                        anyhow!("peer connection build: {e}")
+                    } else {
+                        anyhow!("peer connection build: {e} — {}", clauses.join(", and "))
+                    }
                 })?,
         );
 
@@ -1870,6 +1891,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
+    use crate::bind_addrs::BindSelector;
     use crate::test_client::TestPeer;
 
     /// Build a codec-parameters entry the way negotiation hands it to
@@ -2559,17 +2581,38 @@ mod tests {
         // hard-coding one: a fixed number is a flake on any machine
         // that happens to be using it, and the self-hosted runners
         // run several jobs at once.
-        let probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("probe socket");
-        let port = probe.local_addr().expect("probe addr").port();
-        drop(probe);
-
+        //
+        // The window between releasing the probe and the bridge
+        // binding is small but real — the other tests in this binary
+        // are taking ephemeral UDP ports the whole time — and losing
+        // it surfaces as "Address already in use" from `build()`,
+        // which reads like a product bug. Retry with a fresh probe
+        // instead, and only fail once three ports in a row have been
+        // taken out from under us, which is no longer bad luck.
+        // The receiver has to outlive the loop: dropping it would
+        // close the encoder-control channel the bridge holds a sender
+        // for.
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let mut config = WebrtcBridgeConfig::new(tx);
-        config.udp_bind = UdpBindPolicy {
-            selectors: Vec::new(),
-            port,
+        let mut attempt = 0;
+        let (bridge, port) = loop {
+            attempt += 1;
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("probe socket");
+            let port = probe.local_addr().expect("probe addr").port();
+            drop(probe);
+
+            let mut config = WebrtcBridgeConfig::new(tx.clone());
+            config.udp_bind = UdpBindPolicy {
+                selectors: Vec::new(),
+                port,
+            };
+            match WebrtcBridge::new(config).await {
+                Ok(bridge) => break (bridge, port),
+                Err(e) if attempt < 3 => {
+                    tracing::warn!("pinned port {port} was taken before the bridge bound: {e}");
+                }
+                Err(e) => panic!("bridge failed to bind a pinned port three times: {e}"),
+            }
         };
-        let bridge = WebrtcBridge::new(config).await.expect("bridge");
 
         let client = TestPeer::builder()
             .seed_data_channel("client-seed")
@@ -2606,6 +2649,46 @@ mod tests {
 
         client.close().await.expect("client close");
         bridge.close().await.expect("bridge close");
+    }
+
+    /// Selectors that match nothing must say so as a selector
+    /// problem, not as "this host has no interfaces".
+    ///
+    /// The two empty-resolve cases have opposite fixes — fix the
+    /// typo, versus bring an interface up — so the branch is only
+    /// useful if it picks the right one. It runs exactly when an
+    /// operator has already made a mistake, which is when a
+    /// regression in it would go unnoticed, and it costs nothing to
+    /// pin: no interface anywhere is called this, and no socket is
+    /// bound on the way to the error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unmatched_selectors_report_a_selector_problem() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let mut config = WebrtcBridgeConfig::new(tx);
+        config.udp_bind = UdpBindPolicy {
+            selectors: vec![BindSelector::Interface(
+                "ryll-no-such-interface-0".to_string(),
+            )],
+            port: 0,
+        };
+
+        // `WebrtcBridge` is not `Debug`, so `expect_err` is out.
+        let err = match WebrtcBridge::new(config).await {
+            Ok(_) => panic!("a selector matching nothing cannot produce a usable bridge"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("no media bind address matched"),
+            "wrong empty-resolve branch: {err}"
+        );
+        assert!(
+            err.contains("--web-media-addr"),
+            "the error must name the flag that chose the selectors: {err}"
+        );
+        assert!(
+            !err.contains("no bindable network interface"),
+            "this host's interfaces are not the problem: {err}"
+        );
     }
 
     /// The gathering signal must not fire before the local

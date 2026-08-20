@@ -69,7 +69,7 @@ window. The operator guide, including reverse-proxy and TLS setup, is
 | `--web-tls-key <PATH>` | none | PEM-encoded TLS private key. Required with `--web-tls-cert` |
 | `--web-media-addr <ADDR\|IFACE>` | every non-loopback interface address | Local address, or interface name, to bind the WebRTC media (UDP) sockets to. Repeatable. Naming addresses explicitly also overrides the default exclusion of loopback, which is how a loopback-only host is served (`--web-media-addr 127.0.0.1`). The unspecified addresses (`0.0.0.0`, `::`) and zoneless `fe80::/10` are refused at startup: neither can become an ICE candidate a browser will use |
 | `--web-media-port <PORT>` | 0 (ephemeral) | UDP port for the media sockets. Pin it so a firewall rule can name one port instead of the OS's whole ephemeral range. Applies to every bound address; a port already in use fails loudly rather than falling back to an ephemeral one, since a silent fallback would no longer match the firewall rule |
-| `--web-ice-server <URL>` | none | STUN or TURN server URL (`stun:host:port`, `turn:host:port`). Repeatable. Empty by default: ryll assumes browser and host share a LAN, so ICE host candidates are usually enough |
+| `--web-ice-server <URL>` | none | STUN or TURN server URL (`stun:host:port`, `turn:host:port`). Repeatable. Empty by default: ryll assumes browser and host share a LAN, so ICE host candidates are usually enough. The scheme must be `stun:`, `stuns:`, `turn:` or `turns:` and is checked at startup, so a URL with the scheme left off fails the launch rather than producing an ICE server that silently does nothing |
 
 ### Capture and Debugging
 

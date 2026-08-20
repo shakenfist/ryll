@@ -294,8 +294,9 @@ Definition-of-done items were checked against the built binary
 rather than only asserted in tests:
 
     $ ryll --web --direct 127.0.0.1:5900 --web-media-addr 0.0.0.0
-    Error: --web-media-addr: 0.0.0.0 cannot be used as a media
-    bind address: it binds successfully and then advertises itself
+    Error: web media binding (`--web-media-addr` /
+    `--web-media-port`): 0.0.0.0 cannot be used as a media bind
+    address: it binds successfully and then advertises itself
     verbatim as an ICE host candidate, which every browser
     discards …
 
@@ -351,6 +352,76 @@ handled: `WebrtcBridge::new` now distinguishes "no bindable
 network interface" from "no media bind address matched", and a
 `build()` failure under a pinned port is wrapped with the port
 number and the flag that chose it.
+
+## What the review changed
+
+The automated review of PR #298 raised three action items and
+eight suggestions. All three action items and six suggestions
+landed; two suggestions were declined, with reasons.
+
+The action items were the stale `host_udp_bind_addrs:` log prefix
+in `test_client.rs` (the divergence this plan explicitly asked a
+reviewer to decide on rather than leave to silence — it was
+stale, and both copies now say `bind_addrs:`), `docs/features.md`
+still listing the pre-PR web flag set, and the missing
+`docs/multi-mode-parity.md` row that `AGENTS.md` makes mandatory.
+
+Four suggestions closed gaps this plan had knowingly left open:
+
+- **Interface-selector hit paths are now tested.** `select_from`
+  was split out of `selected_addrs` as a pure function taking the
+  interface list, so name matching, an interface with several
+  addresses, one address on two interfaces, and a link-local-only
+  interface are all covered against a synthetic fixture. The
+  module docs rule out enumerating the real host in a test, which
+  argues for injecting the list rather than leaving the logic
+  uncovered.
+- **The "no media bind address matched" branch has a test.**
+  Risk 1 settled for a review-time check; it is deterministic via
+  a nonexistent interface name and binds no socket, so it is now
+  pinned rather than re-checked by eye each time.
+- **`--web-ice-server` is validated at launch.** Decision 2 said
+  bad input fails at launch, and this flag was the one that did
+  not. It matters most here: an operator only reaches for an ICE
+  server when host candidates already fail, so a silently useless
+  URL is indistinguishable from WebRTC being broken.
+- **A malformed address literal no longer becomes an interface
+  name.** The address-or-interface fallback is ambiguous in one
+  direction only, and this plan's own error text steers people
+  into it: told that `fe80::1` needs a zone id, the natural next
+  attempt is `fe80::1%eth0`, which Rust cannot parse and which
+  therefore became a nonexistent interface name. A single colon
+  is still a name (`eth0:0` is a real alias label).
+
+Two more were diagnostic polish: a `build()` failure now names
+`--web-media-addr` as well as `--web-media-port`, each clause
+appearing only when that flag was actually set; and the
+whole-policy `validate()` error is prefixed with the flag family
+rather than `--web-media-addr`, so the first port-related check
+added later cannot inherit the wrong flag name.
+
+Declined:
+
+- **Declaring `rust-version = "1.88"` for the `as_chunks`
+  rewrite.** The floor is real, but it is set by the dependency
+  tree rather than by these three lines, and nothing in CI builds
+  on the oldest supported toolchain — so the number would be an
+  unverified promise on two published crates. Whether this
+  workspace declares an MSRV at all is a repo-wide decision that
+  deserves its own change, with a CI job that makes the claim
+  true.
+- **Tightening the `--web-*` flags to require `--web`.** Recorded
+  as an observation rather than an action item by the review
+  itself, and it is: `--web-host` and `--web-port` have always
+  behaved this way, so changing only the three new flags would
+  make them behave unlike their siblings.
+
+One informational item has no artefact to carry it: the review
+suggests noting in the crate's release notes that
+`host_udp_bind_addrs()` now deduplicates, since it is public and
+its observable output changed. There is no changelog in this
+repo, so it is recorded here and in deviation 1 above for
+whoever writes the next `shakenfist-spice-webrtc` release notes.
 
 ## Back brief
 
