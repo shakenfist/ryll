@@ -8,8 +8,7 @@
 //! FPS cap with keyframe-on-demand.
 //!
 //! No network code lives here; the output is an mpsc stream
-//! of [`EncodedFrame`]s that the WebRTC plumbing in Phase 3+
-//! will consume.
+//! of [`EncodedFrame`]s that the WebRTC plumbing consumes.
 
 mod frame_source;
 mod h264;

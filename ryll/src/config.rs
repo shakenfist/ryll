@@ -130,14 +130,13 @@ pub struct Args {
     #[arg(long)]
     pub auto_snapshot_cap: Option<usize>,
 
-    /// Diagnostic flag for the K1 hang investigation
-    /// (PLAN-session-001-feedback Phase 02). When set, ryll's
+    /// Diagnostic flag for a hang investigation. When set, ryll's
     /// per-connection tokio runtime is built with
     /// `Builder::new_current_thread()` instead of the default
-    /// multi-threaded `Runtime::new()`. Disambiguates a real
-    /// blocking call (would still hang) from a multi-threaded
-    /// scheduler / Waker registration bug (would not hang).
-    /// Will be removed after K1 is closed.
+    /// multi-threaded `Runtime::new()`. Disambiguates a real blocking
+    /// call (would still hang) from a multi-threaded scheduler / Waker
+    /// registration bug (would not hang). Will be removed once that
+    /// investigation is closed.
     #[arg(long)]
     pub debug_single_thread_runtime: bool,
 
@@ -195,12 +194,11 @@ pub struct Args {
     #[arg(long, default_value_t = 256)]
     pub image_cache_cap_mib: u64,
 
-    /// Maximum total bytes for the shared SPICE GLZ dictionary,
-    /// in MiB. Defaults to 256. The dictionary holds decoded
-    /// RGBA for GLZ images so cross-frame references resolve;
-    /// without a cap, full-screen ZlibGlzRgb workloads observed
-    /// in sessions 003a / 004d-g consumed gigabytes (~30 MiB/s
-    /// of growth). Phase 12E.
+    /// Maximum total bytes for the shared SPICE GLZ dictionary, in MiB.
+    /// Defaults to 256. The dictionary holds decoded RGBA for GLZ
+    /// images so cross-frame references resolve; without a cap,
+    /// full-screen ZlibGlzRgb workloads observed in sessions 003a /
+    /// 004d-g consumed gigabytes (~30 MiB/s of growth).
     #[arg(long, default_value_t = 256)]
     pub glz_dictionary_cap_mib: u64,
 }
@@ -272,12 +270,10 @@ fn parse_optional_u16(ini: &Ini, section: &str, key: &str) -> Result<Option<u16>
 impl Config {
     /// Create configuration from command line arguments.
     ///
-    /// Phase 5 step 5a tightened `--web` to require a real
-    /// connection source (`--url` / `--file` / `--direct`).
-    /// Phase 4 had returned a placeholder stub here so the
-    /// HTTP server could come up without a SPICE backend; that
-    /// expedient is gone now that `run_web` actually spawns
-    /// `run_connection`.
+    /// `--web` requires a real connection source (`--url` /
+    /// `--file` / `--direct`) like every other mode, because
+    /// `run_web` spawns `run_connection` rather than serving a
+    /// placeholder backend.
     pub fn from_args(args: &Args) -> Result<Self> {
         if let Some(url) = &args.url {
             Self::from_url(url)

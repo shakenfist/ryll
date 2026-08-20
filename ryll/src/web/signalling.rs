@@ -34,10 +34,9 @@ use tracing::{info, warn};
 
 use super::server::WebState;
 
-/// Encoder FPS cap. 30 fps matches master plan Resolution §4.
-/// The encoder dimensions come from the SurfaceMirror's primary
-/// surface at restart time (Phase 5), not a hard-coded constant
-/// (Phase 4 used 1280×720; that's gone now).
+/// Encoder FPS cap. 30 fps matches master plan Resolution §4. The
+/// encoder dimensions come from the SurfaceMirror's primary surface
+/// at restart time rather than a hard-coded constant.
 const ENCODER_FPS: u32 = 30;
 
 /// Sentinel error message returned by [`EncoderInfra::restart`]
@@ -179,7 +178,7 @@ impl EncoderInfra {
     }
 
     /// Stop the active encoder task without restarting. Used
-    /// by the bridge reaper (Phase 6b) when the browser
+    /// by the bridge reaper when the browser
     /// disconnects and no immediate replacement is expected,
     /// and by the shutdown path in `run_web` to release
     /// resources before the runtime drops.
@@ -317,12 +316,12 @@ pub async fn post_offer(
     // exits when its rx closes (driven by the next /offer
     // overwriting `active_opus_tx`, dropping this Sender).
     let _video_handle = bridge.spawn_video_pump(frame_rx);
-    // Phase 5e: real Opus passthrough from the SPICE playback
-    // channel. Build a fresh per-viewer mpsc and plug the
-    // Sender into the shared slot the renderer-side
-    // `WebOpusSink` reads from. The previous bridge's Sender
-    // is replaced atomically; that drops the previous audio
-    // pump's `Receiver` and causes that pump to exit cleanly.
+    // Real Opus passthrough from the SPICE playback channel. Build a
+    // fresh per-viewer mpsc and plug the Sender into the shared slot
+    // the renderer-side `WebOpusSink` reads from. The previous
+    // bridge's Sender is replaced atomically; that drops the
+    // previous audio pump's `Receiver` and causes that pump to exit
+    // cleanly.
     let (opus_tx, opus_rx) = mpsc::channel::<(Vec<u8>, u32)>(64);
     {
         // std::sync::Mutex on the slot — see the rationale in
@@ -338,7 +337,7 @@ pub async fn post_offer(
     }
     let _audio_handle = bridge.spawn_audio_pump(opus_rx);
 
-    // Step 5c: spawn the browser → renderer input relay. Each
+    // Spawn the browser → renderer input relay. Each
     // bridge owns exactly one control DC; `control_rx()` is
     // single-shot, so taking it here is correct. We only spawn
     // the relay when the renderer-side senders are populated
@@ -367,8 +366,8 @@ pub async fn post_offer(
     // `bridge_slot` yet, so nothing else will ever reap it, and on
     // 0.20 dropping it detaches the driver task rather than stopping
     // it — the peer connection, its UDP sockets (one per non-loopback
-    // interface), the control-DC pump, and the input relay spawned at
-    // step 5c would all outlive the failed request. A client posting
+    // interface), the control-DC pump, and the input relay spawned
+    // above would all outlive the failed request. A client posting
     // malformed SDP in a loop would accumulate them for the life of
     // the process; the offer cooldown bounds the rate, not the total.
     // `WebrtcBridge`'s `Drop` is a backstop for paths that forget,
@@ -459,9 +458,9 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let state = Arc::new(WebState::new());
-        // Seed the surface mirror with a primary so the
-        // encoder restart path doesn't return the 503 sentinel.
-        // 1280x720 matches what Phase 4's hard-coded source used.
+        // Seed the surface mirror with a primary so the encoder restart
+        // path doesn't return the 503 sentinel. 1280x720 is an arbitrary
+        // but realistic primary size.
         {
             let mut m = state.surface_mirror.lock().await;
             m.apply_event(&shakenfist_spice_renderer::ChannelEvent::SurfaceCreated {
@@ -477,8 +476,8 @@ mod tests {
         // Build a client-side PC to generate a real SDP
         // offer.
         //
-        // Phase 3 step 3f finding: the offer must carry an
-        // m=application section, or the bridge's data-channel
+        // The offer must carry an m=application section, or
+        // the bridge's data-channel
         // expectations don't match the answer side. That is
         // what the seed datachannel is for.
         //

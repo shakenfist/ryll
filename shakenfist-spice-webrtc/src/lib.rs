@@ -2,10 +2,9 @@
 //!
 //! Exposes [`WebrtcBridge`], which owns a
 //! [`webrtc::peer_connection::PeerConnection`] together with a
-//! video track, an audio track, and a control datachannel. Phase 3
-//! step 3b ships the constructor and SDP-answer plumbing; 3c adds
-//! the video pump; 3d adds the synthetic Opus audio pump; the
-//! datachannel send/recv (3e) attaches later.
+//! video track, an audio track, and a control datachannel. It
+//! owns the SDP-answer plumbing, the video pump, the Opus audio
+//! pump, and the datachannel send/recv path.
 //!
 //! [`host_udp_bind_addrs`] chooses which local addresses to bind the
 //! WebRTC UDP sockets to (see its module docs for why this needs its

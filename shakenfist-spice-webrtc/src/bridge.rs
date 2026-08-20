@@ -1,12 +1,11 @@
 //! [`WebrtcBridge`] wraps a [`PeerConnection`] together with a
 //! video track, an audio track, and a control datachannel.
 //!
-//! Phase 3 step 3b implements [`WebrtcBridge::new`] and
-//! [`WebrtcBridge::accept_offer`]; 3c adds the video pump; 3d adds
-//! the synthetic Opus audio pump; 3e adds the datachannel
-//! send/recv ([`WebrtcBridge::send_control`],
-//! [`WebrtcBridge::control_rx`]); 3f adds the in-process loopback
-//! integration test.
+//! [`WebrtcBridge::new`] and [`WebrtcBridge::accept_offer`] set the
+//! connection up; the video pump, the Opus audio pump and the
+//! datachannel send/recv path ([`WebrtcBridge::send_control`],
+//! [`WebrtcBridge::control_rx`]) run on top of it. `tests/loopback.rs`
+//! exercises the lot in process.
 //!
 //! ## Codec registration
 //!
@@ -121,7 +120,7 @@ const AUDIO_SAMPLES_PER_FRAME: usize =
 /// realistic configuration.
 const AUDIO_OPUS_BUF_BYTES: usize = 1500;
 
-/// Synthetic-tone frequency for the Phase 3 audio pump.
+/// Synthetic-tone frequency for the synthetic audio pump.
 const AUDIO_TONE_HZ: f64 = 440.0;
 
 /// Amplitude for the synthetic sine, expressed as a fraction of
@@ -147,7 +146,7 @@ const LOG_EVERY_N_DROPS: u64 = 100;
 /// shared state between them and the clone dance obscured what they
 /// actually did.
 ///
-/// Two of the three things phase 01 wired up survive as handler
+/// Two of the three callbacks this replaced survive as handler
 /// methods, renamed: `on_state_change` is dispatched from
 /// [`PeerConnectionEventHandler::on_connection_state_change`], and
 /// `on_ice_gathering_state_change` now takes an
@@ -179,9 +178,8 @@ const LOG_EVERY_N_DROPS: u64 = 100;
 /// dropping input events is worse than back-pressure. Getting this
 /// distinction wrong is how a keystroke goes missing.
 ///
-/// See `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`
-/// step 1e, and step 2b of the phase-02 plan for the `try_send`
-/// change.
+/// See `docs/plans/PLAN-webrtc-0.20-upgrade.md` for the reasoning
+/// behind both the handler split and the `try_send` change.
 struct BridgeEvents {
     /// Ask the encoder for an IDR whenever a viewer attaches.
     encoder_control: mpsc::Sender<EncoderControl>,
@@ -515,11 +513,12 @@ impl WebrtcBridgeConfig {
 /// One-PC, one-viewer WebRTC bridge between the SPICE-side encoder
 /// pipeline and a browser-side `RTCPeerConnection`.
 ///
-/// Phase 3 step 3b ships [`WebrtcBridge::new`],
-/// [`WebrtcBridge::accept_offer`], and [`WebrtcBridge::close`]; 3c
-/// adds [`WebrtcBridge::spawn_video_pump`]; 3d adds
-/// [`WebrtcBridge::spawn_synthetic_audio_pump`]; 3e adds
-/// [`WebrtcBridge::send_control`] and [`WebrtcBridge::control_rx`].
+/// [`WebrtcBridge::new`], [`WebrtcBridge::accept_offer`] and
+/// [`WebrtcBridge::close`] manage the connection;
+/// [`WebrtcBridge::spawn_video_pump`],
+/// [`WebrtcBridge::spawn_synthetic_audio_pump`],
+/// [`WebrtcBridge::send_control`] and [`WebrtcBridge::control_rx`]
+/// move media and control traffic across it.
 pub struct WebrtcBridge {
     /// `Arc<dyn PeerConnection>` rather than a concrete type because
     /// `PeerConnectionBuilder::build` hands back an unnameable
@@ -540,14 +539,12 @@ pub struct WebrtcBridge {
     /// `Arc` but the receiver can only be consumed once.
     incoming_control: Mutex<Option<mpsc::Receiver<Vec<u8>>>>,
     /// Raised once when the underlying `RTCPeerConnection` reaches a
-    /// terminal state (`Failed`, `Disconnected`, or `Closed`).
-    /// External waiters can clone this via
-    /// [`WebrtcBridge::dead_signal`] or await it directly via
-    /// [`WebrtcBridge::wait_for_dead`]. Phase 6a wires this up so
-    /// the server-side reaper (Phase 6b) can tear down the bridge
-    /// and encoder when the browser disconnects. Sticky
-    /// ([`StickySignal`]) so a waiter that subscribes after the
-    /// bridge already died still returns.
+    /// terminal state (`Failed`, `Disconnected`, or `Closed`). External
+    /// waiters can clone this via [`WebrtcBridge::dead_signal`] or await it
+    /// directly via [`WebrtcBridge::wait_for_dead`]. The server-side reaper
+    /// uses it to tear down the bridge and encoder when the browser
+    /// disconnects. Sticky ([`StickySignal`]) so a waiter that subscribes
+    /// after the bridge already died still returns.
     dead: Arc<StickySignal>,
     /// Latest peer connection state, shadowed by [`BridgeEvents`].
     /// Read by the `#[cfg(test)]` `connection_state` accessor rather
@@ -667,12 +664,11 @@ impl WebrtcBridge {
 
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 
-        // Bridge lifecycle signal, raised once when the PC reaches a
-        // terminal state (`Failed` / `Disconnected` / `Closed`). The
-        // reaper task in Phase 6b waits on this to tear down the
-        // bridge and encoder when the browser disconnects. Sticky
-        // (see `StickySignal`) so late subscribers — callers that
-        // begin awaiting after the PC already died — return
+        // Bridge lifecycle signal, raised once when the PC reaches a terminal
+        // state (`Failed` / `Disconnected` / `Closed`). The reaper task waits
+        // on this to tear down the bridge and encoder when the browser
+        // disconnects. Sticky (see `StickySignal`) so late subscribers —
+        // callers that begin awaiting after the PC already died — return
         // immediately.
         let dead = Arc::new(StickySignal::new());
 
@@ -704,14 +700,13 @@ impl WebrtcBridge {
             dc_pumps: dc_pumps.clone(),
         });
 
-        // Which local addresses to bind the ICE sockets to. 0.20 makes
-        // this the caller's problem — the bound addresses are the only
-        // input to host-candidate generation and nothing downstream
-        // filters them — so an empty list is not a degraded bridge, it
-        // is a bridge that can only ever advertise candidates no
-        // browser will use. Fail here rather than hand back something
-        // that passes every test we have and reaches nobody. See
-        // `crate::bind_addrs` and Decision 4 of the phase-02 plan.
+        // Which local addresses to bind the ICE sockets to. 0.20 makes this the
+        // caller's problem — the bound addresses are the only input to
+        // host-candidate generation and nothing downstream filters them — so an
+        // empty list is not a degraded bridge, it is a bridge that can only ever
+        // advertise candidates no browser will use. Fail here rather than hand
+        // back something that passes every test we have and reaches nobody. See
+        // `crate::bind_addrs` and `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
         let udp_addrs = host_udp_bind_addrs();
         if udp_addrs.is_empty() {
             return Err(anyhow!(
@@ -868,13 +863,13 @@ impl WebrtcBridge {
         self.dead.wait().await;
     }
 
-    /// Return a clone of the [`StickySignal`] that is raised once
-    /// when the bridge's PC reaches a terminal state. Used by the
-    /// server-side reaper (Phase 6b) so it can wait on the signal
-    /// without holding the `bridge_slot` lock or borrowing `&self`
-    /// across an `.await`. `handle.wait().await` is equivalent to
-    /// [`WebrtcBridge::wait_for_dead`], including the
-    /// late-subscriber fast-path.
+    /// Return a clone of the [`StickySignal`] that is raised once when the
+    /// bridge's PC reaches a terminal state. Used by the server-side
+    /// reaper so it can wait on the signal without holding the
+    /// `bridge_slot` lock or borrowing `&self` across an `.await`.
+    /// `handle.wait().await` is equivalent to
+    /// [`WebrtcBridge::wait_for_dead`], including the late-subscriber
+    /// fast-path.
     pub fn dead_signal(&self) -> Arc<StickySignal> {
         self.dead.clone()
     }
@@ -1025,10 +1020,10 @@ impl WebrtcBridge {
     /// (960 samples per frame), payload via [`OpusPayloader`], and
     /// write RTP packets to the bridge's audio track at 50 fps.
     ///
-    /// Phase 3 ships this synthetic path so the audio track is
-    /// exercised in integration tests (3f); Phase 5e replaces it
-    /// in production with [`Self::spawn_audio_pump`] which forwards
-    /// real SPICE Opus packets. The synthetic pump is retained for
+    /// This synthetic path exercises the audio track in the
+    /// integration tests. Production uses
+    /// [`Self::spawn_audio_pump`] instead, which forwards real
+    /// SPICE Opus packets; the synthetic pump is retained for
     /// tests and as a debugging aid.
     ///
     /// The pump runs forever — there is no natural stop condition
@@ -1047,7 +1042,7 @@ impl WebrtcBridge {
         ))
     }
 
-    /// Spawn the real Opus passthrough pump (Phase 5e).
+    /// Spawn the real Opus passthrough pump.
     ///
     /// Consumes `(opus_packet, samples_in_packet)` tuples from
     /// `rx`, where `opus_packet` is a single Opus packet as
@@ -1081,7 +1076,7 @@ impl WebrtcBridge {
 
     /// Send a payload over the control datachannel. The DC is
     /// reliable + ordered; this is appropriate for inputs and
-    /// cursor overlay updates (Phase 5).
+    /// cursor overlay updates.
     ///
     /// Returns an error if the underlying datachannel send fails
     /// (e.g. the channel is not yet open or the remote peer has
@@ -1241,8 +1236,8 @@ async fn attach_tracks_and_control_dc(
     pc.add_track(audio_track.clone() as Arc<dyn TrackLocal>)
         .await?;
 
-    // Control datachannel. Ordered + reliable for input events
-    // (Phase 5) and cursor overlay (Phase 5b).
+    // Control datachannel. Ordered + reliable for input events and
+    // cursor overlay.
     let control_dc = pc
         .create_data_channel(
             "control",
@@ -1284,9 +1279,10 @@ fn nonzero_random_ssrc() -> u32 {
 /// This call is redundant on 0.20 and is kept deliberately.
 /// `register_default_codecs` registers five H.264 entries
 /// unconditionally (PT 102, 127, 125, 108, 123) and webrtc-rs drops
-/// this one as a duplicate payload type — phase 01 asserted exactly
-/// that in `register_h264_is_redundant_with_default_codecs`, and the
-/// answer SDP is byte-identical with or without it. It stays because
+/// this one as a duplicate payload type —
+/// `register_h264_is_redundant_with_default_codecs` asserts exactly
+/// that, and the answer SDP is byte-identical with or without it.
+/// It stays because
 /// it states our profile-level preference in one place: if the
 /// defaults ever stop carrying H.264, or carry it at a profile the
 /// renderer cannot emit, this is what turns that into a changed SDP
@@ -1523,8 +1519,8 @@ async fn run_video_pump(
 
         for annex_b_nal in &frame.nal_units {
             // Defensive: every NAL produced by H264Encoder is
-            // 4-byte-start-code framed (Phase 2 step 2b); skip
-            // anything too short to be a real NAL body.
+            // 4-byte-start-code framed; skip anything too short to be a real
+            // NAL body.
             if annex_b_nal.len() < 5 {
                 continue;
             }
@@ -2211,14 +2207,14 @@ mod tests {
         bridge.close().await.expect("close");
     }
 
-    /// Smoke test: spawn the synthetic audio pump and let it run
-    /// for a few hundred ms. The pump runs forever, so we abort
-    /// after a brief sleep. We don't assert exact packet counts —
-    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
-    /// without a connected peer (they're buffered/dropped at the
-    /// transport), and the in-process inspect path is added in
-    /// 3f's loopback test. The Phase 3 success criterion here is
-    /// "no panics, no encoder errors, the track accepts writes".
+    /// Smoke test: spawn the synthetic audio pump and let it run for a
+    /// few hundred ms. The pump runs forever, so we abort after a brief
+    /// sleep. We don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even without a
+    /// connected peer (they're buffered/dropped at the transport), and
+    /// the in-process inspect path lives in `tests/loopback.rs`. The
+    /// success criterion here is "no panics, no encoder errors, the track
+    /// accepts writes".
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn synthetic_audio_pump_emits_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
@@ -2244,14 +2240,14 @@ mod tests {
         bridge.close().await.expect("close");
     }
 
-    /// Smoke test: spawn the real Opus passthrough pump and feed
-    /// it a handful of synthetic Opus packets. As with the
-    /// synthetic pump, we don't assert exact packet counts —
-    /// `TrackLocalStaticRTP::write_rtp` accepts packets even
-    /// without a connected peer (they're buffered/dropped at the
-    /// transport). The Phase 5e success criterion here is "no
-    /// panics, payloader accepts the bytes, the track accepts
-    /// writes, the pump exits cleanly when the channel closes".
+    /// Smoke test: spawn the real Opus passthrough pump and feed it a
+    /// handful of synthetic Opus packets. As with the synthetic pump, we
+    /// don't assert exact packet counts —
+    /// `TrackLocalStaticRTP::write_rtp` accepts packets even without a
+    /// connected peer (they're buffered/dropped at the transport). The
+    /// success criterion here is "no panics, payloader accepts the
+    /// bytes, the track accepts writes, the pump exits cleanly when the
+    /// channel closes".
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn audio_pump_forwards_real_opus_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
@@ -2470,8 +2466,8 @@ mod tests {
             // check on that: two Rust peers on one host agree about an
             // unspecified address and connect happily, so the loopback
             // and lifecycle tests stay green on a build no browser can
-            // reach. See `crate::bind_addrs` and Decision 4 of the
-            // phase-02 plan.
+            // reach. See `crate::bind_addrs` and
+            // `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
             //
             // The address is the fifth space-separated field of an ICE
             // candidate line (RFC 5245 §15.1: foundation, component,

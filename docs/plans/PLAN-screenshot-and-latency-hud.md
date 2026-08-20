@@ -134,9 +134,9 @@ protocol, the channel wiring, or any async task.
 
 | Phase | Plan | Status |
 |-------|------|--------|
-| 1. Screenshot hotkey + save dialog | PLAN-screenshot-and-latency-hud-phase-01-screenshot.md | Complete |
-| 2. Latency sparkline | PLAN-screenshot-and-latency-hud-phase-02-latency-sparkline.md | Complete |
-| 3. Documentation | PLAN-screenshot-and-latency-hud-phase-03-docs.md | Complete |
+| 1. Screenshot hotkey + save dialog | [PLAN-screenshot-and-latency-hud-phase-01-screenshot.md](PLAN-screenshot-and-latency-hud-phase-01-screenshot.md) | Complete |
+| 2. Latency sparkline | [PLAN-screenshot-and-latency-hud-phase-02-latency-sparkline.md](PLAN-screenshot-and-latency-hud-phase-02-latency-sparkline.md) | Complete |
+| 3. Documentation | [PLAN-screenshot-and-latency-hud-phase-03-docs.md](PLAN-screenshot-and-latency-hud-phase-03-docs.md) | Complete |
 
 Both feature phases are independent and could be done in
 either order. Phase 3 collates README/ARCHITECTURE updates

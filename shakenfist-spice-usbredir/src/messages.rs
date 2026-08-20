@@ -4,8 +4,9 @@
 //! deserialisation and `write()` for serialisation.  All multi-byte
 //! integers are little-endian on the wire.
 //!
-//! Many types and methods are defined here for use in later phases
-//! (device backend, transfers, virtual MSC).
+//! Many types and methods are defined here ahead of the code that
+//! will use them (device backend, transfers, virtual MSC), which is
+//! what the crate-level `dead_code` allow below is for.
 #![allow(dead_code)]
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};

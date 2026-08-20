@@ -602,7 +602,7 @@ pub type SpiceInvers = SpiceBlackness;
 /// brush (variable) + rop_descriptor (u16) + scale_mode (u8) + mask
 /// (13 bytes). `src_bitmap` is a byte offset into the surrounding
 /// message payload (same convention as `SpiceCopy.src_bitmap`);
-/// image-payload decode is a later phase.
+/// image-payload decode is not implemented.
 #[derive(Debug, Clone)]
 pub struct SpiceOpaque {
     pub src_bitmap: u32,

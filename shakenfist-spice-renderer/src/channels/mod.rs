@@ -72,10 +72,10 @@ pub enum ChannelEvent {
         pixels: Vec<u8>, // RGBA
         #[allow(dead_code)]
         image_id: u64,
-        /// Session-relative seconds at the moment the emitting
-        /// channel called `event_tx.send`. Used by the app to
-        /// compute mpsc-queue lag for renderer-side latency
-        /// diagnostics. See PLAN-video-keeping-up-phase-04.
+        /// Session-relative seconds at the moment the emitting channel called
+        /// `event_tx.send`. Used by the app to compute mpsc-queue lag for
+        /// renderer-side latency diagnostics. See
+        /// `docs/plans/PLAN-video-keeping-up.md`.
         produced_at_secs: f64,
     },
 
@@ -256,7 +256,6 @@ pub enum ChannelEvent {
     WebdavSharingStopped,
 
     /// A WebDAV error occurred
-    #[allow(dead_code)] // used in later phases when WebDAV serving is implemented
     WebdavError(String),
 
     /// Channel disconnected
@@ -324,7 +323,6 @@ pub enum InputEvent {
 }
 
 /// Commands sent from the app to the webdav channel.
-#[allow(dead_code)] // variants constructed in phase 5 (UI panel)
 pub enum WebdavCommand {
     /// Start sharing a local directory.
     ShareDirectory { path: PathBuf, read_only: bool },
@@ -345,7 +343,6 @@ pub enum UsbCommand {
 
 /// Decoded cursor image in RGBA format
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields used in phase 2 (cursor overlay rendering)
 pub struct CursorImage {
     pub width: u16,
     pub height: u16,

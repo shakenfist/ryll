@@ -1,4 +1,4 @@
-// ryll web frontend — Phase 4 + 5c + 6c client.
+// ryll web frontend client.
 //
 // Reads the per-launch token from window.location.search,
 // constructs an RTCPeerConnection, opens a "control-seed"
@@ -8,7 +8,7 @@
 // exchange via POST /offer, and attaches the incoming video
 // track to the <video> element.
 //
-// Phase 5c additions:
+// Input handling:
 //   * KeyboardEvent.code → AT scancode table (ported from
 //     `scancode_for_logical_key` in
 //     shakenfist-spice-renderer/src/channels/inputs.rs).
@@ -26,13 +26,13 @@
 //     guest's vdagent resizes the display via
 //     VDAgentMonitorsConfig.
 //
-// Phase 6c additions:
+// Reconnect handling:
 //   * Browser-side auto-reconnect with exponential backoff
 //     (1 s, 2 s, 4 s, 8 s, 16 s; max 5 attempts).
 //   * scheduleReconnect() / resetPeerConnection() helpers.
 //   * "Click to reconnect" button revealed after max attempts.
-//   * connect() is now a callable function; the IIFE calls it
-//     and chains .catch() → scheduleReconnect().
+//   * connect() is a callable function; the IIFE calls it and
+//     chains .catch() → scheduleReconnect().
 //   * Input listeners stay registered across reconnects — they
 //     reach the module-level `dc` reference via sendCtrl().
 
@@ -511,8 +511,8 @@
         // connection object (some browsers cache failed PCs briefly).
         pc = new RTCPeerConnection();
 
-        // Phase 3 finding: a data channel must exist on the offer
-        // side before createOffer() so the SDP carries an
+        // A data channel must exist on the offer side before
+        // createOffer() so the SDP carries an
         // m=application section. The server bridge's control DC is
         // answered against this seed channel.
         dc = pc.createDataChannel('control-seed', { ordered: true });

@@ -7,7 +7,7 @@
 //! ([`shakenfist_spice_renderer::InputEvent`]) and `resize_tx`
 //! (`(width, height)`) channels.
 //!
-//! Phase 5c uses raw 16-bit AT scancodes on the wire. The
+//! Raw 16-bit AT scancodes travel on the wire. The
 //! browser ports the [`scancode_for_logical_key`] table from
 //! `shakenfist_spice_renderer::channels::inputs` directly to a
 //! `KeyboardEvent.code` → scancode lookup, so this side just

@@ -88,8 +88,7 @@ jobs:
 
   # A cheap proxy for the Windows builds in the merge tier: a cargo
   # check against the x86_64-pc-windows-gnu triple, cross-compiled from
-  # the devcontainer (see
-  # docs/plans/PLAN-two-stage-ci-phase-02-windows-check.md for why the
+  # the devcontainer (see docs/plans/PLAN-two-stage-ci.md for why the
   # msvc triple CI actually builds cannot be checked this way).
   #
   # This is its own job rather than a step in build-linux. Measured on

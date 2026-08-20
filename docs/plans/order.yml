@@ -1,9 +1,9 @@
 ---
 # This file defines the ordering and page titles for the import of
-# this content into `shakenfist/docs/components/ryll/plans/`. Only
-# master plans and the index are listed here; phase-specific plan
-# files are linked from the index and from each master plan's
-# execution table.
+# this content into `shakenfist/docs/components/ryll/plans/`. Master
+# plans, standalone plans and the index are listed here;
+# phase-specific plan files are linked from the index and from each
+# master plan's execution table.
 
 - index.md: Plans index
 - PLAN-initial.md: Initial porting plan
@@ -27,6 +27,7 @@
 - PLAN-display-draw-ops.md: Display draw-op coverage
 - PLAN-android-apk.md: Android APK port
 - PLAN-bugreport-trigger-snapshot.md: Bug-report trigger snapshot
+- PLAN-macbook-bugreport-fixes.md: Macbook bug-report fixes
 - PLAN-paste-as-keystrokes.md: Paste-as-keystrokes fallback
 - PLAN-hamburger-menu.md: Hamburger menu
 - PLAN-notifications.md: Notifications system
@@ -40,7 +41,10 @@
 - PLAN-video-keeping-up.md: Video keeping up
 - PLAN-macos-runtime-metrics.md: macOS runtime metrics
 - PLAN-ci-platform-matrix.md: CI platform matrix
+- PLAN-egui-0.34-followups.md: egui / eframe 0.34 follow-ups
 - PLAN-stream-caps-and-flap.md: Stream caps and flap diagnostics
+- PLAN-streaming-test-automation.md: Streaming test automation
+- OPEN-QUESTIONS.md: Open questions watch-list
 - PLAN-self-hosted-runners.md: Self-hosted runner migration
 - PLAN-pip-distribution.md: Pip-installable ryll
 - PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade

@@ -210,14 +210,13 @@ pub fn log_unknown_once(channel: &'static str, msg_type: u16, payload: &[u8]) {
 }
 
 /// Number of distinct keys that have fired so far this session.
-/// Used by the phase-8 status-bar gap counter.
+/// Used by the status-bar gap counter.
 pub fn warn_once_count() -> usize {
     registry().lock().expect("registry lock poisoned").len()
 }
 
-/// Snapshot of the fired keys (in some order). Caller does not hold
-/// the registry lock. Used by the phase-8 pedantic popup / bug
-/// report assembly.
+/// Snapshot of the fired keys (in some order). Caller does not hold the
+/// registry lock. Used by the pedantic popup / bug-report assembly.
 pub fn warn_once_keys() -> Vec<&'static str> {
     registry()
         .lock()

@@ -99,7 +99,7 @@ pub struct UsbredirChannel {
     interrupt_rx: mpsc::Receiver<InterruptData>,
     interrupt_handles: HashMap<u8, tokio::task::JoinHandle<()>>,
 
-    /// Phase-02: see `MainChannel::capture_dropped_count`.
+    /// See `MainChannel::capture_dropped_count`.
     capture_dropped_count: u64,
 }
 

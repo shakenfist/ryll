@@ -30,8 +30,8 @@ pub const DEFAULT_GLZ_DICT_CAP_BYTES: usize = 256 * 1024 * 1024;
 /// Backed by a byte-bounded LRU ([`ByteBoundedLru`]) so the
 /// dictionary cannot grow without bound on workloads where the
 /// server never sends a sliding-window `inval_*`.  See
-/// `PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md`
-/// step 12E for the motivating session traces.
+/// `docs/plans/PLAN-stream-caps-and-flap.md` for the motivating
+/// session traces.
 pub struct GlzDictionary {
     images: Mutex<ByteBoundedLru>,
     notify: tokio::sync::Notify,

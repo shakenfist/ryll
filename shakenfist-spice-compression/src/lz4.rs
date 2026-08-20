@@ -338,8 +338,6 @@ mod tests {
     // This test asserts that current behaviour.  If this is later
     // determined to be a bug and the decoder is changed to return
     // None on truncation, this test will need updating.
-    // See the phase-02 plan's note about whether this is a bug we
-    // want to fix later.
     // ---------------------------------------------------------------
     #[test]
     fn decompress_spice_lz4_truncated_returns_partial_image() {

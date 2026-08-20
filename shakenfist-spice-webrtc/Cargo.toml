@@ -29,7 +29,7 @@ test-support = []
 # still schedules ICE checks in terminal states, both of which this
 # crate's tests and the server-side reaper walk straight into. Declared
 # as a floor rather than `=0.20.2` so patch updates still flow. See
-# docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md, Decision 1.
+# docs/plans/PLAN-webrtc-0.20-upgrade.md.
 webrtc = "0.20.2"
 
 # The sans-io core `webrtc` is built on. A direct dependency because
@@ -54,8 +54,8 @@ async-trait = "0.1"
 # Host interface enumeration, so the WebRTC UDP sockets can be bound
 # to real addresses instead of the placeholder 0.0.0.0, which binds
 # fine and then produces host candidates every browser discards (see
-# src/bind_addrs.rs and Decision 4 of
-# docs/plans/PLAN-webrtc-0.20-upgrade-phase-02-bump.md). MIT OR
+# src/bind_addrs.rs and
+# docs/plans/PLAN-webrtc-0.20-upgrade.md). MIT OR
 # BSD-3-Clause, both already on deny.toml's allowlist; pulls in libc
 # on unix and windows-sys 0.61 on Windows, and 0.61.2 is already in
 # Cargo.lock, so it adds no duplicate dependency version.
@@ -77,17 +77,16 @@ bytes = "1"
 # Random values (SSRC, initial sequence numbers)
 rand = "0.8"
 
-# Opus encoder for the Phase 3 step 3d synthetic-audio pump. The
-# `opus` crate wraps libopus through `audiopus_sys`, which probes
-# for libopus via pkg-config and otherwise builds it from source
-# with cmake — both work in the devcontainer. Phase 5 may reuse
-# this same crate to encode raw PCM if SPICE negotiates an
-# uncompressed playback format (master plan Resolution §5).
+# Opus encoder for the synthetic-audio pump. The `opus` crate
+# wraps libopus through `audiopus_sys`, which probes for libopus
+# via pkg-config and otherwise builds it from source with cmake —
+# both work in the devcontainer. The same crate could encode raw
+# PCM if SPICE ever negotiates an uncompressed playback format.
 opus = "0.3"
 
 # Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
-# H264Encoder, and SyntheticFrameSource used for the Phase 3 pumps
-# and integration test.
+# H264Encoder, and SyntheticFrameSource used for the media pumps
+# and the integration test.
 shakenfist-spice-renderer = { path = "../shakenfist-spice-renderer", version = "0.1.7", default-features = false }
 
 [dev-dependencies]

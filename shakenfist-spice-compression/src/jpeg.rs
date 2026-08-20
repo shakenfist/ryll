@@ -772,9 +772,8 @@ impl JpegDecoder for WicDecoder {
 ///   2. `Library::new("libva-drm.so.2")` — same fallback
 ///      ladder for older sonames.
 ///   3. `open("/dev/dri/renderD128")` — the typical first GPU.
-///      We do NOT enumerate `renderD*` — that's Q3 in the
-///      phase plan, deferred until a real multi-GPU report
-///      surfaces.
+///      We do NOT enumerate `renderD*`; that is deferred
+///      until a real multi-GPU report surfaces.
 ///   4. `vaGetDisplayDRM(fd)` + `vaInitialize(...)`.
 ///   5. `vaQueryConfigProfiles()` — scan for
 ///      `VAProfileJPEGBaseline` (id 19).
@@ -787,8 +786,7 @@ impl JpegDecoder for WicDecoder {
 ///
 /// # Decode path — currently delegated to mozjpeg
 ///
-/// Per the phase 3E brief (clarifications #4 and #5 in the
-/// step prompt), the actual VA-API decode path — populating
+/// The actual VA-API decode path — populating
 /// `VAPictureParameterBufferJPEGBaseline`,
 /// `VAIQMatrixBufferJPEGBaseline`,
 /// `VAHuffmanTableBufferJPEGBaseline`, and
@@ -851,11 +849,10 @@ pub struct VaapiDecoder {
     /// libva-drm.so.2 handle. Same lifetime story as `libva`.
     #[allow(dead_code)]
     libva_drm: libloading::Library,
-    /// Fallback decoder. Per the phase 3E plan, the actual
-    /// VA-API decode path is deferred to a follow-up; today
-    /// every `decode()` call delegates here. Embedded rather
-    /// than constructed per-call so we share the (currently
-    /// stateless) `MozJpegDecoder` instance.
+    /// Fallback decoder. The actual VA-API decode path is deferred
+    /// to a follow-up; today every `decode()` call delegates here.
+    /// Embedded rather than constructed per-call so we share the
+    /// (currently stateless) `MozJpegDecoder` instance.
     fallback: MozJpegDecoder,
 }
 
@@ -1287,11 +1284,17 @@ impl JpegDecoder for VaapiDecoder {
 ///   other   →                  MozJpegDecoder → JpegDecoderRsDecoder
 /// ```
 ///
-/// Steps 3A–3D have landed: pure-Rust + libjpeg-turbo
-/// cross-platform, ImageIO on macOS, and WIC on Windows. VA-API
-/// lands in step 3E. `MozJpegDecoder` is only present when the
+/// Pure-Rust + libjpeg-turbo are available cross-platform,
+/// ImageIO on macOS, and WIC on Windows; VA-API is the newest
+/// addition. `MozJpegDecoder` is only present when the
 /// `mozjpeg` Cargo feature is enabled (defaulted on); building
 /// without it falls back to the pure-Rust path.
+///
+/// `*` `VaapiDecoder` probes for VA-API capability but
+/// currently delegates every `decode()` call to its embedded
+/// `MozJpegDecoder`; the real VA-API decode path is not
+/// implemented yet, which is why it reports its backend as
+/// "VA-API (probed, mozjpeg fallback)".
 ///
 /// The result is constructed once at session start
 /// (`DisplayChannel::new`) and stored as `Arc<dyn JpegDecoder>`.
@@ -1513,8 +1516,8 @@ mod mozjpeg_tests {
 
 /// Tests for the macOS ImageIO decoder backend. These compile and
 /// run only on macOS — Linux/Windows CI never executes them. The
-/// real cross-platform smoke test lives in step 3H of the phase 3
-/// plan and is operator-driven.
+/// real cross-platform smoke test is operator-driven; see
+/// `docs/plans/PLAN-stream-caps-and-flap.md`.
 ///
 /// The fixture is a 32x32 JPEG with four 16x16 quadrants painted
 /// red / green / blue / yellow, generated at quality 85 by
@@ -1634,8 +1637,8 @@ mod imageio_tests {
 
 /// Tests for the Windows WIC decoder backend. These compile and
 /// run only on Windows — Linux/macOS CI never executes them. The
-/// real cross-platform smoke test lives in step 3H of the phase 3
-/// plan and is operator-driven.
+/// real cross-platform smoke test is operator-driven; see
+/// `docs/plans/PLAN-stream-caps-and-flap.md`.
 ///
 /// Uses the same `swatches.jpg` fixture as the macOS test (32x32,
 /// four 16x16 quadrants painted red / green / blue / yellow at

@@ -574,25 +574,23 @@ mod tests {
 
     #[test]
     fn display_stream_destroy_all_opcode_pinned() {
-        // Phase 05 (K5) guard. The opcode value is defined in
-        // spice-protocol/spice/enums.h:497 and any drift would
-        // silently break ryll's handler. The opcode is also
-        // exercised end-to-end via display.rs's match arm —
-        // this assertion is just the constant-value backstop.
+        // The opcode value is defined in spice-protocol/spice/enums.h:497
+        // and any drift would silently break ryll's handler. The opcode
+        // is also exercised end-to-end via display.rs's match arm — this
+        // assertion is just the constant-value backstop.
         assert_eq!(display_server::STREAM_DESTROY_ALL, 126);
     }
 
     #[test]
     fn display_pref_message_opcodes_pinned() {
-        // Phase 07 guard. PREFERRED_COMPRESSION is the third
-        // entry in the SPICE_MSGC_DISPLAY_* enum starting at
-        // INIT=101; PREFERRED_VIDEO_CODEC_TYPE is the fifth.
-        // Counted from spice-protocol/spice/enums.h:523-530:
-        // 101=INIT, 102=STREAM_REPORT, 103=PREFERRED_COMPRESSION,
-        // 104=GL_DRAW_DONE, 105=PREFERRED_VIDEO_CODEC_TYPE. Any
-        // drift here silently breaks server-side preference
-        // handling — the server would reject the message and we
-        // would log nothing client-side.
+        // PREFERRED_COMPRESSION is the third entry in the
+        // SPICE_MSGC_DISPLAY_* enum starting at INIT=101;
+        // PREFERRED_VIDEO_CODEC_TYPE is the fifth. Counted from
+        // spice-protocol/spice/enums.h:523-530: 101=INIT, 102=STREAM_REPORT,
+        // 103=PREFERRED_COMPRESSION, 104=GL_DRAW_DONE,
+        // 105=PREFERRED_VIDEO_CODEC_TYPE. Any drift here silently breaks
+        // server-side preference handling — the server would reject the
+        // message and we would log nothing client-side.
         assert_eq!(display_client::PREFERRED_COMPRESSION, 103);
         assert_eq!(display_client::GL_DRAW_DONE, 104);
         assert_eq!(display_client::PREFERRED_VIDEO_CODEC_TYPE, 105);
@@ -600,13 +598,12 @@ mod tests {
 
     #[test]
     fn display_pref_capabilities_pinned() {
-        // Phase 07 guard. SPICE_DISPLAY_CAP_PREF_COMPRESSION is
-        // bit 6 and SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE is
-        // bit 12 in spice-protocol/spice/protocol.h:137-153
-        // (zero-indexed list: SIZED_STREAM=0 ... PREF_COMPRESSION=6
-        // ... PREF_VIDEO_CODEC_TYPE=12). Drift here would cause
-        // the server to silently ignore our preference messages
-        // because the cap negotiation would have rejected them.
+        // SPICE_DISPLAY_CAP_PREF_COMPRESSION is bit 6 and
+        // SPICE_DISPLAY_CAP_PREF_VIDEO_CODEC_TYPE is bit 12 in
+        // spice-protocol/spice/protocol.h:137-153 (zero-indexed list:
+        // SIZED_STREAM=0 ... PREF_COMPRESSION=6 ... PREF_VIDEO_CODEC_TYPE=12).
+        // Drift here would cause the server to silently ignore our preference
+        // messages because the cap negotiation would have rejected them.
         assert_eq!(capabilities::DISPLAY_PREF_COMPRESSION, 1 << 6);
         assert_eq!(capabilities::DISPLAY_PREF_VIDEO_CODEC_TYPE, 1 << 12);
         assert_eq!(
@@ -621,15 +618,13 @@ mod tests {
 
     #[test]
     fn image_compression_auto_glz_value_pinned() {
-        // Phase 07 guard. AUTO_GLZ is the value the link-up
-        // PREFERRED_COMPRESSION message sends (changed from
-        // AUTO_LZ after session 006 showed AUTO_LZ disabled
-        // server-side GLZ entirely, costing 25% bandwidth on a
-        // UI-heavy workload). If this drifts we'd be asking the
-        // server for the wrong scheme without any wire-level
-        // error. Value from spice-protocol/spice/enums.h:196-203
-        // (INVALID=0, OFF=1, AUTO_GLZ=2, AUTO_LZ=3, QUIC=4,
-        // GLZ=5, LZ=6, LZ4=7).
+        // AUTO_GLZ is the value the link-up PREFERRED_COMPRESSION message
+        // sends (changed from AUTO_LZ after session 006 showed AUTO_LZ
+        // disabled server-side GLZ entirely, costing 25% bandwidth on a
+        // UI-heavy workload). If this drifts we'd be asking the server for
+        // the wrong scheme without any wire-level error. Value from
+        // spice-protocol/spice/enums.h:196-203 (INVALID=0, OFF=1,
+        // AUTO_GLZ=2, AUTO_LZ=3, QUIC=4, GLZ=5, LZ=6, LZ4=7).
         assert_eq!(image_compression::AUTO_GLZ, 2);
     }
 }

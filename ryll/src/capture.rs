@@ -114,8 +114,8 @@ impl PcapChannelWriter {
 ///
 /// `MAX_PAYLOAD = 65495 = 65535 − 20 (IP) − 20 (TCP)` is the
 /// IPv4-frame payload ceiling; `build_tcp_frame` itself
-/// fails closed above this, which is the K2 (Phase 08) bug
-/// in the un-segmented ring path.
+/// fails closed above this, which is what the un-segmented
+/// ring path used to trip over.
 ///
 /// Always returns at least one frame. SPICE messages carry a
 /// 6-byte header so `data` is non-empty in practice, but if
@@ -167,8 +167,8 @@ pub(crate) fn segment_payload(
 /// which chunks at `MAX_PAYLOAD = 65495` so the IPv4 ceiling is
 /// never exceeded. The `> 65515` defensive check below is
 /// therefore expected to be unreachable; if it fires, an
-/// unsegmented caller has snuck in. Phase 15B instruments the
-/// first hit per process with a `Backtrace::force_capture()` so
+/// unsegmented caller has snuck in. The first hit per process
+/// is instrumented with a `Backtrace::force_capture()` so
 /// the offending call site can be identified — subsequent hits
 /// log the bare warn without a backtrace to keep a busy session
 /// from spamming thousands of stacks. Grep `payload too large
@@ -197,7 +197,6 @@ pub(crate) fn build_tcp_frame(
         // force_capture, which ignores RUST_BACKTRACE — we want
         // the trace regardless of how the binary was launched),
         // and every subsequent firing emits only the bare warn.
-        // See PLAN-stream-caps-and-flap-phase-15 step 15B.
         static BACKTRACE_CAPTURED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
         if !BACKTRACE_CAPTURED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -261,11 +260,11 @@ fn channel_static(name: &str) -> Option<&'static str> {
 
 // ── Pcap writer task ────────────────────────────────────
 
-/// Bound on the queue feeding the dedicated pcap writer task.
-/// In steady state with a keeping-up writer the queue sits near
-/// zero; the cap exists so a slow disk burst is dropped rather
-/// than allowed to back-pressure the SPICE socket. See
-/// PLAN-video-keeping-up-phase-02-pcap-thread.md.
+/// Bound on the queue feeding the dedicated pcap writer task. In
+/// steady state with a keeping-up writer the queue sits near zero;
+/// the cap exists so a slow disk burst is dropped rather than
+/// allowed to back-pressure the SPICE socket. See
+/// `docs/plans/PLAN-video-keeping-up.md`.
 const PCAP_QUEUE_CAPACITY: usize = 1024;
 
 /// Direction of a queued packet.
@@ -606,12 +605,12 @@ fn chrono_now() -> String {
 
 // ── Video writer task ───────────────────────────────────
 
-/// Bound on the queue feeding the dedicated video encoder
-/// task. Smaller than `PCAP_QUEUE_CAPACITY` because per-item
-/// payload is dominated by full RGBA surface bytes (~8 MB at
-/// 1080p, ~33 MB at 4K). Eight slots absorb ~100-250 ms of
-/// encoder backlog at typical SPICE presentation rates before
-/// drops begin. See PLAN-video-keeping-up-phase-03.
+/// Bound on the queue feeding the dedicated video encoder task.
+/// Smaller than `PCAP_QUEUE_CAPACITY` because per-item payload is
+/// dominated by full RGBA surface bytes (~8 MB at 1080p, ~33 MB
+/// at 4K). Eight slots absorb ~100-250 ms of encoder backlog at
+/// typical SPICE presentation rates before drops begin. See
+/// `docs/plans/PLAN-video-keeping-up.md`.
 const VIDEO_QUEUE_CAPACITY: usize = 8;
 
 /// One queued frame for the encoder task. `pixels` is
@@ -631,11 +630,10 @@ struct VideoQueueItem {
 
 /// Long-lived task that owns the `VideoWriter`. Lazily
 /// initialises it from the first received frame's dimensions
-/// (matching pre-phase-3 behaviour where the writer was
-/// created inside `CaptureSession::frame` on first call).
-/// When the sender drops, drains any in-flight items, then
-/// finalises the MP4 by calling `VideoWriter::close()` —
-/// which writes the moov atom and makes the file playable.
+/// rather than requiring them up front. When the sender drops,
+/// drains any in-flight items, then finalises the MP4 by calling
+/// `VideoWriter::close()` — which writes the moov atom and makes
+/// the file playable.
 async fn video_writer_task(mut rx: mpsc::Receiver<VideoQueueItem>, dir: PathBuf) {
     let mut writer: Option<VideoWriter> = None;
     let mut init_attempted = false;
@@ -690,15 +688,14 @@ pub struct CaptureSession {
     /// after the sender is dropped to guarantee the queue has
     /// drained before this `CaptureSession` is destroyed.
     writer_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Phase-03: sender side of the queue feeding the
-    /// dedicated H.264/MP4 encoder task. Held inside
-    /// `Option<Mutex<>>` so `close()` can `take()` it and
-    /// drop it, signalling the encoder task to drain,
-    /// finalise the MP4 (moov atom), and exit.
+    /// Sender side of the queue feeding the dedicated H.264/MP4
+    /// encoder task. Held inside `Option<Mutex<>>` so `close()`
+    /// can `take()` it and drop it, signalling the encoder task
+    /// to drain, finalise the MP4 (moov atom), and exit.
     video_tx: Mutex<Option<mpsc::Sender<VideoQueueItem>>>,
-    /// Phase-03: join handle for the encoder task. Detached
-    /// at `close()` time; the task continues on the runtime
-    /// until it has drained the queue and finalised the MP4.
+    /// Join handle for the encoder task. Detached at `close()` time;
+    /// the task continues on the runtime until it has drained the
+    /// queue and finalised the MP4.
     video_handle: Mutex<Option<JoinHandle<()>>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
@@ -868,15 +865,15 @@ impl CaptureSession {
     /// finish well before the runtime shuts down at process
     /// exit.
     ///
-    /// **Phase-3 regression**: MP4 finalisation is no longer
-    /// synchronous with `close()`. A bug report assembled
-    /// within milliseconds of `close()` may see a not-yet-
-    /// finalised (unplayable) MP4. At process exit the tokio
-    /// runtime may also shut down before the encoder task
-    /// drains, in which case the in-progress MP4 will be
-    /// missing its moov atom and unplayable regardless of
-    /// `close()` timing. See PLAN-video-keeping-up-phase-03
-    /// for the trade-off and mitigation options.
+    /// **Caveat**: MP4 finalisation is not synchronous with
+    /// `close()`. A bug report assembled within milliseconds
+    /// of `close()` may see a not-yet-finalised (unplayable)
+    /// MP4. At process exit the tokio runtime may also shut
+    /// down before the encoder task drains, in which case the
+    /// in-progress MP4 will be missing its moov atom and
+    /// unplayable regardless of `close()` timing. See
+    /// `docs/plans/PLAN-video-keeping-up.md` for the trade-off
+    /// and mitigation options.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return; // already closed
@@ -944,9 +941,8 @@ mod tests {
 
     #[test]
     fn segment_payload_split_at_max() {
-        // A 130 000-byte payload must produce 2 frames: the
-        // first with 65 495 bytes of payload, the second with
-        // the 64 505-byte tail. Phase 08 / K2 fix.
+        // A 130 000-byte payload must produce 2 frames: the first with
+        // 65 495 bytes of payload, the second with the 64 505-byte tail.
         let payload = vec![0u8; 130_000];
         let frames = segment_payload(CLIENT_IP, 10002, SERVER_IP, SERVER_PORT, 0, 0, &payload);
         assert_eq!(frames.len(), 2, "130KB payload should split into 2 frames");
@@ -1033,15 +1029,14 @@ mod tests {
 
     #[test]
     fn build_tcp_frame_oversized_payload_returns_empty_vec() {
-        // Regression guard for the defensive branch in
-        // build_tcp_frame: an over-65515-byte tcp_payload_len
-        // must return Vec::new() (and warn), not panic. The
-        // warn itself is instrumented with a one-shot backtrace
-        // (Phase 15B); this test just pins the return contract
-        // so a future refactor doesn't silently turn the warn
-        // into a panic or a partial frame. We use 100 000 bytes
-        // — comfortably past the 65515 ceiling and matching the
-        // live observation range that motivated Phase 15.
+        // Regression guard for the defensive branch in build_tcp_frame: an
+        // over-65515-byte tcp_payload_len must return Vec::new() (and
+        // warn), not panic. The warn itself is instrumented with a
+        // one-shot backtrace; this test just pins the return contract so a
+        // future refactor doesn't silently turn the warn into a panic or a
+        // partial frame. We use 100 000 bytes — comfortably past the 65515
+        // ceiling and matching the range this has been observed at in live
+        // sessions.
         let payload = vec![0u8; 100_000];
         let frame = build_tcp_frame(CLIENT_IP, 10001, SERVER_IP, SERVER_PORT, 0, 0, &payload);
         assert!(
@@ -1051,7 +1046,7 @@ mod tests {
         );
     }
 
-    // ── Phase-02 pcap writer-task tests ──────────────────
+    // ── Pcap writer-task tests ───────────────────────────
 
     #[test]
     fn channel_static_resolves_known_channel_names() {
@@ -1249,7 +1244,7 @@ mod tests {
         assert!(!session.packet_received("display", &[0u8; 10]));
     }
 
-    // ── Phase-03 video writer-task tests ─────────────────
+    // ── Video writer-task tests ──────────────────────────
 
     /// Build an RGBA pixel buffer of the requested size with
     /// a simple gradient. Content doesn't matter for H.264

@@ -140,19 +140,18 @@ const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 /// side.
 const REPLY_ELIGIBLE_AGENT_REQUEST_TYPES: &[u32] = &[VD_AGENT_MONITORS_CONFIG];
 
-/// Maximum entries retained in the recent-reply-lag ring.
-/// 16 entries at the 30 s probe cadence (phase 9B) covers
-/// 8 minutes of agent history in a bug report.
+/// Maximum entries retained in the recent-reply-lag ring. 16
+/// entries at the 30 s probe cadence covers 8 minutes of
+/// agent history in a bug report.
 const MAX_RECENT_AGENT_REPLIES: usize = 16;
 
-/// Cadence for the vdagent liveness probe (phase 9B). 30 s is
-/// chosen so the snapshot ring (cap 16) covers ~8 minutes of
-/// agent history in a bug report — long enough to characterise
-/// an intermittent stall without burning bandwidth on a working
-/// agent. The probe re-sends the most recent monitors config
-/// (treated by the guest agent as a no-op when unchanged), so
-/// the lag of the resulting VD_AGENT_REPLY is a clean liveness
-/// measurement.
+/// Cadence for the vdagent liveness probe. 30 s is chosen so the
+/// snapshot ring (cap 16) covers ~8 minutes of agent history in a
+/// bug report — long enough to characterise an intermittent stall
+/// without burning bandwidth on a working agent. The probe re-sends
+/// the most recent monitors config (treated by the guest agent as a
+/// no-op when unchanged), so the lag of the resulting
+/// VD_AGENT_REPLY is a clean liveness measurement.
 const VDAGENT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long `outstanding_agent_request_count` may stay > 0
@@ -214,9 +213,8 @@ pub struct MainChannel {
     /// (ChannelType, channel_id) tuples the server advertised,
     /// which the orchestrator uses to spawn secondary channels.
     channels_avail_signal: Option<oneshot::Sender<Vec<(ChannelType, u8)>>>,
-    /// Phase-02: count of pcap-capture packets rejected by the
-    /// writer task's queue. Mirrored into
-    /// `MainSnapshot::writer_dropped_count`.
+    /// Count of pcap-capture packets rejected by the writer task's
+    /// queue. Mirrored into `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
     /// Per-opcode receive counts; flushed to snapshot by
     /// `update_snapshot`.
@@ -536,13 +534,12 @@ impl MainChannel {
         // path. Removing this when K1 is closed.
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
         heartbeat.tick().await;
-        // Phase 9B: vdagent liveness probe. Fires every 30 s (VDAGENT_PROBE_INTERVAL).
-        // Skip the first immediate tick so we don't probe before the agent
-        // even attaches.
+        // Vdagent liveness probe. Fires every 30 s (VDAGENT_PROBE_INTERVAL). Skip the
+        // first immediate tick so we don't probe before the agent even attaches.
         let mut vdagent_probe = tokio::time::interval(VDAGENT_PROBE_INTERVAL);
         vdagent_probe.tick().await;
-        // Phase 9C: stuck-agent warning. Polls every 5 s to detect
-        // stalled agent requests and emit notifications with cool-down.
+        // Stuck-agent warning. Polls every 5 s to detect stalled agent requests
+        // and emit notifications with cool-down.
         let mut stuck_agent_check = tokio::time::interval(std::time::Duration::from_secs(5));
         stuck_agent_check.tick().await;
         let mut last_arm: &'static str = "startup";
@@ -674,8 +671,8 @@ impl MainChannel {
                 }
                 _ = vdagent_probe.tick() => {
                     last_arm = "vdagent_probe";
-                    // Phase 9B: Send a liveness probe if conditions are met.
-                    // Skip if agent not connected or no agent caps received yet.
+                    // Send a liveness probe if conditions are met. Skip if
+                    // agent not connected or no agent caps received yet.
                     if self.guest_caps_received {
                         // Check suppression: if a real monitors-config send
                         // happened recently, skip the probe — that send is its
@@ -715,7 +712,7 @@ impl MainChannel {
                 }
                 _ = stuck_agent_check.tick() => {
                     last_arm = "stuck_agent_check";
-                    // Phase 9C: Check if agent requests are stuck and emit
+                    // Check if agent requests are stuck and emit
                     // Warn notification if conditions are met.
                     //
                     // NOTE for future maintainers: this check anchors on
@@ -856,10 +853,9 @@ impl MainChannel {
                 let init = MainInit::read(payload)?;
                 info!("main: session initialized: id={}", init.session_id);
 
-                // Seed the shared mm_time clock from the server's
-                // initial multi_media_time. Display channel readers
-                // (phase 1F STREAM_REPORT) need this base before
-                // they can compute a meaningful "now in mm_time".
+                // Seed the shared mm_time clock from the server's initial
+                // multi_media_time. Display channel readers (STREAM_REPORT) need this
+                // base before they can compute a meaningful "now in mm_time".
                 self.mm_clock
                     .set(init.multi_media_time, self.traffic.elapsed().as_secs_f64());
 
@@ -1137,10 +1133,9 @@ impl MainChannel {
                 self.send_event(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
-                // Per PR #105 review items 1 + 8: drop phase-09
-                // probe bookkeeping tied to the previous agent
-                // instance. Without this, after the next agent
-                // reconnect:
+                // Drop probe bookkeeping tied to the previous
+                // agent instance. Without this, after the next
+                // agent reconnect:
                 //   - outstanding_agent_request_count would still
                 //     count requests the old agent will never reply
                 //     to (spurious stuck-agent Warn notification),
@@ -1410,11 +1405,10 @@ impl MainChannel {
             active, flags
         );
 
-        // Send first; only refresh the phase-9B probe cache if the
-        // send actually went on the wire (Ok(true)). Caching before
-        // the send would defer the next probe by one interval after
-        // an Ok(false) "no tokens" outcome, suppressing the probe
-        // even though no message left the client.
+        // Send first; only refresh the probe cache if the send actually went
+        // on the wire (Ok(true)). Caching before the send would defer the next
+        // probe by one interval after an Ok(false) "no tokens" outcome,
+        // suppressing the probe even though no message left the client.
         let sent = self
             .send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await?;
@@ -1460,7 +1454,6 @@ impl MainChannel {
         // most recent send and accept that the in-flight earlier
         // REPLY (if any) will skip the lag-update branch when it
         // arrives (no matching map entry by then). The trade-off
-        // is documented in the phase 09 plan's *Background* and
         // surfaces as a "no matching send entry" debug log in
         // handle_agent_message.
         if REPLY_ELIGIBLE_AGENT_REQUEST_TYPES.contains(&ty) {

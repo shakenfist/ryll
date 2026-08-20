@@ -1,4 +1,4 @@
-//! Phase 3 step 3f: full in-process loopback integration test.
+//! Full in-process loopback integration test.
 //!
 //! Two peers run in the same process. The "server" peer uses
 //! [`WebrtcBridge`] (the production type) and runs the H.264 video
@@ -222,8 +222,8 @@ async fn loopback_video_audio_datachannel() {
     // Thresholds err on the side of "the pipeline is alive": at
     // 30 fps video + 50 fps audio we expect ~90 video and ~150
     // audio packets in 3 s, but debug-build openh264 in Docker is
-    // slower than wall-clock (Phase 2 step 2d saw ~52 frames in
-    // 3 s instead of 90), and the very first packets of an access
+    // slower than wall-clock (~52 frames in 3 s instead of 90
+    // when measured), and the very first packets of an access
     // unit can be dropped before the SRTP context fully arms.
     tokio::time::sleep(Duration::from_secs(3)).await;
 

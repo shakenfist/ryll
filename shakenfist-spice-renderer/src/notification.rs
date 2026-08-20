@@ -26,8 +26,6 @@ pub enum NotificationSource {
     /// cycle, channel disconnect, channel error, guest agent
     /// up/down. Groups every event that tells the user
     /// "something changed about the link to the server".
-    /// Introduced in Phase 09 (F1) of the session-001 feedback
-    /// work.
     Connection,
 }
 

@@ -83,7 +83,7 @@ impl ClipboardBackend for ArboardClipboard {
 /// macOS to wedge main's tokio worker, starving SPICE PONGs
 /// and tripping the server's 30 s rcc connectivity timeout.
 ///
-/// Step 2e (commit 54155e99) made the call cancel-safe via
+/// Commit 54155e99 made the call cancel-safe via
 /// `spawn_blocking` + 1 s timeout. This wrapper goes a step
 /// further: when ryll isn't focused, the user is by definition
 /// not interacting with the guest, so polling the host

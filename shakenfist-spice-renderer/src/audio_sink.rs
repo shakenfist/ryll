@@ -9,9 +9,9 @@
 //!
 //! For SPICE servers that negotiated raw PCM (rare; xspice and
 //! QEMU default to Opus), the [`OpusPacketSink::on_pcm_samples`]
-//! method is called instead. Phase 5 ships only a warn-and-
-//! silence implementation for this fallback in `--web` mode;
-//! full PCM-to-Opus encoding is tracked as a future-work item.
+//! method is called instead. `--web` mode ships only a warn-
+//! and-silence implementation for this fallback; full
+//! PCM-to-Opus encoding is not implemented.
 //!
 //! The GUI and headless modes pass `None` for the optional
 //! sink: their existing decode-to-cpal path is unchanged, and

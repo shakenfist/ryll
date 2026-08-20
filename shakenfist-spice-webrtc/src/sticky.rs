@@ -11,8 +11,8 @@
 //!
 //! This type exists because the wait side is subtly easy to get
 //! wrong, and getting it wrong cost us a real production bug (the
-//! `wait_for_dead` lost wakeup, phase-01 step 1f' of
-//! `docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`). The
+//! `wait_for_dead` lost wakeup; see
+//! `docs/plans/PLAN-webrtc-0.20-upgrade.md`). The
 //! correct ordering is: register interest first via
 //! [`Notified::enable`], *then* check the flag, then await. Checking
 //! the flag before registering leaves a window where [`raise`] fires
