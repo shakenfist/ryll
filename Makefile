@@ -78,15 +78,16 @@ CACHE_MOUNTS_RO := \
 	-v "$(CARGO_CACHE_DIR)/registry":/build/.cargo/registry:ro \
 	-v "$(CARGO_CACHE_DIR)/git":/build/.cargo/git:ro
 
-# Networked invocation with a writable cache. Used by `fetch` and
-# `lock`; by the packaging and smoke targets that run after a build
-# (`deb`, `rpm`, `web-smoke`, `web-smoke-tls`), which repackage or run
-# an already-built binary and so compile nothing; and by the fuzz and
-# publish targets (`fuzz-fmt-check`, `fuzz-build-%`, `fuzz-smoke-%`,
-# `publish-crates`), which do compile with the network up -- see
-# docs/ci.md for why those cannot be isolated. `ensure-cache`'s
-# permission fix is not one of these: it needs a root container, so it
-# writes its own docker run.
+# Networked invocation with a writable cache. Two groups use it. The
+# ones that compile nothing: `fetch` and `lock` (which resolve and
+# download only), `fuzz-fmt-check` (`cargo fmt --check`), and the
+# packaging and smoke targets that run after a build (`deb`, `rpm`,
+# `web-smoke`, `web-smoke-tls`), which repackage or run an
+# already-built binary. And the three that do compile with the network
+# up, and so execute build scripts unisolated: `fuzz-build-%`,
+# `fuzz-smoke-%` and `publish-crates` -- see docs/ci.md for why those
+# cannot be isolated. `ensure-cache`'s permission fix is not one of
+# these: it needs a root container, so it writes its own docker run.
 DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 
 # Offline invocation for every target that compiles crates. A build

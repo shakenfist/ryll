@@ -345,7 +345,8 @@ and `publish-crates` on every release.
   workspace (see `shakenfist-spice-protocol/fuzz/Cargo.toml`'s
   `[workspace]` table), which `make fetch` does not populate, so
   they must still resolve and download at compile time. Isolating
-  them needs a second `cargo fetch` against that workspace first.
+  them needs a second `cargo fetch` against that workspace first,
+  tracked in shakenfist/ryll#306.
 - `publish-crates` runs `cargo publish`, which builds each crate as
   part of its verify step and genuinely needs the network to
   upload. This one cannot be isolated.
@@ -361,8 +362,9 @@ inside `quay.io/pypa/manylinux_2_28_*` rather than the
 devcontainer, with network and without `--frozen`. That is a
 shipped artifact — it is what `pip install ryll` gets — so it is
 the most significant gap here. Closing it needs the same
-fetch/compile split inside the manylinux image; until then the
-wheel is built on the same terms as before this change.
+fetch/compile split inside the manylinux image, tracked in
+shakenfist/ryll#305; until then the wheel is built on the same
+terms as before this change.
 
 Because those jobs write the cargo cache with the network up,
 they save it under their own `actions/cache` key prefix
