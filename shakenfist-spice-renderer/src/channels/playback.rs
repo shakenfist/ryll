@@ -155,8 +155,8 @@ fn write_samples_f32(
 /// existing cpal path.
 fn pcm_bytes_to_i16(bytes: &[u8]) -> Vec<i16> {
     let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.chunks_exact(2) {
-        out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    for chunk in bytes.as_chunks::<2>().0 {
+        out.push(i16::from_le_bytes(*chunk));
     }
     out
 }
@@ -886,8 +886,8 @@ impl PlaybackChannel {
     /// "decode" (raw mode skips decoding).
     fn push_samples_raw(&mut self, audio_data: &[u8]) {
         if let Some(ref mut producer) = self.audio_producer {
-            for chunk in audio_data.chunks_exact(2) {
-                let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+            for chunk in audio_data.as_chunks::<2>().0 {
+                let sample = i16::from_le_bytes(*chunk);
                 if producer.push(sample).is_err() {
                     self.audio_counters
                         .ring_overflow_count

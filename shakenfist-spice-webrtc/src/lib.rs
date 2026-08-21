@@ -6,16 +6,19 @@
 //! owns the SDP-answer plumbing, the video pump, the Opus audio
 //! pump, and the datachannel send/recv path.
 //!
-//! [`host_udp_bind_addrs`] chooses which local addresses to bind the
-//! WebRTC UDP sockets to (see its module docs for why this needs its
-//! own reasoning). [`WebrtcBridge::new`] consumes it and fails
-//! construction if it comes back empty.
+//! [`UdpBindPolicy`] chooses which local addresses to bind the
+//! WebRTC UDP sockets to, and on which port (see its module docs for
+//! why this needs its own reasoning, and for which of its filters an
+//! operator may override). [`WebrtcBridge::new`] resolves it on every
+//! call and fails construction if it comes back empty.
+//! [`host_udp_bind_addrs`] is the default policy as a function, for
+//! callers with no configuration surface of their own.
 
 mod bind_addrs;
 mod bridge;
 mod sticky;
 
-pub use bind_addrs::host_udp_bind_addrs;
+pub use bind_addrs::{host_udp_bind_addrs, BindSelector, UdpBindPolicy};
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
 pub use sticky::StickySignal;
 

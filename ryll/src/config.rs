@@ -1,11 +1,13 @@
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use configparser::ini::Ini;
 use shakenfist_spice_protocol::ConnectionConfig;
+use shakenfist_spice_webrtc::{BindSelector, UdpBindPolicy};
 use tracing::warn;
 
 // Device-shaped configuration (the value types passed into the
@@ -186,6 +188,32 @@ pub struct Args {
     #[arg(long, requires = "web_tls_cert")]
     pub web_tls_key: Option<PathBuf>,
 
+    /// Local address or interface name to bind the WebRTC media
+    /// (UDP) sockets to in --web mode. Repeatable. Defaults to
+    /// every interface address that is not loopback, unspecified
+    /// or IPv6 link-local. Naming an address explicitly overrides
+    /// that default, which is how a loopback-only host is served:
+    /// --web-media-addr 127.0.0.1. Note this is not --web-host,
+    /// which binds only the HTTP listener.
+    #[arg(long = "web-media-addr", value_name = "ADDR|IFACE")]
+    pub web_media_addr: Vec<String>,
+
+    /// UDP port for the WebRTC media sockets in --web mode.
+    /// Defaults to 0, an ephemeral port per bound address. Pin it
+    /// so a firewall rule can name one port instead of the whole
+    /// ephemeral range; the pinned port applies to every bound
+    /// address, and a port already in use is a hard error rather
+    /// than a silent fallback.
+    #[arg(long, default_value_t = 0u16)]
+    pub web_media_port: u16,
+
+    /// STUN or TURN server URL for --web mode, as
+    /// stun:host:port or turn:host:port. Repeatable. Empty by
+    /// default: ryll assumes browser and host share a LAN, so ICE
+    /// host candidates are usually enough.
+    #[arg(long = "web-ice-server", value_name = "URL")]
+    pub web_ice_server: Vec<String>,
+
     /// Maximum total bytes for the SPICE display image cache,
     /// in MiB. Defaults to 256. The cache holds decoded RGBA
     /// for images the server flagged with CACHE_ME; without a
@@ -201,6 +229,125 @@ pub struct Args {
     /// 004d-g consumed gigabytes (~30 MiB/s of growth).
     #[arg(long, default_value_t = 256)]
     pub glz_dictionary_cap_mib: u64,
+}
+
+/// The WebRTC media socket binding policy `--web-media-addr` and
+/// `--web-media-port` describe.
+///
+/// Called once at startup so a malformed or unusable address fails
+/// the launch, rather than surfacing at the first viewer's
+/// `POST /offer` — the policy itself is re-resolved per bridge, so
+/// this is the only chance to reject bad input early.
+///
+/// Anything that does not parse as an `IpAddr` is taken to be an
+/// interface name, which is what lets `--web-media-addr eth0` work
+/// without a second flag. That fallback is narrowed by
+/// [`reject_malformed_address`] first, because the interesting
+/// failure is not an interface name that looks like an address —
+/// there is no such thing — but an address that Rust's parser
+/// rejects and which would otherwise be silently demoted to a name.
+pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
+    let mut selectors = Vec::with_capacity(args.web_media_addr.len());
+    for value in &args.web_media_addr {
+        selectors.push(match value.parse::<IpAddr>() {
+            Ok(ip) => BindSelector::Addr(ip),
+            Err(_) => {
+                // Safe to name one flag here, unlike the whole-policy
+                // check below: this only ever inspects a
+                // `--web-media-addr` value.
+                reject_malformed_address(value).map_err(|e| anyhow!("--web-media-addr: {}", e))?;
+                BindSelector::Interface(value.clone())
+            }
+        });
+    }
+    let policy = UdpBindPolicy {
+        selectors,
+        port: args.web_media_port,
+    };
+    // Name the flag family rather than one flag: `validate` checks
+    // the whole policy, and today only the selectors can fail — but a
+    // port check added later would arrive here wearing
+    // `--web-media-addr` if this named that flag directly.
+    policy.validate().map_err(|e| {
+        anyhow!(
+            "web media binding (`--web-media-addr` / `--web-media-port`): {}",
+            e
+        )
+    })?;
+    Ok(policy)
+}
+
+/// Reject a `--web-media-addr` value that is a failed *address*
+/// rather than an interface name.
+///
+/// The address-or-interface fallback is ambiguous in exactly one
+/// direction. No interface name parses as an IP literal, so a
+/// successful parse is never a misread name — but an address the
+/// parser rejects becomes an interface name that will never match,
+/// and the operator gets "no interface named ..." for something that
+/// is visibly an address.
+///
+/// The zone-scoped case is the one the docs actively steer people
+/// into: `bind_addrs` and `docs/configuration.md` both explain that a
+/// zoneless `fe80::/10` address is refused *because* it has no zone
+/// id, so `fe80::1%eth0` is the natural next thing to try. Rust's
+/// `Ipv6Addr` has no scope-id support, so it does not parse.
+///
+/// A single colon is left alone: `eth0:0` is a legitimate IPv4 alias
+/// interface label, and `getifaddrs` reports it as the interface
+/// name.
+fn reject_malformed_address(value: &str) -> Result<()> {
+    if value.contains('%') {
+        bail!(
+            "`{value}` cannot be used as a media bind address: a zone-scoped IPv6 literal \
+             cannot be carried by a socket address or an ICE candidate, which is why the \
+             zoneless form is refused too. Name the interface instead — `--web-media-addr \
+             eth0` binds the addresses on that link"
+        );
+    }
+    if value.matches(':').count() > 1 {
+        bail!(
+            "`{value}` is not a valid IPv6 address and cannot be an interface name either. \
+             Pass an address literal, or an interface name such as `--web-media-addr eth0`"
+        );
+    }
+    // The dot is what makes it an attempted address rather than a
+    // name: a bare number is a legal interface name on Linux, so
+    // `--web-media-addr 123` has to stay a name.
+    if value.contains('.') && value.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        bail!(
+            "`{value}` is not a valid IPv4 address and cannot be an interface name either. \
+             Pass an address literal, or an interface name such as `--web-media-addr eth0`"
+        );
+    }
+    Ok(())
+}
+
+/// The STUN and TURN URLs `--web-ice-server` supplies, checked for
+/// the one thing that can be checked without a network.
+///
+/// The sibling address flags fail at launch on bad input, and this
+/// one needs it more, not less: an operator only reaches for
+/// `--web-ice-server` on a deployment where host candidates already
+/// do not work, so a URL that is quietly useless is indistinguishable
+/// from "WebRTC is broken". Reachability is not checked — a STUN
+/// server that is down now may be up when a viewer arrives, the same
+/// reasoning that keeps interface names out of `validate`.
+pub fn web_ice_servers(args: &Args) -> Result<Vec<String>> {
+    const SCHEMES: [&str; 4] = ["stun:", "stuns:", "turn:", "turns:"];
+    for url in &args.web_ice_server {
+        let Some(scheme) = SCHEMES.iter().find(|s| url.starts_with(*s)) else {
+            bail!(
+                "--web-ice-server: `{url}` has no usable scheme — a STUN or TURN URL must \
+                 start with `stun:`, `stuns:`, `turn:` or `turns:` (RFC 7064, RFC 7065), as \
+                 in `stun:stun.example.com:3478`"
+            );
+        };
+        if url[scheme.len()..].is_empty() {
+            bail!("--web-ice-server: `{url}` names no host after `{scheme}`");
+        }
+    }
+    Ok(args.web_ice_server.clone())
 }
 
 /// SPICE connection configuration
@@ -642,5 +789,185 @@ mod tests {
         );
         let cfg = parse(&vv);
         assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    fn web_args(extra: &[&str]) -> Args {
+        let mut argv = vec!["ryll", "--web", "--file", "x.vv"];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("args parse")
+    }
+
+    #[test]
+    fn media_addr_takes_an_address_or_an_interface_name() {
+        let args = web_args(&[
+            "--web-media-addr",
+            "192.168.1.42",
+            "--web-media-addr",
+            "eth0",
+        ]);
+        let policy = web_media_bind_policy(&args).expect("policy");
+        assert_eq!(
+            policy.selectors,
+            vec![
+                BindSelector::Addr("192.168.1.42".parse::<IpAddr>().expect("addr")),
+                BindSelector::Interface("eth0".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn media_addr_accepts_loopback_explicitly() {
+        // The loopback-only opt-in: the default policy filters
+        // loopback, and naming it is the override.
+        let args = web_args(&["--web-media-addr", "127.0.0.1"]);
+        let policy = web_media_bind_policy(&args).expect("loopback is a supported explicit choice");
+        assert_eq!(
+            policy.selectors,
+            vec![BindSelector::Addr(
+                "127.0.0.1".parse::<IpAddr>().expect("addr")
+            )]
+        );
+    }
+
+    #[test]
+    fn media_addr_rejects_the_wildcard_at_startup() {
+        // 0.0.0.0 binds happily and then advertises itself as an ICE
+        // candidate every browser discards, so it must fail the
+        // launch rather than the first offer.
+        let args = web_args(&["--web-media-addr", "0.0.0.0"]);
+        let err = web_media_bind_policy(&args).expect_err("0.0.0.0 must be refused");
+        assert!(
+            err.to_string().contains("--web-media-addr"),
+            "the error must name the flag the operator typed: {err}"
+        );
+    }
+
+    #[test]
+    fn media_port_defaults_to_ephemeral_and_can_be_pinned() {
+        assert_eq!(
+            web_media_bind_policy(&web_args(&[]))
+                .expect("default policy")
+                .port,
+            0
+        );
+        assert_eq!(
+            web_media_bind_policy(&web_args(&["--web-media-port", "41000"]))
+                .expect("pinned policy")
+                .port,
+            41_000
+        );
+    }
+
+    #[test]
+    fn media_addr_rejects_a_zoneless_link_local_at_startup() {
+        // The other half of the mechanical pair. Both docs tell the
+        // operator this address needs a zone id, so the CLI has to be
+        // the thing that says no.
+        let args = web_args(&["--web-media-addr", "fe80::1"]);
+        let err = web_media_bind_policy(&args).expect_err("a zoneless fe80::/10 must be refused");
+        assert!(
+            err.to_string().contains("zone id"),
+            "the error must explain what is missing: {err}"
+        );
+    }
+
+    #[test]
+    fn media_addr_rejects_a_zone_scoped_literal_rather_than_reading_it_as_an_interface() {
+        // The trap the zoneless error sets: an operator told that
+        // fe80::1 needs a zone id types fe80::1%eth0, which Rust
+        // cannot parse, so without this it becomes an interface name
+        // and fails much later with "no interface named fe80::1%eth0".
+        let args = web_args(&["--web-media-addr", "fe80::1%eth0"]);
+        let err = web_media_bind_policy(&args).expect_err("a zone-scoped literal must be refused");
+        let err = err.to_string();
+        assert!(
+            err.contains("zone-scoped"),
+            "the error must name what was typed, not what it was demoted to: {err}"
+        );
+        assert!(
+            err.contains("eth0"),
+            "and must point at the interface-name form as the fix: {err}"
+        );
+    }
+
+    #[test]
+    fn media_addr_rejects_malformed_literals_rather_than_demoting_them() {
+        // An address typo is not an interface name. Without this it
+        // becomes one, and the operator is told no interface has that
+        // name — for a value that is visibly an address.
+        for value in ["2001:db8::zz", "192.168.1.999", "10.0.0."] {
+            let err = web_media_bind_policy(&web_args(&["--web-media-addr", value]))
+                .expect_err("a malformed address literal must be refused");
+            assert!(
+                err.to_string().contains("interface name"),
+                "the error must say why it is not being read as a name: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn media_addr_still_accepts_the_interface_names_that_look_like_addresses() {
+        // `eth0:0` is a real IPv4 alias label and getifaddrs reports
+        // it as the interface name, so the malformed-literal check
+        // must not swallow a single colon. A bare number is also a
+        // legal interface name, so digits alone are not enough to
+        // call something a failed address either.
+        for name in ["eth0:0", "123"] {
+            let policy = web_media_bind_policy(&web_args(&["--web-media-addr", name]))
+                .unwrap_or_else(|e| panic!("`{name}` is a legal interface name: {e}"));
+            assert_eq!(
+                policy.selectors,
+                vec![BindSelector::Interface(name.to_string())]
+            );
+        }
+    }
+
+    #[test]
+    fn ice_servers_are_empty_unless_given() {
+        assert!(web_ice_servers(&web_args(&[]))
+            .expect("no servers")
+            .is_empty());
+        assert_eq!(
+            web_ice_servers(&web_args(&[
+                "--web-ice-server",
+                "stun:stun.example.com:3478"
+            ]))
+            .expect("a well-formed stun URL"),
+            vec!["stun:stun.example.com:3478".to_string()]
+        );
+    }
+
+    #[test]
+    fn ice_servers_reject_a_url_with_no_scheme() {
+        // The scheme is easy to omit because the help text writes it
+        // inline. An ICE server is reached for precisely when host
+        // candidates do not work, so one that is silently useless
+        // looks identical to WebRTC being broken.
+        let err = web_ice_servers(&web_args(&["--web-ice-server", "stun.example.com:3478"]))
+            .expect_err("a URL with no scheme must be refused");
+        assert!(
+            err.to_string().contains("--web-ice-server"),
+            "the error must name the flag: {err}"
+        );
+    }
+
+    #[test]
+    fn ice_servers_reject_a_scheme_with_no_host() {
+        let err = web_ice_servers(&web_args(&["--web-ice-server", "turn:"]))
+            .expect_err("a scheme with no host must be refused");
+        assert!(err.to_string().contains("names no host"), "{err}");
+    }
+
+    #[test]
+    fn ice_servers_accept_every_documented_scheme() {
+        for url in [
+            "stun:stun.example.com:3478",
+            "stuns:stun.example.com:5349",
+            "turn:turn.example.com:3478",
+            "turns:turn.example.com:5349",
+        ] {
+            web_ice_servers(&web_args(&["--web-ice-server", url]))
+                .unwrap_or_else(|e| panic!("{url} should be accepted: {e}"));
+        }
     }
 }

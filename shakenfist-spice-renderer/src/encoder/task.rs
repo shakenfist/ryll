@@ -292,7 +292,7 @@ mod tests {
     /// buffer is not entirely zero.
     fn solid_frame(width: u32, height: u32) -> Vec<u8> {
         let mut buf = vec![0u8; (width as usize) * (height as usize) * 4];
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
         buf

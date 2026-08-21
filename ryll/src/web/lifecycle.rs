@@ -292,12 +292,9 @@ mod tests {
         let state = Arc::new(WebState::new());
 
         let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
-        let first = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: enc_tx.clone(),
-        })
-        .await
-        .expect("first bridge");
+        let first = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx.clone()))
+            .await
+            .expect("first bridge");
         let first_dead = first.dead_signal();
         {
             let mut slot = state.bridge_slot.lock().await;
@@ -311,12 +308,9 @@ mod tests {
 
         // Replace it, exactly as `post_offer` does: install, bump the
         // generation, then wake the reaper.
-        let second = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: enc_tx,
-        })
-        .await
-        .expect("second bridge");
+        let second = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx))
+            .await
+            .expect("second bridge");
         let second_dead = second.dead_signal();
         {
             let mut slot = state.bridge_slot.lock().await;
@@ -386,12 +380,9 @@ mod tests {
 
         // Built up front so the install below is quick enough to land
         // inside a single no-bridge sleep window.
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: enc_tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx))
+            .await
+            .expect("bridge");
         let dead = bridge.dead_signal();
 
         // Start the reaper with an empty slot and let it reach the

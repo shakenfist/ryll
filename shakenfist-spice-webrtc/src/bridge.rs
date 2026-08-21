@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
 
-use crate::bind_addrs::host_udp_bind_addrs;
+use crate::bind_addrs::UdpBindPolicy;
 use crate::sticky::StickySignal;
 
 // The protocol-level types come from `rtc`, the sans-io core, because
@@ -497,15 +497,33 @@ pub struct WebrtcBridgeConfig {
     /// encoder for an IDR keyframe whenever a viewer reaches
     /// `Connected`.
     pub encoder_control: mpsc::Sender<EncoderControl>,
+    /// Which local addresses to bind the ICE sockets to, and on which
+    /// port. [`UdpBindPolicy::default`] reproduces the behaviour this
+    /// bridge had before the policy was configurable: every interface
+    /// address that is not loopback, unspecified or IPv6 link-local,
+    /// each on an ephemeral port.
+    ///
+    /// Resolved on every [`WebrtcBridge::new`], not once per process,
+    /// so a long-lived session binds the addresses that exist when a
+    /// viewer arrives rather than the ones that existed at launch.
+    pub udp_bind: UdpBindPolicy,
 }
 
 impl WebrtcBridgeConfig {
-    /// Build a config with no ICE servers and the given encoder
-    /// control channel. Equivalent to setting `ice_servers = vec![]`.
+    /// Build a config with no ICE servers, the default UDP bind
+    /// policy, and the given encoder control channel.
+    ///
+    /// This is the constructor tests should use: assign only the
+    /// fields the test actually cares about afterwards, so that
+    /// adding a field here costs one line rather than one per call
+    /// site. The production caller (`ryll`'s signalling handler)
+    /// deliberately writes an explicit struct literal instead, so a
+    /// reviewer can see every value it chooses.
     pub fn new(encoder_control: mpsc::Sender<EncoderControl>) -> Self {
         Self {
             ice_servers: Vec::new(),
             encoder_control,
+            udp_bind: UdpBindPolicy::default(),
         }
     }
 }
@@ -707,15 +725,30 @@ impl WebrtcBridge {
         // advertise candidates no browser will use. Fail here rather than hand
         // back something that passes every test we have and reaches nobody. See
         // `crate::bind_addrs` and `docs/plans/PLAN-webrtc-0.20-upgrade.md`.
-        let udp_addrs = host_udp_bind_addrs();
+        let udp_addrs = config.udp_bind.resolve();
         if udp_addrs.is_empty() {
-            return Err(anyhow!(
-                "no bindable network interface: either enumeration failed or every address \
-                 this host reports is loopback, unspecified, or IPv6 link-local — check for an \
-                 earlier `host_udp_bind_addrs` warning to tell which. Either way the peer \
-                 connection could only offer ICE candidates no remote peer can reach"
-            ));
+            // The two empty cases have different fixes, so they get
+            // different messages: narrow the selectors, versus bring
+            // up an interface.
+            return Err(if config.udp_bind.selectors.is_empty() {
+                anyhow!(
+                    "no bindable network interface: either enumeration failed or every address \
+                     this host reports is loopback, unspecified, or IPv6 link-local — check for \
+                     an earlier `bind_addrs` warning to tell which. Either way the peer \
+                     connection could only offer ICE candidates no remote peer can reach. On a \
+                     host with only loopback, `--web-media-addr 127.0.0.1` binds it explicitly"
+                )
+            } else {
+                anyhow!(
+                    "no media bind address matched: nothing this host reports matches the \
+                     configured selectors, so the peer connection would have no ICE candidate \
+                     to offer — check the `--web-media-addr` values against the interfaces and \
+                     addresses this host actually has"
+                )
+            });
         }
+        let pinned_port = config.udp_bind.port;
+        let selectors_configured = !config.udp_bind.selectors.is_empty();
 
         // One handler replaces 0.17's four separate callback
         // registrations, and it has to be supplied *before* the peer
@@ -743,7 +776,41 @@ impl WebrtcBridge {
                 .with_handler(Arc::new(BridgeHandler(events.clone())))
                 .with_udp_addrs(udp_addrs)
                 .build()
-                .await?,
+                .await
+                .map_err(|e| {
+                    // Everything this can fail on that an operator
+                    // can act on was chosen by a flag, and webrtc-rs
+                    // reports all of it as a bare `UdpSocket::bind`
+                    // error naming neither. Say which flag chose
+                    // what, for each of the two that could be at
+                    // fault. Do not fall back to an ephemeral port or
+                    // to the default addresses: both were named
+                    // because something external — a firewall rule, a
+                    // routing decision — depends on them, so a quiet
+                    // fallback ships a bridge nothing reaches.
+                    // With neither flag set there is nothing to
+                    // name: the addresses came from enumerating this
+                    // host and the port is ephemeral.
+                    let mut clauses: Vec<String> = Vec::new();
+                    if selectors_configured {
+                        clauses.push(
+                            "the media bind addresses were chosen by `--web-media-addr`; check \
+                             they exist on this host (`ip addr`)"
+                                .to_string(),
+                        );
+                    }
+                    if pinned_port != 0 {
+                        clauses.push(format!(
+                            "the media port {pinned_port} was pinned by `--web-media-port`; \
+                             check nothing else holds it"
+                        ));
+                    }
+                    if clauses.is_empty() {
+                        anyhow!("peer connection build: {e}")
+                    } else {
+                        anyhow!("peer connection build: {e} — {}", clauses.join(", and "))
+                    }
+                })?,
         );
 
         // Video and audio tracks. 0.20 builds a track from a whole
@@ -1824,6 +1891,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
+    use crate::bind_addrs::BindSelector;
     use crate::test_client::TestPeer;
 
     /// Build a codec-parameters entry the way negotiation hands it to
@@ -2112,10 +2180,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_constructs_with_empty_ice_servers() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let config = WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        };
+        let config = WebrtcBridgeConfig::new(tx);
         let bridge = WebrtcBridge::new(config).await.expect("bridge constructs");
         bridge.close().await.expect("close");
     }
@@ -2124,12 +2189,9 @@ mod tests {
     async fn bridge_accept_offer_returns_answer_with_h264_and_opus() {
         // Build the bridge under test.
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge");
 
         // A separate "client" peer generates an offer for the bridge
         // to answer. No seed datachannel and no gathering wait: this
@@ -2167,12 +2229,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn video_pump_runs_without_errors() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: control_tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+            .await
+            .expect("bridge");
 
         // Encoder pipeline driven by a synthetic source.
         let encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
@@ -2218,12 +2277,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn synthetic_audio_pump_emits_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: control_tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+            .await
+            .expect("bridge");
 
         let pump = bridge.spawn_synthetic_audio_pump();
 
@@ -2251,12 +2307,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn audio_pump_forwards_real_opus_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: control_tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+            .await
+            .expect("bridge");
 
         // Encode a handful of synthetic Opus packets so the
         // payloader sees real Opus content (not random bytes).
@@ -2302,21 +2355,15 @@ mod tests {
     async fn control_datachannel_roundtrips_messages() {
         // Server bridge (the answerer).
         let (server_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
-        let server = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: server_enc_tx,
-        })
-        .await
-        .expect("server bridge");
+        let server = WebrtcBridge::new(WebrtcBridgeConfig::new(server_enc_tx))
+            .await
+            .expect("server bridge");
 
         // Client bridge (the offerer).
         let (client_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
-        let client = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: client_enc_tx,
-        })
-        .await
-        .expect("client bridge");
+        let client = WebrtcBridge::new(WebrtcBridgeConfig::new(client_enc_tx))
+            .await
+            .expect("client bridge");
 
         // Take receivers early — before any messages can arrive —
         // so the on_message handlers have a live channel to push
@@ -2431,12 +2478,9 @@ mod tests {
         let mut counts = Vec::new();
         for i in 0..iterations {
             let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-            let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-                ice_servers: vec![],
-                encoder_control: tx,
-            })
-            .await
-            .expect("bridge");
+            let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+                .await
+                .expect("bridge");
 
             let client = TestPeer::builder()
                 .seed_data_channel("client-seed")
@@ -2524,6 +2568,129 @@ mod tests {
         }
     }
 
+    /// A pinned media port reaches the answer SDP.
+    ///
+    /// `--web-media-port` exists so an operator can write one static
+    /// firewall rule instead of opening the whole ephemeral range, so
+    /// what matters is not that the bind succeeded but that the port
+    /// the operator opened is the port the browser is told to dial.
+    /// The candidate line is the only place that is observable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pinned_media_port_reaches_the_answer_sdp() {
+        // Ask the kernel for a free port and then pin it, rather than
+        // hard-coding one: a fixed number is a flake on any machine
+        // that happens to be using it, and the self-hosted runners
+        // run several jobs at once.
+        //
+        // The window between releasing the probe and the bridge
+        // binding is small but real — the other tests in this binary
+        // are taking ephemeral UDP ports the whole time — and losing
+        // it surfaces as "Address already in use" from `build()`,
+        // which reads like a product bug. Retry with a fresh probe
+        // instead, and only fail once three ports in a row have been
+        // taken out from under us, which is no longer bad luck.
+        // The receiver has to outlive the loop: dropping it would
+        // close the encoder-control channel the bridge holds a sender
+        // for.
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let mut attempt = 0;
+        let (bridge, port) = loop {
+            attempt += 1;
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0").expect("probe socket");
+            let port = probe.local_addr().expect("probe addr").port();
+            drop(probe);
+
+            let mut config = WebrtcBridgeConfig::new(tx.clone());
+            config.udp_bind = UdpBindPolicy {
+                selectors: Vec::new(),
+                port,
+            };
+            match WebrtcBridge::new(config).await {
+                Ok(bridge) => break (bridge, port),
+                Err(e) if attempt < 3 => {
+                    tracing::warn!("pinned port {port} was taken before the bridge bound: {e}");
+                }
+                Err(e) => panic!("bridge failed to bind a pinned port three times: {e}"),
+            }
+        };
+
+        let client = TestPeer::builder()
+            .seed_data_channel("client-seed")
+            .build()
+            .await
+            .expect("client peer");
+        let offer_sdp = client.offer_and_gather().await.expect("client offer");
+        let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
+
+        let candidate_lines: Vec<&str> = answer_sdp
+            .lines()
+            .filter(|l| l.starts_with("a=candidate:"))
+            .collect();
+        assert!(
+            !candidate_lines.is_empty(),
+            "answer carried no ICE candidates:\n{answer_sdp}"
+        );
+
+        // Port is the sixth space-separated field of an ICE candidate
+        // line (RFC 5245 §15.1), immediately after the address.
+        for line in &candidate_lines {
+            let advertised = line
+                .split_whitespace()
+                .nth(5)
+                .unwrap_or_else(|| panic!("malformed candidate line: {line}"));
+            assert_eq!(
+                advertised,
+                port.to_string(),
+                "a pinned media port must reach every host candidate, or the \
+                 firewall rule the operator wrote does not match what the \
+                 browser dials:\n{line}"
+            );
+        }
+
+        client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
+    }
+
+    /// Selectors that match nothing must say so as a selector
+    /// problem, not as "this host has no interfaces".
+    ///
+    /// The two empty-resolve cases have opposite fixes — fix the
+    /// typo, versus bring an interface up — so the branch is only
+    /// useful if it picks the right one. It runs exactly when an
+    /// operator has already made a mistake, which is when a
+    /// regression in it would go unnoticed, and it costs nothing to
+    /// pin: no interface anywhere is called this, and no socket is
+    /// bound on the way to the error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unmatched_selectors_report_a_selector_problem() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let mut config = WebrtcBridgeConfig::new(tx);
+        config.udp_bind = UdpBindPolicy {
+            selectors: vec![BindSelector::Interface(
+                "ryll-no-such-interface-0".to_string(),
+            )],
+            port: 0,
+        };
+
+        // `WebrtcBridge` is not `Debug`, so `expect_err` is out.
+        let err = match WebrtcBridge::new(config).await {
+            Ok(_) => panic!("a selector matching nothing cannot produce a usable bridge"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("no media bind address matched"),
+            "wrong empty-resolve branch: {err}"
+        );
+        assert!(
+            err.contains("--web-media-addr"),
+            "the error must name the flag that chose the selectors: {err}"
+        );
+        assert!(
+            !err.contains("no bindable network interface"),
+            "this host's interfaces are not the problem: {err}"
+        );
+    }
+
     /// The gathering signal must not fire before the local
     /// description actually carries the candidates.
     ///
@@ -2535,12 +2702,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn gathering_signal_fires_after_local_description_is_populated() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge");
 
         let client = TestPeer::builder()
             .seed_data_channel("client-seed")
@@ -2589,12 +2753,9 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge constructs");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge constructs");
 
         let result = bridge.accept_offer("not actually sdp".to_owned()).await;
         assert!(
@@ -2619,12 +2780,9 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge constructs");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge constructs");
 
         let pumps = bridge.dc_pumps.clone();
         assert!(
@@ -2653,12 +2811,9 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge constructs");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge constructs");
 
         let pumps = bridge.dc_pumps.clone();
         assert!(
@@ -2683,12 +2838,9 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig {
-            ice_servers: vec![],
-            encoder_control: tx,
-        })
-        .await
-        .expect("bridge constructs");
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            .await
+            .expect("bridge constructs");
 
         assert_ne!(bridge.video_ssrc, 0, "video SSRC must not be zero");
         assert_ne!(bridge.audio_ssrc, 0, "audio SSRC must not be zero");

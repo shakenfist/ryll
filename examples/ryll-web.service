@@ -26,6 +26,13 @@ EnvironmentFile=/etc/ryll/web.env
 #   WEB_PORT=8443
 #   WEB_TLS_CERT=/etc/ryll/tls/cert.pem
 #   WEB_TLS_KEY=/etc/ryll/tls/key.pem
+#
+# A host reachable through a firewall usually also wants the WebRTC
+# media port pinned, so one UDP rule covers it instead of the whole
+# ephemeral range. Add MEDIA_PORT=41000 to web.env and append
+# `--web-media-port ${MEDIA_PORT}` below. On a multi-homed host add
+# `--web-media-addr` with the interface facing the viewers; see
+# docs/configuration.md#web-mode.
 ExecStart=/usr/bin/ryll --web \
     --file ${VV_FILE} \
     --web-host ${WEB_HOST} \

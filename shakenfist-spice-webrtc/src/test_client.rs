@@ -265,7 +265,7 @@ impl TestPeerBuilder {
             return Err(anyhow!(
                 "no bindable network interface for the test peer: either enumeration failed \
                  or this host reports only loopback, unspecified or IPv6 link-local addresses \
-                 — check for an earlier `host_udp_bind_addrs` warning to tell which"
+                 — check for an earlier `bind_addrs` warning to tell which"
             ));
         }
 
@@ -612,7 +612,7 @@ mod tests {
             !udp_addrs.is_empty(),
             "no bindable network interface for the test peer: either enumeration failed or this \
              host reports only loopback, unspecified or IPv6 link-local addresses — check for an \
-             earlier `host_udp_bind_addrs` warning to tell which"
+             earlier `bind_addrs` warning to tell which"
         );
         Arc::new(
             PeerConnectionBuilder::new()
