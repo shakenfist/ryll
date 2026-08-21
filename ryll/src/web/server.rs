@@ -167,7 +167,10 @@ impl WebState {
             None,
             Arc::new(Mutex::new(SurfaceMirror::new())),
             Arc::new(std::sync::Mutex::new(None)),
-            UdpBindPolicy::default(),
+            // Loopback-capable, so the web tests still have an
+            // address to bind inside a network-isolated build
+            // sandbox. See `bind_policy_for_tests`.
+            shakenfist_spice_webrtc::bind_policy_for_tests(),
             Vec::new(),
         )
     }

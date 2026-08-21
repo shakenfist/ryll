@@ -36,7 +36,7 @@ use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
 async fn loopback_video_audio_datachannel() {
     // ── Server: production WebrtcBridge ──────────────────────────
     let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
-    let server = WebrtcBridge::new(WebrtcBridgeConfig::new(server_enc_tx))
+    let server = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(server_enc_tx))
         .await
         .expect("server bridge");
 
@@ -260,7 +260,7 @@ async fn loopback_video_audio_datachannel() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
     let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
-    let server = WebrtcBridge::new(WebrtcBridgeConfig::new(server_enc_tx))
+    let server = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(server_enc_tx))
         .await
         .expect("server bridge");
 

@@ -18,6 +18,8 @@ mod bind_addrs;
 mod bridge;
 mod sticky;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use bind_addrs::bind_policy_for_tests;
 pub use bind_addrs::{host_udp_bind_addrs, BindSelector, UdpBindPolicy};
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
 pub use sticky::StickySignal;

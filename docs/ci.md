@@ -344,6 +344,25 @@ natively rather than in the devcontainer and use
 `Swatinem/rust-cache`; the `--network none` isolation applies only
 to the containerised Linux builds.)
 
+Severing the network namespace leaves the container with only
+`lo`, which the WebRTC tests notice: the default UDP bind policy
+excludes loopback, so on such a host it correctly resolves to
+nothing and refuses to build a peer connection (see
+`shakenfist-spice-webrtc/src/bind_addrs.rs`). Tests go through
+`bind_policy_for_tests` and `WebrtcBridgeConfig::for_tests`
+instead, which fall back to binding loopback when the host offers
+nothing else — the peers they connect are in the same process, so
+a loopback candidate serves. The production default is
+deliberately left alone: a server that quietly bound loopback
+would advertise candidates no browser could reach, which is what
+`--web-media-addr 127.0.0.1` exists to make a deliberate choice.
+
+The trade-off to know about: under isolation those tests no
+longer exercise binding a real interface address, which is the
+failure a wrong bind address produces. Nothing in CI covers that
+— it is what the browser session in the webrtc-rs 0.20 upgrade's
+soak phase is for.
+
 ## Supply-chain policy
 
 The scanner jobs above enforce policy that lives in files at the

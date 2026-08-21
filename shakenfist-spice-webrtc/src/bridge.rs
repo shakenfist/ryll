@@ -513,17 +513,37 @@ impl WebrtcBridgeConfig {
     /// Build a config with no ICE servers, the default UDP bind
     /// policy, and the given encoder control channel.
     ///
-    /// This is the constructor tests should use: assign only the
-    /// fields the test actually cares about afterwards, so that
-    /// adding a field here costs one line rather than one per call
-    /// site. The production caller (`ryll`'s signalling handler)
+    /// The production caller (`ryll`'s signalling handler)
     /// deliberately writes an explicit struct literal instead, so a
-    /// reviewer can see every value it chooses.
+    /// reviewer can see every value it chooses. This exists for any
+    /// other caller that wants the defaults; tests want
+    /// [`WebrtcBridgeConfig::for_tests`] instead.
     pub fn new(encoder_control: mpsc::Sender<EncoderControl>) -> Self {
         Self {
             ice_servers: Vec::new(),
             encoder_control,
             udp_bind: UdpBindPolicy::default(),
+        }
+    }
+
+    /// [`WebrtcBridgeConfig::new`], but binding loopback on a host
+    /// that has no routable address.
+    ///
+    /// This is the constructor tests should use: assign only the
+    /// fields the test actually cares about afterwards, so that
+    /// adding a field here costs one line rather than one per call
+    /// site.
+    ///
+    /// The difference from `new` is the bind policy, and it matters
+    /// only inside a network-isolated build sandbox, where `lo` is
+    /// the whole interface list. See
+    /// [`crate::bind_policy_for_tests`] for why that is a test
+    /// concern rather than a reason to soften the default.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests(encoder_control: mpsc::Sender<EncoderControl>) -> Self {
+        Self {
+            udp_bind: crate::bind_addrs::bind_policy_for_tests(),
+            ..Self::new(encoder_control)
         }
     }
 }
@@ -2180,7 +2200,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bridge_constructs_with_empty_ice_servers() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let config = WebrtcBridgeConfig::new(tx);
+        let config = WebrtcBridgeConfig::for_tests(tx);
         let bridge = WebrtcBridge::new(config).await.expect("bridge constructs");
         bridge.close().await.expect("close");
     }
@@ -2189,7 +2209,7 @@ mod tests {
     async fn bridge_accept_offer_returns_answer_with_h264_and_opus() {
         // Build the bridge under test.
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge");
 
@@ -2229,7 +2249,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn video_pump_runs_without_errors() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(control_tx))
             .await
             .expect("bridge");
 
@@ -2277,7 +2297,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn synthetic_audio_pump_emits_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(control_tx))
             .await
             .expect("bridge");
 
@@ -2307,7 +2327,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn audio_pump_forwards_real_opus_packets() {
         let (control_tx, _control_rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(control_tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(control_tx))
             .await
             .expect("bridge");
 
@@ -2355,13 +2375,13 @@ mod tests {
     async fn control_datachannel_roundtrips_messages() {
         // Server bridge (the answerer).
         let (server_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
-        let server = WebrtcBridge::new(WebrtcBridgeConfig::new(server_enc_tx))
+        let server = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(server_enc_tx))
             .await
             .expect("server bridge");
 
         // Client bridge (the offerer).
         let (client_enc_tx, _) = mpsc::channel::<EncoderControl>(4);
-        let client = WebrtcBridge::new(WebrtcBridgeConfig::new(client_enc_tx))
+        let client = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(client_enc_tx))
             .await
             .expect("client bridge");
 
@@ -2478,7 +2498,7 @@ mod tests {
         let mut counts = Vec::new();
         for i in 0..iterations {
             let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-            let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+            let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
                 .await
                 .expect("bridge");
 
@@ -2600,10 +2620,14 @@ mod tests {
             let port = probe.local_addr().expect("probe addr").port();
             drop(probe);
 
-            let mut config = WebrtcBridgeConfig::new(tx.clone());
+            let mut config = WebrtcBridgeConfig::for_tests(tx.clone());
+            // Pin the port on whatever the test policy selected, so
+            // this still has an address to bind under `--network
+            // none`. What the test asserts is the port on every
+            // candidate, which holds whichever address carries it.
             config.udp_bind = UdpBindPolicy {
-                selectors: Vec::new(),
                 port,
+                ..config.udp_bind
             };
             match WebrtcBridge::new(config).await {
                 Ok(bridge) => break (bridge, port),
@@ -2664,7 +2688,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unmatched_selectors_report_a_selector_problem() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let mut config = WebrtcBridgeConfig::new(tx);
+        let mut config = WebrtcBridgeConfig::for_tests(tx);
         config.udp_bind = UdpBindPolicy {
             selectors: vec![BindSelector::Interface(
                 "ryll-no-such-interface-0".to_string(),
@@ -2702,7 +2726,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn gathering_signal_fires_after_local_description_is_populated() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge");
 
@@ -2753,7 +2777,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge constructs");
 
@@ -2780,7 +2804,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge constructs");
 
@@ -2811,7 +2835,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge constructs");
 
@@ -2838,7 +2862,7 @@ mod tests {
         use tokio::sync::mpsc;
 
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
             .await
             .expect("bridge constructs");
 

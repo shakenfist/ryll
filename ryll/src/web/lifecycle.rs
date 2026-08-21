@@ -292,7 +292,7 @@ mod tests {
         let state = Arc::new(WebState::new());
 
         let (enc_tx, _enc_rx) = mpsc::channel::<EncoderControl>(4);
-        let first = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx.clone()))
+        let first = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx.clone()))
             .await
             .expect("first bridge");
         let first_dead = first.dead_signal();
@@ -308,7 +308,7 @@ mod tests {
 
         // Replace it, exactly as `post_offer` does: install, bump the
         // generation, then wake the reaper.
-        let second = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx))
+        let second = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx))
             .await
             .expect("second bridge");
         let second_dead = second.dead_signal();
@@ -380,7 +380,7 @@ mod tests {
 
         // Built up front so the install below is quick enough to land
         // inside a single no-bridge sleep window.
-        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::new(enc_tx))
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(enc_tx))
             .await
             .expect("bridge");
         let dead = bridge.dead_signal();

@@ -52,7 +52,7 @@ use webrtc::peer_connection::{
 };
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
-use crate::bind_addrs::host_udp_bind_addrs;
+use crate::bind_addrs::bind_policy_for_tests;
 use crate::bridge::register_h264;
 use crate::sticky::StickySignal;
 
@@ -256,16 +256,17 @@ impl TestPeerBuilder {
         });
 
         // Bind the same interface addresses the bridge does; see
-        // `crate::bind_addrs` for why not `0.0.0.0`. A host with
-        // nothing but loopback cannot run these tests at all, so say so
-        // here rather than let it surface as an unexplained handshake
-        // timeout twenty seconds later.
-        let udp_addrs = host_udp_bind_addrs();
+        // `crate::bind_addrs` for why not `0.0.0.0`. Loopback is
+        // included when the host has nothing else, because the peer
+        // this talks to is in the same process — see
+        // `bind_policy_for_tests`. The guard stays: enumeration can
+        // still fail outright, and saying so here beats an
+        // unexplained handshake timeout twenty seconds later.
+        let udp_addrs = bind_policy_for_tests().resolve();
         if udp_addrs.is_empty() {
             return Err(anyhow!(
-                "no bindable network interface for the test peer: either enumeration failed \
-                 or this host reports only loopback, unspecified or IPv6 link-local addresses \
-                 — check for an earlier `bind_addrs` warning to tell which"
+                "no bindable address for the test peer, not even loopback: interface \
+                 enumeration must have failed — check for an earlier `bind_addrs` warning"
             ));
         }
 
@@ -607,12 +608,11 @@ mod tests {
         // Without it a loopback-only host fails these two tests with an
         // opaque builder error while every other test in the file
         // explains itself.
-        let udp_addrs = host_udp_bind_addrs();
+        let udp_addrs = bind_policy_for_tests().resolve();
         assert!(
             !udp_addrs.is_empty(),
-            "no bindable network interface for the test peer: either enumeration failed or this \
-             host reports only loopback, unspecified or IPv6 link-local addresses — check for an \
-             earlier `bind_addrs` warning to tell which"
+            "no bindable address for the test peer, not even loopback: interface enumeration \
+             must have failed — check for an earlier `bind_addrs` warning"
         );
         Arc::new(
             PeerConnectionBuilder::new()

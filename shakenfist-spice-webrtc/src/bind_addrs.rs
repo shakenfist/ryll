@@ -367,6 +367,47 @@ pub fn host_udp_bind_addrs() -> Vec<SocketAddr> {
     UdpBindPolicy::default().resolve()
 }
 
+/// The default policy, or an explicit loopback bind on a host that
+/// has nothing else.
+///
+/// A test peer and a bridge under test both need *some* address to
+/// bind, and they do not care which: the handshake they exercise
+/// happens between two peers inside one process, where a loopback
+/// candidate works exactly as well as a routable one. A build
+/// sandbox with no network namespace — `docker run --network none`,
+/// which is how this workspace compiles and tests untrusted build
+/// scripts — reports only `lo`, so the default policy correctly
+/// resolves to nothing and every such test fails on an error that is
+/// right about the host and irrelevant to what the test asserts.
+///
+/// This is the loopback-only deployment shape the module docs
+/// describe, and the override is the sanctioned one: loopback is
+/// policy, so naming it explicitly is how a caller opts in. That the
+/// production default still refuses to guess is the point — a server
+/// that silently bound loopback would advertise candidates no browser
+/// could reach, which is the failure `--web-media-addr 127.0.0.1`
+/// exists to make deliberate.
+///
+/// Gated to tests and the `test-support` feature so it cannot become
+/// a production caller's shortcut past that decision.
+#[cfg(any(test, feature = "test-support"))]
+pub fn bind_policy_for_tests() -> UdpBindPolicy {
+    let default = UdpBindPolicy::default();
+    if !default.resolve().is_empty() {
+        return default;
+    }
+    tracing::debug!(
+        "bind_addrs: no routable address on this host — binding loopback so in-process peers \
+         can still reach each other"
+    );
+    UdpBindPolicy {
+        selectors: vec![BindSelector::Addr(IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        ))],
+        port: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
