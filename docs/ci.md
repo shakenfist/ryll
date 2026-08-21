@@ -329,7 +329,7 @@ compiles. To contain that, the Makefile splits the build in two:
   none` and the cargo cache mounted read-only. A malicious build
   script cannot reach a C2 or exfiltrate secrets (its download call
   fails and the build aborts loudly), and it cannot poison the
-  cache for later runs.
+  cache for the rest of the job.
 
 This is the same reason docs.rs builds every crate offline, and is
 what would have turned the 2026-08-20 `arrayref` / `proc-macro1`
@@ -351,7 +351,25 @@ and `publish-crates` on every release.
   upload. This one cannot be isolated.
 
 (`fuzz-fmt-check` also runs networked, but it only runs `cargo
-fmt --check` and compiles nothing.)
+fmt --check` and compiles nothing. So do `deb`, `rpm` and the
+`web-smoke` targets, which repackage or run the binary `release`
+already produced.)
+
+Outside the Makefile entirely: release's `build-ryll-wheels` job
+runs `tools/build-ryll-wheel.sh`, which builds ryll with maturin
+inside `quay.io/pypa/manylinux_2_28_*` rather than the
+devcontainer, with network and without `--frozen`. That is a
+shipped artifact — it is what `pip install ryll` gets — so it is
+the most significant gap here. Closing it needs the same
+fetch/compile split inside the manylinux image; until then the
+wheel is built on the same terms as before this change.
+
+Because those jobs write the cargo cache with the network up,
+they save it under their own `actions/cache` key prefix
+(`fuzz-cargo-cache`, `publish-cargo-cache`) rather than the shared
+one. Otherwise a networked, writable-cache job could hand the next
+run's isolated build the very cache the read-only mount exists to
+protect — the mount stops poisoning within a job, not across them.
 
 What the isolation does not buy: the checkout stays mounted
 read-write, because the build has to write `target/`. A build

@@ -19,6 +19,16 @@ description: >-
 # a prefix restore-key so a lockfile bump still warm-starts from the
 # previous one. The cache holds only downloaded sources, which are
 # architecture-independent, so one key serves every Linux runner.
+inputs:
+  key-prefix:
+    description: >-
+      Cache key prefix. A job that compiles with the network up and the
+      cache writable MUST pass its own, so the cache it saves can never
+      become the read-only input an isolated compile trusts on a later
+      run. Read-only-cache jobs share the default.
+    required: false
+    default: cargo-cache
+
 runs:
   using: composite
   steps:
@@ -26,6 +36,6 @@ runs:
       uses: actions/cache@v4
       with:
         path: .cargo-cache
-        key: cargo-cache-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        key: ${{ inputs.key-prefix }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
-          cargo-cache-${{ runner.os }}-
+          ${{ inputs.key-prefix }}-${{ runner.os }}-

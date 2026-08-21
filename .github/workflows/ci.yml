@@ -347,8 +347,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Must stay directly after checkout; see the action for why.
+      # Must stay directly after checkout; see the action for why. Its
+      # own key prefix: the fuzz targets compile with the network up and
+      # the cache writable, so what this job saves must never become the
+      # read-only input to an isolated build.
       - uses: ./.github/actions/cargo-cache
+        with:
+          key-prefix: fuzz-cargo-cache
 
       # The fuzz crate is a detached workspace, so the lint job's
       # `cargo fmt --all --check` does not reach it. Format-check it here.

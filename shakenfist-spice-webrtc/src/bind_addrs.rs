@@ -376,10 +376,17 @@ pub fn host_udp_bind_addrs() -> Vec<SocketAddr> {
 /// explicit loopback bind on a host that has nothing else.
 ///
 /// [`bind_policy_for_tests`] and [`bind_addrs_for_tests`] are the
-/// two views of this. Both come out of a single interface
-/// enumeration, so a caller that wants the addresses does not
-/// resolve a second time, and the decision and the use cannot
-/// disagree about what this host offers.
+/// two views of this, and they guarantee different things.
+/// `bind_addrs_for_tests` hands back the addresses this one
+/// enumeration produced, so the decision and the use cannot
+/// disagree and the result cannot be empty. `bind_policy_for_tests`
+/// hands back `UdpBindPolicy::default()` unchanged on a host that
+/// has routable addresses, which `WebrtcBridge::new` then resolves
+/// again — deliberately, because resolving per `new` is how an
+/// interface appearing mid-session is picked up, and it is what
+/// production does. Only in the fallback case is the returned
+/// policy an explicit `BindSelector::Addr`, which resolves without
+/// enumerating at all.
 ///
 /// A test peer and a bridge under test both need *some* address to
 /// bind, and they do not care which: the handshake they exercise
@@ -571,6 +578,8 @@ mod tests {
         // host-coupled, because the fallback exists precisely to make
         // the host stop mattering.
         assert!(!bind_addrs_for_tests().is_empty());
+        // The policy view re-resolves by design (see `bind_for_tests`);
+        // this pins that what it hands back is still usable.
         assert!(!bind_policy_for_tests().resolve().is_empty());
     }
 

@@ -13,6 +13,15 @@ DEVCONTAINER_DIR := .devcontainer
 # itself be absolute. `make clean` only removes the cache when it lies
 # inside the checkout, so pointing this at a shared directory is safe.
 CARGO_CACHE ?= .cargo-cache
+# `?=` treats CARGO_CACHE= in the environment as set, so an override fed
+# by an unset CI variable leaves this empty. Every target degrades badly
+# on that -- the mounts become -v "/registry":..., the mkdir rule becomes
+# `mkdir -p /registry`, and `clean` used to expand to `rm -rf /` -- and
+# the resulting permission error names none of it. One check at parse
+# time covers the lot.
+ifeq ($(strip $(CARGO_CACHE)),)
+$(error CARGO_CACHE is empty; unset it or give it a path)
+endif
 CARGO_CACHE_DIR := $(abspath $(CARGO_CACHE))
 
 # Test QEMU SPICE server settings
@@ -69,8 +78,15 @@ CACHE_MOUNTS_RO := \
 	-v "$(CARGO_CACHE_DIR)/registry":/build/.cargo/registry:ro \
 	-v "$(CARGO_CACHE_DIR)/git":/build/.cargo/git:ro
 
-# Networked invocation with a writable cache. Used only by `fetch`
-# (and the permission fix in ensure-cache).
+# Networked invocation with a writable cache. Used by `fetch` and
+# `lock`; by the packaging and smoke targets that run after a build
+# (`deb`, `rpm`, `web-smoke`, `web-smoke-tls`), which repackage or run
+# an already-built binary and so compile nothing; and by the fuzz and
+# publish targets (`fuzz-fmt-check`, `fuzz-build-%`, `fuzz-smoke-%`,
+# `publish-crates`), which do compile with the network up -- see
+# docs/ci.md for why those cannot be isolated. `ensure-cache`'s
+# permission fix is not one of these: it needs a root container, so it
+# writes its own docker run.
 DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 
 # Offline invocation for every target that compiles crates. A build
@@ -85,7 +101,7 @@ DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS_RO)
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
-	devcontainer fuzz-devcontainer ensure-cache fetch lint lint-fix test help \
+	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
 	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
@@ -96,6 +112,7 @@ all: build
 help:
 	@echo "Ryll build targets:"
 	@echo "  make fetch                  - Pre-download crates into the cargo cache"
+	@echo "  make lock                   - Refresh Cargo.lock after a dependency change"
 	@echo "  make build                  - Build debug version"
 	@echo "  make release                - Build release version"
 	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
@@ -151,6 +168,16 @@ ensure-cache: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 # --locked additionally refuses to proceed if Cargo.lock is stale.
 fetch: ensure-cache
 	$(DOCKER_RUN) $(RYLL_IMAGE) cargo fetch --locked
+
+# Refresh Cargo.lock after editing a Cargo.toml. The only target
+# allowed to write the lockfile: `fetch` passes --locked and every
+# compile passes --frozen, so without this there is no in-devcontainer
+# path to a lockfile update at all, and the first `make build` after
+# adding or bumping a dependency fails at `fetch` with "the lock file
+# needs to be updated but --locked was passed". Still runs no build
+# script -- `cargo fetch` resolves and downloads, it does not compile.
+lock: ensure-cache
+	$(DOCKER_RUN) $(RYLL_IMAGE) cargo fetch
 
 # Build debug version
 build: fetch
@@ -365,13 +392,10 @@ macos-release: macos-prereqs
 # The cargo cache is only removed when it lives inside the checkout.
 # CARGO_CACHE may point at a shared directory that outlives this
 # checkout (see its comment at the top of this file), and `clean` has
-# no business deleting that. The emptiness check is separate because
-# `?=` treats CARGO_CACHE= in the environment as set, which used to
-# expand the removal to `rm -rf /`.
+# no business deleting that. An empty CARGO_CACHE is rejected at parse
+# time, so this recipe only has to decide in-tree versus out-of-tree.
 clean:
 	rm -rf target/
-	@test -n "$(CARGO_CACHE)" || \
-		{ echo "CARGO_CACHE is empty; refusing to clean it"; exit 1; }
 	@case "$(CARGO_CACHE_DIR)/" in \
 		"$(CURDIR)"/?*) rm -rf "$(CARGO_CACHE_DIR)/" ;; \
 		*) echo "Kept $(CARGO_CACHE_DIR) (not below $(CURDIR); delete by hand)" ;; \
