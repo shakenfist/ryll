@@ -53,10 +53,6 @@
       "sha": "8df3b465acfd467da5245995c1443a2d348b6983",
       "date": "2026-08-18"
     },
-    "ARCHITECTURE.md": {
-      "sha": "fbe810c11deb10e34e2b2a4ee0a8481c74bef746",
-      "date": "2026-08-18"
-    },
     "MERGE-TEMPLATE.md": {
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
       "date": "2026-08-18"
@@ -89,10 +85,6 @@
       "sha": "042bf7c62c659a54c4c4119ff08e2b7a62275bed",
       "date": "2026-08-17"
     },
-    "docs/configuration.md": {
-      "sha": "5f4aee4f262c90d50bbd9d96579ae920ec6eca06",
-      "date": "2026-08-17"
-    },
     "docs/control-socket-protocol.md": {
       "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
       "date": "2026-08-17"
@@ -101,10 +93,6 @@
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
     },
-    "docs/development.md": {
-      "sha": "4caf5a811e110f71f46a66219f7db95e7c426f4c",
-      "date": "2026-08-18"
-    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
@@ -112,10 +100,6 @@
     "docs/diagnostics.md": {
       "sha": "ff45c64109f364312e58a11ddb53a2139d639068",
       "date": "2026-08-17"
-    },
-    "docs/features.md": {
-      "sha": "4027fad8f45878989daa71ac06139b3ab9f33190",
-      "date": "2026-08-18"
     },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
@@ -127,10 +111,6 @@
     },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
-      "date": "2026-08-18"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "0ce51313f10dfac71f37e1f635704ccedc20f066",
       "date": "2026-08-18"
     },
     "docs/portability.md": {
@@ -156,14 +136,6 @@
     "docs/troubleshooting.md": {
       "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
-    },
-    "docs/web-frontend.md": {
-      "sha": "f35462ac4c61419d48d392f52a51e3c66eccd12c",
-      "date": "2026-08-18"
-    },
-    "examples/ryll-web.service": {
-      "sha": "a55c1b607f576ff8e34421401b6e692d9da43052",
-      "date": "2026-08-02"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
@@ -195,10 +167,6 @@
     },
     "ryll/src/web/cursor.rs": {
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
-      "date": "2026-08-18"
-    },
-    "ryll/src/web/lifecycle.rs": {
-      "sha": "0b42f39fc6219b2b6bf721f8476754c4d0ed2a57",
       "date": "2026-08-18"
     },
     "ryll/src/web/mod.rs": {

@@ -296,10 +296,6 @@
       "author": "mikal"
     },
     {
-      "path": "examples/ryll-web.service",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-usbredir/README.md",
       "author": "mikal"
     },
@@ -412,10 +408,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/control-socket-protocol.md",
       "author": "mikal"
     },
@@ -456,19 +448,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/macos-metrics-verification.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/multi-mode-parity.md",
       "author": "mikal"
     },
     {
@@ -476,15 +456,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
       "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ARCHITECTURE.md",
       "author": "mikal"
     },
     {
@@ -513,10 +485,6 @@
     },
     {
       "path": "ryll/src/web/cursor.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/lifecycle.rs",
       "author": "mikal"
     },
     {
