@@ -311,7 +311,10 @@ fn reject_malformed_address(value: &str) -> Result<()> {
              Pass an address literal, or an interface name such as `--web-media-addr eth0`"
         );
     }
-    if !value.is_empty() && value.chars().all(|c| c.is_ascii_digit() || c == '.') {
+    // The dot is what makes it an attempted address rather than a
+    // name: a bare number is a legal interface name on Linux, so
+    // `--web-media-addr 123` has to stay a name.
+    if value.contains('.') && value.chars().all(|c| c.is_ascii_digit() || c == '.') {
         bail!(
             "`{value}` is not a valid IPv4 address and cannot be an interface name either. \
              Pass an address literal, or an interface name such as `--web-media-addr eth0`"
@@ -903,16 +906,20 @@ mod tests {
     }
 
     #[test]
-    fn media_addr_still_accepts_an_alias_interface_label() {
+    fn media_addr_still_accepts_the_interface_names_that_look_like_addresses() {
         // `eth0:0` is a real IPv4 alias label and getifaddrs reports
         // it as the interface name, so the malformed-literal check
-        // must not swallow a single colon.
-        let policy = web_media_bind_policy(&web_args(&["--web-media-addr", "eth0:0"]))
-            .expect("an alias interface label is a name, not a broken address");
-        assert_eq!(
-            policy.selectors,
-            vec![BindSelector::Interface("eth0:0".to_string())]
-        );
+        // must not swallow a single colon. A bare number is also a
+        // legal interface name, so digits alone are not enough to
+        // call something a failed address either.
+        for name in ["eth0:0", "123"] {
+            let policy = web_media_bind_policy(&web_args(&["--web-media-addr", name]))
+                .unwrap_or_else(|e| panic!("`{name}` is a legal interface name: {e}"));
+            assert_eq!(
+                policy.selectors,
+                vec![BindSelector::Interface(name.to_string())]
+            );
+        }
     }
 
     #[test]
