@@ -80,20 +80,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Persist the cargo download cache across runs, outside the build
-      # container. checkout's default `clean: true` runs `git clean
-      # -ffdx` and so deletes the gitignored .cargo-cache every run;
-      # restoring it here (after checkout) is what makes `make fetch`
-      # incremental instead of re-downloading the whole tree each time.
-      # Keyed on Cargo.lock so a dependency change starts a fresh entry,
-      # with a prefix restore-key so a lockfile bump still warm-starts.
-      - name: Cache cargo downloads
-        uses: actions/cache@v4
-        with:
-          path: .cargo-cache
-          key: cargo-cache-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-cache-${{ runner.os }}-
+      # Must stay directly after checkout; see the action for why.
+      - uses: ./.github/actions/cargo-cache
 
       - name: Build
         run: make release
@@ -338,6 +326,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
+
+      # Must stay directly after checkout; see the action for why.
+      - uses: ./.github/actions/cargo-cache
 
       # tools/publish-crates.sh publishes the six workspace crates
       # serially in dependency order inside the devcontainer.

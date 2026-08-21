@@ -43,7 +43,9 @@ time (see [build network isolation](ci.md#build-network-isolation)).
 Run `make fetch` on its own after changing dependencies to
 pre-download without building. The cache lives in `.cargo-cache`;
 override `CARGO_CACHE` to move it (for example to a location a CI
-runner keeps between jobs).
+runner keeps between jobs). `make clean` removes the cache only
+when it sits inside the checkout, so a shared out-of-tree cache
+survives.
 
 ## Building with a local Rust installation
 

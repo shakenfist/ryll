@@ -12,14 +12,15 @@
 //! operator may override). [`WebrtcBridge::new`] resolves it on every
 //! call and fails construction if it comes back empty.
 //! [`host_udp_bind_addrs`] is the default policy as a function, for
-//! callers with no configuration surface of their own.
+//! external consumers of this crate with no configuration surface of
+//! their own; nothing in this workspace calls it.
 
 mod bind_addrs;
 mod bridge;
 mod sticky;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use bind_addrs::bind_policy_for_tests;
+pub use bind_addrs::{bind_addrs_for_tests, bind_policy_for_tests};
 pub use bind_addrs::{host_udp_bind_addrs, BindSelector, UdpBindPolicy};
 pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
 pub use sticky::StickySignal;

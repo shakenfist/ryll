@@ -10,7 +10,8 @@ DEVCONTAINER_DIR := .devcontainer
 # in-checkout default is deleted by `actions/checkout`, whose default
 # `clean: true` runs `git clean -ffdx` and so removes this gitignored
 # directory every run). Resolved to an absolute path so an override may
-# itself be absolute.
+# itself be absolute. `make clean` only removes the cache when it lies
+# inside the checkout, so pointing this at a shared directory is safe.
 CARGO_CACHE ?= .cargo-cache
 CARGO_CACHE_DIR := $(abspath $(CARGO_CACHE))
 
@@ -84,7 +85,7 @@ DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
 DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS_RO)
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
-	devcontainer fuzz-devcontainer ensure-cache lint lint-fix test help \
+	devcontainer fuzz-devcontainer ensure-cache fetch lint lint-fix test help \
 	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
@@ -94,6 +95,7 @@ all: build
 
 help:
 	@echo "Ryll build targets:"
+	@echo "  make fetch                  - Pre-download crates into the cargo cache"
 	@echo "  make build                  - Build debug version"
 	@echo "  make release                - Build release version"
 	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
@@ -358,10 +360,22 @@ macos-release: macos-prereqs
 	@echo ""
 	@echo "Built release binary: target/release/ryll"
 
-# Clean build artifacts
+# Clean build artifacts.
+#
+# The cargo cache is only removed when it lives inside the checkout.
+# CARGO_CACHE may point at a shared directory that outlives this
+# checkout (see its comment at the top of this file), and `clean` has
+# no business deleting that. The emptiness check is separate because
+# `?=` treats CARGO_CACHE= in the environment as set, which used to
+# expand the removal to `rm -rf /`.
 clean:
 	rm -rf target/
-	rm -rf $(CARGO_CACHE)/
+	@test -n "$(CARGO_CACHE)" || \
+		{ echo "CARGO_CACHE is empty; refusing to clean it"; exit 1; }
+	@case "$(CARGO_CACHE_DIR)/" in \
+		"$(CURDIR)"/?*) rm -rf "$(CARGO_CACHE_DIR)/" ;; \
+		*) echo "Kept $(CARGO_CACHE_DIR) (not below $(CURDIR); delete by hand)" ;; \
+	esac
 
 # Clean test data files
 clean-testdata:

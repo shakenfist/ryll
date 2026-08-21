@@ -2688,6 +2688,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unmatched_selectors_report_a_selector_problem() {
         let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        // `for_tests` for call-site uniformity only; the policy it
+        // picks is overwritten on the next line.
         let mut config = WebrtcBridgeConfig::for_tests(tx);
         config.udp_bind = UdpBindPolicy {
             selectors: vec![BindSelector::Interface(

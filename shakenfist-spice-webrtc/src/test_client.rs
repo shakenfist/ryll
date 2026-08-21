@@ -52,7 +52,7 @@ use webrtc::peer_connection::{
 };
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
-use crate::bind_addrs::bind_policy_for_tests;
+use crate::bind_addrs::bind_addrs_for_tests;
 use crate::bridge::register_h264;
 use crate::sticky::StickySignal;
 
@@ -258,17 +258,10 @@ impl TestPeerBuilder {
         // Bind the same interface addresses the bridge does; see
         // `crate::bind_addrs` for why not `0.0.0.0`. Loopback is
         // included when the host has nothing else, because the peer
-        // this talks to is in the same process — see
-        // `bind_policy_for_tests`. The guard stays: enumeration can
-        // still fail outright, and saying so here beats an
-        // unexplained handshake timeout twenty seconds later.
-        let udp_addrs = bind_policy_for_tests().resolve();
-        if udp_addrs.is_empty() {
-            return Err(anyhow!(
-                "no bindable address for the test peer, not even loopback: interface \
-                 enumeration must have failed — check for an earlier `bind_addrs` warning"
-            ));
-        }
+        // this talks to is in the same process. There is no guard
+        // here because `bind_addrs_for_tests` is never empty by
+        // construction — see its doc comment.
+        let udp_addrs = bind_addrs_for_tests();
 
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
@@ -604,16 +597,10 @@ mod tests {
     async fn raw_peer(mut media_engine: MediaEngine) -> Arc<dyn PeerConnection> {
         let registry = register_default_interceptors(Registry::new(), &mut media_engine)
             .expect("interceptors");
-        // Same guard as `TestPeerBuilder::build` and `WebrtcBridge::new`.
-        // Without it a loopback-only host fails these two tests with an
-        // opaque builder error while every other test in the file
-        // explains itself.
-        let udp_addrs = bind_policy_for_tests().resolve();
-        assert!(
-            !udp_addrs.is_empty(),
-            "no bindable address for the test peer, not even loopback: interface enumeration \
-             must have failed — check for an earlier `bind_addrs` warning"
-        );
+        // Same address source as `TestPeerBuilder::build`, so a
+        // loopback-only host builds these two hand-rolled peers on
+        // the same terms as every other peer in the file.
+        let udp_addrs = bind_addrs_for_tests();
         Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(RTCConfigurationBuilder::new().build())
