@@ -2,8 +2,10 @@
 //!
 //! Everything the server pushes to `app.js` travels as JSON over the
 //! one control datachannel the bridge owns — cursor shapes and
-//! positions from [`super::cursor`], and the negotiated mouse mode
-//! from [`super::inputs`]. This module holds the pieces both need:
+//! positions from [`super::cursor`], the negotiated mouse mode from
+//! [`super::inputs`], and the "your browser offered no video codec"
+//! notice from the same place. This module holds the pieces they
+//! need:
 //! the message envelopes, an outbound queue, and the task that drains
 //! it onto whichever bridge is currently installed.
 //!
@@ -56,6 +58,17 @@ pub(crate) type ControlSink = mpsc::Sender<Vec<u8>>;
 pub(crate) enum ControlMsg {
     #[serde(rename = "mouse-mode")]
     MouseMode { mode: u32 },
+    /// Tell the browser its own offer carried no codec ryll can
+    /// encode, so it will never see a picture on this session.
+    ///
+    /// Sent only in reply to `BrowserMsg::Hello`, never pushed:
+    /// negotiation settles inside `accept_offer`, long before SCTP
+    /// opens this channel, so a push would be written into a
+    /// channel that does not exist yet and silently dropped. The
+    /// wording lives in `app.js` — this is the fact, not the
+    /// sentence.
+    #[serde(rename = "no-video-codec")]
+    NoVideoCodec,
 }
 
 /// Create the outbound queue. The receiver is handed to

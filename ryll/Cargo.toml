@@ -43,9 +43,10 @@ audio = ["shakenfist-spice-renderer/audio"]
 # `digest-decode` plumbs through to
 # shakenfist-spice-renderer/digest-decode, which adds the
 # shakenfist-visual-digest dependency, a 100 ms QR-decode
-# polling task in the headless session, and the
-# `digest_updated` control-socket event.  Test-harness only;
-# production builds (debian, GUI) leave it off.
+# polling task in any session hosting a control socket
+# (`--headless` or `--web`), and the `digest_updated`
+# control-socket event.  Test-harness only; production builds
+# (debian, GUI) leave it off.
 digest-decode = ["shakenfist-spice-renderer/digest-decode"]
 
 capture = ["dep:pcap-file", "dep:etherparse", "dep:mp4"]

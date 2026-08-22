@@ -177,7 +177,7 @@ shakenfist-spice-renderer/src/
 │   ├── playback.rs      # Audio (PCM/Opus → rtrb → cpal)
 │   ├── usbredir.rs      # USB redirection (SpiceVMC)
 │   └── webdav.rs        # WebDAV sharing (SpiceVMC)
-├── control/             # Headless control socket (see
+├── control/             # Control socket for headless and web (see
 │   │                    #   docs/control-socket-protocol.md)
 │   ├── mod.rs           # Re-exports: Server, StatusProvider
 │   ├── protocol.rs      # Request/Response/Event wire types

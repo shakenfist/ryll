@@ -12,11 +12,18 @@
 //   * KeyboardEvent.code → AT scancode table (ported from
 //     `scancode_for_logical_key` in
 //     shakenfist-spice-renderer/src/channels/inputs.rs).
-//     Extended keys (E0-prefixed) are encoded with the
-//     prefix byte in the low byte of the u32, matching
-//     `make_scancode()` on the Rust side.
+//     The table is written in *logical* form, with an
+//     extended key's E0 prefix in the HIGH byte -- Up arrow
+//     is 0xE048. That is not the wire form and it does not
+//     match `make_scancode()`; ryll converts it, swapping
+//     the bytes and applying the release bit. This comment
+//     said the opposite until phase 04, and believing it is
+//     how the browser path came to reimplement the encoding
+//     backwards. See the SCANCODE_TABLE comment below.
 //   * keydown / keyup listeners on `document`, dispatched
 //     through the data channel as `{type:"key",scancode,down}`.
+//     Browser auto-repeat is dropped and held keys are released
+//     on focus loss -- see the listeners for why both matter.
 //   * mousemove / mousedown / mouseup on the `<video>`
 //     element with letterbox-corrected normalised
 //     coordinates, dispatched as `{type:"pointer-move"}`
@@ -42,6 +49,7 @@
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
     const cursorEl = document.getElementById('cursor');
+    const noVideoEl = document.getElementById('no-video');
 
     // SPICE mouse modes (shakenfist-spice-protocol constants.rs).
     const MOUSE_MODE_SERVER = 1;
@@ -79,10 +87,19 @@
     //
     // Ported from `scancode_for_logical_key` in
     // shakenfist-spice-renderer/src/channels/inputs.rs. Extended
-    // keys (navigation cluster, arrows, right-side modifiers) use
-    // the SPICE wire format produced by `make_scancode()`:
-    //   wire = (scancode << 8) | 0xE0
-    // i.e. Up arrow's base 0x48 becomes 0xE048 on the wire.
+    // keys (navigation cluster, arrows, right-side modifiers) are
+    // written here in the *logical* form, with the 0xE0 prefix in
+    // the high byte -- Up arrow is 0xE048. Ryll converts to the
+    // wire form with `make_scancode()`, which flips it to 0x48E0 so
+    // the little-endian u32 serialises as `E0 48`, and applies the
+    // release bit on key-up.
+    //
+    // Do not encode wire values here. This comment used to give the
+    // formula `wire = (scancode << 8) | 0xE0` and then contradict it
+    // one line later with "0xE048 on the wire"; the table followed
+    // the example rather than the formula, and every extended key --
+    // all four arrows, Home, End, PageUp/Down, Insert, Delete, the
+    // right-side modifiers -- was dead in web mode as a result.
     //
     // Modifier keys aren't in the LogicalKey table (the GUI
     // path lets egui's modifier state ride along on the
@@ -269,6 +286,12 @@
     // ---------------------------------------------------------------
     const KEY_PASSTHROUGH = new Set(['F11']);
 
+    // Scancodes the guest currently believes are held down, so they
+    // can be released if this page stops receiving key events. A
+    // guest holding a key it will never be told about repeats it
+    // forever.
+    const heldKeys = new Set();
+
     document.addEventListener('keydown', (e) => {
         const sc = SCANCODE_TABLE[e.code];
         if (sc === undefined) {
@@ -277,6 +300,17 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
+        // Drop the browser's auto-repeat. Holding a key fires
+        // keydown over and over with e.repeat set, but only one
+        // keyup at the end. SPICE expects one down and one up, and
+        // the guest's own X server generates the repeat from the
+        // held key — so forwarding these would stack the browser's
+        // repeat on top of the guest's and make the keyboard
+        // unusable.
+        if (e.repeat) {
+            return;
+        }
+        heldKeys.add(sc);
         sendCtrl({ type: 'key', scancode: sc, down: true });
     });
 
@@ -288,7 +322,30 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
+        heldKeys.delete(sc);
         sendCtrl({ type: 'key', scancode: sc, down: false });
+    });
+
+    // Release everything still held when the page stops being able
+    // to see key events. Losing focus mid-keypress — alt-tab, a
+    // browser dialog, switching tab — delivers the keydown and never
+    // the keyup, leaving the guest repeating that key indefinitely
+    // with no way for the user to stop it.
+    const releaseHeldKeys = () => {
+        for (const sc of heldKeys) {
+            sendCtrl({ type: 'key', scancode: sc, down: false });
+        }
+        if (heldKeys.size > 0) {
+            console.log('[ryll] released', heldKeys.size, 'held key(s) on focus loss');
+            heldKeys.clear();
+        }
+    };
+
+    window.addEventListener('blur', releaseHeldKeys);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            releaseHeldKeys();
+        }
     });
 
     // ---------------------------------------------------------------
@@ -487,6 +544,14 @@
                     cursorEl.hidden = false;
                 }
                 break;
+            case 'no-video-codec':
+                // Sent only in reply to our hello, and only when the
+                // server established that this browser's offer had no
+                // H.264 in it. Everything else about the session is
+                // healthy, which is exactly why this needs saying.
+                console.warn('[ryll] no video codec in common; see the panel');
+                noVideoEl.hidden = false;
+                break;
             default:
                 console.log('[ryll] dc message:', msg);
                 break;
@@ -506,6 +571,12 @@
         // host cursor is the only pointer the viewer has.
         cursorEl.hidden = true;
         videoEl.classList.remove('spice-cursor');
+
+        // Likewise the no-video panel: whether this browser and this
+        // server have a codec in common is decided afresh by every
+        // negotiation, so a panel left over from the last one would
+        // be a claim nobody has checked.
+        noVideoEl.hidden = true;
 
         // Build a brand-new PC each time so we never reuse a failed
         // connection object (some browsers cache failed PCs briefly).

@@ -81,7 +81,7 @@ struct HeadlessStats {
 /// `ChannelEvent::AgentConnected` observed by the broadcast fan-out.
 /// `surfaces` is populated from the live `SurfaceMirror` so a
 /// `status` reply matches what the `screenshot` verb would observe.
-struct HeadlessStatus {
+pub struct SessionStatus {
     /// True while the connection task is running.  The control server
     /// reads this via the `StatusProvider` trait.
     connected: Arc<AtomicBool>,
@@ -101,8 +101,14 @@ struct HeadlessStatus {
     surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
 }
 
-impl HeadlessStatus {
-    fn new(
+impl SessionStatus {
+    /// Build a status provider for a control socket.
+    ///
+    /// Nothing here is mode-specific: any mode that can supply a
+    /// liveness flag, an agent-connected flag and a surface mirror
+    /// can host a control socket. Headless was simply the only one
+    /// that did, until web mode grew a socket of its own.
+    pub fn new(
         connected: Arc<AtomicBool>,
         agent_connected: Arc<AtomicBool>,
         surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
@@ -116,7 +122,7 @@ impl HeadlessStatus {
 }
 
 #[cfg(unix)]
-impl crate::control::StatusProvider for HeadlessStatus {
+impl crate::control::StatusProvider for SessionStatus {
     fn snapshot(&self) -> crate::control::protocol::StatusResult {
         // try_lock: never block the per-client task on a slow apply.
         // The apply task only holds the lock for a single
@@ -495,6 +501,74 @@ pub async fn run_connection(
     Ok(())
 }
 
+/// Spawn a control-socket server for a session.
+///
+/// Shared by every mode that offers `--control-socket`, so a change
+/// of shape lands once rather than in each mode separately. Web mode
+/// hosts one of these too; it was headless-only until a browser
+/// session found four input bugs that a control-socket scenario test
+/// would have caught, and could not have run.
+///
+/// Takes a [`CancellationToken`] rather than being aborted, because
+/// the server unlinks its socket file on the way out and an abort
+/// would skip that.
+///
+/// Unix-only: the server uses `tokio::net::UnixListener`, which has
+/// no Windows equivalent in this shape.
+#[cfg(unix)]
+pub fn spawn_control_socket(
+    sock_path: PathBuf,
+    status: Arc<dyn crate::control::StatusProvider>,
+    event_tx: broadcast::Sender<ChannelEvent>,
+    input_tx: mpsc::Sender<InputEvent>,
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let server = crate::control::Server::new(sock_path);
+    tokio::spawn(async move {
+        if let Err(e) = server
+            .run(status, event_tx, input_tx, surface_mirror, cancel)
+            .await
+        {
+            warn!("control: server exited with error: {}", e);
+        }
+    })
+}
+
+/// Spawn the visual-digest poller.
+///
+/// Watches the primary surface for a QR-encoded visual digest and
+/// broadcasts a `ChannelEvent::DigestUpdated` when the frame counter
+/// changes. The control server's event translator turns that into a
+/// `digest_updated` wire event. See [`crate::digest`].
+///
+/// Shared between `run_headless` and `ryll`'s `run_web` rather than
+/// living inside the former, because the two are the modes that can
+/// host a control socket and the scenario tests that consume
+/// `digest_updated` have to be able to drive either. Web mode got a
+/// socket without this and the failure was silent: `subscribe` on
+/// `digest_updated` succeeded and no event ever arrived.
+///
+/// Spawn this only where something will consume the events. The
+/// poller decodes QR out of the framebuffer on a timer whether or not
+/// anyone is listening, and web mode's ordinary path — a browser, no
+/// socket — should not pay for it.
+#[cfg(feature = "digest-decode")]
+///
+/// Takes the session's `Arc<AtomicBool>` cancel flag rather than the
+/// `CancellationToken` the control socket uses. The two coexist: the
+/// token stops the socket server, the flag stops everything on the
+/// renderer side, and both are raised on the same shutdown path.
+pub fn spawn_digest_poller(
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    event_tx: broadcast::Sender<ChannelEvent>,
+    cancel: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        crate::digest::run_digest_poller(surface_mirror, event_tx, cancel).await;
+    })
+}
+
 /// Run a headless SPICE session.
 ///
 /// Constructs the connection-side channel pairs internally, then
@@ -552,13 +626,13 @@ pub async fn run_headless(
     let repaint_notify = Arc::new(Notify::new());
 
     // Track whether the SPICE connection task is still alive. The
-    // control server's `HeadlessStatus` impl reads this flag to answer
+    // control server's `SessionStatus` impl reads this flag to answer
     // `status` queries.
     let spice_connected = Arc::new(AtomicBool::new(true));
 
     // Track the current vdagent connection state.  Updated by the
     // fan-out task whenever a `ChannelEvent::AgentConnected` arrives;
-    // read by the `HeadlessStatus` provider so `status` requests
+    // read by the `SessionStatus` provider so `status` requests
     // reflect reality without having to peer into the main channel.
     let agent_connected = Arc::new(AtomicBool::new(false));
 
@@ -573,22 +647,16 @@ pub async fn run_headless(
     // indirection.
     let surface_mirror = Arc::new(tokio::sync::Mutex::new(SurfaceMirror::new()));
 
-    // When the `digest-decode` feature is on, spawn a polling
-    // task that watches the primary surface for a QR-encoded
-    // visual digest and broadcasts a `DigestUpdated` event when
-    // the frame_counter changes.  The control server's event
-    // translator turns that into a `digest_updated` wire event.
-    // See `crate::digest`.
+    // Watch the primary surface for a QR-encoded visual digest.  See
+    // `spawn_digest_poller`, which `run_web` calls too — the scenario
+    // tests that consume `digest_updated` have to be able to drive
+    // either mode.
     #[cfg(feature = "digest-decode")]
-    let _digest_handle = {
-        let mirror_for_digest = surface_mirror.clone();
-        let tx_for_digest = event_broadcast_tx.clone();
-        let cancel_for_digest = cancel.clone();
-        tokio::spawn(async move {
-            crate::digest::run_digest_poller(mirror_for_digest, tx_for_digest, cancel_for_digest)
-                .await;
-        })
-    };
+    let _digest_handle = spawn_digest_poller(
+        surface_mirror.clone(),
+        event_broadcast_tx.clone(),
+        cancel.clone(),
+    );
 
     // Spawn connection task. The cancel flag is passed through so
     // a host-side Ctrl+C bridge can flip it and have every channel
@@ -676,33 +744,21 @@ pub async fn run_headless(
     #[cfg(unix)]
     let control_cancel = CancellationToken::new();
     #[cfg(unix)]
-    let control_handle = if let Some(sock_path) = control_socket_path {
-        let status: Arc<dyn crate::control::StatusProvider> = Arc::new(HeadlessStatus::new(
+    let control_handle = control_socket_path.map(|sock_path| {
+        let status: Arc<dyn crate::control::StatusProvider> = Arc::new(SessionStatus::new(
             spice_connected.clone(),
             agent_connected.clone(),
             surface_mirror.clone(),
         ));
-        let server = crate::control::Server::new(sock_path);
-        let token = control_cancel.clone();
-        let event_tx_for_control = event_broadcast_tx.clone();
-        let mirror_for_control = surface_mirror.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = server
-                .run(
-                    status,
-                    event_tx_for_control,
-                    input_tx_for_control,
-                    mirror_for_control,
-                    token,
-                )
-                .await
-            {
-                warn!("control: server exited with error: {}", e);
-            }
-        }))
-    } else {
-        None
-    };
+        spawn_control_socket(
+            sock_path,
+            status,
+            event_broadcast_tx.clone(),
+            input_tx_for_control,
+            surface_mirror.clone(),
+            control_cancel.clone(),
+        )
+    });
     #[cfg(not(unix))]
     {
         if control_socket_path.is_some() {

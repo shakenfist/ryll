@@ -38,6 +38,11 @@ OVMF_CODE=''
 OVMF_VARS=''
 SPICE_PORT=''
 PID_FILE=''
+# Optional QMP control socket. Lets a script drive the guest --
+# sendkey, screendump, quit -- without a human at the viewer, which
+# is what tools/web-soak.sh needs and what makes an unattended
+# keyboard or audio check possible at all.
+QMP_SOCKET=''
 MEMORY='2048'
 CPUS='2'
 SPICE_ADDR='127.0.0.1'
@@ -51,6 +56,7 @@ while [ $# -gt 0 ]; do
         --spice-port) SPICE_PORT="$2"; shift 2 ;;
         --spice-addr) SPICE_ADDR="$2"; shift 2 ;;
         --pid-file)   PID_FILE="$2";   shift 2 ;;
+        --qmp)        QMP_SOCKET="$2"; shift 2 ;;
         --memory)     MEMORY="$2";     shift 2 ;;
         --cpus)       CPUS="$2";       shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -97,6 +103,12 @@ fi
 echo "[start-desktop-qemu] Launching XFCE guest with SPICE on" \
      "${SPICE_ADDR}:${SPICE_PORT}"
 
+QMP_ARGS=()
+if [ -n "${QMP_SOCKET}" ]; then
+    rm -f "${QMP_SOCKET}"
+    QMP_ARGS=(-qmp "unix:${QMP_SOCKET},server=on,wait=off")
+fi
+
 qemu-system-x86_64 \
     -machine "q35,accel=${ACCEL}" \
     "${CPU_ARGS[@]}" \
@@ -117,6 +129,7 @@ qemu-system-x86_64 \
     -netdev user,id=net0 \
     -device virtio-net-pci,netdev=net0 \
     -display none \
+    "${QMP_ARGS[@]}" \
     -daemonize \
     -pidfile "${PID_FILE}"
 

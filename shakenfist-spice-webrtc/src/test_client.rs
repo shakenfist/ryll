@@ -41,7 +41,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
-use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
+use rtc::peer_connection::configuration::media_engine::{
+    MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8,
+};
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use webrtc::data_channel::DataChannel;
 use webrtc::media_stream::track_remote::TrackRemote;
@@ -102,9 +104,19 @@ pub struct TestPeerBuilder {
 /// `register_default_codecs`. See
 /// [`TestPeerBuilder::offer_only_h264_fmtp`].
 struct NarrowCodecs {
-    h264_fmtp: String,
-    h264_payload_type: u8,
+    video: NarrowVideo,
     opus_payload_type: u8,
+}
+
+/// The single video codec a narrow offer carries.
+enum NarrowVideo {
+    /// One H.264 entry with this fmtp at this payload type.
+    H264 { fmtp: String, payload_type: u8 },
+    /// One VP8 entry and no H.264 at all — what a Firefox whose
+    /// OpenH264 plugin has not loaded actually offers, and the only
+    /// way to reach the bridge's no-common-video-codec path from a
+    /// test.
+    Vp8 { payload_type: u8 },
 }
 
 impl TestPeerBuilder {
@@ -185,8 +197,31 @@ impl TestPeerBuilder {
         opus_payload_type: u8,
     ) -> Self {
         self.narrow_codecs = Some(NarrowCodecs {
-            h264_fmtp: fmtp.to_owned(),
-            h264_payload_type,
+            video: NarrowVideo::H264 {
+                fmtp: fmtp.to_owned(),
+                payload_type: h264_payload_type,
+            },
+            opus_payload_type,
+        });
+        self
+    }
+
+    /// Offer VP8 and Opus, and no H.264 at any payload type.
+    ///
+    /// This is the shape of a real Firefox offer when its OpenH264
+    /// plugin is present but has not loaded: VP8, VP9, AV1 and Opus,
+    /// with no `a=rtpmap` H.264 line anywhere (see issue #289). ryll
+    /// encodes H.264 only, so there is no common video codec — and
+    /// because VP8 *is* in webrtc-rs's default set, the bridge
+    /// happily negotiates a video codec it cannot produce. Every
+    /// other signal in the session stays healthy, which is what
+    /// makes this worth reaching from a test rather than only from a
+    /// browser.
+    pub fn offer_no_h264(mut self, vp8_payload_type: u8, opus_payload_type: u8) -> Self {
+        self.narrow_codecs = Some(NarrowCodecs {
+            video: NarrowVideo::Vp8 {
+                payload_type: vp8_payload_type,
+            },
             opus_payload_type,
         });
         self
@@ -314,16 +349,20 @@ impl TestPeerBuilder {
 /// and the bridge has to cope with numbers that are not the ones it
 /// registered.
 fn register_narrow_codecs(media_engine: &mut MediaEngine, narrow: &NarrowCodecs) -> Result<()> {
+    let (video_mime, video_fmtp, video_payload_type) = match &narrow.video {
+        NarrowVideo::H264 { fmtp, payload_type } => (MIME_TYPE_H264, fmtp.clone(), *payload_type),
+        NarrowVideo::Vp8 { payload_type } => (MIME_TYPE_VP8, String::new(), *payload_type),
+    };
     media_engine.register_codec(
         RTCRtpCodecParameters {
             rtp_codec: RTCRtpCodec {
-                mime_type: MIME_TYPE_H264.to_owned(),
+                mime_type: video_mime.to_owned(),
                 clock_rate: 90_000,
                 channels: 0,
-                sdp_fmtp_line: narrow.h264_fmtp.clone(),
+                sdp_fmtp_line: video_fmtp,
                 rtcp_feedback: vec![],
             },
-            payload_type: narrow.h264_payload_type,
+            payload_type: video_payload_type,
         },
         RtpCodecKind::Video,
     )?;

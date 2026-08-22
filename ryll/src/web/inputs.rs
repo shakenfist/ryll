@@ -29,12 +29,14 @@
 //! [`KeyUp`]: shakenfist_spice_renderer::InputEvent::KeyUp
 //! [`InputsChannel`]: shakenfist_spice_renderer
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
-use shakenfist_spice_renderer::{even_dimensions, ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{
+    even_dimensions, make_scancode, ChannelEvent, InputEvent, SurfaceMirror,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -156,6 +158,7 @@ pub async fn run_input_relay(
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
     mouse_mode: Arc<AtomicU32>,
     control_tx: ControlSink,
+    no_video_codec: Arc<AtomicBool>,
 ) {
     // Last pointer position in surface pixels, for deriving
     // relative deltas in server mouse mode.
@@ -176,10 +179,18 @@ pub async fn run_input_relay(
 
         match msg {
             BrowserMsg::Key { scancode, down } => {
+                // `app.js` sends the logical scancode -- a plain code
+                // like 0x13, or an 0xE0-prefixed one like 0xE048 for
+                // Up arrow. The inputs channel writes what it is
+                // given straight onto the wire, so the conversion has
+                // to happen here, through the same function the GUI
+                // path uses. Doing it by hand is how this diverged:
+                // releases went out without the break bit, so every
+                // key the guest saw stayed held and auto-repeated.
                 let event = if down {
-                    InputEvent::KeyDown(scancode)
+                    InputEvent::KeyDown(make_scancode(scancode, false))
                 } else {
-                    InputEvent::KeyUp(scancode)
+                    InputEvent::KeyUp(make_scancode(scancode, true))
                 };
                 if input_tx.send(event).await.is_err() {
                     warn!("web inputs: input_tx receiver dropped; relay exiting");
@@ -297,6 +308,15 @@ pub async fn run_input_relay(
                 let mode = mouse_mode.load(Ordering::Relaxed);
                 debug!("web inputs: hello; replying with mouse mode {}", mode);
                 send_msg(&control_tx, &ControlMsg::MouseMode { mode });
+
+                // The hello is also the first moment this can be
+                // delivered: negotiation settled during
+                // `accept_offer`, before this channel existed. A
+                // viewer that did negotiate video hears nothing.
+                if no_video_codec.load(Ordering::Relaxed) {
+                    debug!("web inputs: hello; this viewer negotiated no video codec");
+                    send_msg(&control_tx, &ControlMsg::NoVideoCodec);
+                }
             }
         }
     }
@@ -409,6 +429,9 @@ mod tests {
             mirror,
             mouse_mode,
             outbound_tx,
+            // Every existing case is a viewer that negotiated video
+            // normally; the no-video reply has its own test below.
+            Arc::new(AtomicBool::new(false)),
         ));
         (control_tx, input_rx, resize_rx, outbound_rx, handle)
     }
@@ -425,7 +448,11 @@ mod tests {
         let mirror = primary_mirror(1920, 1080).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
 
-        // 0xE048 is Up arrow in wire-format (E0-prefixed).
+        // 57416 is 0xE048, Up arrow as `app.js` writes it. On the
+        // wire the prefix has to come first, and a u32 serialises
+        // little-endian, so the value that must reach the inputs
+        // channel is 0x48E0. This test asserted 0xE048 until a
+        // browser session found that no arrow key worked at all.
         let payload = br#"{"type":"key","scancode":57416,"down":true}"#.to_vec();
         tx.send(payload).await.expect("send");
 
@@ -434,8 +461,8 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         match event {
-            InputEvent::KeyDown(sc) => assert_eq!(sc, 0xE048),
-            other => panic!("expected KeyDown(0xE048), got {:?}", other),
+            InputEvent::KeyDown(sc) => assert_eq!(sc, 0x48E0),
+            other => panic!("expected KeyDown(0x48E0), got {:?}", other),
         }
     }
 
@@ -444,7 +471,11 @@ mod tests {
         let mirror = primary_mirror(1920, 1080).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
 
-        // 0x1E is the 'A' base scancode.
+        // 0x1E is the 'A' base scancode; a release must carry the
+        // break bit, so the inputs channel has to see 0x9E. Sending
+        // 0x1E is a second *press*, which leaves the guest holding
+        // the key and auto-repeating it forever -- the bug this
+        // test asserted as correct until a browser session hit it.
         let payload = br#"{"type":"key","scancode":30,"down":false}"#.to_vec();
         tx.send(payload).await.expect("send");
 
@@ -453,8 +484,69 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         match event {
-            InputEvent::KeyUp(sc) => assert_eq!(sc, 0x1E),
-            other => panic!("expected KeyUp(0x1E), got {:?}", other),
+            InputEvent::KeyUp(sc) => assert_eq!(sc, 0x9E),
+            other => panic!("expected KeyUp(0x9E), got {:?}", other),
+        }
+    }
+
+    /// Every key the browser can send survives the trip to the wire
+    /// in the form the GUI would have sent.
+    ///
+    /// The two tests above pin one case each. This pins the matrix,
+    /// because the web frontend shipped with its own scancode table
+    /// and no test compared the two paths -- so a release that
+    /// forgot the break bit, and an extended code with its prefix in
+    /// the wrong byte, both looked correct to the suite while making
+    /// the keyboard unusable in front of a guest.
+    ///
+    /// The expected values are `make_scancode`'s, which is the GUI
+    /// path's encoder. If this test and that function ever disagree,
+    /// the two input paths have diverged again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_key_reaches_the_wire_the_way_the_gui_would_send_it() {
+        // (logical scancode as app.js sends it, down, expected wire value)
+        let cases: [(u32, bool, u32); 6] = [
+            // Plain key: press is the base code, release sets 0x80.
+            (0x1E, true, 0x1E),
+            (0x1E, false, 0x9E),
+            // Extended key: prefix must land in the low byte so the
+            // u32 serialises as `E0 48`, and the release bit applies
+            // to the code, not the prefix.
+            (0xE048, true, 0x48E0),
+            (0xE048, false, 0xC8E0),
+            // Right Ctrl -- an extended modifier, the combination
+            // most likely to strand a guest if it is wrong.
+            (0xE01D, true, 0x1DE0),
+            (0xE01D, false, 0x9DE0),
+        ];
+
+        for (logical, down, expected) in cases {
+            let mirror = primary_mirror(1920, 1080).await;
+            let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+            let payload =
+                format!(r#"{{"type":"key","scancode":{},"down":{}}}"#, logical, down).into_bytes();
+            tx.send(payload).await.expect("send");
+
+            let event = tokio::time::timeout(Duration::from_secs(1), input_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("relay should send");
+
+            let got = match event {
+                InputEvent::KeyDown(sc) | InputEvent::KeyUp(sc) => sc,
+                other => panic!("expected a key event, got {:?}", other),
+            };
+            assert_eq!(
+                got, expected,
+                "logical {:#x} down={} should reach the wire as {:#x}, got {:#x}",
+                logical, down, expected, got
+            );
+            assert_eq!(
+                got,
+                make_scancode(logical, !down),
+                "the web path disagrees with make_scancode for {:#x}",
+                logical
+            );
         }
     }
 
@@ -716,6 +808,89 @@ mod tests {
             v["mode"], MOUSE_MODE_SERVER,
             "browser was told the wrong mode: {}",
             v
+        );
+    }
+
+    /// A viewer whose offer carried no H.264 is told so, in the one
+    /// window where telling it is possible.
+    ///
+    /// The server-side half of issue #289. Negotiation settles inside
+    /// `accept_offer`, seconds before SCTP opens this channel, and
+    /// `send_control` drops anything written before it opens — so the
+    /// fact has to wait for the browser's hello exactly as the mouse
+    /// mode does. The mouse mode still comes first: this is an extra
+    /// message, not a replacement.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hello_is_answered_with_the_no_video_notice() {
+        let mirror = primary_mirror(640, 480).await;
+        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
+        let (input_tx, _input_rx) = mpsc::channel::<InputEvent>(16);
+        let (resize_tx, _resize_rx) = mpsc::channel::<(u32, u32)>(4);
+        let (outbound_tx, mut outbound) = crate::web::control::control_queue();
+        let _h = tokio::spawn(run_input_relay(
+            control_rx,
+            input_tx,
+            resize_tx,
+            mirror,
+            mode,
+            outbound_tx,
+            Arc::new(AtomicBool::new(true)),
+        ));
+
+        control_tx
+            .send(br#"{"type":"hello"}"#.to_vec())
+            .await
+            .expect("send");
+
+        let mut types = Vec::new();
+        for _ in 0..2 {
+            let payload = tokio::time::timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("no reply to hello within 1s")
+                .expect("outbound queue closed");
+            let v: serde_json::Value = serde_json::from_slice(&payload).expect("reply is JSON");
+            types.push(v["type"].as_str().expect("type is a string").to_owned());
+        }
+        assert_eq!(
+            types,
+            vec!["mouse-mode", "no-video-codec"],
+            "hello should be answered with the mouse mode and then the no-video notice"
+        );
+    }
+
+    /// A viewer that *did* negotiate video hears nothing about it.
+    ///
+    /// The guard on the test above. A notice that fired on every
+    /// session would be worse than no notice at all: it would tell
+    /// every working viewer that its video is broken, and the panel
+    /// sits over the picture.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_working_viewer_is_told_nothing_about_video() {
+        let mirror = primary_mirror(640, 480).await;
+        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let (tx, _input_rx, _resize_rx, mut outbound, _h) =
+            spawn_relay_watching_outbound(mirror, mode);
+
+        tx.send(br#"{"type":"hello"}"#.to_vec())
+            .await
+            .expect("send");
+
+        let payload = tokio::time::timeout(Duration::from_secs(1), outbound.recv())
+            .await
+            .expect("no reply to hello within 1s")
+            .expect("outbound queue closed");
+        let v: serde_json::Value = serde_json::from_slice(&payload).expect("reply is JSON");
+        assert_eq!(v["type"], "mouse-mode");
+
+        // Nothing else should follow. A short wait rather than an
+        // immediate `try_recv`: the notice, if it were sent, would be
+        // queued from the same handler a moment later.
+        let extra = tokio::time::timeout(Duration::from_millis(250), outbound.recv()).await;
+        assert!(
+            extra.is_err(),
+            "a viewer with working video was sent an unexpected message: {:?}",
+            extra.ok().flatten().map(String::from_utf8)
         );
     }
 

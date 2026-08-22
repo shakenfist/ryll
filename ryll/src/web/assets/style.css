@@ -1,6 +1,25 @@
 body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-serif; }
-#status { position: absolute; top: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0,0,0,0.5); border-radius: 4px; font-size: 0.85rem; }
-#enable-audio { position: absolute; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
+/* Page chrome sits above the video.
+
+   Observed, not derived: on Chrome both #status and #enable-audio
+   disappeared behind #video once the first frame arrived. Plain CSS
+   painting order says they should not have -- #video is not
+   positioned, so absolutely-positioned siblings paint after it
+   whatever their z-index -- which points at the browser compositing
+   the video into a layer of its own rather than at document order.
+   An explicit z-index settles it without needing to know which.
+   Chrome still delivered the click, so the button worked if you knew
+   where it was, but a control you cannot see is the same as a
+   missing one -- and clicking it is the only way to get sound,
+   because browsers will not autoplay audio unprompted. Anything
+   added here that the user has to see or press needs a z-index too.
+
+   Deliberately two declarations rather than a layout change: the
+   letterbox-versus-scale question is #308's, and the wider UI is
+   headed for sfui (#293). Neither should have to land before a
+   button is visible. */
+#status { position: absolute; top: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0,0,0,0.5); border-radius: 4px; font-size: 0.85rem; z-index: 20; }
+#enable-audio { position: absolute; z-index: 20; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
 #enable-audio:hover { background: rgba(255, 255, 255, 0.25); }
 #enable-audio[hidden] { display: none; }
 #video { display: block; width: 100vw; height: 100vh; object-fit: contain; }
@@ -19,5 +38,23 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
 #video.spice-cursor { cursor: none; }
 #reconnect-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 0.6rem 1.2rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 1rem; cursor: pointer; z-index: 20; }
 #reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
+/* Shown when the server answers the browser's hello with
+   `no-video-codec`. Deliberately a panel over the video rather than
+   a line in #status: the failure it describes leaves every other
+   signal healthy -- audio plays, input works, the cursor moves --
+   so it reads as a rendering bug unless it is said plainly and in
+   the middle of the thing that is missing.
+
+   `pointer-events: none` because the panel's own text promises the
+   mouse still works, and a 32rem box centred on the viewport would
+   otherwise swallow every click and move landing in the middle of
+   the screen -- the listeners are bound to the <video> underneath.
+   Nothing in here is interactive; the <code> spans are decorative. */
+#no-video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 32rem; padding: 1.25rem 1.5rem; background: rgba(0, 0, 0, 0.85); border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; font-size: 0.9rem; line-height: 1.5; z-index: 15; pointer-events: none; }
+#no-video h1 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+#no-video p { margin: 0 0 0.6rem; }
+#no-video p:last-child { margin-bottom: 0; }
+#no-video code { background: rgba(255, 255, 255, 0.12); padding: 0.05rem 0.25rem; border-radius: 3px; }
+#no-video[hidden] { display: none; }
 #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }
 #cursor[hidden] { display: none; }

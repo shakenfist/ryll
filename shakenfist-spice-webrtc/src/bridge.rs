@@ -66,6 +66,21 @@ use webrtc::peer_connection::{
 /// why a constant is not good enough.
 const H264_PAYLOAD_TYPE: u8 = 102;
 
+/// Stored in a pump's payload-type cell when negotiation settled on
+/// *no* common codec for that track, as distinct from "not resolved
+/// yet".
+///
+/// RTP payload types are seven bits (RFC 3550 §5.1), so no real one
+/// can ever have the top bit set and this value cannot collide with a
+/// negotiated number. The distinction matters because the pumps are
+/// spawned before `accept_offer` runs: at startup the cell holds the
+/// registered default and the pump should behave exactly as it always
+/// has, whereas after negotiation this value means the sender will
+/// reject every packet the pump could write. Writing them anyway
+/// costs an encode, a payload and an unthrottled `ERROR` per packet
+/// from inside webrtc-rs, with nothing arriving at the far end.
+const PAYLOAD_TYPE_NONE: u8 = 0x80;
+
 /// The media stream both tracks belong to. Surfaces in the answer SDP
 /// as the `msid` / `mslabel` value, so it is observable to the browser
 /// and must not drift.
@@ -567,10 +582,11 @@ pub struct WebrtcBridge {
     video_track: Arc<TrackLocalStaticRTP>,
     audio_track: Arc<TrackLocalStaticRTP>,
     control_dc: Arc<dyn DataChannel>,
-    // Retained so the Sender is kept alive for diagnostics; the
-    // on-state handler keeps its own clone. Prefixed with `_` to
-    // signal intentional non-use without suppressing via attribute.
-    _encoder_control: mpsc::Sender<EncoderControl>,
+    // The on-state handler keeps its own clone for keyframe
+    // requests; this one is the bridge's own, used by
+    // `resolve_negotiated_payload_types` to stop an encoder whose
+    // output no viewer can decode.
+    encoder_control: mpsc::Sender<EncoderControl>,
     /// Receiver for incoming control-DC messages. Take it once
     /// via [`WebrtcBridge::control_rx`]. Wrapped in
     /// `Mutex<Option<...>>` because `WebrtcBridge` is shared via
@@ -923,7 +939,7 @@ impl WebrtcBridge {
             video_track,
             audio_track,
             control_dc,
-            _encoder_control: config.encoder_control,
+            encoder_control: config.encoder_control,
             incoming_control,
             dead,
             state,
@@ -1047,11 +1063,28 @@ impl WebrtcBridge {
                 self.video_payload_type.store(pt, Ordering::Relaxed);
                 tracing::debug!("webrtc: negotiated H.264 payload type {}", pt);
             }
-            None => tracing::warn!(
-                "webrtc: no H.264 payload type negotiated; the video pump will keep stamping {} \
-                 and the sender will reject every packet — the viewer will see no video",
-                H264_PAYLOAD_TYPE
-            ),
+            None => {
+                // The viewer offered no H.264, so nothing this
+                // session encodes can ever reach it. Park the pump
+                // (`PAYLOAD_TYPE_NONE`) and stop the encoder that
+                // feeds it: the pump stops immediately, while the
+                // encoder stops once it sees the message, which
+                // also closes the pump's channel and retires the
+                // task. Audio, input and cursor are unaffected —
+                // only video is impossible.
+                self.video_payload_type
+                    .store(PAYLOAD_TYPE_NONE, Ordering::Relaxed);
+                tracing::warn!(
+                    "webrtc: no H.264 payload type negotiated; this viewer offered no codec we \
+                     can send, so video is stopped for this session and the viewer is told why"
+                );
+                if let Err(e) = self.encoder_control.try_send(EncoderControl::Stop) {
+                    tracing::warn!(
+                        "webrtc: could not stop the encoder after a failed video negotiation: {}",
+                        e
+                    );
+                }
+            }
         }
 
         match audio {
@@ -1059,12 +1092,39 @@ impl WebrtcBridge {
                 self.audio_payload_type.store(pt, Ordering::Relaxed);
                 tracing::debug!("webrtc: negotiated Opus payload type {}", pt);
             }
-            None => tracing::warn!(
-                "webrtc: no Opus payload type negotiated; the audio pump will keep stamping {} \
-                 and the sender will reject every packet — the viewer will hear nothing",
-                OPUS_PAYLOAD_TYPE
-            ),
+            None => {
+                // Same reasoning as the video branch, minus the
+                // encoder: web-mode audio is Opus forwarded straight
+                // off the SPICE playback channel, so there is no
+                // encode of ours to stop -- only the payloading and
+                // the writes, which the sentinel suppresses.
+                self.audio_payload_type
+                    .store(PAYLOAD_TYPE_NONE, Ordering::Relaxed);
+                tracing::warn!(
+                    "webrtc: no Opus payload type negotiated; this viewer offered no codec we \
+                     can send, so audio is stopped for this session"
+                );
+            }
         }
+    }
+
+    /// Whether the offer/answer settled on a video codec both ends
+    /// can use.
+    ///
+    /// False means this viewer offered no H.264 and will never see a
+    /// picture on this bridge, however healthy everything else looks
+    /// — the datachannel opens, audio plays, input and cursor work.
+    /// That combination is misleading enough that ryll tells the
+    /// viewer in the page rather than only warning on the server's
+    /// terminal; see `ryll/src/web/control.rs`.
+    ///
+    /// Only meaningful after `accept_offer` has returned. Before
+    /// then it reports true, because the pumps' cells still hold the
+    /// registered defaults and nothing has been negotiated to
+    /// contradict them — a caller that asks too early gets "no
+    /// problem known", never a false alarm.
+    pub fn video_negotiated(&self) -> bool {
+        self.video_payload_type.load(Ordering::Relaxed) != PAYLOAD_TYPE_NONE
     }
 
     /// Wait until ICE gathering has completed.
@@ -1600,6 +1660,18 @@ async fn run_video_pump(
         // one load is no more work than several.
         let frame_payload_type = payload_type.load(Ordering::Relaxed);
 
+        // Negotiation settled on no common video codec. Drop the
+        // frame here rather than payloading and writing it: every
+        // packet would be rejected at the sender and logged as an
+        // `ERROR` from inside webrtc-rs, at the frame rate, for as
+        // long as the viewer stayed. Keep draining `rx` so the
+        // encoder is never parked on a full channel while it winds
+        // down (see `resolve_negotiated_payload_types`, which asks
+        // it to stop).
+        if frame_payload_type == PAYLOAD_TYPE_NONE {
+            continue;
+        }
+
         // Collect every RTP packet for this access unit so we can
         // set the marker bit on the last one only.
         let mut packets: Vec<Packet> = Vec::new();
@@ -1759,6 +1831,12 @@ async fn run_synthetic_audio_pump(
         // for the reason given in `run_video_pump`.
         let packet_payload_type = payload_type.load(Ordering::Relaxed);
 
+        // No common audio codec: drop rather than write, for the
+        // reason given in `run_video_pump`.
+        if packet_payload_type == PAYLOAD_TYPE_NONE {
+            continue;
+        }
+
         for payload in payloads {
             if payload.is_empty() {
                 continue;
@@ -1823,6 +1901,12 @@ async fn run_audio_pump(
         // One load per input packet rather than per output packet,
         // for the reason given in `run_video_pump`.
         let packet_payload_type = payload_type.load(Ordering::Relaxed);
+
+        // No common audio codec: drop rather than write, for the
+        // reason given in `run_video_pump`.
+        if packet_payload_type == PAYLOAD_TYPE_NONE {
+            continue;
+        }
 
         for payload in payloads {
             if payload.is_empty() {

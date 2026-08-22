@@ -1335,13 +1335,29 @@ pub fn scancode_for_logical_key(key: LogicalKey) -> Option<(u32, u32)> {
     Some((make_scancode(base, false), make_scancode(base, true)))
 }
 
-/// Encode a SPICE scancode for the wire.
+/// Encode a logical AT scancode into the value SPICE expects on the
+/// wire.
 ///
-/// Normal keys use a single-byte scancode in the low byte of the u32.
-/// Extended keys (E0-prefixed on the AT keyboard) are encoded as two
-/// bytes: the E0 prefix in the low byte, the scancode in the next byte.
-/// This matches spice-gtk's `spice_make_scancode()`.
-fn make_scancode(base: u32, release: bool) -> u32 {
+/// `base` is the scancode as tables normally write it: a plain code
+/// like `0x13` for `r`, or an `0xE0`-prefixed one like `0xE048` for
+/// Up arrow. The wire wants the prefix *first*, and a `u32` is
+/// serialised little-endian, so an extended code has to be flipped to
+/// `0x48E0` for the bytes to come out as `E0 48`.
+///
+/// `release` sets the break bit. This is not optional: SPICE's
+/// `KEY_UP` message carries the scancode verbatim, so a release that
+/// forgets the bit sends the guest a second *press*. The guest then
+/// believes the key is still held and its own auto-repeat runs
+/// forever — which is exactly the bug the web frontend shipped with
+/// until it started using this function too.
+///
+/// Every caller that builds an [`InputEvent::KeyDown`] or
+/// [`InputEvent::KeyUp`] must go through here. This matches
+/// spice-gtk's `spice_make_scancode()`.
+///
+/// [`InputEvent::KeyDown`]: crate::InputEvent::KeyDown
+/// [`InputEvent::KeyUp`]: crate::InputEvent::KeyUp
+pub fn make_scancode(base: u32, release: bool) -> u32 {
     let code = if release { base | 0x80 } else { base };
     if base >= 0x100 {
         // Extended key: wire bytes are [0xE0, scancode] in LE u32
