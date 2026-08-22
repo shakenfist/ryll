@@ -271,9 +271,7 @@ jobs:
           - arch: x86_64
             runs-on: [self-hosted, vm, debian-12-docker, l]
           - arch: aarch64
-            # audit-ok: github-hosted-runner -- no self-hosted aarch64
-            # Linux hardware, and the arm wheel must build natively,
-            # not under QEMU
+            # audit-ok: github-hosted-runner -- no self-hosted aarch64 Linux hardware, and the arm wheel must build natively, not under QEMU
             runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7
@@ -297,9 +295,7 @@ jobs:
   sign-tag:
     name: Sign release tag with Sigstore
     needs: [build, build-linux, build-ryll-wheels]
-    # audit-ok: github-hosted-runner -- ephemeral runner for tag
-    # signing; installs gitsign via sudo and writes global git config,
-    # so it must be throwaway rather than the shared self-hosted pool
+    # audit-ok: github-hosted-runner -- ephemeral runner for tag signing; installs gitsign via sudo and writes global git config, so it must be throwaway rather than the shared self-hosted pool
     runs-on: ubuntu-latest
     environment: release
     permissions:
