@@ -245,28 +245,6 @@ pub struct Args {
 /// failure is not an interface name that looks like an address —
 /// there is no such thing — but an address that Rust's parser
 /// rejects and which would otherwise be silently demoted to a name.
-/// Reject `--control-socket` in GUI mode.
-///
-/// The socket is valid with `--headless` or `--web`, both of which
-/// run a session with no host window and can host the server. The
-/// GUI cannot: it owns input and the surface itself, and a second
-/// driver injecting events behind its back has no defined meaning.
-///
-/// Expressed here rather than as a clap `requires`, because clap
-/// cannot say "one of these two flags" and the error it produces for
-/// a single `requires` names the wrong flag.
-#[cfg(unix)]
-pub fn validate_control_socket(args: &Args) -> Result<()> {
-    if args.control_socket.is_some() && !args.headless && !args.web {
-        bail!(
-            "--control-socket needs a session with no host window: pass --headless or \
-             --web as well. It is not available in GUI mode, where the window owns input \
-             and the surface."
-        );
-    }
-    Ok(())
-}
-
 pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
     let mut selectors = Vec::with_capacity(args.web_media_addr.len());
     for value in &args.web_media_addr {
@@ -296,6 +274,28 @@ pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
         )
     })?;
     Ok(policy)
+}
+
+/// Reject `--control-socket` in GUI mode.
+///
+/// The socket is valid with `--headless` or `--web`, both of which
+/// run a session with no host window and can host the server. The
+/// GUI cannot: it owns input and the surface itself, and a second
+/// driver injecting events behind its back has no defined meaning.
+///
+/// Expressed here rather than as a clap `requires`, because clap
+/// cannot say "one of these two flags" and the error it produces for
+/// a single `requires` names the wrong flag.
+#[cfg(unix)]
+pub fn validate_control_socket(args: &Args) -> Result<()> {
+    if args.control_socket.is_some() && !args.headless && !args.web {
+        bail!(
+            "--control-socket needs a session with no host window: pass --headless or \
+             --web as well. It is not available in GUI mode, where the window owns input \
+             and the surface."
+        );
+    }
+    Ok(())
 }
 
 /// Reject a `--web-media-addr` value that is a failed *address*

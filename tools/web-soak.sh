@@ -50,8 +50,14 @@ QMP=""
 KEY="spc"
 CSV=""
 
+# Print the header comment as help.  The range ends at the first
+# non-comment line rather than a fixed number: a hardcoded end used to
+# spill `set -euo pipefail` and the variable block into --help, and
+# would go wrong again on the next edit to the header.  The second sed
+# only prints lines it stripped a `#` from, so the boundary line
+# itself never escapes either.
 usage() {
-    sed -n '3,45p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,/^[^#]/p' "$0" | sed -n 's/^# \{0,1\}//p'
     exit "${1:-0}"
 }
 
@@ -222,12 +228,23 @@ while [ "$elapsed" -lt "$DURATION" ]; do
     fi
 done
 
+# On the process-exited path there is nothing left in /proc to read,
+# so the endpoints come from what was already sampled.  Both are
+# approximations and the summary says so: RSS falls back to the peak,
+# which draws a flat curve rather than a crash, and CPU reads the last
+# CSV row -- guarded on NR > 1, because a process that died before the
+# first sample landed would otherwise hand awk the header string and
+# print a negative percentage.  A run that ends this way has already
+# failed its most important assertion and is discarded rather than
+# read, but it should not print a number that looks deliberate.
+ended_early=""
 if [ -d "/proc/$PID" ]; then
     rss_end="$(rss_kb)"
     cpu_end="$(process_cpu_jiffies)"
 else
+    ended_early=" (at exit; process died mid-run)"
     rss_end="$rss_max"
-    cpu_end="$(awk -F, 'END { print $3 }' "$CSV")"
+    cpu_end="$(awk -F, 'NR > 1 { c = $3 } END { print (c == "" ? "0" : c) }' "$CSV")"
 fi
 
 # CPU as a percentage of one core across the whole run, which is how
@@ -243,9 +260,9 @@ web-soak summary (compare with the Baseline table in
 docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md)
 
   Duration                     ${elapsed}s
-  RSS start -> end             $((rss_start / 1024)) -> $((rss_end / 1024)) MB
+  RSS start -> end             $((rss_start / 1024)) -> $((rss_end / 1024)) MB${ended_early}
   RSS max                      $((rss_max / 1024)) MB
-  CPU, all threads, whole run  ${cpu_pct}% of one core
+  CPU, all threads, whole run  ${cpu_pct}% of one core${ended_early}
   Host CPU busy%, mean (max)   ${host_mean} (${host_max})
 
   Per-sample data: $CSV
@@ -257,5 +274,6 @@ in the one being measured: --verbose is debug for the whole
 dependency tree, and webrtc-rs at that level is enough log to move
 the numbers.
 
-ryll does not read RUST_LOG.
+ryll does not read RUST_LOG, so it cannot be narrowed to one crate.
+Tracked as https://github.com/shakenfist/ryll/issues/313.
 SUMMARY

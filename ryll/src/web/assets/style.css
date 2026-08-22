@@ -1,16 +1,18 @@
 body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-serif; }
 /* Page chrome sits above the video.
 
-   #video fills the whole viewport and comes after these elements in
-   the DOM, so without an explicit z-index it paints over them: among
-   positioned elements with `z-index: auto`, document order decides.
-   Both #status and #enable-audio were painted over once the first
-   frame arrived. Chrome still delivered the click, so the button
-   worked if you knew where it was, but a control you cannot see is
-   the same as a missing one -- and clicking it is the only way to
-   get sound, because browsers will not autoplay audio unprompted.
-   Anything added here that the user has to see or press needs a
-   z-index too.
+   Observed, not derived: on Chrome both #status and #enable-audio
+   disappeared behind #video once the first frame arrived. Plain CSS
+   painting order says they should not have -- #video is not
+   positioned, so absolutely-positioned siblings paint after it
+   whatever their z-index -- which points at the browser compositing
+   the video into a layer of its own rather than at document order.
+   An explicit z-index settles it without needing to know which.
+   Chrome still delivered the click, so the button worked if you knew
+   where it was, but a control you cannot see is the same as a
+   missing one -- and clicking it is the only way to get sound,
+   because browsers will not autoplay audio unprompted. Anything
+   added here that the user has to see or press needs a z-index too.
 
    Deliberately two declarations rather than a layout change: the
    letterbox-versus-scale question is #308's, and the wider UI is
@@ -41,8 +43,14 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
    a line in #status: the failure it describes leaves every other
    signal healthy -- audio plays, input works, the cursor moves --
    so it reads as a rendering bug unless it is said plainly and in
-   the middle of the thing that is missing. */
-#no-video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 32rem; padding: 1.25rem 1.5rem; background: rgba(0, 0, 0, 0.85); border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; font-size: 0.9rem; line-height: 1.5; z-index: 15; }
+   the middle of the thing that is missing.
+
+   `pointer-events: none` because the panel's own text promises the
+   mouse still works, and a 32rem box centred on the viewport would
+   otherwise swallow every click and move landing in the middle of
+   the screen -- the listeners are bound to the <video> underneath.
+   Nothing in here is interactive; the <code> spans are decorative. */
+#no-video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 32rem; padding: 1.25rem 1.5rem; background: rgba(0, 0, 0, 0.85); border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; font-size: 0.9rem; line-height: 1.5; z-index: 15; pointer-events: none; }
 #no-video h1 { margin: 0 0 0.75rem; font-size: 1.05rem; }
 #no-video p { margin: 0 0 0.6rem; }
 #no-video p:last-child { margin-bottom: 0; }

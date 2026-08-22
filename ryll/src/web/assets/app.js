@@ -12,9 +12,14 @@
 //   * KeyboardEvent.code → AT scancode table (ported from
 //     `scancode_for_logical_key` in
 //     shakenfist-spice-renderer/src/channels/inputs.rs).
-//     Extended keys (E0-prefixed) are encoded with the
-//     prefix byte in the low byte of the u32, matching
-//     `make_scancode()` on the Rust side.
+//     The table is written in *logical* form, with an
+//     extended key's E0 prefix in the HIGH byte -- Up arrow
+//     is 0xE048. That is not the wire form and it does not
+//     match `make_scancode()`; ryll converts it, swapping
+//     the bytes and applying the release bit. This comment
+//     said the opposite until phase 04, and believing it is
+//     how the browser path came to reimplement the encoding
+//     backwards. See the SCANCODE_TABLE comment below.
 //   * keydown / keyup listeners on `document`, dispatched
 //     through the data channel as `{type:"key",scancode,down}`.
 //     Browser auto-repeat is dropped and held keys are released

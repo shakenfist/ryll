@@ -1335,12 +1335,6 @@ pub fn scancode_for_logical_key(key: LogicalKey) -> Option<(u32, u32)> {
     Some((make_scancode(base, false), make_scancode(base, true)))
 }
 
-/// Encode a SPICE scancode for the wire.
-///
-/// Normal keys use a single-byte scancode in the low byte of the u32.
-/// Extended keys (E0-prefixed on the AT keyboard) are encoded as two
-/// bytes: the E0 prefix in the low byte, the scancode in the next byte.
-/// This matches spice-gtk's `spice_make_scancode()`.
 /// Encode a logical AT scancode into the value SPICE expects on the
 /// wire.
 ///
@@ -1358,7 +1352,8 @@ pub fn scancode_for_logical_key(key: LogicalKey) -> Option<(u32, u32)> {
 /// until it started using this function too.
 ///
 /// Every caller that builds an [`InputEvent::KeyDown`] or
-/// [`InputEvent::KeyUp`] must go through here.
+/// [`InputEvent::KeyUp`] must go through here. This matches
+/// spice-gtk's `spice_make_scancode()`.
 ///
 /// [`InputEvent::KeyDown`]: crate::InputEvent::KeyDown
 /// [`InputEvent::KeyUp`]: crate::InputEvent::KeyUp

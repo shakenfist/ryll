@@ -9,11 +9,17 @@
 //! to verify "incoming RTP packets" and the ping/pong round-trip we
 //! drive the client side directly.
 //!
-//! Asserts:
+//! The first test asserts:
 //! * >= 10 video RTP packets received within ~3 seconds.
 //! * >= 5 audio RTP packets received within ~3 seconds.
 //! * Round-trip on the control DC: server sends "ping", the client
 //!   replies "pong", server's `control_rx` delivers it.
+//!
+//! The tests below it narrow the client's codec set: one offers a
+//! reduced-but-workable set and still expects media, the other offers
+//! no H.264 at all and expects the encoder task to retire rather than
+//! spin. Each carries its own doc comment; this list is a summary of
+//! the first test, not an inventory of the file.
 //!
 //! No browser involved; SDP exchange is direct between the two
 //! peers. ICE uses host-only candidates (empty `ice_servers`).

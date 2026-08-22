@@ -341,6 +341,9 @@ Note that `--verbose` turns on `debug` for the whole dependency tree,
 not just ryll — webrtc-rs is talkative at that level. That is enough
 log to affect the numbers on a long run, so take the counters from a
 short separate session rather than from the one being measured.
+`RUST_LOG` will not narrow it: ryll does not read it. Tracked as
+[#313](https://github.com/shakenfist/ryll/issues/313); when that
+lands, this paragraph goes away.
 
 If you are driving the uefi-latency-guest, note that any keypress
 advances a fixed eight-colour cycle and one step in eight is black,
