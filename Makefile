@@ -493,7 +493,8 @@ test-qemu-desktop: test-qemu-stop $(DESKTOP_BASE_IMAGE) $(DESKTOP_SEED)
 		--ovmf-code $(OVMF_CODE) \
 		--ovmf-vars $(OVMF_VARS) \
 		--spice-port $(QEMU_SPICE_PORT) \
-		--pid-file $(QEMU_PID_FILE)
+		--pid-file $(QEMU_PID_FILE) \
+		--qmp $(QEMU_QMP_SOCKET)
 	@echo "Connect with: ryll --web --direct localhost:$(QEMU_SPICE_PORT)"
 	@echo "Guest login: debian / $(DESKTOP_PASSWORD) (xfce autologins)"
 
