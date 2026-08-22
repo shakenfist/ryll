@@ -734,6 +734,111 @@ Three tiers, cheapest first:
    is the `KeyboardEvent.code` → scancode table in `app.js`, which
    is the part tier 2 would cover.
 
+## Review response
+
+The automated reviewer raised fifteen findings on #312 — eight FIX,
+five CONSIDER, two INFO. All fifteen were verified against the tree
+before being acted on; none was wrong. Thirteen were fixed on the
+branch and two were filed.
+
+Two of them were substantive, and both are the same failure this
+phase was already about: a second implementation of something that
+already had an owner, and a capability that reports success while
+doing nothing.
+
+**The control socket's `send_key` had the identical pair of
+scancode bugs the web frontend had.** `handle_send_key` hand-rolled
+the encoding — `scancode as u32` straight into `KeyDown`, and
+`scancode | 0x80` for the release. For 0xE0-prefixed keys that sent
+the prefix byte second and put the break bit on the prefix rather
+than the scancode, so every extended key was wrong in both
+directions, exactly as `app.js` was. The phase found one instance of
+the duplicate-encoding bug and left the other in place, in the very
+verb the new doc comment says must go through `make_scancode`. It
+now does. The test asserted the buggy values (`0xE04B` / `0xE0CB`),
+which is the same "written from the implementation rather than the
+contract" failure recorded above for the web tests; it now asserts a
+literal *and* `make_scancode`, as the web test does.
+
+This is protocol-visible, so the protocol went to **1.2** with the
+correction written into the version history and the `send_key`
+section. It is a minor bump: nothing about the envelope, verbs or
+field types changes, and no client could have depended on the old
+behaviour while also reaching the guest correctly. Checked before
+changing it — no ecosystem consumer sends extended scancodes.
+kerbside's `press_key` sends 28 and 23 with the release bit applied
+client-side, and the loadtest orchestrator sends 0x39; all three are
+plain codes, byte-identical across the change. The affordance
+kerbside relies on (a logical code that already carries the break
+bit) survives, and is now asserted rather than assumed.
+
+**Web mode's control socket could never emit `digest_updated`.** The
+poller that decodes the QR digest out of the framebuffer was spawned
+inside `run_headless` only, so a client could `subscribe` in web
+mode, get a success response, and wait forever. That is precisely
+the gap "What 4e implies for testing" says this feature exists to
+close, so the feature was landed without the thing that makes it
+useful. `spawn_digest_poller` now sits beside `spawn_control_socket`
+and both modes call it. Web mode spawns it inside the
+`--control-socket` branch: the poller decodes QR on a timer whether
+or not anyone is listening, and an ordinary browser session should
+not pay for that. Note that neither `make test` nor `make lint`
+builds `digest-decode`, so this needed a separate
+`cargo clippy -p ryll --features digest-decode --all-targets` to
+check at all — the first attempt did not compile.
+
+The rest were documentation and comment corrections, and three of
+them were places where this phase's own text was wrong:
+
+- `app.js`'s file header still asserted that extended keys are
+  encoded with the prefix in the low byte "matching
+  `make_scancode()`" — the exact false statement that produced the
+  bug, seventy lines above the corrected comment.
+- `make_scancode` carried two stacked doc comments, the stale one
+  first, describing the encoding in terms of output byte layout
+  while the new one described input logical form.
+- `validate_control_socket` was inserted between
+  `web_media_bind_policy`'s doc comment and its function, so
+  rustdoc silently reassigned eight lines of explanation to the
+  wrong function.
+- The parity matrix marked the socket "available" for Web while the
+  two rows describing what it can do still read "n/a — intrinsic".
+- The z-index comment's stacking-order explanation was wrong:
+  `#video` is not positioned, so `#status` and `#enable-audio` paint
+  above it regardless. Reworded to what was observed — Chrome hid
+  them anyway — rather than a mechanism that does not apply.
+- `#no-video` had default `pointer-events`, so a 32rem panel whose
+  own text promises "mouse ... unaffected and still work" swallowed
+  every click in the middle of the screen.
+- `tools/web-soak.sh --help` printed `set -euo pipefail` and the
+  variable block, because the extraction used a hardcoded line
+  range that the header had outgrown.
+
+Two were deferred, both as the reviewer suggested:
+
+- **#313** — ryll ignores `RUST_LOG`, so `--verbose` is
+  all-or-nothing. This is the direct cause of the invalidated
+  baseline rows recorded above. `EnvFilter` is a few lines, but it
+  is a behaviour change to logging with its own testing, and the
+  documented workaround is in both places an operator looks. The
+  comment at `main.rs` and the paragraphs in `docs/development.md`
+  and `tools/web-soak.sh` now name the issue, and say the text goes
+  away when it lands.
+- **#314** — `no_video_codec` is an `Arc<AtomicBool>` on shared
+  state holding a per-bridge fact. Correct for the single viewer
+  web mode supports; the fix needs the relay spawn moved below
+  `accept_offer`, which touches bridge lifecycle and the error path
+  on the one code path this phase soak-tested by hand. Not worth
+  that risk for a failure mode that is a missing notice, in a
+  configuration web mode does not support. Recorded in the field's
+  doc comment.
+
+The reviewer's strongest coverage note stands and is not fixed here:
+there is still no end-to-end test that drives a web-mode control
+socket, and such a test would have caught both substantive findings.
+It is tier 2 in "What 4e implies for testing" and needs a live
+guest, so it belongs in kerbside rather than in this branch.
+
 ## Back brief
 
 Before executing any step of this plan, please back brief the
