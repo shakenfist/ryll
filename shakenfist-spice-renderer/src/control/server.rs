@@ -904,13 +904,17 @@ struct PasteParams {
 
 /// Handle a `send_key` request.
 ///
+/// The `scancode` param is the *logical* AT set-1 code, which is not
+/// the wire form; [`make_scancode`](crate::make_scancode) converts it
+/// and owns that conversion for every input producer in the tree.
+///
 /// Translates the `state` field into one or two `InputEvent`s:
-/// - `"down"` → `InputEvent::KeyDown(scancode)`.
-/// - `"up"` → `InputEvent::KeyUp` carrying the AT set-1 release code
-///   (`scancode | 0x80`); the caller may supply either the make code
-///   or the release code.
-/// - `"press"` → `InputEvent::KeyDown(scancode)` followed immediately
-///   by the same `InputEvent::KeyUp` as `"up"` (two separate sends).
+/// - `"down"` → `InputEvent::KeyDown(make_scancode(scancode, false))`.
+/// - `"up"` → `InputEvent::KeyUp(make_scancode(scancode, true))`,
+///   which sets the AT set-1 break bit.  The caller may supply either
+///   the make code or a logical code that already carries the bit.
+/// - `"press"` → the `"down"` event followed immediately by the same
+///   `InputEvent::KeyUp` as `"up"` (two separate sends).
 ///
 /// Returns `{}` on success.  The two sends for `"press"` are
 /// non-atomic from the inputs channel's perspective, but they arrive
@@ -933,19 +937,32 @@ fn handle_send_key(
         }
     };
 
-    let scancode = p.scancode as u32;
-    // `InputEvent::KeyUp` carries the AT set-1 release code: the make
-    // code with bit 7 set (every other producer — GUI, cadence —
-    // already passes it that way).  For 0xE0-prefixed extended codes
-    // the release bit belongs on the second byte, which is the low
-    // byte of the packed u16 value, so the same OR covers both.
-    // OR-ing an already-set bit is a no-op, keeping clients that
-    // supply an explicit release code correct.
-    let release = scancode | 0x80;
+    // Clients send the scancode in logical form, as the protocol
+    // document specifies: a plain code like `0x1E`, or an extended one
+    // with the 0xE0 prefix in the high byte, `0xE04B`.  Neither is what
+    // SPICE wants on the wire, and this verb used to pass both through
+    // unconverted:
+    // a `u32` serialises little-endian, so `0xE04B` reached the guest
+    // as `4B E0` with the prefix *second*, and `scancode | 0x80` put
+    // the break bit on the prefix byte rather than the scancode.  Every
+    // extended key was wrong in both directions.
+    //
+    // `make_scancode` is the single owner of that encoding for every
+    // producer in the tree — GUI, web frontend, paste, and now here.
+    // The web frontend shipped the identical pair of bugs by
+    // reimplementing it; see its doc comment.
+    //
+    // A client that supplies a logical code with the break bit already
+    // set for `"up"` still works, because `make_scancode` ORs the bit in
+    // and OR-ing a set bit is a no-op.  kerbside's `press_key` relies on
+    // that, and the protocol document guarantees it.
+    let logical = p.scancode as u32;
+    let press = crate::make_scancode(logical, false);
+    let release = crate::make_scancode(logical, true);
 
     match p.state.as_str() {
         "down" => {
-            if input_tx.try_send(InputEvent::KeyDown(scancode)).is_err() {
+            if input_tx.try_send(InputEvent::KeyDown(press)).is_err() {
                 return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
             }
         }
@@ -957,7 +974,7 @@ fn handle_send_key(
         "press" => {
             // Send KeyDown then KeyUp.  If either fails, return an
             // error; the channel is likely closed.
-            if input_tx.try_send(InputEvent::KeyDown(scancode)).is_err() {
+            if input_tx.try_send(InputEvent::KeyDown(press)).is_err() {
                 return Response::err(id, ErrorCode::InternalError, "input channel closed or full");
             }
             if input_tx.try_send(InputEvent::KeyUp(release)).is_err() {

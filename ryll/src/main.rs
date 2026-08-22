@@ -162,7 +162,13 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     crate::config::validate_control_socket(&args)?;
 
-    // Set up logging
+    // Set up logging.
+    //
+    // This is a plain level filter, so `RUST_LOG` is ignored and
+    // `--verbose` is all-or-nothing: debug for the whole dependency
+    // tree, webrtc-rs included, which is roughly 250x the log volume
+    // and enough to move a CPU measurement. `EnvFilter` would fix it;
+    // see #313, and the workaround in docs/development.md.
     let log_level = if args.verbose {
         Level::DEBUG
     } else {
@@ -790,6 +796,23 @@ fn run_web(
                     surface_mirror.clone(),
                 ));
             info!("web: control socket at {}", sock_path.display());
+            // The digest poller belongs with the socket, not with
+            // the mode: it is what turns framebuffer content into
+            // the `digest_updated` events the QR scenario tests
+            // subscribe to, and headless spawns it for the same
+            // reason. Spawned inside this closure rather than
+            // beside it so an ordinary browser session -- no socket
+            // -- does not pay to decode QR out of every frame.
+            //
+            // Without this, `subscribe` on `digest_updated` returned
+            // success in web mode and then delivered nothing, which
+            // is the worst shape a gap can take.
+            #[cfg(feature = "digest-decode")]
+            let _digest_handle = shakenfist_spice_renderer::spawn_digest_poller(
+                surface_mirror.clone(),
+                event_broadcast_tx.clone(),
+                cancel.clone(),
+            );
             shakenfist_spice_renderer::spawn_control_socket(
                 sock_path,
                 status,

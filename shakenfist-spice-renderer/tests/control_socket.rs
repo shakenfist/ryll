@@ -45,6 +45,7 @@ use tokio_util::sync::CancellationToken;
 use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent};
 use shakenfist_spice_renderer::control::protocol::{RequestId, StatusResult, SurfaceInfo};
 use shakenfist_spice_renderer::control::server::{Server, StatusProvider};
+use shakenfist_spice_renderer::make_scancode;
 use shakenfist_spice_renderer::surface_mirror::SurfaceMirror;
 
 // ── Mock status provider ──────────────────────────────────────────
@@ -242,7 +243,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.1");
+    assert_eq!(result["protocol_version"], "1.2");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -502,8 +503,21 @@ async fn send_key_translates_to_input_events() {
     assert!(matches!(ev1, InputEvent::KeyDown(sc) if sc == 0x1E_u32));
     assert!(matches!(ev2, InputEvent::KeyUp(sc) if sc == 0x9E_u32));
 
-    // Extended key (0xE0-prefixed, left arrow): the release bit lands
-    // on the low byte of the packed value.
+    // Extended key (0xE0-prefixed, left arrow).  The client supplies
+    // the logical form the protocol document specifies, `0xE04B`, and
+    // the server must convert: an `InputEvent` scancode is serialised
+    // little-endian, so the wire bytes want the prefix *first* and the
+    // packed value is therefore `0x4BE0`.  The break bit goes on the
+    // scancode byte, not the prefix, giving `0xCBE0`.
+    //
+    // Asserted twice on purpose, exactly as
+    // `every_key_reaches_the_wire_the_way_the_gui_would_send_it` does
+    // in ryll: once against a literal, so a regression in
+    // `make_scancode` itself fails here rather than being cancelled
+    // out, and once against `make_scancode`, so this verb cannot drift
+    // away from the encoding the GUI and web paths use.  Asserting
+    // only against the implementation is what let the previous values
+    // (`0xE04B` / `0xE0CB`, both wrong on the wire) sit here green.
     send_request(
         &mut w,
         6,
@@ -522,13 +536,47 @@ async fn send_key_translates_to_input_events() {
         .recv()
         .await
         .expect("KeyUp for extended press");
-    assert!(matches!(ev1, InputEvent::KeyDown(sc) if sc == 0xE04B_u32));
-    assert!(matches!(ev2, InputEvent::KeyUp(sc) if sc == 0xE0CB_u32));
+    assert!(
+        matches!(ev1, InputEvent::KeyDown(sc) if sc == 0x4BE0_u32),
+        "expected KeyDown(0x4BE0), got {:?}",
+        ev1
+    );
+    assert!(
+        matches!(ev2, InputEvent::KeyUp(sc) if sc == 0xCBE0_u32),
+        "expected KeyUp(0xCBE0), got {:?}",
+        ev2
+    );
+    assert_eq!(make_scancode(0xE04B, false), 0x4BE0);
+    assert_eq!(make_scancode(0xE04B, true), 0xCBE0);
+
+    // The same logical code with the break bit already set, as
+    // kerbside's `press_key` sends it, must land on the identical wire
+    // value: `make_scancode` ORs the bit in and OR-ing a set bit is a
+    // no-op.  The protocol document promises this affordance, so it is
+    // asserted rather than assumed.
+    send_request(
+        &mut w,
+        7,
+        "send_key",
+        serde_json::json!({ "scancode": 0xE0CB, "state": "up" }),
+    )
+    .await;
+    let _resp = recv_line(&mut r).await;
+    let ev = inputs
+        .input_rx
+        .recv()
+        .await
+        .expect("KeyUp for pre-encoded extended release");
+    assert!(
+        matches!(ev, InputEvent::KeyUp(sc) if sc == 0xCBE0_u32),
+        "expected KeyUp(0xCBE0), got {:?}",
+        ev
+    );
 
     // "sideways" → bad_state error; no InputEvent enqueued.
     send_request(
         &mut w,
-        7,
+        8,
         "send_key",
         serde_json::json!({ "scancode": 0x1E, "state": "sideways" }),
     )

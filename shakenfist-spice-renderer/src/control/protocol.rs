@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.1).
+//! Wire types for the Ryll control-socket protocol (version 1.2).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -10,13 +10,22 @@
 //! handshake compatibility is at the major-version level, so
 //! v1.0 clients still hello successfully; they just never
 //! subscribe to v1.1 events.
+//!
+//! v1.1 → v1.2 corrected `send_key`'s handling of 0xE0-prefixed
+//! extended scancodes, which were transmitted with the prefix byte
+//! second and the break bit on the wrong byte.  A minor bump rather
+//! than a major one because the envelope, verbs and field types are
+//! unchanged, and because no client could have depended on the old
+//! behaviour and reached the guest correctly.  It is called out in
+//! the version number so a client needing arrow keys has something
+//! to require.
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::channels::RequestId;
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.1";
+pub const PROTOCOL_VERSION: &str = "1.2";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding

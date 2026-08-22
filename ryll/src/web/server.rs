@@ -165,6 +165,11 @@ pub struct WebState {
     ///
     /// False until proven otherwise, so a viewer is never wrongly
     /// told its video is broken.
+    ///
+    /// Shared state holding a per-bridge fact, which is the wrong
+    /// shape and only safe because web mode supports one viewer at a
+    /// time. See #314 for the fix: read `video_negotiated()` once and
+    /// pass a plain `bool` into the relay.
     pub no_video_codec: Arc<AtomicBool>,
 }
 

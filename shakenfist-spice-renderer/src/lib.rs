@@ -37,10 +37,6 @@ pub use audio_sink::OpusPacketSink;
 pub use byte_counter::ByteCounter;
 pub use capture_sink::CaptureSink;
 pub use channels::inputs::make_scancode;
-#[cfg(unix)]
-pub use session::{spawn_control_socket, SessionStatus};
-// Re-exported so a caller can shut a control socket down without
-// taking a direct tokio-util dependency of its own.
 pub use channels::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavCommand};
 pub use clipboard::ClipboardBackend;
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
@@ -54,12 +50,18 @@ pub use log_config::LogConfig;
 pub use mm_clock::MmClock;
 pub use notification::{NotificationEntry, NotificationSource};
 pub use notification_sink::NotificationSink;
+#[cfg(feature = "digest-decode")]
+pub use session::spawn_digest_poller;
 pub use session::{run_connection, run_headless};
+#[cfg(unix)]
+pub use session::{spawn_control_socket, SessionStatus};
 pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,
 };
 pub use surface_mirror::SurfaceMirror;
+// Re-exported so a caller can shut a control socket down without
+// taking a direct tokio-util dependency of its own.
 #[cfg(unix)]
 pub use tokio_util::sync::CancellationToken;
 pub use traffic::TrafficSink;
