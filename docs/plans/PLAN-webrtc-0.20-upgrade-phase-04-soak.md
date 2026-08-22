@@ -364,9 +364,67 @@ packaging, not ours".
 The phase is cheap to plan and expensive to redo, which is why
 Decision 2 and the back-brief gate exist.
 
+## Results
+
+### 4d — the Firefox H.264 question, settled
+
+Firefox 140.14.0esr on this host offers **no H.264 at any payload
+type**, and the cause is not anything ryll does. Established with
+`tools/browser-offer-probe.py`, which this step added, against the
+provisioned `default-esr` profile:
+
+| Check | Result |
+|---|---|
+| `RTCRtpSender.getCapabilities('video')` | lists **four** H.264 entries (`42e01f` and `42001f`, packetization-mode 1 and 0) |
+| The offer it actually sends | VP8 120, VP9 121, AV1 99, rtx, ulpfec, red — **no H.264 line at all** |
+| Same, windowed on a real X display | identical — headless is not the cause |
+| Same, `direction: recvonly` | identical — and this is the direction a ryll viewer uses |
+| Same, `MOZ_GMP_PATH` forced at the plugin | identical |
+| Chromium 151, same probe, as a control | offers H.264 at PT 102, 104, 108, 114, 116, 39, 41, 43 |
+
+So the capability list and the offer disagree, which is exactly the
+trap `docs/development.md` already warned about — now demonstrable
+in a minute rather than asserted.
+
+Everything static about the installation says it should work. The
+plugin is on disk at `gmp-gmpopenh264/2.6.0/libgmpopenh264.so` with
+its `.info` declaring both `encode-video[h264]` and
+`decode-video[h264]`; `ldd` resolves every library it needs; Debian's
+`firefox-esr` defaults `media.gmp-gmpopenh264.enabled` and
+`.visible` to true and ships no `policies.json` overriding them;
+`media.navigator.video.disable_h264_baseline` is false; and
+`libxul.so` still references the plugin by name. `MOZ_LOG=GMP:5`
+produced empty logs across all nine child processes, so no GMP
+process is launched and rejected — Firefox concludes H.264 is
+unavailable before it gets that far.
+
+**Decision 4 stands: this is not ryll's to fix, and ryll does not
+gain a second codec because of it.** The failure is inside Firefox's
+own GMP provisioning on this host; ryll's H.264-only encoder is
+shared with the GUI path, and adding VP8 would be a renderer project
+undertaken during a port's validation phase — the attribution
+problem the master plan is structured to avoid.
+
+What phase 04 does instead is make the failure legible, which 4a
+did: a browser in this state now gets a panel in the page naming
+the cause, and the session stops spending CPU on video nobody can
+decode.
+
+Two things follow for the rest of the phase. The Firefox criterion
+is met in the form Decision 4 stated — Firefox reaches a healthy
+session and is told why it has no picture — and **the comparable
+soak (4c) must use Chromium**, which is what phase 01's baseline
+used anyway.
+
+An unexpected dividend: the regression test added in 4a offers VP8
+at PT 120 and Opus at 109 because that is what this probe showed
+Firefox actually offering. The test reproduces a real browser's
+numbers rather than plausible-looking ones.
+
 ## Status
 
-Planned. Not started.
+In progress. 4a, 4b and 4d complete; 4c, 4e and 4f are operator
+steps and have not run.
 
 ## Back brief
 

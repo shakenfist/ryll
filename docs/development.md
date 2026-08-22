@@ -413,12 +413,25 @@ Firefox is the browser this happens on. It ships H.264 for WebRTC via
 Cisco's OpenH264 plugin, and if that plugin has not loaded, Firefox
 still lists H.264 in `RTCRtpReceiver.getCapabilities('video')` while
 omitting it from the offer — so the capability list is not evidence.
-Check `about:addons` → Plugins for OpenH264, and confirm against a
-generated offer rather than against capabilities.
+`tools/browser-offer-probe.py` is the check that follows from that. It
+serves a page to a browser, prints the video codecs from the offer the
+page actually generated with `getCapabilities` beside them, and exits
+non-zero when the two disagree:
+
+```bash
+tools/browser-offer-probe.py --browser chromium
+tools/browser-offer-probe.py --browser firefox-esr --profile ~/.mozilla/firefox/<profile>
+```
+
+Pass a real `--profile` for Firefox. Without one it uses a throwaway
+profile, which has never downloaded OpenH264 and would report no H.264
+for a reason that has nothing to do with the browser you meant to
+test.
 
 Chromium carries H.264 in-tree and does not have this failure mode,
 which makes it the browser to reach for when deciding whether a
-problem is ryll's.
+problem is ryll's — and the control to run the probe against when
+deciding whether the probe itself is telling the truth.
 
 ### Inspecting a `--capture` pcap
 
