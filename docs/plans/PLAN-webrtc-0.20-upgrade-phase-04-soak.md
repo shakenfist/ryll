@@ -508,6 +508,41 @@ conditions — now cheap, since `tools/web-soak.sh` exists. Per
 Decision 6 this phase records the number and does not chase it
 inline.
 
+### 4c — the bisect: the port did not cause the CPU rise
+
+The comparison above could not attribute its 0.74 pp CPU difference,
+because nine days of unrelated development sit between phase 01's
+baseline commit and the tip. So the phase measured either side of the
+phase-02 merge instead, under the same conditions, back to back.
+
+| | webrtc | CPU, whole run | RSS start → end | RSS max | Host busy% mean (max) |
+|---|---|---|---|---|---|
+| `1a7b47ed` — before the merge | 0.17.1 | **0.96%** | 150 → 220 MB | 220 MB | 11.7 (17.5) |
+| `be1aa97c` — the merge | 0.20.2 | **0.98%** | 145 → 201 MB | 201 MB | 10.2 (13.2) |
+| `b4a5b4bd` — tip, run 1 | 0.20.3 | 1.83% | 158 → 235 MB | 235 MB | 10.0 (12.7) |
+| `b4a5b4bd` — tip, run 2 | 0.20.3 | 1.95% | 161 → 221 MB | 225 MB | 8.9 (10.8) |
+
+**Across the bump itself, CPU is unchanged** — 0.96% against 0.98%,
+a difference far below the 0.5 pp phase 01 called run-to-run noise —
+**and memory improved**, 220 MB down to 201 MB peak. The port is not
+where the cost appeared.
+
+The rise to ~1.9% therefore happened somewhere between `be1aa97c`
+and `b4a5b4bd`: phase 03's binding configuration, the control socket
+and its verbs, `SurfaceMirror` in headless, the bug-report work, and
+several dependency bumps. Narrowing it further is another bisect over
+that range, which `tools/web-soak.sh` now makes routine, and it is
+not this plan's to chase — Decision 6 says record and hand off.
+
+Two notes on method, since a soak that cannot be trusted is worse
+than none. The first pre-bump run was **discarded**: host busy
+averaged 27.8% with two ~100% spikes from unrelated work on this
+shared machine, against ~10% on every run reported here. And a
+second attempt was lost when its sampler was stopped mid-run; the
+retry ran under `nohup`. All four reported runs sit within 8.9–11.7%
+mean host busy, which is what makes them comparable to each other
+and to phase 01's 8.3–10.4%.
+
 ### 4c — observations from the measured sessions
 
 Three things worth recording separately from the numbers.
