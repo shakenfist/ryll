@@ -317,10 +317,25 @@ jobs:
         run: ./tools/check-bidi.sh
 
   # Lints the agent context (AGENTS.md and anything else an agent is
-  # handed). The version is pinned to the same release as the
-  # pre-commit hook: skillsaw's rule set moves between releases, and
-  # the hook and the CI job must not disagree about what counts as
-  # broken. Bump both together.
+  # handed), by running the pre-commit hook rather than by invoking
+  # skillsaw directly. Two reasons.
+  #
+  # The composite action this job used to call opens with
+  # actions/setup-python, which resolves an interpreter from the
+  # actions/python-versions manifest -- and that manifest publishes
+  # builds for the GitHub-hosted images only. On this pool it failed
+  # with "The version '3.11' with architecture 'x64' was not found for
+  # Debian 12" before skillsaw was ever installed, so the job reported
+  # a failure without linting anything, and the action exposes no
+  # input to skip the step.
+  #
+  # Going through pre-commit also makes .pre-commit-config.yaml's rev
+  # the only place the version is written down. skillsaw's rule set
+  # moves between releases, so a hook and a job pinned separately can
+  # disagree about what counts as broken -- and Renovate's pre-commit
+  # manager bumps the hook on its own, so a second pin would drift
+  # without anyone choosing it. shakenfist/actions runs skillsaw the
+  # same way.
   skillsaw:
     name: skillsaw
     runs-on: [self-hosted, vm, debian-12, s]
@@ -335,10 +350,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Into a venv, not the system python: the runners enforce PEP
+      # 668, so a bare `pip install` is refused with "error:
+      # externally-managed-environment". pre-commit then builds the
+      # skillsaw hook its own environment from the pinned rev.
+      - name: Install pre-commit
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/venv-skillsaw"
+          "${RUNNER_TEMP}/venv-skillsaw/bin/pip" install --quiet \
+              --disable-pip-version-check pre-commit
+          echo "${RUNNER_TEMP}/venv-skillsaw/bin" >> "${GITHUB_PATH}"
+
+      # Just this hook. The others already have jobs of their own, and
+      # running them again here would report the same failure under two
+      # names while holding a second runner to do it.
       - name: Lint agent context
-        uses: stbenjam/skillsaw@v0
-        with:
-          version: '0.18.0'
+        run: pre-commit run skillsaw --all-files
 
   # Merge tier: the two jobs below run on merge_group (and on
   # workflow_dispatch) and gate "Can merge". They are the expensive
