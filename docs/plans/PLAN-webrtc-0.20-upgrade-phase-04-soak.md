@@ -678,15 +678,17 @@ recorded above, and neither is a port regression.
 | `docs/configuration.md` and `docs/web-frontend.md` cover the UDP bind address | ✅ both name `--web-media-port` (phase 03) |
 | `ARCHITECTURE.md` and `AGENTS.md` reflect the bridge's task and callback structure | ✅ verified, and phase 02 had already written it up. `ARCHITECTURE.md` changed by one word this phase — its `control/` annotation said "Headless control socket", which stopped being true |
 
-**Not satisfied, with reasons:**
+**Not satisfied, with reasons — both now tracked rather than left
+in this document:**
 
-- **Safari.** No Mac was available to the session; the operator
-  checked Chrome on macOS instead, which the master plan does not
-  count. Safari remains unexercised.
-- **Firefox.** Reaches a healthy session with audio, input and
-  cursor, and no video, on both Linux and macOS. This is the
+- **Safari** (#310). No Mac was available to the session; the
+  operator checked Chrome on macOS instead, which the master plan
+  does not count. Safari remains unexercised.
+- **Firefox** (#311). Reaches a healthy session with audio, input
+  and cursor, and no video, on both Linux and macOS. This is the
   criterion Decision 4 deliberately reinterpreted rather than met;
-  see 4d and its correction under 4e.
+  see 4d and its correction under 4e. #311 carries the evidence and
+  the second-codec decision.
 
 ## What 4e implies for testing
 
