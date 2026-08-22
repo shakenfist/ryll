@@ -17,6 +17,8 @@
 //     `make_scancode()` on the Rust side.
 //   * keydown / keyup listeners on `document`, dispatched
 //     through the data channel as `{type:"key",scancode,down}`.
+//     Browser auto-repeat is dropped and held keys are released
+//     on focus loss -- see the listeners for why both matter.
 //   * mousemove / mousedown / mouseup on the `<video>`
 //     element with letterbox-corrected normalised
 //     coordinates, dispatched as `{type:"pointer-move"}`
@@ -279,6 +281,12 @@
     // ---------------------------------------------------------------
     const KEY_PASSTHROUGH = new Set(['F11']);
 
+    // Scancodes the guest currently believes are held down, so they
+    // can be released if this page stops receiving key events. A
+    // guest holding a key it will never be told about repeats it
+    // forever.
+    const heldKeys = new Set();
+
     document.addEventListener('keydown', (e) => {
         const sc = SCANCODE_TABLE[e.code];
         if (sc === undefined) {
@@ -287,6 +295,17 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
+        // Drop the browser's auto-repeat. Holding a key fires
+        // keydown over and over with e.repeat set, but only one
+        // keyup at the end. SPICE expects one down and one up, and
+        // the guest's own X server generates the repeat from the
+        // held key — so forwarding these would stack the browser's
+        // repeat on top of the guest's and make the keyboard
+        // unusable.
+        if (e.repeat) {
+            return;
+        }
+        heldKeys.add(sc);
         sendCtrl({ type: 'key', scancode: sc, down: true });
     });
 
@@ -298,7 +317,30 @@
         if (!KEY_PASSTHROUGH.has(e.code)) {
             e.preventDefault();
         }
+        heldKeys.delete(sc);
         sendCtrl({ type: 'key', scancode: sc, down: false });
+    });
+
+    // Release everything still held when the page stops being able
+    // to see key events. Losing focus mid-keypress — alt-tab, a
+    // browser dialog, switching tab — delivers the keydown and never
+    // the keyup, leaving the guest repeating that key indefinitely
+    // with no way for the user to stop it.
+    const releaseHeldKeys = () => {
+        for (const sc of heldKeys) {
+            sendCtrl({ type: 'key', scancode: sc, down: false });
+        }
+        if (heldKeys.size > 0) {
+            console.log('[ryll] released', heldKeys.size, 'held key(s) on focus loss');
+            heldKeys.clear();
+        }
+    };
+
+    window.addEventListener('blur', releaseHeldKeys);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            releaseHeldKeys();
+        }
     });
 
     // ---------------------------------------------------------------
