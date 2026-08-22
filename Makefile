@@ -27,6 +27,10 @@ CARGO_CACHE_DIR := $(abspath $(CARGO_CACHE))
 # Test QEMU SPICE server settings
 QEMU_SPICE_PORT := 5900
 QEMU_PID_FILE := /tmp/ryll-test-qemu.pid
+# QMP control socket for the test guest. tools/web-soak.sh drives the
+# guest through it with `sendkey`, which is what makes an unattended
+# soak produce screen activity to encode.
+QEMU_QMP_SOCKET := /tmp/ryll-test-qemu-qmp.sock
 QEMU_TEST_IMAGE := testdata/uefi-latency-guest.qcow2
 QEMU_TEST_IMAGE_URL := https://images.shakenfist.com/testimages/uefi-latency-guest.qcow2
 OVMF_CODE := /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -433,16 +437,18 @@ test-qemu: test-qemu-stop $(QEMU_TEST_IMAGE)
 		-drive file=$(QEMU_TEST_IMAGE),format=qcow2,if=virtio \
 		-vga qxl \
 		-spice port=$(QEMU_SPICE_PORT),disable-ticketing=on \
+		-qmp unix:$(QEMU_QMP_SOCKET),server=on,wait=off \
 		-daemonize \
 		-pidfile $(QEMU_PID_FILE)
 	@echo "QEMU SPICE server running on port $(QEMU_SPICE_PORT) (PID $$(cat $(QEMU_PID_FILE)))"
 	@echo "Connect with: ryll --direct localhost:$(QEMU_SPICE_PORT)"
+	@echo "QMP socket:   $(QEMU_QMP_SOCKET) (used by tools/web-soak.sh)"
 
 # Stop the test QEMU instance
 test-qemu-stop:
 	@if [ -f $(QEMU_PID_FILE) ]; then \
 		kill $$(cat $(QEMU_PID_FILE)) 2>/dev/null || true; \
-		rm -f $(QEMU_PID_FILE); \
+		rm -f $(QEMU_PID_FILE) $(QEMU_QMP_SOCKET); \
 		echo "Stopped test QEMU instance"; \
 	fi
 	@rm -f $(QEMU_VARS_COPY)

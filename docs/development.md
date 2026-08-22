@@ -307,6 +307,42 @@ Integration testing against real traffic needs a SPICE server;
 `make test-qemu` starts one locally. Headless mode is what CI uses for
 protocol-level testing.
 
+### Soaking `--web` and comparing against a baseline
+
+`tools/web-soak.sh` samples a running `ryll --web` process while
+driving the guest, and prints a summary in the same shape as the
+0.17 baseline recorded in
+`docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md`. Reach for
+it when a change could plausibly affect memory or CPU over minutes
+rather than seconds — the WebRTC write path especially, where the
+integration tests only ever exercise a few seconds.
+
+```bash
+make test-qemu                       # guest, SPICE on 5900, QMP socket
+ryll --web --direct localhost:5900 & # the process to sample
+tools/web-soak.sh --pid $! --qmp /tmp/ryll-test-qemu-qmp.sock
+```
+
+Defaults are a 20-minute run sampled every 30 s, which is what the
+baseline used; both are overridable. Per sample it records RSS,
+per-thread CPU, whole-host CPU busy% and load average, to a CSV as
+well as the terminal. The host figures are there because these soaks
+usually run on a shared machine: contamination belongs in the data,
+not folded into the result.
+
+Two things it deliberately does not do. It does not start ryll or a
+browser — an attended session is the point, and the numbers are only
+comparable if the browser and its flags match whatever the baseline
+used. And it does not read the pump drop counters or reaper events,
+which ryll logs at `debug`; run with
+`RUST_LOG=info,shakenfist_spice_webrtc=debug,ryll=debug` and take
+them out of the session log.
+
+If you are driving the uefi-latency-guest, note that any keypress
+advances a fixed eight-colour cycle and one step in eight is black,
+so the viewer legitimately goes black for one interval in eight. The
+script says so at startup.
+
 ## Manual verification against a desktop guest
 
 Some behaviour cannot be tested from the automated suite at all,
