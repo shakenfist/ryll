@@ -73,10 +73,6 @@
       "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
       "date": "2026-08-03"
     },
-    "docs/control-socket-protocol.md": {
-      "sha": "c0ae2c61f9f83fbdc397c739ba9ad9d357499ec5",
-      "date": "2026-08-17"
-    },
     "docs/development-macos.md": {
       "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
       "date": "2026-08-17"
@@ -144,14 +140,6 @@
     "ryll/src/web/assets.rs": {
       "sha": "c2543638db787927d711673e33b0729d9374cc8c",
       "date": "2026-07-26"
-    },
-    "ryll/src/web/assets/index.html": {
-      "sha": "a6d00d5bcab771ebdfd2324aef8c8a2fb8347d9d",
-      "date": "2026-08-08"
-    },
-    "ryll/src/web/control.rs": {
-      "sha": "7b48cc2d8f5b848e9bb9c95b3755d5d255075e8f",
-      "date": "2026-08-18"
     },
     "ryll/src/web/cursor.rs": {
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
@@ -257,14 +245,6 @@
       "sha": "e5d17a3a8dcd9c28de519ced1d31b502a1639fcd",
       "date": "2026-07-19"
     },
-    "shakenfist-spice-renderer/src/control/protocol.rs": {
-      "sha": "b0317b156c0ea511f42d3da53ac41de41c0f810d",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/control/server.rs": {
-      "sha": "bba7179d0e3d005460e2157e16a46f9fd60acacf",
-      "date": "2026-07-19"
-    },
     "shakenfist-spice-renderer/src/device_config.rs": {
       "sha": "908c55fe61f547a541546bf450d3835820e76370",
       "date": "2026-07-21"
@@ -276,10 +256,6 @@
     "shakenfist-spice-renderer/src/display/surface.rs": {
       "sha": "9457c8de4686abc792bef017c2ac1456655f3cc7",
       "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/lib.rs": {
-      "sha": "5c9380c706a38baf82dd19d2bde72fdd856fc7d7",
-      "date": "2026-08-18"
     },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
@@ -408,10 +384,6 @@
     "tools/sign-release-tag.sh": {
       "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
       "date": "2026-07-26"
-    },
-    "tools/start-desktop-qemu.sh": {
-      "sha": "18e1d798477e9750a82a03f2beeb2f2a1f72cc39",
-      "date": "2026-08-18"
     },
     "tools/tag-release.sh": {
       "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",

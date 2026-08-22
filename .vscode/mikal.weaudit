@@ -112,18 +112,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/control/protocol.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control/server.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/display/mod.rs",
       "author": "mikal"
     },
@@ -376,10 +364,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/assets/index.html",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/codeql-analysis.yml",
       "author": "mikal"
     },
@@ -393,10 +377,6 @@
     },
     {
       "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/control-socket-protocol.md",
       "author": "mikal"
     },
     {
@@ -464,10 +444,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/control.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/cursor.rs",
       "author": "mikal"
     },
@@ -480,15 +456,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "tools/make-cloud-seed.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/start-desktop-qemu.sh",
       "author": "mikal"
     }
   ],
