@@ -348,23 +348,11 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/pr-re-review.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/pr-retest.yml",
       "author": "mikal"
     },
     {
       "path": ".github/actionlint.yaml",
-      "author": "mikal"
-    },
-    {
-      "path": ".pre-commit-config.yaml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/codeql-analysis.yml",
       "author": "mikal"
     },
     {
@@ -425,14 +413,6 @@
     },
     {
       "path": "MERGE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "PLAN-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "PUSH-AUDIT.md",
       "author": "mikal"
     },
     {

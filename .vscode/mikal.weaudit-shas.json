@@ -5,20 +5,12 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
-    ".github/workflows/codeql-analysis.yml": {
-      "sha": "8085f6c6016354e3c2522821498fb2ace6b5d088",
-      "date": "2026-08-10"
-    },
     ".github/workflows/export-repo-config.yml": {
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
     },
     ".github/workflows/pr-address-comments.yml": {
       "sha": "a6a11da6e24aebba1c7a802f68e9e185dde2eaaa",
-      "date": "2026-08-05"
-    },
-    ".github/workflows/pr-re-review.yml": {
-      "sha": "3a85fcb034e4e040090a3c219cbc80008200c4c3",
       "date": "2026-08-05"
     },
     ".github/workflows/pr-retest.yml": {
@@ -37,24 +29,12 @@
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
     },
-    ".pre-commit-config.yaml": {
-      "sha": "74ce9e676d00a8f371ad4cb0f149128799e94e5b",
-      "date": "2026-08-05"
-    },
     "AGENTS.md": {
       "sha": "8df3b465acfd467da5245995c1443a2d348b6983",
       "date": "2026-08-18"
     },
     "MERGE-TEMPLATE.md": {
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
-      "date": "2026-08-18"
-    },
-    "PLAN-TEMPLATE.md": {
-      "sha": "a017c28861a1ec3f59c4174f3ea573c441b9261e",
-      "date": "2026-08-18"
-    },
-    "PUSH-AUDIT.md": {
-      "sha": "81ecd826fd3a4eea3c6a87d92156f4d48059c2ab",
       "date": "2026-08-18"
     },
     "README.md": {
