@@ -355,6 +355,7 @@ pub async fn post_offer(
                 mirror,
                 state.mouse_mode.clone(),
                 state.control_tx.clone(),
+                state.no_video_codec.clone(),
             ));
         } else {
             warn!("web: bridge.control_rx() returned None; input relay not spawned");
@@ -383,6 +384,23 @@ pub async fn post_offer(
             return Err((StatusCode::BAD_REQUEST, format!("accept_offer: {}", e)));
         }
     };
+
+    // Negotiation has settled, so the answer to "will this viewer
+    // ever see a picture" is now known. Record it for the input
+    // relay to hand back when the browser says hello — this is the
+    // earliest the fact exists and the latest it can be captured,
+    // since the bridge moves into `bridge_slot` on the next
+    // statement. A viewer with no common video codec otherwise gets
+    // a session where everything except the picture works, which
+    // reads as a rendering bug rather than a negotiation one.
+    let no_video = !bridge.video_negotiated();
+    state.no_video_codec.store(no_video, Ordering::SeqCst);
+    if no_video {
+        warn!(
+            "web: this viewer offered no H.264; video is disabled for the session and the \
+             browser has been told why"
+        );
+    }
 
     // Step 7: store the new bridge and bump the generation
     // counter so the reaper knows not to act on the dead

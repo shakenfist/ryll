@@ -42,6 +42,7 @@
     const statusEl = document.getElementById('status');
     const videoEl = document.getElementById('video');
     const cursorEl = document.getElementById('cursor');
+    const noVideoEl = document.getElementById('no-video');
 
     // SPICE mouse modes (shakenfist-spice-protocol constants.rs).
     const MOUSE_MODE_SERVER = 1;
@@ -487,6 +488,14 @@
                     cursorEl.hidden = false;
                 }
                 break;
+            case 'no-video-codec':
+                // Sent only in reply to our hello, and only when the
+                // server established that this browser's offer had no
+                // H.264 in it. Everything else about the session is
+                // healthy, which is exactly why this needs saying.
+                console.warn('[ryll] no video codec in common; see the panel');
+                noVideoEl.hidden = false;
+                break;
             default:
                 console.log('[ryll] dc message:', msg);
                 break;
@@ -506,6 +515,12 @@
         // host cursor is the only pointer the viewer has.
         cursorEl.hidden = true;
         videoEl.classList.remove('spice-cursor');
+
+        // Likewise the no-video panel: whether this browser and this
+        // server have a codec in common is decided afresh by every
+        // negotiation, so a panel left over from the last one would
+        // be a claim nobody has checked.
+        noVideoEl.hidden = true;
 
         // Build a brand-new PC each time so we never reuse a failed
         // connection object (some browsers cache failed PCs briefly).

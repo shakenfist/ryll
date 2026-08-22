@@ -19,5 +19,17 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
 #video.spice-cursor { cursor: none; }
 #reconnect-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 0.6rem 1.2rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 1rem; cursor: pointer; z-index: 20; }
 #reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
+/* Shown when the server answers the browser's hello with
+   `no-video-codec`. Deliberately a panel over the video rather than
+   a line in #status: the failure it describes leaves every other
+   signal healthy -- audio plays, input works, the cursor moves --
+   so it reads as a rendering bug unless it is said plainly and in
+   the middle of the thing that is missing. */
+#no-video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 32rem; padding: 1.25rem 1.5rem; background: rgba(0, 0, 0, 0.85); border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; font-size: 0.9rem; line-height: 1.5; z-index: 15; }
+#no-video h1 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+#no-video p { margin: 0 0 0.6rem; }
+#no-video p:last-child { margin-bottom: 0; }
+#no-video code { background: rgba(255, 255, 255, 0.12); padding: 0.05rem 0.25rem; border-radius: 3px; }
+#no-video[hidden] { display: none; }
 #cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }
 #cursor[hidden] { display: none; }

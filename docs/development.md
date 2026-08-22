@@ -352,12 +352,26 @@ Worth checking in ryll's own log when verifying `--web`:
 ### A browser with no H.264 gets no video
 
 ryll's web mode encodes H.264 and nothing else, so a browser that does
-not offer H.264 connects successfully and shows a black rectangle.
-Audio, input, cursor and viewport resize all keep working, which makes
-the symptom look like a rendering bug rather than a negotiation one.
-The server-side tell is the `no H.264 payload type negotiated` warning
-followed by an endless `Failed to send RTP: unsupported codec type by
-this transceiver`.
+not offer H.264 connects successfully and gets no picture. Audio,
+input, cursor and viewport resize all keep working, which is what
+makes the symptom look like a rendering bug rather than a negotiation
+one.
+
+The browser is told: the page shows a panel over the video area
+explaining that this browser offered no H.264 and pointing at the
+OpenH264 plugin. The server logs `no H.264 payload type negotiated`
+once, stops the encoder for that session, and parks the video pump —
+so a session in this state costs no CPU and produces no further log
+output. Before that fix (issues #289 and #290) the only signal was a
+black rectangle, and the log filled with one
+`Failed to send RTP: unsupported codec type by this transceiver` per
+packet at the frame rate.
+
+The notice is sent in reply to the browser's `hello`, not pushed when
+negotiation settles: negotiation finishes inside `accept_offer`,
+before SCTP has opened the control datachannel, and anything written
+then is dropped. This is the same pull the mouse mode uses, for the
+same reason.
 
 Firefox is the browser this happens on. It ships H.264 for WebRTC via
 Cisco's OpenH264 plugin, and if that plugin has not loaded, Firefox

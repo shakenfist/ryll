@@ -151,6 +151,21 @@ pub struct WebState {
     /// browser connects: a `broadcast::Receiver` subscribed when
     /// the relay spawns would never see that message.
     pub mouse_mode: Arc<AtomicU32>,
+    /// Whether the current bridge's offer/answer failed to settle on
+    /// a video codec, set by `post_offer` once `accept_offer`
+    /// returns and read by the input relay when the browser says
+    /// hello.
+    ///
+    /// A shared cell rather than a message pushed at negotiation
+    /// time, for the reason `crate::web::control` gives at length:
+    /// negotiation finishes long before SCTP opens the control
+    /// datachannel, so anything pushed then is simply lost. The
+    /// browser pulls it instead, and the pull cannot be too early by
+    /// construction.
+    ///
+    /// False until proven otherwise, so a viewer is never wrongly
+    /// told its video is broken.
+    pub no_video_codec: Arc<AtomicBool>,
 }
 
 impl WebState {
@@ -240,6 +255,7 @@ impl WebState {
             // was tracked at all. The tracker corrects this within
             // milliseconds of session-init in any real session.
             mouse_mode: Arc::new(AtomicU32::new(shakenfist_spice_protocol::MOUSE_MODE_CLIENT)),
+            no_video_codec: Arc::new(AtomicBool::new(false)),
         }
     }
 }

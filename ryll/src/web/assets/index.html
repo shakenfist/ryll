@@ -9,6 +9,16 @@
   <div id="status">Connecting…</div>
   <button id="enable-audio" hidden>🔊 Click to enable audio</button>
   <button id="reconnect-btn" style="display:none">Click to reconnect</button>
+  <div id="no-video" hidden>
+    <h1>No video: this browser offered no H.264</h1>
+    <p>ryll streams H.264 and nothing else, and this browser did not
+       offer it, so there is no video codec in common and nothing to
+       show. Audio, keyboard, mouse and the cursor are unaffected and
+       still work.</p>
+    <p>In Firefox, check that the OpenH264 plugin is installed and
+       enabled under <code>about:addons</code> &rarr; Plugins.
+       Chromium and Chrome ship H.264 and do not have this problem.</p>
+  </div>
   <video id="video" autoplay playsinline muted></video>
   <img id="cursor" alt="" hidden>
   <script src="/static/app.js?token={{TOKEN}}"></script>

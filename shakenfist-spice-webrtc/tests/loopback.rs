@@ -346,3 +346,145 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
     server.close().await.expect("server close");
     client.close().await.expect("client close");
 }
+
+/// A viewer that offers no H.264 gets no video RTP at all — and still
+/// gets its audio.
+///
+/// This is issue #290's regression test, and the negative twin of
+/// `loopback_media_flows_when_client_offers_a_narrow_codec_set` above.
+/// Before the fix the pump kept encoding and writing at the frame
+/// rate for output the sender discarded, logging an unthrottled
+/// `ERROR` per packet from inside webrtc-rs; the log became unusable
+/// and the CPU was spent producing nothing. Note the trap this walks
+/// into: VP8 *is* in webrtc-rs's default codec set, so a video codec
+/// negotiates successfully and only ryll's own encoder — H.264 and
+/// nothing else — makes it unusable. "A codec was negotiated" is
+/// therefore not the question; "did *H.264* survive" is.
+///
+/// The load-bearing assertion is that the *encoder* stops. Counting
+/// received video packets does not discriminate: before the fix the
+/// pump wrote at the frame rate and webrtc-rs rejected every packet
+/// at the sender, so the far end saw nothing either way — which is
+/// exactly why #290 was invisible to the test suite. What changed is
+/// the work: the bridge now asks the encoder to stop, so the task
+/// retires instead of encoding into a discard. Awaiting its handle
+/// is that, observed.
+///
+/// Audio still flowing is the guard against over-fixing it: the
+/// failure is video-specific, and a session that went silent too
+/// would be a worse bug than the one being fixed.
+///
+/// The viewer-facing half of #289 cannot be asserted here — the
+/// message is ryll's, not this crate's, because the control
+/// datachannel's protocol lives in `ryll/src/web/control.rs`. See
+/// `hello_is_answered_with_the_no_video_notice` there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn loopback_video_stops_when_the_client_offers_no_h264() {
+    let (server_enc_tx, server_enc_rx) = mpsc::channel::<EncoderControl>(4);
+    let server = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(server_enc_tx))
+        .await
+        .expect("server bridge");
+
+    let video_count = Arc::new(AtomicUsize::new(0));
+    let audio_count = Arc::new(AtomicUsize::new(0));
+
+    let client = TestPeer::builder()
+        .seed_data_channel("client-seed")
+        // Firefox's payload numbers for VP8 and Opus.
+        .offer_no_h264(120, 109)
+        .on_track_hook({
+            let video_count = video_count.clone();
+            let audio_count = audio_count.clone();
+            Box::new(move |track: Arc<dyn TrackRemote>| {
+                let video_count = video_count.clone();
+                let audio_count = audio_count.clone();
+                Box::pin(async move {
+                    let counter = match track.kind().await {
+                        RtpCodecKind::Video => video_count,
+                        RtpCodecKind::Audio => audio_count,
+                        RtpCodecKind::Unspecified => return,
+                    };
+                    tokio::spawn(async move {
+                        while let Some(event) = track.poll().await {
+                            if matches!(event, TrackRemoteEvent::OnRtpPacket(_)) {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    });
+                })
+            })
+        })
+        .build()
+        .await
+        .expect("client peer");
+
+    let final_offer_sdp = client.offer_and_gather().await.expect("client offer");
+    let answer_sdp = server
+        .accept_offer(final_offer_sdp)
+        .await
+        .expect("server accept");
+    client
+        .set_remote_answer(answer_sdp)
+        .await
+        .expect("client rsd");
+
+    client
+        .wait_until_connected(Duration::from_secs(20))
+        .await
+        .expect("client PC did not reach Connected");
+
+    // The bridge knows immediately, and this is the fact ryll reads
+    // to decide whether to tell the viewer.
+    assert!(
+        !server.video_negotiated(),
+        "the bridge should have reported no usable video codec after an offer with no H.264"
+    );
+
+    let encoder = H264Encoder::new(64, 64, 30).expect("encoder init");
+    let source = SyntheticFrameSource::new(64, 64);
+    let (frame_tx, frame_rx) = mpsc::channel(32);
+    let enc_handle = EncoderTask::spawn(encoder, source, frame_tx, server_enc_rx, 30);
+    let _video_pump = server.spawn_video_pump(frame_rx);
+    let _audio_pump = server.spawn_synthetic_audio_pump();
+
+    // The `EncoderControl::Stop` was queued during `accept_offer`,
+    // before this task existed; the task checks its control channel
+    // at the start of every tick, so it reads it on the first one and
+    // returns. Generous timeout because a debug-build openh264 in
+    // Docker is slower than wall-clock, and the task finishes any
+    // encode already in flight before it stops.
+    let stopped = tokio::time::timeout(Duration::from_secs(5), enc_handle).await;
+    assert!(
+        stopped.is_ok(),
+        "the encoder was still running 5 s after a negotiation that produced no usable video \
+         codec — it is encoding frames that can only be discarded"
+    );
+
+    // Same window the two tests above use to accumulate packets, so
+    // "none arrived" means the same thing here as ">= 10 arrived"
+    // does there.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let v = video_count.load(Ordering::Relaxed);
+    let a = audio_count.load(Ordering::Relaxed);
+    eprintln!(
+        "no-h264 loopback: received {} video RTP packets, {} audio RTP packets",
+        v, a
+    );
+    // Weaker than it looks -- see the note above -- but it is the
+    // user-visible outcome, and a future change that made the far end
+    // start receiving something here would be worth knowing about.
+    assert_eq!(
+        v, 0,
+        "expected no video packets when no H.264 was negotiated, got {}",
+        v
+    );
+    assert!(
+        a >= 5,
+        "expected >=5 audio packets, got {} — stopping video must not stop audio",
+        a
+    );
+
+    server.close().await.expect("server close");
+    client.close().await.expect("client close");
+}
