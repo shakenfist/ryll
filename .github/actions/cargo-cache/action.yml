@@ -1,0 +1,41 @@
+name: Cache cargo downloads
+description: >-
+  Persist .cargo-cache, the cargo download cache the devcontainer build
+  targets bind-mount, across runs of a self-hosted job.
+
+# Every job that runs a devcontainer make target wants this, so the
+# rationale lives here once rather than being copied into each job.
+#
+# Position matters: this MUST come after actions/checkout. checkout's
+# default `clean: true` runs `git clean -ffdx`, which deletes the
+# gitignored .cargo-cache regardless of ignore rules, so restoring
+# before checkout restores into a directory that is about to be wiped.
+# Restoring after it is what makes `make fetch` incremental instead of
+# re-downloading the whole lockfile every run -- and `cargo fetch`
+# downloads for every platform in the lockfile, not just this job's
+# target, so a cold cache is expensive even for a job that only lints.
+#
+# Keyed on Cargo.lock so a dependency change starts a fresh entry, with
+# a prefix restore-key so a lockfile bump still warm-starts from the
+# previous one. The cache holds only downloaded sources, which are
+# architecture-independent, so one key serves every Linux runner.
+inputs:
+  key-prefix:
+    description: >-
+      Cache key prefix. A job that compiles with the network up and the
+      cache writable MUST pass its own, so the cache it saves can never
+      become the read-only input an isolated compile trusts on a later
+      run. Read-only-cache jobs share the default.
+    required: false
+    default: cargo-cache
+
+runs:
+  using: composite
+  steps:
+    - name: Cache cargo downloads
+      uses: actions/cache@v4
+      with:
+        path: .cargo-cache
+        key: ${{ inputs.key-prefix }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.key-prefix }}-${{ runner.os }}-

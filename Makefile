@@ -4,7 +4,25 @@
 RYLL_IMAGE := ryll-dev
 RYLL_FUZZ_IMAGE := ryll-fuzz
 DEVCONTAINER_DIR := .devcontainer
-CARGO_CACHE := .cargo-cache
+# Cargo download cache, bind-mounted into the devcontainer so crates are
+# not re-downloaded on every build. Override CARGO_CACHE to point at a
+# location outside the checkout that survives across CI runs (the
+# in-checkout default is deleted by `actions/checkout`, whose default
+# `clean: true` runs `git clean -ffdx` and so removes this gitignored
+# directory every run). Resolved to an absolute path so an override may
+# itself be absolute. `make clean` only removes the cache when it lies
+# inside the checkout, so pointing this at a shared directory is safe.
+CARGO_CACHE ?= .cargo-cache
+# `?=` treats CARGO_CACHE= in the environment as set, so an override fed
+# by an unset CI variable leaves this empty. Every target degrades badly
+# on that -- the mounts become -v "/registry":..., the mkdir rule becomes
+# `mkdir -p /registry`, and `clean` used to expand to `rm -rf /` -- and
+# the resulting permission error names none of it. One check at parse
+# time covers the lot.
+ifeq ($(strip $(CARGO_CACHE)),)
+$(error CARGO_CACHE is empty; unset it or give it a path)
+endif
+CARGO_CACHE_DIR := $(abspath $(CARGO_CACHE))
 
 # Test QEMU SPICE server settings
 QEMU_SPICE_PORT := 5900
@@ -39,24 +57,52 @@ GID := $(shell id -g)
 RYLL_GIT_SHA := $(shell git rev-parse --short=8 HEAD 2>/dev/null)$(shell test -n "$$(git status --porcelain 2>/dev/null)" && echo -dirty)
 RYLL_GIT_SHA := $(if $(RYLL_GIT_SHA),$(RYLL_GIT_SHA),unknown)
 
-# Shared docker-run invocation for working inside the devcontainer.
+# Shared pieces of the devcontainer docker-run invocation.
 # CARGO_BUILD_JOBS is forwarded only when set in the caller's
 # environment, so parallelism can be bounded on small machines
 # (docker omits the variable entirely when it is unset on the
 # host). Targets append extra -e flags and the image name; a later
-# -w flag overrides the default working directory.
-DOCKER_RUN := docker run --rm \
+# -w flag overrides the default working directory. The cache mounts
+# are split out because the offline compile takes them read-only.
+DOCKER_BASE_ARGS := \
 	-v "$(CURDIR)":/workspace \
-	-v "$(CURDIR)/$(CARGO_CACHE)/registry":/build/.cargo/registry \
-	-v "$(CURDIR)/$(CARGO_CACHE)/git":/build/.cargo/git \
 	-w /workspace \
 	-u $(UID):$(GID) \
 	-e HOME=/build \
 	-e CARGO_BUILD_JOBS \
 	-e RYLL_GATHERING_SOAK
+CACHE_MOUNTS := \
+	-v "$(CARGO_CACHE_DIR)/registry":/build/.cargo/registry \
+	-v "$(CARGO_CACHE_DIR)/git":/build/.cargo/git
+CACHE_MOUNTS_RO := \
+	-v "$(CARGO_CACHE_DIR)/registry":/build/.cargo/registry:ro \
+	-v "$(CARGO_CACHE_DIR)/git":/build/.cargo/git:ro
+
+# Networked invocation with a writable cache. Two groups use it. The
+# ones that compile nothing: `fetch` and `lock` (which resolve and
+# download only), `fuzz-fmt-check` (`cargo fmt --check`), and the
+# packaging and smoke targets that run after a build (`deb`, `rpm`,
+# `web-smoke`, `web-smoke-tls`), which repackage or run an
+# already-built binary. And the three that do compile with the network
+# up, and so execute build scripts unisolated: `fuzz-build-%`,
+# `fuzz-smoke-%` and `publish-crates` -- see docs/ci.md for why those
+# cannot be isolated. `ensure-cache`'s permission fix is not one of
+# these: it needs a root container, so it writes its own docker run.
+DOCKER_RUN := docker run --rm $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS)
+
+# Offline invocation for every target that compiles crates. A build
+# script (build.rs) runs arbitrary code at compile time for each
+# dependency in the tree -- the supply-chain attack surface. Two
+# defences: --network none severs the network namespace, so a
+# compromised dependency cannot reach a C2 or exfiltrate secrets (its
+# download call fails and the build aborts loudly); and the cache is
+# mounted read-only, so a build script cannot poison it for later
+# runs. Crates must be pre-populated by `make fetch`, the one target
+# allowed network, which every offline target below depends on.
+DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE_MOUNTS_RO)
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
-	devcontainer fuzz-devcontainer ensure-cache lint lint-fix test help \
+	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
 	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
@@ -66,6 +112,8 @@ all: build
 
 help:
 	@echo "Ryll build targets:"
+	@echo "  make fetch                  - Pre-download crates into the cargo cache"
+	@echo "  make lock                   - Refresh Cargo.lock after a dependency change"
 	@echo "  make build                  - Build debug version"
 	@echo "  make release                - Build release version"
 	@echo "  make propose-release X.Y.Z  - Branch, bump versions, push for PR review"
@@ -109,17 +157,35 @@ ensure-cache: devcontainer $(CARGO_CACHE)/registry $(CARGO_CACHE)/git
 	@if [ ! -w "$(CARGO_CACHE)/registry" ] || [ ! -w "$(CARGO_CACHE)/git" ]; then \
 		echo "Fixing cargo cache permissions..."; \
 		docker run --rm \
-			-v "$(CURDIR)/$(CARGO_CACHE)":/cache \
+			-v "$(CARGO_CACHE_DIR)":/cache \
 			$(RYLL_IMAGE) \
 			chown -R $(UID):$(GID) /cache; \
 	fi
 
+# Populate the cargo cache. This is the ONLY build target permitted
+# network access. `cargo fetch` downloads every crate named in
+# Cargo.lock but compiles nothing, so no build script runs here -- the
+# untrusted code only executes later, offline, in the compile targets.
+# --locked additionally refuses to proceed if Cargo.lock is stale.
+fetch: ensure-cache
+	$(DOCKER_RUN) $(RYLL_IMAGE) cargo fetch --locked
+
+# Refresh Cargo.lock after editing a Cargo.toml. The only target
+# allowed to write the lockfile: `fetch` passes --locked and every
+# compile passes --frozen, so without this there is no in-devcontainer
+# path to a lockfile update at all, and the first `make build` after
+# adding or bumping a dependency fails at `fetch` with "the lock file
+# needs to be updated but --locked was passed". Still runs no build
+# script -- `cargo fetch` resolves and downloads, it does not compile.
+lock: ensure-cache
+	$(DOCKER_RUN) $(RYLL_IMAGE) cargo fetch
+
 # Build debug version
-build: ensure-cache
-	$(DOCKER_RUN) \
+build: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
-		cargo build -p ryll
+		cargo build --frozen -p ryll
 
 # Diagnostic-only build: compile ryll with the tokio-console
 # feature on, plus RUSTFLAGS=--cfg tokio_unstable so tokio's
@@ -128,19 +194,19 @@ build: ensure-cache
 # 127.0.0.1:6669 that the `tokio-console` TUI viewer connects
 # to. Used during the K1 hang investigation; will go away when
 # the feature is removed.
-build-tokio-console: ensure-cache
-	$(DOCKER_RUN) \
+build-tokio-console: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		-e RUSTFLAGS="--cfg tokio_unstable" \
 		$(RYLL_IMAGE) \
-		cargo build -p ryll --features tokio-console
+		cargo build --frozen -p ryll --features tokio-console
 
 # Build release version
-release: ensure-cache
-	$(DOCKER_RUN) \
+release: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		-e RYLL_GIT_SHA="$(RYLL_GIT_SHA)" \
 		$(RYLL_IMAGE) \
-		cargo build --release -p ryll
+		cargo build --release --frozen -p ryll
 
 # Cheap smoke-tier proxy for the Windows builds that run in the merge
 # tier: `cargo check` against the gnu triple, which mingw-w64 lets us
@@ -150,10 +216,10 @@ release: ensure-cache
 # gnu triple shares the cfg(windows)/windows-sys surface with msvc,
 # so it catches the common case cheaply. See
 # docs/plans/PLAN-two-stage-ci.md.
-check-windows: ensure-cache
-	$(DOCKER_RUN) \
+check-windows: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		cargo check --target x86_64-pc-windows-gnu --no-default-features -p ryll
+		cargo check --frozen --target x86_64-pc-windows-gnu --no-default-features -p ryll
 
 # Cutting a release is a two-phase operation so the version bump
 # goes through the normal PR review gate rather than landing
@@ -192,22 +258,22 @@ $(RELEASE_VERSION):
 endif
 
 # Run tests
-test: ensure-cache
-	$(DOCKER_RUN) \
+test: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		cargo test --workspace
+		cargo test --frozen --workspace
 
 # Run linting checks (rustfmt + clippy)
-lint: ensure-cache
-	$(DOCKER_RUN) \
+lint: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets -- -D warnings"
 
 # Run linting with auto-fix
-lint-fix: ensure-cache
-	$(DOCKER_RUN) \
+lint-fix: fetch
+	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all && cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings"
+		sh -c "cargo fmt --all && cargo clippy --fix --frozen --allow-dirty --workspace --all-targets -- -D warnings"
 
 # Package the release binary as a .deb. cargo-deb is baked into the
 # devcontainer image; --no-build packages the binary produced by
@@ -322,10 +388,19 @@ macos-release: macos-prereqs
 	@echo ""
 	@echo "Built release binary: target/release/ryll"
 
-# Clean build artifacts
+# Clean build artifacts.
+#
+# The cargo cache is only removed when it lives inside the checkout.
+# CARGO_CACHE may point at a shared directory that outlives this
+# checkout (see its comment at the top of this file), and `clean` has
+# no business deleting that. An empty CARGO_CACHE is rejected at parse
+# time, so this recipe only has to decide in-tree versus out-of-tree.
 clean:
 	rm -rf target/
-	rm -rf $(CARGO_CACHE)/
+	@case "$(CARGO_CACHE_DIR)/" in \
+		"$(CURDIR)"/?*) rm -rf "$(CARGO_CACHE_DIR)/" ;; \
+		*) echo "Kept $(CARGO_CACHE_DIR) (not below $(CURDIR); delete by hand)" ;; \
+	esac
 
 # Clean test data files
 clean-testdata:

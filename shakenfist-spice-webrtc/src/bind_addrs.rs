@@ -356,15 +356,101 @@ fn default_policy_addrs() -> Vec<IpAddr> {
 /// binding under the default policy, on ephemeral ports.
 ///
 /// Exactly `UdpBindPolicy::default().resolve()`, kept as a function
-/// because `TestPeerBuilder` (`crate::test_client`) wants the default
-/// and has no configuration surface of its own. `WebrtcBridge::new`
-/// goes through the policy instead, since `--web-media-addr` and
-/// `--web-media-port` reach it.
+/// for external consumers of this published crate that want the
+/// default and have no configuration surface of their own. Nothing
+/// in this workspace calls it any more: `WebrtcBridge::new` goes
+/// through the policy, since `--web-media-addr` and
+/// `--web-media-port` reach it, and the tests go through
+/// `bind_addrs_for_tests`, which tolerates a loopback-only host.
+/// (Not a doc link: that function only exists under `cfg(test)` or
+/// the `test-support` feature, so linking it breaks the default
+/// docs build.)
 ///
 /// See the module docs for what an empty return means and who is
 /// responsible for treating it as an error.
 pub fn host_udp_bind_addrs() -> Vec<SocketAddr> {
     UdpBindPolicy::default().resolve()
+}
+
+/// The default policy and the addresses it resolves to, or an
+/// explicit loopback bind on a host that has nothing else.
+///
+/// [`bind_policy_for_tests`] and [`bind_addrs_for_tests`] are the
+/// two views of this, and they guarantee different things.
+/// `bind_addrs_for_tests` hands back the addresses this one
+/// enumeration produced, so the decision and the use cannot
+/// disagree and the result cannot be empty. `bind_policy_for_tests`
+/// hands back `UdpBindPolicy::default()` unchanged on a host that
+/// has routable addresses, which `WebrtcBridge::new` then resolves
+/// again — deliberately, because resolving per `new` is how an
+/// interface appearing mid-session is picked up, and it is what
+/// production does. Only in the fallback case is the returned
+/// policy an explicit `BindSelector::Addr`, which resolves without
+/// enumerating at all.
+///
+/// A test peer and a bridge under test both need *some* address to
+/// bind, and they do not care which: the handshake they exercise
+/// happens between two peers inside one process, where a loopback
+/// candidate works exactly as well as a routable one. A build
+/// sandbox with no network namespace — `docker run --network none`,
+/// which is how this workspace compiles and tests untrusted build
+/// scripts — reports only `lo`, so the default policy correctly
+/// resolves to nothing and every such test fails on an error that is
+/// right about the host and irrelevant to what the test asserts.
+///
+/// This is the loopback-only deployment shape the module docs
+/// describe, and the override is the sanctioned one: loopback is
+/// policy, so naming it explicitly is how a caller opts in. That the
+/// production default still refuses to guess is the point — a server
+/// that silently bound loopback would advertise candidates no browser
+/// could reach, which is the failure `--web-media-addr 127.0.0.1`
+/// exists to make deliberate.
+///
+/// Gated to tests and the `test-support` feature so it cannot become
+/// a production caller's shortcut past that decision.
+#[cfg(any(test, feature = "test-support"))]
+fn bind_for_tests() -> (UdpBindPolicy, Vec<SocketAddr>) {
+    let default = UdpBindPolicy::default();
+    let addrs = default.resolve();
+    if !addrs.is_empty() {
+        return (default, addrs);
+    }
+    tracing::debug!(
+        "bind_addrs: no routable address on this host — binding loopback so in-process peers \
+         can still reach each other"
+    );
+    let loopback = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    (
+        UdpBindPolicy {
+            selectors: vec![BindSelector::Addr(loopback)],
+            port: 0,
+        },
+        vec![SocketAddr::new(loopback, 0)],
+    )
+}
+
+/// The bind policy a test should hand to something that takes a
+/// policy, notably [`crate::WebrtcBridgeConfig::for_tests`]. See
+/// [`bind_for_tests`] for why it is not just the default.
+#[cfg(any(test, feature = "test-support"))]
+pub fn bind_policy_for_tests() -> UdpBindPolicy {
+    bind_for_tests().0
+}
+
+/// The bind addresses a test should hand to something that takes
+/// addresses, notably `TestPeerBuilder` (`crate::test_client`).
+///
+/// Never empty. The loopback fallback is chosen from the same
+/// enumeration that decides it is needed, so a caller has no "no
+/// address to bind" case to handle — and so must not write an error
+/// message speculating about one, which the module docs' rule on
+/// empty results forbids anyway. Prefer this over
+/// `bind_policy_for_tests().resolve()`: that enumerates a second
+/// time, and a host whose last interface goes down in between can
+/// still hand back an empty list.
+#[cfg(any(test, feature = "test-support"))]
+pub fn bind_addrs_for_tests() -> Vec<SocketAddr> {
+    bind_for_tests().1
 }
 
 #[cfg(test)]
@@ -481,6 +567,20 @@ mod tests {
         assert!(policy.selectors.is_empty());
         assert_eq!(policy.port, 0);
         assert!(policy.validate().is_ok());
+    }
+
+    #[test]
+    fn bind_addrs_for_tests_always_offers_an_address() {
+        // The invariant every test peer leans on: whatever this host
+        // looks like — routable interfaces, or only `lo` inside a
+        // `--network none` build container — there is something to
+        // bind. This is the one assertion here that is deliberately
+        // host-coupled, because the fallback exists precisely to make
+        // the host stop mattering.
+        assert!(!bind_addrs_for_tests().is_empty());
+        // The policy view re-resolves by design (see `bind_for_tests`);
+        // this pins that what it hands back is still usable.
+        assert!(!bind_policy_for_tests().resolve().is_empty());
     }
 
     #[test]

@@ -103,6 +103,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Must stay directly after checkout; see the action for why.
+      - uses: ./.github/actions/cargo-cache
+
       - name: Get short sha
         run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
 

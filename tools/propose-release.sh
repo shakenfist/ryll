@@ -140,6 +140,18 @@ cargo release version "$VERSION" \
     --execute \
     --no-confirm
 
+# --- re-lock ---
+#
+# The version bump above rewrites every workspace member's version,
+# which Cargo.lock records. `make test` is --frozen and its `fetch`
+# prerequisite is --locked, so a lockfile left out of sync would abort
+# the proposal here rather than self-heal. `make lock` is the one
+# target allowed to write it; it is a no-op when nothing moved, and
+# `git add -u` below commits the result.
+
+info "Refreshing Cargo.lock for the bumped versions"
+make lock
+
 # --- final test gate ---
 #
 # Delegate to `make test` so the test compile/run uses the
