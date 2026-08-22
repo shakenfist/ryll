@@ -9,11 +9,16 @@ name: CI
 # pr-retest.yml's `gh workflow run ci.yml` stays a full retest and the
 # merge tier can be exercised on a branch.
 #
-# Review-only changes (weaudit annotations and the rendered REVIEWS.md)
-# cannot affect the build, so the check_paths job below skips every
-# tier job for them. The gates still pass: their jq treats a skipped
+# Changes that cannot affect the build -- documentation under docs/,
+# weaudit annotations and the rendered REVIEWS.md -- are skipped by the
+# check_paths job below. The gates still pass: their jq treats a skipped
 # dependency as success. Keep check_paths' skip list in sync with the
 # .vscode whitelist in .gitignore and with codeql-analysis.yml.
+#
+# The content scanners (gitleaks, bidi-check) deliberately do not
+# consume check_paths. Their whole point is to read human-written text,
+# and a secret or a smuggled character lands in documentation or a
+# review note as easily as in code.
 on:
   pull_request:
     branches: [develop]
@@ -51,6 +56,7 @@ jobs:
           filters: |
             code:
               - '**'
+              - '!docs/**'
               - '!REVIEWS.md'
               - '!.vscode/*.weaudit'
               - '!.vscode/*.weaudit-shas.json'
@@ -250,10 +256,7 @@ jobs:
     name: gitleaks
     runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
-    needs: [check_paths]
-    if: >-
-      github.event_name != 'merge_group'
-      && needs.check_paths.outputs.code_changed != 'false'
+    if: github.event_name != 'merge_group'
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-gitleaks
       cancel-in-progress: true
@@ -303,10 +306,7 @@ jobs:
     name: bidi and zero-width
     runs-on: [self-hosted, vm, debian-12, s]
     timeout-minutes: 15
-    needs: [check_paths]
-    if: >-
-      github.event_name != 'merge_group'
-      && needs.check_paths.outputs.code_changed != 'false'
+    if: github.event_name != 'merge_group'
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-bidi-check
       cancel-in-progress: true
