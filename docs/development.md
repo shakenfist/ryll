@@ -334,9 +334,13 @@ Two things it deliberately does not do. It does not start ryll or a
 browser — an attended session is the point, and the numbers are only
 comparable if the browser and its flags match whatever the baseline
 used. And it does not read the pump drop counters or reaper events,
-which ryll logs at `debug`; run with
-`RUST_LOG=info,shakenfist_spice_webrtc=debug,ryll=debug` and take
-them out of the session log.
+which ryll logs at `debug`; run ryll with `--verbose` and take them
+out of the session log.
+
+Note that `--verbose` turns on `debug` for the whole dependency tree,
+not just ryll — webrtc-rs is talkative at that level. That is enough
+log to affect the numbers on a long run, so take the counters from a
+short separate session rather than from the one being measured.
 
 If you are driving the uefi-latency-guest, note that any keypress
 advances a fixed eight-colour cycle and one step in eight is black,

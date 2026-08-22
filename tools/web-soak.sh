@@ -250,8 +250,12 @@ docs/plans/PLAN-webrtc-0.20-upgrade-phase-01-prework.md)
 
   Per-sample data: $CSV
 
-Not sampled here, and needed for the comparison: video and audio pump
-drop counts and reaper events, which ryll logs at debug. Run it with
-RUST_LOG=info,shakenfist_spice_webrtc=debug,ryll=debug and read them
-out of the session log.
+Not sampled here: video and audio pump drop counts and reaper events,
+which ryll logs at debug -- run ryll with --verbose and read them out
+of the session log. Do that in a short separate session rather than
+in the one being measured: --verbose is debug for the whole
+dependency tree, and webrtc-rs at that level is enough log to move
+the numbers.
+
+ryll does not read RUST_LOG.
 SUMMARY

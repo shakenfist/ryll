@@ -421,6 +421,124 @@ at PT 120 and Opus at 109 because that is what this probe showed
 Firefox actually offering. The test reproduces a real browser's
 numbers rather than plausible-looking ones.
 
+### 4c — a condition in the baseline that never worked
+
+Setting up the comparable soak turned up something the survey could
+not have caught, because it only shows when you run the thing:
+**ryll does not read `RUST_LOG`.** `main.rs:161-169` picks between
+`Level::INFO` and `Level::DEBUG` from the `--verbose` flag and builds
+a plain `LevelFilter`; there is no `EnvFilter` anywhere, and the only
+occurrence of `RUST_LOG` in ryll's history is inside a comment.
+
+Phase 01's Baseline conditions record running with
+`RUST_LOG=info,shakenfist_spice_webrtc=debug,ryll=debug` "(the drop
+counters only log at debug)". That variable did nothing. The run was
+at `INFO`, so the video-pump drops, audio-pump drops and reaper
+events rows of the baseline table are all reporting *nothing logged*
+rather than *nothing dropped*. Those three rows should not be read
+as measurements.
+
+Two docs pages carried the same instruction and have been corrected
+to `--verbose`, along with the sentence this phase itself added to
+`docs/development.md` in 4b — which had inherited the incantation
+from the plan without checking it.
+
+This changes how 4c is run. To stay comparable with what phase 01
+*actually* did, the measured session runs at `INFO`, which is what
+the baseline had. `--verbose` turns on `debug` for the whole
+dependency tree, and webrtc-rs at that level emits enough log to
+perturb the very numbers being taken — so the drop counters come
+from a short separate session instead.
+
+### 4c — the comparable soak
+
+Two 20-minute runs on `b4a5b4bd`, webrtc and rtc resolved at
+**0.20.3** in `Cargo.lock` (the manifest says 0.20.2). Conditions as
+phase 01's Baseline: uefi-latency-guest via `make test-qemu`,
+Chromium 151 windowed with a fresh profile and
+`--disable-features=WebRtcHideLocalIpsWithMdns
+--autoplay-policy=no-user-gesture-required`, one QMP `sendkey` every
+30 s, `/proc` sampled every 30 s by `tools/web-soak.sh`, dev-profile
+binary, encoder confirmed at 1280x800@30fps with one restart in each
+run.
+
+| Metric | 1a (0.17.2) | 1g (phase 01 tip) | **4c run 1** | **4c run 2** |
+|---|---|---|---|---|
+| RSS start → end | 154 → 215 MB | 161 → 197 MB | 158 → 235 MB | 161 → 221 MB |
+| RSS max | 226 MB | 197 MB | 235 MB | 225 MB |
+| CPU, all threads, whole run | ~1.4% of one core | ~0.9% | 1.83% | 1.95% |
+| Video pump drops | 0 (not logged) | 0 (not logged) | 0 (observed) | 0 (observed) |
+| Audio pump drops | 0 (not logged) | 0 (not logged) | 0 (observed) | 0 (observed) |
+| Reaper events | 0 (not logged) | 0 (not logged) | 0 (observed) | 0 (observed) |
+| ryll alive at end | yes | yes | yes | yes |
+| Host CPU busy%, mean (max) | 8.3 (9) | 10.4 (29) | 10.0 (12.7) | 8.9 (10.8) |
+
+**Memory is bounded.** Both runs plateau: run 1 sits at exactly
+235 MB for its final seven samples, run 2 at 221 MB for its final
+three, after the same climb-then-flatten shape phase 01 saw and
+attributed to ring buffers and caches filling to their caps. Nothing
+is leaking, which is the question a soak exists to answer. Max RSS
+is up about 9% on the 0.17 pair's mean (230 MB against 211 MB) —
+within the 29 MB spread phase 01's own two runs showed.
+
+**CPU is up, and by more than phase 01 called noise.** The two 0.20
+figures (1.83%, 1.95%) are both above both 0.17 figures (1.4%,
+0.9%), and they are tighter to each other than the 0.17 pair is.
+Mean 1.89% against 1.15%: +0.74 percentage points, or roughly 1.6×.
+Phase 01 called a 0.5 pp difference run-to-run noise, so this is not
+something to wave through on that precedent. In absolute terms it is
+small — under 2% of one core either way, about 23 CPU-seconds per
+20 minutes against 14 — and this is deliberately a near-idle
+workload, which phase 01 warned is "a floor-shape baseline, not a
+stress result".
+
+**But the delta cannot be attributed to webrtc-rs 0.20.** This is
+the honest limit of the comparison as the master plan specified it.
+The baseline was taken on `ce740e26` (2026-08-13) and this run is on
+`b4a5b4bd` (2026-08-22); between them the tree gained not just
+phases 02 and 03 but nine days of unrelated development — the
+control socket and its verbs, `SurfaceMirror` in headless, the
+bug-report work, several dependency bumps. A 0.74 pp CPU difference
+across that much change is a fact about the tree, not about the
+dependency.
+
+Isolating it would mean measuring `develop` immediately before and
+immediately after the phase-02 merge (`be1aa97c`) under these same
+conditions — now cheap, since `tools/web-soak.sh` exists. Per
+Decision 6 this phase records the number and does not chase it
+inline.
+
+### 4c — observations from the measured sessions
+
+Three things worth recording separately from the numbers.
+
+**The negotiated H.264 payload type was 108, not 102.** Chromium
+151 landed on 108 in these sessions. The constant phase 02's review
+removed was 102, so on this browser, today, a bridge that still
+stamped the constant would send every video packet at a payload type
+the sender rejects and the viewer would see a black screen. That fix
+is not defensive against a hypothetical browser; it is load-bearing
+against the one in front of us.
+
+**Pump drops and reaper events are genuinely zero.** Taken from a
+short `--verbose` session rather than from the measured run, per the
+finding above. The three drop messages
+(`bridge.rs:1725`, `:1856`, `:1927`) only exist on the error path, so
+no occurrences means no drops rather than no instrumentation. The one
+reaper line is `bridge reaper: woken but bridge is alive;
+re-parking` — healthy, not a teardown.
+
+**The `--verbose` log volume justifies keeping it out of the
+measurement.** 3,620 lines in about two minutes with it, against 147
+lines in twenty minutes without: roughly 250× the rate. Logging that
+hard would have shown up in the CPU figure being measured.
+
+**#289's negative case held in a real browser.** Across both
+measured runs Chromium negotiated H.264, the no-video notice never
+fired, and no `unsupported codec type` line appeared. The guard added
+in 4a — that a working viewer is never told its video is broken — is
+confirmed outside the unit tests.
+
 ### 4f — the ICE gathering soak
 
 `RYLL_GATHERING_SOAK=1 make test` passes. The 20-iteration
@@ -442,7 +560,14 @@ makes it flaky in the failing direction.
 
 ## Status
 
-In progress. 4a, 4b, 4d and 4f complete; 4c and 4e remain.
+In progress. 4a, 4b, 4c, 4d and 4f complete. **4e remains** — the
+qualitative desktop-guest session, whose central item is confirming
+audio **by ear**, which cannot be delegated. Two open items for the
+operator to settle before 4g closes the phase:
+
+1. Whether to attribute the CPU difference by measuring either side
+   of the phase-02 merge, or to file it and move on.
+2. 4e itself.
 
 ## Back brief
 
