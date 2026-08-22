@@ -74,7 +74,7 @@ binding added 2026-08-21.
 | TLS / secure channel (inline CA from .vv) | available | available | available |
 | Password authentication | available | available | available |
 | **Control socket** | | | |
-| Control socket (`--control-socket`) | n/a — intrinsic (requires `--headless`; combining with the GUI is a CLI error) | available | n/a — intrinsic (requires `--headless`; combining with `--web` is a CLI error) |
+| Control socket (`--control-socket`) | n/a — intrinsic (the window owns input and the surface; combining with the GUI is a CLI error) | available | available |
 | Session state query (`status` verb) | n/a — intrinsic | available | n/a — intrinsic |
 | Event subscription (`latency`, `agent_connected`, `paste_*`, `surface_drawn`, `digest_updated`) | n/a — intrinsic | available (`digest_updated` needs the `digest-decode` build feature) | n/a — intrinsic |
 | **Display** | | | |

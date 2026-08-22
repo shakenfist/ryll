@@ -81,7 +81,7 @@ struct HeadlessStats {
 /// `ChannelEvent::AgentConnected` observed by the broadcast fan-out.
 /// `surfaces` is populated from the live `SurfaceMirror` so a
 /// `status` reply matches what the `screenshot` verb would observe.
-struct HeadlessStatus {
+pub struct SessionStatus {
     /// True while the connection task is running.  The control server
     /// reads this via the `StatusProvider` trait.
     connected: Arc<AtomicBool>,
@@ -101,8 +101,14 @@ struct HeadlessStatus {
     surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
 }
 
-impl HeadlessStatus {
-    fn new(
+impl SessionStatus {
+    /// Build a status provider for a control socket.
+    ///
+    /// Nothing here is mode-specific: any mode that can supply a
+    /// liveness flag, an agent-connected flag and a surface mirror
+    /// can host a control socket. Headless was simply the only one
+    /// that did, until web mode grew a socket of its own.
+    pub fn new(
         connected: Arc<AtomicBool>,
         agent_connected: Arc<AtomicBool>,
         surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
@@ -116,7 +122,7 @@ impl HeadlessStatus {
 }
 
 #[cfg(unix)]
-impl crate::control::StatusProvider for HeadlessStatus {
+impl crate::control::StatusProvider for SessionStatus {
     fn snapshot(&self) -> crate::control::protocol::StatusResult {
         // try_lock: never block the per-client task on a slow apply.
         // The apply task only holds the lock for a single
@@ -495,6 +501,40 @@ pub async fn run_connection(
     Ok(())
 }
 
+/// Spawn a control-socket server for a session.
+///
+/// Shared by every mode that offers `--control-socket`, so a change
+/// of shape lands once rather than in each mode separately. Web mode
+/// hosts one of these too; it was headless-only until a browser
+/// session found four input bugs that a control-socket scenario test
+/// would have caught, and could not have run.
+///
+/// Takes a [`CancellationToken`] rather than being aborted, because
+/// the server unlinks its socket file on the way out and an abort
+/// would skip that.
+///
+/// Unix-only: the server uses `tokio::net::UnixListener`, which has
+/// no Windows equivalent in this shape.
+#[cfg(unix)]
+pub fn spawn_control_socket(
+    sock_path: PathBuf,
+    status: Arc<dyn crate::control::StatusProvider>,
+    event_tx: broadcast::Sender<ChannelEvent>,
+    input_tx: mpsc::Sender<InputEvent>,
+    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let server = crate::control::Server::new(sock_path);
+    tokio::spawn(async move {
+        if let Err(e) = server
+            .run(status, event_tx, input_tx, surface_mirror, cancel)
+            .await
+        {
+            warn!("control: server exited with error: {}", e);
+        }
+    })
+}
+
 /// Run a headless SPICE session.
 ///
 /// Constructs the connection-side channel pairs internally, then
@@ -552,13 +592,13 @@ pub async fn run_headless(
     let repaint_notify = Arc::new(Notify::new());
 
     // Track whether the SPICE connection task is still alive. The
-    // control server's `HeadlessStatus` impl reads this flag to answer
+    // control server's `SessionStatus` impl reads this flag to answer
     // `status` queries.
     let spice_connected = Arc::new(AtomicBool::new(true));
 
     // Track the current vdagent connection state.  Updated by the
     // fan-out task whenever a `ChannelEvent::AgentConnected` arrives;
-    // read by the `HeadlessStatus` provider so `status` requests
+    // read by the `SessionStatus` provider so `status` requests
     // reflect reality without having to peer into the main channel.
     let agent_connected = Arc::new(AtomicBool::new(false));
 
@@ -676,33 +716,21 @@ pub async fn run_headless(
     #[cfg(unix)]
     let control_cancel = CancellationToken::new();
     #[cfg(unix)]
-    let control_handle = if let Some(sock_path) = control_socket_path {
-        let status: Arc<dyn crate::control::StatusProvider> = Arc::new(HeadlessStatus::new(
+    let control_handle = control_socket_path.map(|sock_path| {
+        let status: Arc<dyn crate::control::StatusProvider> = Arc::new(SessionStatus::new(
             spice_connected.clone(),
             agent_connected.clone(),
             surface_mirror.clone(),
         ));
-        let server = crate::control::Server::new(sock_path);
-        let token = control_cancel.clone();
-        let event_tx_for_control = event_broadcast_tx.clone();
-        let mirror_for_control = surface_mirror.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = server
-                .run(
-                    status,
-                    event_tx_for_control,
-                    input_tx_for_control,
-                    mirror_for_control,
-                    token,
-                )
-                .await
-            {
-                warn!("control: server exited with error: {}", e);
-            }
-        }))
-    } else {
-        None
-    };
+        spawn_control_socket(
+            sock_path,
+            status,
+            event_broadcast_tx.clone(),
+            input_tx_for_control,
+            surface_mirror.clone(),
+            control_cancel.clone(),
+        )
+    });
     #[cfg(not(unix))]
     {
         if control_socket_path.is_some() {

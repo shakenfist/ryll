@@ -37,16 +37,15 @@ pub struct Args {
     pub headless: bool,
 
     /// Bind a Unix-domain control socket at <PATH> for external
-    /// NDJSON-based session control. Only valid with --headless;
-    /// incompatible with --web and the GUI default. The socket is
-    /// created with mode 0600 (owner read/write only). See
+    /// NDJSON-based session control. Valid with --headless or
+    /// --web; not with the GUI. The socket is created with mode
+    /// 0600 (owner read/write only). See
     /// ryll/docs/control-socket-protocol.md for the wire format.
     ///
     /// Unix-only: tokio::net::UnixListener has no equivalent on
     /// Windows; the flag is omitted from the CLI on non-Unix builds.
     #[cfg(unix)]
-    #[arg(long, value_name = "PATH", requires = "headless",
-          conflicts_with = "web",
+    #[arg(long, value_name = "PATH",
           value_parser = clap::value_parser!(PathBuf))]
     pub control_socket: Option<PathBuf>,
 
@@ -246,6 +245,28 @@ pub struct Args {
 /// failure is not an interface name that looks like an address —
 /// there is no such thing — but an address that Rust's parser
 /// rejects and which would otherwise be silently demoted to a name.
+/// Reject `--control-socket` in GUI mode.
+///
+/// The socket is valid with `--headless` or `--web`, both of which
+/// run a session with no host window and can host the server. The
+/// GUI cannot: it owns input and the surface itself, and a second
+/// driver injecting events behind its back has no defined meaning.
+///
+/// Expressed here rather than as a clap `requires`, because clap
+/// cannot say "one of these two flags" and the error it produces for
+/// a single `requires` names the wrong flag.
+#[cfg(unix)]
+pub fn validate_control_socket(args: &Args) -> Result<()> {
+    if args.control_socket.is_some() && !args.headless && !args.web {
+        bail!(
+            "--control-socket needs a session with no host window: pass --headless or \
+             --web as well. It is not available in GUI mode, where the window owns input \
+             and the surface."
+        );
+    }
+    Ok(())
+}
+
 pub fn web_media_bind_policy(args: &Args) -> Result<UdpBindPolicy> {
     let mut selectors = Vec::with_capacity(args.web_media_addr.len());
     for value in &args.web_media_addr {
@@ -795,6 +816,61 @@ mod tests {
         let mut argv = vec!["ryll", "--web", "--file", "x.vv"];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("args parse")
+    }
+
+    /// A control socket is allowed in web mode.
+    ///
+    /// It was a CLI error until phase 04, and that is why the
+    /// QR-digest scenario tests -- which drive a session through the
+    /// control socket and read back what the guest received -- could
+    /// never observe web mode, the one mode with its own scancode
+    /// table. Four input bugs shipped behind that gap.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_socket_is_allowed_alongside_web() {
+        let args = web_args(&["--control-socket", "/tmp/ryll-test.sock"]);
+        validate_control_socket(&args).expect("web mode should accept a control socket");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_control_socket_is_still_allowed_alongside_headless() {
+        let args = Args::try_parse_from([
+            "ryll",
+            "--headless",
+            "--file",
+            "x.vv",
+            "--control-socket",
+            "/tmp/ryll-test.sock",
+        ])
+        .expect("args parse");
+        validate_control_socket(&args).expect("headless should still accept a control socket");
+    }
+
+    /// The GUI still refuses one, and says which flag to add.
+    ///
+    /// The window owns input and the surface, so a second driver
+    /// injecting events behind its back has no defined meaning.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_socket_without_headless_or_web_is_refused() {
+        let args = Args::try_parse_from([
+            "ryll",
+            "--file",
+            "x.vv",
+            "--control-socket",
+            "/tmp/ryll-test.sock",
+        ])
+        .expect("args parse");
+        let err = validate_control_socket(&args)
+            .expect_err("the GUI cannot host a control socket")
+            .to_string();
+        assert!(
+            err.contains("--headless"),
+            "error should name --headless: {}",
+            err
+        );
+        assert!(err.contains("--web"), "error should name --web: {}", err);
     }
 
     #[test]

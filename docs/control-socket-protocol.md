@@ -74,9 +74,11 @@ Version history:
 - **Multi-client concurrency.** Version 1 accepts exactly one client at
   a time. A second connection attempt while a client is connected
   receives a `busy` error and is closed immediately.
-- **Control socket in GUI or web mode.** The socket is only valid in
-  `--headless` mode. Combining `--control-socket` with the GUI or
-  `--web` flag is a CLI error.
+- **Control socket in GUI mode.** The socket is valid with
+  `--headless` or `--web`, both of which run a session with no host
+  window. Combining `--control-socket` with the GUI is a CLI error:
+  the window owns input and the surface, so a second driver
+  injecting events behind its back has no defined meaning.
 - **Replacing the `--cadence`, `--paste-text`, or `--latency-file`
   flags.** Those flags keep working unchanged. The control socket is a
   new, orthogonal interface.
@@ -87,9 +89,8 @@ Version history:
 
 The control socket is a **Unix-domain stream socket** (type
 `SOCK_STREAM`). Its path is supplied by the caller via Ryll's
-`--control-socket <path>` flag. This flag is only valid when
-`--headless` is also present; Ryll will reject the combination with
-any other operating mode.
+`--control-socket <path>` flag. This flag needs `--headless` or
+`--web`; Ryll rejects it in GUI mode at launch.
 
 On startup, Ryll:
 
@@ -1053,10 +1054,18 @@ Key observations from this transcript:
 Everything above this point is the contract. This section describes
 how ryll implements it, and is not binding on other implementations.
 
-The control socket is exposed by headless mode via the
-`--control-socket <path>` CLI flag. The flag is only valid when
-`--headless` is also present; combining it with the GUI or `--web`
-flag is a CLI error caught before the SPICE session starts.
+The control socket is exposed by headless and web mode via the
+`--control-socket <path>` CLI flag; the GUI rejects it at launch.
+Both modes spawn the same server through
+`shakenfist_spice_renderer::spawn_control_socket`, so the two cannot
+drift apart.
+
+Web mode gained a socket in the webrtc-rs 0.20 upgrade's phase 04. It
+was headless-only until then, which meant the scenario tests that
+drive a session through this protocol and assert on the QR visual
+digest could not observe web mode at all -- and web mode is the one
+mode with its own browser-side scancode table. Four input bugs
+shipped behind that gap.
 
 **Module layout.** The control surface lives entirely under
 `shakenfist-spice-renderer/src/control/`:

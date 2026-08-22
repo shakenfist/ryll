@@ -157,6 +157,11 @@ fn main() -> Result<()> {
     // Parse command line arguments
     let args = Args::parse();
 
+    // Fail at launch rather than at the first control-socket
+    // connection: clap cannot express "--headless or --web".
+    #[cfg(unix)]
+    crate::config::validate_control_socket(&args)?;
+
     // Set up logging
     let log_level = if args.verbose {
         Level::DEBUG
@@ -493,6 +498,11 @@ fn run_web(
 ) -> Result<()> {
     info!("Running in web mode");
 
+    // --control-socket is Unix-only (see config.rs), so the field
+    // does not exist on Args elsewhere.
+    #[cfg(unix)]
+    let args_control_socket = args.control_socket.clone();
+
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
     let web_tls_cert = args.web_tls_cert.clone();
@@ -584,6 +594,11 @@ fn run_web(
         let (input_tx, input_rx) = tokio::sync::mpsc::channel::<
             shakenfist_spice_renderer::InputEvent,
         >(crate::web::server::INPUT_CHANNEL_CAPACITY);
+        // Taken before `WebState` takes ownership: a control socket
+        // injects input through the same channel the browser does, so
+        // both paths land on one queue and one ordering.
+        #[cfg(unix)]
+        let input_tx_for_control = input_tx.clone();
         let (usb_tx, usb_rx) =
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::UsbCommand>(16);
         let (webdav_tx, webdav_rx) =
@@ -649,13 +664,25 @@ fn run_web(
         let cursor_event_rx = event_broadcast_tx.subscribe();
         let mouse_mode_event_rx = event_broadcast_tx.subscribe();
 
+        // Liveness flags for a control socket's `status` verb, the
+        // same pair headless maintains. Conservative in the same way:
+        // `spice_connected` stays true until the connection task
+        // returns, and `agent_connected` is whatever the last
+        // `AgentConnected` event said. Cheap enough to keep updated
+        // unconditionally rather than only when a socket is asked
+        // for, and that avoids a second code path that only runs
+        // under a flag.
+        let spice_connected = Arc::new(AtomicBool::new(true));
+        let agent_connected = Arc::new(AtomicBool::new(false));
+
         // Spawn the renderer's session orchestrator. The web
         // mode has no clipboard backend (clipboard sync is
         // out of scope for the MVP) and never enables paste-as-
         // keystrokes (that's a host-side hotkey feature).
         let connection_cancel = cancel.clone();
+        let spice_connected_for_conn = spice_connected.clone();
         let connection_handle = tokio::spawn(async move {
-            shakenfist_spice_renderer::run_connection(
+            let res = shakenfist_spice_renderer::run_connection(
                 connection_config,
                 event_tx_mpsc,
                 repaint_notify,
@@ -679,7 +706,11 @@ fn run_web(
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
             )
-            .await
+            .await;
+            // `status` should stop claiming a live SPICE session the
+            // moment the orchestrator returns.
+            spice_connected_for_conn.store(false, Ordering::Relaxed);
+            res
         });
 
         // Forwarder: drain the renderer's mpsc into the broadcast
@@ -688,8 +719,15 @@ fn run_web(
         // The forwarder exits when the renderer drops its sender
         // on session shutdown.
         let event_broadcast_for_forwarder = event_broadcast_tx.clone();
+        let forwarder_agent_connected = agent_connected.clone();
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = event_rx_mpsc.recv().await {
+                // Cache the agent state on the way past, as the
+                // headless fan-out does, so `status` reflects reality
+                // without a second subscriber.
+                if let shakenfist_spice_renderer::ChannelEvent::AgentConnected(connected) = &event {
+                    forwarder_agent_connected.store(*connected, Ordering::Relaxed);
+                }
                 let _ = event_broadcast_for_forwarder.send(event);
             }
         });
@@ -734,6 +772,34 @@ fn run_web(
         // `bridge_slot` the signalling handler installs into. Its bus
         // subscription, and the mouse-mode tracker's, were taken
         // before the session was spawned; see the comment there.
+        // Control socket, when asked for. Web mode can host one for
+        // the same reason headless can: everything the server needs
+        // -- an event bus, an input sender, the surface mirror --
+        // already exists here. It was barred from web mode until a
+        // browser session in phase 04 found four input bugs that a
+        // control-socket scenario test would have caught and could
+        // not have been written.
+        #[cfg(unix)]
+        let control_cancel = shakenfist_spice_renderer::CancellationToken::new();
+        #[cfg(unix)]
+        let control_handle = args_control_socket.map(|sock_path| {
+            let status: Arc<dyn shakenfist_spice_renderer::control::StatusProvider> =
+                Arc::new(shakenfist_spice_renderer::SessionStatus::new(
+                    spice_connected.clone(),
+                    agent_connected.clone(),
+                    surface_mirror.clone(),
+                ));
+            info!("web: control socket at {}", sock_path.display());
+            shakenfist_spice_renderer::spawn_control_socket(
+                sock_path,
+                status,
+                event_broadcast_tx.clone(),
+                input_tx_for_control,
+                surface_mirror.clone(),
+                control_cancel.clone(),
+            )
+        });
+
         let cursor_mirror = surface_mirror.clone();
         let state = Arc::new(crate::web::WebState::with_channels(
             input_tx,
@@ -824,6 +890,16 @@ fn run_web(
         cancel_bridge_handle.abort();
         // Give the renderer a brief window to unwind cleanly.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), connection_handle).await;
+        // Cancel rather than abort, and wait: the control server
+        // unlinks its socket file on the way out, and an abort would
+        // leave it behind for the next launch to trip over. Same
+        // shape as the headless teardown.
+        #[cfg(unix)]
+        if let Some(handle) = control_handle {
+            control_cancel.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        }
+
         forwarder_handle.abort();
         mirror_handle.abort();
         cursor_handle.abort();
