@@ -362,15 +362,19 @@ records what was wrong with each.
 | Phase | Plan | Status |
 |-------|------|--------|
 | 1. Pre-work on 0.17 | [PLAN-webrtc-0.20-upgrade-phase-01-prework.md](PLAN-webrtc-0.20-upgrade-phase-01-prework.md) | Complete — baseline captured, 1g agrees within noise |
-| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Complete — Chromium session on `7e2fb58e` confirms the bind address. Firefox has no video, for a reason that is not a port regression (#289, #290); it is phase 04's gate, as is the audio check nobody performed by ear |
+| 2. Atomic bump to 0.20 | [PLAN-webrtc-0.20-upgrade-phase-02-bump.md](PLAN-webrtc-0.20-upgrade-phase-02-bump.md) | Complete — Chromium session on `7e2fb58e` confirms the bind address. Its two deferrals were discharged in phase 04: the audio check was performed by ear, and #289/#290 are fixed |
 | 3. Socket binding configuration | [PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md](PLAN-webrtc-0.20-upgrade-phase-03-udp-addrs.md) | Complete — `--web-media-addr` (address or interface name), `--web-media-port` and `--web-ice-server`, carried through `WebState` into a `UdpBindPolicy` the bridge resolves per offer. Explicit addresses override the loopback default; `0.0.0.0` is refused at startup |
-| 4. Soak validation and docs | [PLAN-webrtc-0.20-upgrade-phase-04-soak.md](PLAN-webrtc-0.20-upgrade-phase-04-soak.md) | Planned — a comparable 20-minute soak against phase 01's baseline, the audio-by-ear check, the Firefox OpenH264 question, and #289/#290 landing first |
+| 4. Soak validation and docs | [PLAN-webrtc-0.20-upgrade-phase-04-soak.md](PLAN-webrtc-0.20-upgrade-phase-04-soak.md) | Complete — audio confirmed by ear at last; the bump costs no CPU and slightly less memory, bisected either side of the phase-02 merge; #289/#290 fixed, plus four input bugs the browser check found. Safari unexercised (no Mac), Firefox still has no video (#289 makes it legible) |
 
 Phase 01 is a hard prerequisite for 02 only in the sense that it
 makes 02 tractable; 02 could be done standalone at higher risk.
 Phases 03 and 04 both depend on 02.
 
-Phase 02 is `Code complete` rather than `Complete`: the port
+Phase 02 is now `Complete`: phase 04's browser sessions supplied the
+verification it was waiting for. What follows is the reasoning it
+was left open with, kept because it explains why.
+
+The port
 itself has landed on `webrtc = "0.20.2"` and both Renovate rules
 are gone, `rtc` is now a direct dependency, the standalone `rtp`
 and `rustls` dependencies are gone, datachannels and remote

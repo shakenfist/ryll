@@ -655,14 +655,38 @@ makes it flaky in the failing direction.
 
 ## Status
 
-In progress. 4a, 4b, 4c, 4d, 4e and 4f are complete. What remains is
-4g, the close-out, plus two operator decisions:
+Complete. Every step landed, both operator decisions were taken and
+executed: the CPU difference was bisected to somewhere after the
+port rather than in it, and web mode can now host a control socket
+so the QR-digest scenario tests can reach it.
 
-1. Whether to attribute the CPU difference by measuring either side
-   of the phase-02 merge (worktrees are prepared).
-2. Whether to lift `--control-socket`'s `conflicts_with = "web"` so
-   the existing Sextant/QR scenario tests can reach web mode — see
-   "What 4e implies for testing" below.
+Two things leave this phase open elsewhere rather than here: Safari
+is unexercised for want of a Mac, and Firefox still gets no video —
+recorded above, and neither is a port regression.
+
+### 4g — the master plan's success criteria, item by item
+
+| Criterion | Result |
+|---|---|
+| `webrtc = "0.20.2"` or later in the one manifest, both Renovate rules gone | ✅ manifest says 0.20.2, lockfile resolves 0.20.3, `renovate.json` names webrtc nowhere |
+| `make test` passes, including `tests/loopback.rs` and `tests/lifecycle.rs` | ✅ 16 suites green |
+| `pre-commit run --all-files` passes | ✅ all four hooks |
+| A real browser reaches a real guest with video, audio, input and cursor, and survives a soak | ✅ Chromium on the latency guest (4c, two 20-minute runs) and on the desktop guest with **audio confirmed by ear** (4e) |
+| RSS and CPU compared against a 0.17 baseline | ✅ and then bisected, which is what made the comparison mean anything |
+| The answer SDP advertises no unspecified-address candidate, and at least one candidate | ✅ asserted every round of the 20-iteration gathering soak (4f) |
+| The reaper tears the bridge down on `Failed`, `Disconnected`, `Closed` | ✅ unchanged since phase 02; `wait_for_dead` covered in both crates' tests |
+| `docs/configuration.md` and `docs/web-frontend.md` cover the UDP bind address | ✅ both name `--web-media-port` (phase 03) |
+| `ARCHITECTURE.md` and `AGENTS.md` reflect the bridge's task and callback structure | ✅ verified, and phase 02 had already written it up. `ARCHITECTURE.md` changed by one word this phase — its `control/` annotation said "Headless control socket", which stopped being true |
+
+**Not satisfied, with reasons:**
+
+- **Safari.** No Mac was available to the session; the operator
+  checked Chrome on macOS instead, which the master plan does not
+  count. Safari remains unexercised.
+- **Firefox.** Reaches a healthy session with audio, input and
+  cursor, and no video, on both Linux and macOS. This is the
+  criterion Decision 4 deliberately reinterpreted rather than met;
+  see 4d and its correction under 4e.
 
 ## What 4e implies for testing
 
