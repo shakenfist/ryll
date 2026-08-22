@@ -421,10 +421,28 @@ at PT 120 and Opus at 109 because that is what this probe showed
 Firefox actually offering. The test reproduces a real browser's
 numbers rather than plausible-looking ones.
 
+### 4f — the ICE gathering soak
+
+`RYLL_GATHERING_SOAK=1 make test` passes. The 20-iteration
+invariant-candidate-count check in
+`accept_offer_answer_carries_all_candidates` held: same candidate
+count in the answer on every round, and no candidate with an
+unspecified address.
+
+Confirmed that the soak actually ran rather than silently falling
+back to its three-iteration default — the variable has to survive
+into the devcontainer, and a typo there would look exactly like a
+pass. The crate's suite takes 10.56 s with it set and 1.60 s
+without.
+
+Host load average was 2.3 rising to 3.2 across the run: not the
+quiet host the gate asks for, but the check passed anyway, and a
+false *pass* is not a failure mode this test has — interface churn
+makes it flaky in the failing direction.
+
 ## Status
 
-In progress. 4a, 4b and 4d complete; 4c, 4e and 4f are operator
-steps and have not run.
+In progress. 4a, 4b, 4d and 4f complete; 4c and 4e remain.
 
 ## Back brief
 
