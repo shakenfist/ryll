@@ -376,6 +376,21 @@ a symptom that looks like a client bug:
 | `intel-hda` + `hda-duplex` | The SPICE playback channel | Silence, indistinguishable from a broken audio path |
 | user-mode networking | cloud-init, `apt` in the guest | cloud-init waits out its datasource search on every boot |
 
+The image ships **no audio player** — no `alsa-utils`,
+`pulseaudio-utils` or libcanberra — so there is nothing in it that
+can make a sound, and the audio check below cannot be done until you
+add one:
+
+```bash
+sudo apt-get install -y alsa-utils      # in the guest
+speaker-test -t sine -f 440 -l 3
+```
+
+The guest has user-mode networking, so that works out of the box.
+Worth knowing before you conclude the audio path is broken: silence
+with no player installed looks exactly like silence with a broken
+playback channel.
+
 Worth checking in ryll's own log when verifying `--web`:
 
 - `main: mouse mode=N (...)` — `2` is client mode, which is what a

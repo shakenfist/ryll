@@ -539,6 +539,66 @@ fired, and no `unsupported codec type` line appeared. The guard added
 in 4a — that a working viewer is never told its video is broken — is
 confirmed outside the unit tests.
 
+### 4e — the qualitative session, and what it found
+
+**Audio is confirmed by ear.** Chrome on macOS, against the XFCE
+desktop guest, playing a 440 Hz tone from `speaker-test`. This is
+the clause phase 02 deferred — it had established only that Opus
+was *negotiated* (`playback: MODE: 3`) and explicitly recorded that
+nobody had listened. Server side, 1,193 Opus packets were forwarded
+with zero drops at payload type 111.
+
+Arrow keys, and typing generally, confirmed working after the fixes
+below.
+
+**4e found three input bugs, all pre-existing rather than port
+regressions**, and all of them invisible to the test suite:
+
+1. **Key releases were sent as presses.** The web path handed
+   `InputEvent::KeyUp` the make code; the inputs channel writes it
+   verbatim, so the guest saw a second press and auto-repeated
+   forever. The GUI path has always set the break bit. This was the
+   "keyboard going bonkers" report.
+2. **Extended scancodes had their bytes reversed** — 19 keys dead,
+   including every arrow.
+3. **Browser auto-repeat was forwarded**, stacking on the guest's
+   own repeat. Latent, but the same failure mode by another route.
+
+The first two are one root cause: the web frontend reimplemented an
+encoding that `make_scancode` already owned. Both existing unit
+tests asserted the buggy values, one describing `0xE048` as
+"wire-format" in a comment — they were written from the
+implementation rather than the contract, so they locked the bugs in
+rather than catching them.
+
+**A fourth, in the page itself:** `#enable-audio` had no `z-index`
+while `<video>` fills the viewport and follows it in the DOM, so
+the button was painted over, as was `#status`. Chrome still
+delivered the click — the operator confirmed the button worked once
+found — so this is a visibility defect rather than an unreachable
+control; an earlier draft of this section overstated it as
+"unclickable" on the strength of the stacking order alone, which the
+operator's session contradicted.
+
+It still matters: clicking that button is the only way to get
+sound, because browsers will not autoplay audio unprompted, and a
+control nobody can see is one nobody presses. Fixed with two
+`z-index` declarations. Deliberately not a layout change — the
+letterbox-versus-scale question is #308's and the wider UI is headed
+for sfui (#293), and a button should not have to wait for either.
+
+**Firefox on macOS also gets no video**, reported in passing during
+this session. That is a correction to Decision 4's reasoning rather
+than to its conclusion, and it matters: 4d argued the H.264 gap was
+"a Firefox-side plugin-loading problem on one host". Two hosts, two
+operating systems, is not one host's misconfiguration — it is
+Firefox not offering H.264 for WebRTC in a way ryll can rely on
+anywhere. The decision not to add a second codec *during a port*
+still stands, for the attribution reason. The case for adding one
+afterwards is now materially stronger than 4d made it look, and
+whoever picks up that question should start here rather than from
+4d's more comfortable framing.
+
 ### 4f — the ICE gathering soak
 
 `RYLL_GATHERING_SOAK=1 make test` passes. The 20-iteration
@@ -560,14 +620,58 @@ makes it flaky in the failing direction.
 
 ## Status
 
-In progress. 4a, 4b, 4c, 4d and 4f complete. **4e remains** — the
-qualitative desktop-guest session, whose central item is confirming
-audio **by ear**, which cannot be delegated. Two open items for the
-operator to settle before 4g closes the phase:
+In progress. 4a, 4b, 4c, 4d, 4e and 4f are complete. What remains is
+4g, the close-out, plus two operator decisions:
 
 1. Whether to attribute the CPU difference by measuring either side
-   of the phase-02 merge, or to file it and move on.
-2. 4e itself.
+   of the phase-02 merge (worktrees are prepared).
+2. Whether to lift `--control-socket`'s `conflicts_with = "web"` so
+   the existing Sextant/QR scenario tests can reach web mode — see
+   "What 4e implies for testing" below.
+
+## What 4e implies for testing
+
+Four input bugs shipped in web mode, and none of them was subtle:
+every key stuck down, and nineteen keys did nothing at all. The
+question worth answering is not why they existed but why nothing
+caught them.
+
+**The loop that would have caught them cannot reach web mode.** ryll
+already has the apparatus: the `uncalibrated-sextant` guest,
+`shakenfist-visual-digest` decoding a QR-encoded visual digest off
+the screen, the `digest_updated` control-socket event behind the
+`digest-decode` feature, and Sextant scenario tests written against
+that protocol. It is a genuine closed loop — drive input, read back
+what the guest actually received.
+
+It is confined to headless by construction. `ryll/src/config.rs:48`
+declares `--control-socket` with `requires = "headless"` and
+`conflicts_with = "web"`, so no scenario test can observe a `--web`
+session. And web mode is the one path that reimplements the
+scancode encoding — `docs/multi-mode-parity.md:99` says so plainly:
+"available (MVP; browser-side scancode table)". A second
+implementation of a wire format, with the verification loop
+structurally unable to reach it.
+
+Three tiers, cheapest first:
+
+1. **Done in this phase.**
+   `every_key_reaches_the_wire_the_way_the_gui_would_send_it` pins
+   plain and extended keys, press and release, against
+   `make_scancode` itself. No guest, no browser, runs in CI now, and
+   fails on the pre-fix code. It would have caught both wire-format
+   bugs.
+2. **Lift `conflicts_with = "web"`.** Then an existing-style
+   scenario test drives a headless browser at the web URL and
+   asserts through `digest_updated` what the guest received —
+   closing the loop through the browser, which is the only way to
+   catch a bug in `app.js` itself. This needs no new infrastructure,
+   only permission for the two flags to coexist, and the separation
+   looks deliberate enough to want the operator's agreement first.
+3. **Stop reimplementing the encoding.** `make_scancode` is now
+   shared, so the encoding is single-source. What remains duplicated
+   is the `KeyboardEvent.code` → scancode table in `app.js`, which
+   is the part tier 2 would cover.
 
 ## Back brief
 
