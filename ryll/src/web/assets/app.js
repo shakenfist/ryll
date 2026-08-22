@@ -80,10 +80,19 @@
     //
     // Ported from `scancode_for_logical_key` in
     // shakenfist-spice-renderer/src/channels/inputs.rs. Extended
-    // keys (navigation cluster, arrows, right-side modifiers) use
-    // the SPICE wire format produced by `make_scancode()`:
-    //   wire = (scancode << 8) | 0xE0
-    // i.e. Up arrow's base 0x48 becomes 0xE048 on the wire.
+    // keys (navigation cluster, arrows, right-side modifiers) are
+    // written here in the *logical* form, with the 0xE0 prefix in
+    // the high byte -- Up arrow is 0xE048. Ryll converts to the
+    // wire form with `make_scancode()`, which flips it to 0x48E0 so
+    // the little-endian u32 serialises as `E0 48`, and applies the
+    // release bit on key-up.
+    //
+    // Do not encode wire values here. This comment used to give the
+    // formula `wire = (scancode << 8) | 0xE0` and then contradict it
+    // one line later with "0xE048 on the wire"; the table followed
+    // the example rather than the formula, and every extended key --
+    // all four arrows, Home, End, PageUp/Down, Insert, Delete, the
+    // right-side modifiers -- was dead in web mode as a result.
     //
     // Modifier keys aren't in the LogicalKey table (the GUI
     // path lets egui's modifier state ride along on the

@@ -281,13 +281,22 @@ pub enum ChannelEvent {
 }
 
 /// Events sent from the application to the inputs channel
+///
+/// The key variants carry a **wire-format** scancode, not a logical
+/// one: the inputs channel writes the value straight into the SPICE
+/// message without touching it. Build them with
+/// [`make_scancode`](crate::make_scancode) rather than by hand — the
+/// release bit and the byte order of `0xE0`-prefixed codes are both
+/// easy to get wrong, and both failures are invisible until a guest
+/// is watching.
 #[derive(Debug, Clone)]
 pub enum InputEvent {
-    /// Key pressed
-    KeyDown(u32), // Scancode
+    /// Key pressed. Wire-format scancode; see the type docs.
+    KeyDown(u32),
 
-    /// Key released
-    KeyUp(u32), // Scancode
+    /// Key released. Wire-format scancode, release bit set; see the
+    /// type docs.
+    KeyUp(u32),
 
     /// Mouse moved (absolute position, client mode)
     MouseMove { x: u32, y: u32 },

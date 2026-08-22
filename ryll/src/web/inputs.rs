@@ -34,7 +34,9 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
-use shakenfist_spice_renderer::{even_dimensions, ChannelEvent, InputEvent, SurfaceMirror};
+use shakenfist_spice_renderer::{
+    even_dimensions, make_scancode, ChannelEvent, InputEvent, SurfaceMirror,
+};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -177,10 +179,18 @@ pub async fn run_input_relay(
 
         match msg {
             BrowserMsg::Key { scancode, down } => {
+                // `app.js` sends the logical scancode -- a plain code
+                // like 0x13, or an 0xE0-prefixed one like 0xE048 for
+                // Up arrow. The inputs channel writes what it is
+                // given straight onto the wire, so the conversion has
+                // to happen here, through the same function the GUI
+                // path uses. Doing it by hand is how this diverged:
+                // releases went out without the break bit, so every
+                // key the guest saw stayed held and auto-repeated.
                 let event = if down {
-                    InputEvent::KeyDown(scancode)
+                    InputEvent::KeyDown(make_scancode(scancode, false))
                 } else {
-                    InputEvent::KeyUp(scancode)
+                    InputEvent::KeyUp(make_scancode(scancode, true))
                 };
                 if input_tx.send(event).await.is_err() {
                     warn!("web inputs: input_tx receiver dropped; relay exiting");
@@ -438,7 +448,11 @@ mod tests {
         let mirror = primary_mirror(1920, 1080).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
 
-        // 0xE048 is Up arrow in wire-format (E0-prefixed).
+        // 57416 is 0xE048, Up arrow as `app.js` writes it. On the
+        // wire the prefix has to come first, and a u32 serialises
+        // little-endian, so the value that must reach the inputs
+        // channel is 0x48E0. This test asserted 0xE048 until a
+        // browser session found that no arrow key worked at all.
         let payload = br#"{"type":"key","scancode":57416,"down":true}"#.to_vec();
         tx.send(payload).await.expect("send");
 
@@ -447,8 +461,8 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         match event {
-            InputEvent::KeyDown(sc) => assert_eq!(sc, 0xE048),
-            other => panic!("expected KeyDown(0xE048), got {:?}", other),
+            InputEvent::KeyDown(sc) => assert_eq!(sc, 0x48E0),
+            other => panic!("expected KeyDown(0x48E0), got {:?}", other),
         }
     }
 
@@ -457,7 +471,11 @@ mod tests {
         let mirror = primary_mirror(1920, 1080).await;
         let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
 
-        // 0x1E is the 'A' base scancode.
+        // 0x1E is the 'A' base scancode; a release must carry the
+        // break bit, so the inputs channel has to see 0x9E. Sending
+        // 0x1E is a second *press*, which leaves the guest holding
+        // the key and auto-repeating it forever -- the bug this
+        // test asserted as correct until a browser session hit it.
         let payload = br#"{"type":"key","scancode":30,"down":false}"#.to_vec();
         tx.send(payload).await.expect("send");
 
@@ -466,8 +484,69 @@ mod tests {
             .expect("timeout")
             .expect("relay should send");
         match event {
-            InputEvent::KeyUp(sc) => assert_eq!(sc, 0x1E),
-            other => panic!("expected KeyUp(0x1E), got {:?}", other),
+            InputEvent::KeyUp(sc) => assert_eq!(sc, 0x9E),
+            other => panic!("expected KeyUp(0x9E), got {:?}", other),
+        }
+    }
+
+    /// Every key the browser can send survives the trip to the wire
+    /// in the form the GUI would have sent.
+    ///
+    /// The two tests above pin one case each. This pins the matrix,
+    /// because the web frontend shipped with its own scancode table
+    /// and no test compared the two paths -- so a release that
+    /// forgot the break bit, and an extended code with its prefix in
+    /// the wrong byte, both looked correct to the suite while making
+    /// the keyboard unusable in front of a guest.
+    ///
+    /// The expected values are `make_scancode`'s, which is the GUI
+    /// path's encoder. If this test and that function ever disagree,
+    /// the two input paths have diverged again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_key_reaches_the_wire_the_way_the_gui_would_send_it() {
+        // (logical scancode as app.js sends it, down, expected wire value)
+        let cases: [(u32, bool, u32); 6] = [
+            // Plain key: press is the base code, release sets 0x80.
+            (0x1E, true, 0x1E),
+            (0x1E, false, 0x9E),
+            // Extended key: prefix must land in the low byte so the
+            // u32 serialises as `E0 48`, and the release bit applies
+            // to the code, not the prefix.
+            (0xE048, true, 0x48E0),
+            (0xE048, false, 0xC8E0),
+            // Right Ctrl -- an extended modifier, the combination
+            // most likely to strand a guest if it is wrong.
+            (0xE01D, true, 0x1DE0),
+            (0xE01D, false, 0x9DE0),
+        ];
+
+        for (logical, down, expected) in cases {
+            let mirror = primary_mirror(1920, 1080).await;
+            let (tx, mut input_rx, _resize_rx, _h) = spawn_relay(mirror);
+            let payload =
+                format!(r#"{{"type":"key","scancode":{},"down":{}}}"#, logical, down).into_bytes();
+            tx.send(payload).await.expect("send");
+
+            let event = tokio::time::timeout(Duration::from_secs(1), input_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("relay should send");
+
+            let got = match event {
+                InputEvent::KeyDown(sc) | InputEvent::KeyUp(sc) => sc,
+                other => panic!("expected a key event, got {:?}", other),
+            };
+            assert_eq!(
+                got, expected,
+                "logical {:#x} down={} should reach the wire as {:#x}, got {:#x}",
+                logical, down, expected, got
+            );
+            assert_eq!(
+                got,
+                make_scancode(logical, !down),
+                "the web path disagrees with make_scancode for {:#x}",
+                logical
+            );
         }
     }
 
