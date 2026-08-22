@@ -316,6 +316,30 @@ jobs:
       - name: Scan tree for bidi and zero-width characters
         run: ./tools/check-bidi.sh
 
+  # Lints the agent context (AGENTS.md and anything else an agent is
+  # handed). The version is pinned to the same release as the
+  # pre-commit hook: skillsaw's rule set moves between releases, and
+  # the hook and the CI job must not disagree about what counts as
+  # broken. Bump both together.
+  skillsaw:
+    name: skillsaw
+    runs-on: [self-hosted, vm, debian-12, s]
+    timeout-minutes: 15
+    needs: [check_paths]
+    if: >-
+      github.event_name != 'merge_group'
+      && needs.check_paths.outputs.code_changed != 'false'
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-skillsaw
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint agent context
+        uses: stbenjam/skillsaw@v0
+        with:
+          version: '0.18.0'
+
   # Merge tier: the two jobs below run on merge_group (and on
   # workflow_dispatch) and gate "Can merge". They are the expensive
   # ones, so they run against the commit that is actually landing
@@ -556,6 +580,7 @@ jobs:
       - gitleaks
       - shellcheck
       - bidi-check
+      - skillsaw
     # A cross-repository reusable workflow cannot grant itself more
     # token scope than its caller has, so the permissions go here.
     permissions:
@@ -593,6 +618,7 @@ jobs:
       - gitleaks
       - shellcheck
       - bidi-check
+      - skillsaw
     if: always() && github.event_name != 'merge_group'
     permissions:
       actions: read
