@@ -236,10 +236,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/propose-release.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/publish-crates.sh",
       "author": "mikal"
     },
@@ -356,15 +352,7 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/export-repo-config.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/manual-build.yml",
       "author": "mikal"
     },
     {
@@ -413,10 +401,6 @@
     },
     {
       "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
       "author": "mikal"
     },
     {
