@@ -297,6 +297,7 @@ questions resolve.
 | 7. TV-specific manifest + launcher | PLAN-android-apk-phase-07-tv.md | Not written |
 | 8. CI build + release artifact | PLAN-android-apk-phase-08-ci.md | Not written |
 | 9. Docs | PLAN-android-apk-phase-09-docs.md | Not written |
+| 10. Push audit | PLAN-android-apk-phase-10-push-audit.md | Not written |
 
 ### Phase 1: Toolchain + boot
 
@@ -381,6 +382,17 @@ Release. Document the sideload workflow in
 - `ARCHITECTURE.md` — no changes expected; the core
   architecture is platform-agnostic.
 - `AGENTS.md` — add Android build commands.
+
+### Phase 10: Push audit
+
+Work `PUSH-AUDIT.md` over the accumulated diff of phases 1-9
+against `develop` — the whole port as one change, not the
+last phase's diff alone, because the `#[cfg]` gating from
+phase 2 is threaded through everything the later phases add.
+Findings land as their own PR against `develop`, and this
+plan is not complete until each one is fixed or declined in
+writing here. If the audit finds nothing, record that here
+in one sentence.
 
 ## Administration and logistics
 

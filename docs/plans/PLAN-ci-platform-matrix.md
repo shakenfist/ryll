@@ -160,11 +160,12 @@ matrices (we already build natively).
 
 ## Approach
 
-The plan breaks into four phases. Phases 1 and 2 are no-regret
+The plan breaks into five phases. Phases 1 and 2 are no-regret
 expansions that fit comfortably in current CI budgets. Phase 3
 is a portability cleanup that unblocks Phases 1 and 2 on
 Windows. Phase 4 documents a manual-QA boundary; the work
-itself is a doc, not automation.
+itself is a doc, not automation. Phase 5 is the pre-push audit
+of everything the first four phases changed.
 
 ### Phase 01 — Cross-platform GUI/headless TLS smoke test
 
@@ -298,6 +299,16 @@ Bug-class coverage per minute: not applicable. The point is
 to be honest that some bugs require this and to make the
 boundary explicit.
 
+### Phase 05 — Push audit
+
+Work `PUSH-AUDIT.md` over the accumulated diff of Phases 01-04
+against `develop`, rather than the last phase's diff alone —
+the workflow edits, the portability cleanup and the new smoke
+tests only make sense read together. Findings land as their
+own PR against `develop`, and this plan is not complete until
+each is fixed or declined in writing here. If the audit finds
+nothing, record that here in one sentence.
+
 ## Phase order
 
 | Phase | Plan | Status |
@@ -306,6 +317,7 @@ boundary explicit.
 | 2. `web-smoke` on macOS (and Windows after Phase 03) | PLAN-ci-platform-matrix-phase-02-web-smoke-parity.md | Not started |
 | 3. Smoke-test portability audit | PLAN-ci-platform-matrix-phase-03-smoke-portability.md | Not started |
 | 4. Release QA checklist doc | PLAN-ci-platform-matrix-phase-04-release-qa.md | Not started |
+| 5. Push audit | PLAN-ci-platform-matrix-phase-05-push-audit.md | Not started |
 
 Hard dependencies: Phase 02b (Windows web-smoke) is
 gated on Phase 03 if we choose the Rust-rewrite route.

@@ -170,6 +170,15 @@ enough to bet a CI test on. Trying to write CI assertions
 against a streaming heuristic we don't fully understand
 yet would just produce flaky tests.
 
+## Push audit
+
+Whenever this plan does grow phases, the last of them runs
+`PUSH-AUDIT.md` over the accumulated diff of all of them
+against `develop`, not the last phase's diff alone. Findings
+land as their own PR against `develop`, and the plan is not
+complete until each one is fixed or declined in writing here.
+If the audit finds nothing, record that here in one sentence.
+
 ## Cross-references
 
 - `docs/plans/PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md`

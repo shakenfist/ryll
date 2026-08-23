@@ -199,6 +199,7 @@ guest). Out of scope for this plan.
 | 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete |
 | 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete |
 | 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete |
+| 6. Push audit | PLAN-idle-cpu-and-latency-phase-06-push-audit.md | Not started |
 
 Phase 1 informs phase 2: if profiling shows logging is the
 dominant cost, swap their order.  *Profiling result: the
@@ -221,6 +222,15 @@ captured its own per-thread CPU into bug reports, the user
 report would have included the llvmpipe breakdown directly
 and the profiling phase would have been unnecessary.  This
 phase makes future incidents self-debugging.
+
+Phase 6 is the pre-push audit, and it runs last.  It works
+`PUSH-AUDIT.md` over the accumulated diff of phases 1-5
+against `develop`, not the last phase's diff alone, so it
+sees what the repaint, logging, latency and metrics changes
+did to each other.  Findings land as their own PR against
+`develop`, and this plan is not complete until every one is
+fixed or declined in writing here.  If the audit finds
+nothing, that gets recorded here in one sentence.
 
 ## Agent guidance
 

@@ -197,7 +197,7 @@ Out of scope for this plan:
 
 ## Execution
 
-Four phases. Each phase plan is filled in when its phase
+Five phases. Each phase plan is filled in when its phase
 starts.
 
 | Phase | Plan | Status |
@@ -206,6 +206,7 @@ starts.
 | 2. Dialog UI               | PLAN-connection-properties-phase-02-dialog.md | Not started |
 | 3. Capability name decoding | PLAN-connection-properties-phase-03-cap-names.md | Not started |
 | 4. Docs                     | PLAN-connection-properties-phase-04-docs.md | Not started |
+| 5. Push audit               | PLAN-connection-properties-phase-05-push-audit.md | Not started |
 
 ### Phase 1 — Connection-info plumbing
 
@@ -275,6 +276,16 @@ dialog. Update `AGENTS.md` if it lists places where new
 connection state should be tracked. Add a screenshot to
 `docs/` if other dialogs have screenshots (check
 convention before adding).
+
+### Phase 5 — Push audit
+
+Work `PUSH-AUDIT.md` over the accumulated diff of phases 1-4
+against `develop`, not the last phase's diff alone, so the
+plumbing, dialog, decoding and docs changes are audited as
+the one change they add up to. Findings land as their own PR
+against `develop`, and this plan is not complete until each
+is fixed or declined in writing here. If the audit finds
+nothing, record that here in one sentence.
 
 ## Agent guidance
 

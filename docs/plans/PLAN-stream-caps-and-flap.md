@@ -288,6 +288,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 15. Track down `build_tcp_frame: payload too large` warns | [PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md](PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md) | 15B (one-shot backtrace) landed; no fires across 006 bundles. Awaiting fresh reproduction. |
 | 16. Evaluate guest driver options for video streaming | [PLAN-stream-caps-and-flap-phase-16-qxl-viability.md](PLAN-stream-caps-and-flap-phase-16-qxl-viability.md) | **Parked.** Concept stub. Resume alongside phase 13 after non-video phases close. |
 | 17. Patched libspice-server for hypothesis validation | [PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md](PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md) | **Parked.** Value uncertain after 006: bumping `NUM_TRACE_ITEMS` 8→128 helps cursor / scrollbar flap, but does not address why the YouTube video itself isn't a stream. Hold off on the .deb build until the predicate question is answered. |
+| 18. Push audit | PLAN-stream-caps-and-flap-phase-18-push-audit.md | Not started |
 
 ### Closeout — non-video work remaining
 
@@ -847,6 +848,18 @@ Per-phase intent:
   pivots or is cancelled. Recommended planning effort:
   **medium** (the package build is reasonable but
   unfamiliar; the test recipe is small).
+
+- **Phase 18 — Push audit.** Work `PUSH-AUDIT.md` over the
+  accumulated diff of every phase in this plan against
+  `develop`, not the last phase's diff alone — seventeen
+  phases of capability, decoder, diagnostics and cache work
+  have had plenty of opportunity to leave duplicated helpers
+  and stale docs behind each other. Findings land as their
+  own PR against `develop`, and this plan is not complete
+  until each is fixed or declined in writing here. If the
+  audit finds nothing, record that here in one sentence.
+  Recommended planning effort: **low** (the runbook does the
+  work; the phase plan is a wrapper).
 
 ## Agent guidance
 
