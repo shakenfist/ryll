@@ -5,13 +5,33 @@
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
     },
+    ".github/actions/cargo-cache/action.yml": {
+      "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
+      "date": "2026-08-24"
+    },
+    ".github/workflows/ci.yml": {
+      "sha": "41a10d3c60539bf74fa337c00a3f0e773e6357ea",
+      "date": "2026-08-24"
+    },
+    ".github/workflows/codeql-analysis.yml": {
+      "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
+      "date": "2026-08-24"
+    },
     ".github/workflows/export-repo-config.yml": {
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
     },
+    ".github/workflows/manual-build.yml": {
+      "sha": "faaea0d0597f8160dcb804a068f90383777f8525",
+      "date": "2026-08-24"
+    },
     ".github/workflows/pr-address-comments.yml": {
       "sha": "a6a11da6e24aebba1c7a802f68e9e185dde2eaaa",
       "date": "2026-08-05"
+    },
+    ".github/workflows/pr-re-review.yml": {
+      "sha": "e905bbe211189632248bcfa616701330b41320d0",
+      "date": "2026-08-24"
     },
     ".github/workflows/pr-retest.yml": {
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
@@ -21,6 +41,10 @@
       "sha": "726d173ac44f7a353820e61bc3acfae3149ceae9",
       "date": "2026-08-11"
     },
+    ".github/workflows/release.yml": {
+      "sha": "34b27e2711ee22669b893f67576387e3e0ccb455",
+      "date": "2026-08-24"
+    },
     ".github/workflows/renovate.yml": {
       "sha": "73e1a3568311d2c04d7f419ea566879e46b38db1",
       "date": "2026-08-15"
@@ -28,6 +52,10 @@
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
+    },
+    ".pre-commit-config.yaml": {
+      "sha": "557bd68f4d803f79f952bf4c823ae6d92edd2cf1",
+      "date": "2026-08-24"
     },
     "AGENTS.md": {
       "sha": "8df3b465acfd467da5245995c1443a2d348b6983",
