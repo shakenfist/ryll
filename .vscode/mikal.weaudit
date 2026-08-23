@@ -438,6 +438,46 @@
     {
       "path": "tools/make-cloud-seed.sh",
       "author": "mikal"
+    },
+    {
+      "path": ".github/actions/cargo-cache/action.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/actions/cargo-cache",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/actions",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/codeql-analysis.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/manual-build.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/pr-re-review.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
