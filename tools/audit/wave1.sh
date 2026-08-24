@@ -11,6 +11,7 @@
 #   2  rustfmt/clippy failed
 #   3  cargo test failed
 #   4  style-conformance grep failed (raw println!/eprintln! found)
+#   6  AUDIT_BASE was set but does not resolve to a commit
 #
 # Style conformance is intentionally kept narrow here — only the
 # fully-mechanical checks live in this script.  Anything needing
@@ -19,6 +20,7 @@
 # sub-agent.
 #
 # Usage: tools/audit/wave1.sh
+#        AUDIT_BASE=<sha> AUDIT_HEAD=develop tools/audit/wave1.sh
 # Run from the worktree root.
 
 set -u
@@ -28,9 +30,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 5
 
+# Audit range.  Defaults to develop...HEAD -- the pre-push gate,
+# where the work under audit is the unpushed branch.  Override with
+# AUDIT_BASE / AUDIT_HEAD when auditing a master plan's accumulated
+# diff after its phases have already merged; see the "Two ways this
+# runbook is invoked" section of PUSH-AUDIT.md for the derivation.
+AUDIT_BASE_SET="${AUDIT_BASE+set}"
+AUDIT_BASE="${AUDIT_BASE:-develop}"
+AUDIT_HEAD="${AUDIT_HEAD:-HEAD}"
+AUDIT_RANGE="${AUDIT_BASE}...${AUDIT_HEAD}"
+
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+# An explicitly-set range that does not resolve, or resolves to nothing,
+# is the failure this override exists to prevent -- an audit that reports
+# "no findings" because it looked at an empty diff.  Say so loudly.
+if ! git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+    if [[ -n "$AUDIT_BASE_SET" ]]; then
+        red "FAIL: AUDIT_BASE=$AUDIT_BASE does not resolve to a commit"
+        exit 6
+    fi
+    echo "NOTE: '$AUDIT_BASE' not found; diff-scoped checks are skipped."
+elif [[ -z "$(git diff --name-only "$AUDIT_RANGE")" ]]; then
+    echo "WARNING: $AUDIT_RANGE is an empty diff.  Every diff-scoped"
+    echo "check below will report nothing, and that is not a result."
+    echo "See PUSH-AUDIT.md, 'Two ways this runbook is invoked'."
+fi
 
 bold "=== wave 1a: pre-commit ==="
 if ! pre-commit run --all-files; then
@@ -120,9 +147,10 @@ if [[ -n "$UNGUARDED" ]]; then
 fi
 
 # 3. Long-line check: warn on Rust source lines over 120 chars in changed
-#    files relative to develop.  Non-fatal — purely informational.
-if git rev-parse --verify develop >/dev/null 2>&1; then
-    LONG_LINES=$(git diff develop...HEAD --name-only -- '*.rs' \
+#    files relative to the audit base.  Non-fatal — purely
+#    informational.
+if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+    LONG_LINES=$(git diff "$AUDIT_RANGE" --name-only -- '*.rs' \
         | xargs -r awk 'length > 120 {print FILENAME":"NR": "length" chars"}' \
         2>/dev/null || true)
     if [[ -n "$LONG_LINES" ]]; then

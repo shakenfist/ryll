@@ -228,9 +228,19 @@ Phase 6 is the pre-push audit, and it runs last.  It works
 against `develop`, not the last phase's diff alone, so it
 sees what the repaint, logging, latency and metrics changes
 did to each other.  Findings land as their own PR against
-`develop`, and this plan is not complete until every one is
-fixed or declined in writing here.  If the audit finds
-nothing, that gets recorded here in one sentence.
+`develop`, recorded here under an *Items deferred from the
+push audit* heading as `PLAN-web-frontend.md` does, and this
+plan is not complete until every one is fixed or declined in
+writing.  If the audit finds nothing, that gets recorded here
+in one sentence.
+
+Phases 1-5 have already merged, so `develop...HEAD` is empty
+on the audit branch and the accumulated diff has to be
+assembled from those phases' merge commits.  None of the five
+recorded one, so phase 6 starts by reconstructing them from
+`git log` and writing them into the Status column of the
+table above.  *Two ways this runbook is invoked* in
+`PUSH-AUDIT.md` has the rest.
 
 ## Agent guidance
 

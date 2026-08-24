@@ -389,10 +389,18 @@ Work `PUSH-AUDIT.md` over the accumulated diff of phases 1-9
 against `develop` — the whole port as one change, not the
 last phase's diff alone, because the `#[cfg]` gating from
 phase 2 is threaded through everything the later phases add.
-Findings land as their own PR against `develop`, and this
-plan is not complete until each one is fixed or declined in
-writing here. If the audit finds nothing, record that here
-in one sentence.
+Findings land as their own PR against `develop`, recorded
+here under an *Items deferred from the push audit* heading
+as `PLAN-web-frontend.md` does, and this plan is not
+complete until each one is fixed or declined in writing. If
+the audit finds nothing, record that here in one sentence.
+
+Phases 1-9 have merged by the time this phase runs, so
+`develop...HEAD` is empty on the audit branch and the
+accumulated diff has to be assembled from the phases' merge
+commits. Record each phase's merge commit in the Status
+column of the table above as that phase lands; *Two ways
+this runbook is invoked* in `PUSH-AUDIT.md` has the rest.
 
 ## Administration and logistics
 

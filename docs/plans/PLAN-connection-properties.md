@@ -283,9 +283,18 @@ Work `PUSH-AUDIT.md` over the accumulated diff of phases 1-4
 against `develop`, not the last phase's diff alone, so the
 plumbing, dialog, decoding and docs changes are audited as
 the one change they add up to. Findings land as their own PR
-against `develop`, and this plan is not complete until each
-is fixed or declined in writing here. If the audit finds
-nothing, record that here in one sentence.
+against `develop`, recorded here under an *Items deferred
+from the push audit* heading as `PLAN-web-frontend.md` does,
+and this plan is not complete until each is fixed or declined
+in writing. If the audit finds nothing, record that here in
+one sentence.
+
+Phases 1-4 have merged by the time this phase runs, so
+`develop...HEAD` is empty on the audit branch and the
+accumulated diff has to be assembled from the phases' merge
+commits. Record each phase's merge commit in the Status
+column of the table above as that phase lands; *Two ways
+this runbook is invoked* in `PUSH-AUDIT.md` has the rest.
 
 ## Agent guidance
 
@@ -424,7 +433,8 @@ started*, and links to the four phase plan files (which
 do not yet exist). An entry was also added to
 `docs/plans/order.yml`.
 
-Mark *Complete* in `index.md` when phase 4 lands.
+Mark *Complete* in `index.md` when phase 5 lands and
+every push-audit finding is fixed or declined above.
 
 ### Back brief
 

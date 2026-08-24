@@ -305,9 +305,28 @@ Work `PUSH-AUDIT.md` over the accumulated diff of Phases 01-04
 against `develop`, rather than the last phase's diff alone —
 the workflow edits, the portability cleanup and the new smoke
 tests only make sense read together. Findings land as their
-own PR against `develop`, and this plan is not complete until
-each is fixed or declined in writing here. If the audit finds
-nothing, record that here in one sentence.
+own PR against `develop`, recorded here under an *Items
+deferred from the push audit* heading as `PLAN-web-frontend.md`
+does, and this plan is not complete until each is fixed or
+declined in writing. If the audit finds nothing, record that
+here in one sentence.
+
+Phases 01-04 have merged by the time this phase runs, so
+`develop...HEAD` is empty on the audit branch and the
+accumulated diff has to be assembled from the phases' merge
+commits. Record each phase's merge commit in the Status column
+of the *Phase order* table as that phase lands; *Two ways this
+runbook is invoked* in `PUSH-AUDIT.md` has the rest.
+
+This catches:
+- Cross-phase duplication and doc drift that per-phase review
+  cannot see, because it only exists once several phases have
+  landed.
+
+Cost: sub-agent time at the end of the plan. No CI minutes.
+
+Bug-class coverage per minute: not applicable. This is a
+review gate, not a test.
 
 ## Phase order
 

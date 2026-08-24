@@ -175,9 +175,18 @@ yet would just produce flaky tests.
 Whenever this plan does grow phases, the last of them runs
 `PUSH-AUDIT.md` over the accumulated diff of all of them
 against `develop`, not the last phase's diff alone. Findings
-land as their own PR against `develop`, and the plan is not
-complete until each one is fixed or declined in writing here.
-If the audit finds nothing, record that here in one sentence.
+land as their own PR against `develop`, recorded here under
+an *Items deferred from the push audit* heading as
+`PLAN-web-frontend.md` does, and the plan is not complete
+until each one is fixed or declined in writing. If the audit
+finds nothing, record that here in one sentence.
+
+Those phases will have merged by then, so `develop...HEAD`
+is empty on the audit branch and the accumulated diff has to
+be assembled from their merge commits. Record each phase's
+merge commit alongside its phase as that phase lands; *Two
+ways this runbook is invoked* in `PUSH-AUDIT.md` has the
+rest.
 
 ## Cross-references
 

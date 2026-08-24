@@ -309,7 +309,8 @@ before re-assessing. The remaining open items are:
   rather than open.
 - **Phase 9** — vdagent responsiveness probe. Independent
   of video work. Worth picking up.
-- **Phase 10** — documentation catch-all. Last.
+- **Phase 10** — documentation catch-all. Last of the
+  work phases; phase 18 audits what they add up to.
 - **Phase 11B / 11C** — inputs-channel keepalive decision
   + long-idle soak.
 - **Phase 14 / 15** — landed / instrumented; nothing for
@@ -323,6 +324,8 @@ caps + the phase-13 / 16 / 17 parking into the docs. After
 that, re-open phase 13 with the "why isn't the video a
 stream" question and decide whether to chase the
 predicate read or the client-side instrumentation first.
+Phase 18, the push audit, closes the plan out once the
+phases that are going to land have landed.
 
 Per-phase intent:
 
@@ -850,14 +853,26 @@ Per-phase intent:
   unfamiliar; the test recipe is small).
 
 - **Phase 18 — Push audit.** Work `PUSH-AUDIT.md` over the
-  accumulated diff of every phase in this plan against
-  `develop`, not the last phase's diff alone — seventeen
-  phases of capability, decoder, diagnostics and cache work
-  have had plenty of opportunity to leave duplicated helpers
-  and stale docs behind each other. Findings land as their
-  own PR against `develop`, and this plan is not complete
-  until each is fixed or declined in writing here. If the
-  audit finds nothing, record that here in one sentence.
+  accumulated diff of every phase in this plan that has
+  landed by the time the audit runs, not the last phase's
+  diff alone — seventeen phases of capability, decoder,
+  diagnostics and cache work have had plenty of opportunity
+  to leave duplicated helpers and stale docs behind each
+  other. Parked phases 13 / 16 / 17 and the awaiting-
+  reproduction phase 15 do not gate it; if any of them
+  later lands, it gets its own audit. Findings land as
+  their own PR against `develop`, recorded here under an
+  *Items deferred from the push audit* heading as
+  `PLAN-web-frontend.md` does, and this plan is not
+  complete until each is fixed or declined in writing. If
+  the audit finds nothing, record that here in one
+  sentence. The audited phases have already merged, so
+  `develop...HEAD` is empty on the audit branch and the
+  accumulated diff has to be assembled from their merge
+  commits; record each phase's as it lands in the Status
+  column of the table above, and reconstruct the ones that
+  landed before this convention. *Two ways this runbook is
+  invoked* in `PUSH-AUDIT.md` has the rest.
   Recommended planning effort: **low** (the runbook does the
   work; the phase plan is a wrapper).
 
