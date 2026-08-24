@@ -45,9 +45,11 @@ the plan file appeared" is far too wide — measured on
 `PLAN-idle-cpu-and-latency`, 338 files against the five
 phases actually in it — and the phase branches are gone by
 then. It has to be *recorded*: as each phase of a master
-plan lands, put its merge commit in the Status column of
-the plan's Execution table. One SHA per phase is what
-makes this phase runnable at all.
+plan lands, put its merge commit in the `Merged` column of
+the plan's *Phase order* table. One SHA per phase is what
+makes this phase runnable at all. It does not go in the
+`Status` column, which the `plan-status-vocabulary` shared
+block reserves for a single term.
 
 Given those commits, build the combined patch and hand the
 judgment agents its path, rather than a revision range:
@@ -73,16 +75,30 @@ superset and check each hit against the patch before
 acting on it. Where a plan's phases all landed on one
 branch, the range is exact and no filtering is needed.
 
-If the Execution table records no commits — true of every
-plan written before this convention — reconstruct what you
-can from `git log` and the phase plan filenames, say in
-the findings how much of the plan you were actually able
-to see, and write the commits into the table so the next
-audit does not start from nothing.
+If the *Phase order* table records no commits — true of
+every plan written before this convention — reconstruct
+what you can from `git log` and the phase plan filenames,
+say in the findings how much of the plan you were actually
+able to see, and write the commits into the table so the
+next audit does not start from nothing.
 
 `tools/audit/wave1.sh` and `tools/audit/wave2-mechanical.sh`
-both honour `AUDIT_BASE` and `AUDIT_HEAD`. In the briefs
-below, `git diff develop...HEAD` means "the audit range".
+both honour `AUDIT_BASE` and `AUDIT_HEAD`, sharing the
+resolution logic in `tools/audit/audit-range.sh`. In the
+briefs below, `git diff develop...HEAD` means "the audit
+range".
+
+Both scripts fail fast, with exit 6, on a range that would
+make every diff-scoped check report nothing: an
+`AUDIT_BASE` or `AUDIT_HEAD` that does not resolve, or an
+explicitly-set range whose diff is empty. A range left to
+default that turns out empty is a warning at the top *and*
+again in the closing summary, because that is where it
+gets read. Content-scanning checks read each file at
+`AUDIT_HEAD` rather than out of the working tree, so
+uncommitted edits are not audited — commit first.
+`tools/audit/test-audit-range.sh` pins all of that against
+a scratch repository, and runs in CI beside shellcheck.
 
 Three items in the management checklist at the end read
 differently here. Findings become their own PR against
@@ -112,14 +128,19 @@ It performs (and exits non-zero on any failure):
 
 Exit codes:
 
-| Code | Meaning                          |
-|------|----------------------------------|
-| 0    | all wave 1 checks passed         |
-| 1    | pre-commit failed                |
-| 2    | rustfmt or clippy failed         |
-| 3    | cargo test failed                |
-| 4    | raw `println!`/`eprintln!` found |
-| 6    | `AUDIT_BASE` set but unresolvable |
+| Code | Meaning                                     |
+|------|---------------------------------------------|
+| 0    | all wave 1 checks passed                    |
+| 1    | pre-commit failed                           |
+| 2    | rustfmt or clippy failed                    |
+| 3    | cargo test failed                           |
+| 4    | raw `println!`/`eprintln!` found            |
+| 5    | could not `cd` to the repository root       |
+| 6    | audit range unusable, or empty by default   |
+
+`wave2-mechanical.sh` shares codes 5 and 6 and otherwise
+exits 0; it reports findings as text rather than as a
+status.
 
 If wave 1 fails, fix the cause and re-run before
 spending on wave 2.

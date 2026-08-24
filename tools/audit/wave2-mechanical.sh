@@ -7,7 +7,14 @@
 # (waves 2a-judgment, 2c, 2d).
 #
 # Reports findings as plain text; never exits non-zero unless the
-# script itself failed.  Read the output and decide what to fix.
+# script itself failed or the audit range is unusable.  Read the
+# output and decide what to fix.
+#
+# Exit code:
+#   0  ran to completion
+#   5  could not cd to the repository root
+#   6  the audit range is unusable: AUDIT_BASE or AUDIT_HEAD was set
+#      but does not resolve, or an explicitly-set range is empty
 #
 # Usage: tools/audit/wave2-mechanical.sh
 #        AUDIT_BASE=<sha> AUDIT_HEAD=develop tools/audit/wave2-mechanical.sh
@@ -17,43 +24,37 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-cd "$REPO_ROOT" || exit 1
-
-# Audit range.  Defaults to develop...HEAD -- the pre-push gate,
-# where the work under audit is the unpushed branch.  Override with
-# AUDIT_BASE / AUDIT_HEAD when auditing a master plan's accumulated
-# diff after its phases have already merged; see the "Two ways this
-# runbook is invoked" section of PUSH-AUDIT.md for the derivation.
-AUDIT_BASE_SET="${AUDIT_BASE+set}"
-AUDIT_BASE="${AUDIT_BASE:-develop}"
-AUDIT_HEAD="${AUDIT_HEAD:-HEAD}"
-AUDIT_RANGE="${AUDIT_BASE}...${AUDIT_HEAD}"
+cd "$REPO_ROOT" || exit 5
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
-# An explicitly-set range that does not resolve, or resolves to nothing,
-# is the failure this override exists to prevent -- an audit that reports
-# "no findings" because it looked at an empty diff.  Say so loudly.
-if ! git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
-    if [[ -n "$AUDIT_BASE_SET" ]]; then
-        echo "FAIL: AUDIT_BASE=$AUDIT_BASE does not resolve to a commit"
-        exit 1
-    fi
-    echo "NOTE: '$AUDIT_BASE' not found; diff-scoped checks are skipped."
-elif [[ -z "$(git diff --name-only "$AUDIT_RANGE")" ]]; then
-    echo "WARNING: $AUDIT_RANGE is an empty diff.  Every diff-scoped"
-    echo "check below will report nothing, and that is not a result."
-    echo "See PUSH-AUDIT.md, 'Two ways this runbook is invoked'."
-fi
+# Audit range resolution and validation is shared with wave1.sh; it
+# exits 6 on a range that would make every check below report nothing.
+# shellcheck source=tools/audit/audit-range.sh
+. "$SCRIPT_DIR/audit-range.sh"
+audit_range_init
 
+# Content comes from the audit head rather than the checkout: a file
+# deleted within the range is not in the working tree to grep, and a
+# checkout that has drifted from AUDIT_HEAD holds the wrong bytes.
 bold "=== wave 2a: TODO / FIXME / HACK in changed files ==="
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
-    HITS=$(git diff "$AUDIT_RANGE" --name-only \
-        | xargs -r grep -nH -E '\b(TODO|FIXME|HACK|XXX)\b' 2>/dev/null \
-        | grep -v 'docs/plans/' \
-        || true)
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
+    HITS=""
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        case "$f" in docs/plans/*) continue ;; esac
+        # -I so a changed binary file does not report itself as a
+        # match, and awk rather than sed so a path containing a sed
+        # metacharacter cannot rewrite the expression.
+        hits=$(audit_range_show "$f" \
+            | grep -InE '\b(TODO|FIXME|HACK|XXX)\b' \
+            | awk -v f="$f" '{print f":"$0}')
+        if [[ -n "$hits" ]]; then
+            HITS+="$hits"$'\n'
+        fi
+    done < <(audit_range_files)
     if [[ -n "$HITS" ]]; then
-        echo "$HITS"
+        printf '%s' "$HITS"
     else
         echo "(none)"
     fi
@@ -61,7 +62,7 @@ fi
 echo
 
 bold "=== wave 2a: new #[allow(dead_code)] in changed files ==="
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
     git diff "$AUDIT_RANGE" -- '*.rs' \
         | grep -E '^\+.*allow\(dead_code\)' \
         | head -20
@@ -70,7 +71,7 @@ fi
 echo
 
 bold "=== wave 2b: new test count in changed files ==="
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
     NEW_TESTS=$(git diff "$AUDIT_RANGE" -- '*.rs' \
         | grep -cE '^\+\s*#\[test\]' \
         || true)
@@ -81,7 +82,7 @@ fi
 echo
 
 bold "=== wave 2c: doc files touched in changed set ==="
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
     DOCS=$(git diff "$AUDIT_RANGE" --name-only \
         | grep -E '^(README\.md|ARCHITECTURE\.md|AGENTS\.md|STYLEGUIDE\.md|docs/)' \
         || true)
@@ -95,7 +96,7 @@ echo
 
 bold "=== wave 2d: security smoke ==="
 echo "new unsafe{} blocks in changed files:"
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
     git diff "$AUDIT_RANGE" -- '*.rs' \
         | grep -nE '^\+.*\bunsafe\b' \
         | head -10 \
@@ -104,7 +105,7 @@ fi
 echo
 
 echo "new .unwrap() / .expect() in non-test code:"
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
+if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
     git diff "$AUDIT_RANGE" -- '*.rs' \
         | grep -nE '^\+.*\.(unwrap|expect)\s*\(' \
         | head -20 \
@@ -114,6 +115,17 @@ fi
 echo
 
 bold "=== wave 2 mechanical complete ==="
+# Same reasoning as wave1.sh's closing summary: an empty default range
+# means these checks reported nothing rather than nothing-found, and
+# the warning printed at the top is long gone by now.
+if [[ -n "$AUDIT_RANGE_EMPTY" ]]; then
+    echo "WARNING: $AUDIT_RANGE covered no changes.  Every check above"
+    echo "reported nothing because it looked at nothing.  Set"
+    echo "AUDIT_BASE / AUDIT_HEAD and re-run."
+elif [[ -z "$AUDIT_RANGE_USABLE" ]]; then
+    echo "WARNING: the audit range could not be resolved, so every"
+    echo "diff-scoped check above was skipped."
+fi
 echo "now spawn agents for the judgment-needing parts:"
 echo "  2a-judgment: code quality / missed abstractions"
 echo "  2c-judgment: doc accuracy vs code intent"

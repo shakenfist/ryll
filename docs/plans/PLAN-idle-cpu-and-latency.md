@@ -192,14 +192,14 @@ guest). Out of scope for this plan.
 
 ## Execution
 
-| Phase | Plan | Status |
-|-------|------|--------|
-| 1. Profile idle CPU | [PLAN-idle-cpu-and-latency-phase-01-profile.md](PLAN-idle-cpu-and-latency-phase-01-profile.md) | Complete |
-| 2. Repaint cadence fix | [PLAN-idle-cpu-and-latency-phase-02-repaint.md](PLAN-idle-cpu-and-latency-phase-02-repaint.md) | In progress |
-| 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete |
-| 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete |
-| 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete |
-| 6. Push audit | PLAN-idle-cpu-and-latency-phase-06-push-audit.md | Not started |
+| Phase | Plan | Status | Merged |
+|-------|------|--------|--------|
+| 1. Profile idle CPU | [PLAN-idle-cpu-and-latency-phase-01-profile.md](PLAN-idle-cpu-and-latency-phase-01-profile.md) | Complete | — |
+| 2. Repaint cadence fix | [PLAN-idle-cpu-and-latency-phase-02-repaint.md](PLAN-idle-cpu-and-latency-phase-02-repaint.md) | In progress | — |
+| 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete | — |
+| 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete | — |
+| 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete | — |
+| 6. Push audit | PLAN-idle-cpu-and-latency-phase-06-push-audit.md | Not started | — |
 
 Phase 1 informs phase 2: if profiling shows logging is the
 dominant cost, swap their order.  *Profiling result: the
@@ -229,16 +229,19 @@ against `develop`, not the last phase's diff alone, so it
 sees what the repaint, logging, latency and metrics changes
 did to each other.  Findings land as their own PR against
 `develop`, recorded here under an *Items deferred from the
-push audit* heading as `PLAN-web-frontend.md` does, and this
-plan is not complete until every one is fixed or declined in
-writing.  If the audit finds nothing, that gets recorded here
-in one sentence.
+push audit* heading — the shape `PLAN-web-frontend.md` uses
+for its *Items deferred from the post-Phase-N pre-push audit*
+sections, minus the phase number, because this phase audits
+the whole plan rather than a range of it.  This plan is not
+complete until every one is fixed or declined in writing.  If
+the audit finds nothing, that gets recorded here in one
+sentence.
 
 Phases 1-5 have already merged, so `develop...HEAD` is empty
 on the audit branch and the accumulated diff has to be
 assembled from those phases' merge commits.  None of the five
 recorded one, so phase 6 starts by reconstructing them from
-`git log` and writing them into the Status column of the
+`git log` and writing them into the `Merged` column of the
 table above.  *Two ways this runbook is invoked* in
 `PUSH-AUDIT.md` has the rest.
 

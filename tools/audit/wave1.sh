@@ -11,7 +11,9 @@
 #   2  rustfmt/clippy failed
 #   3  cargo test failed
 #   4  style-conformance grep failed (raw println!/eprintln! found)
-#   6  AUDIT_BASE was set but does not resolve to a commit
+#   5  could not cd to the repository root
+#   6  the audit range is unusable: AUDIT_BASE or AUDIT_HEAD was set
+#      but does not resolve, or an explicitly-set range is empty
 #
 # Style conformance is intentionally kept narrow here — only the
 # fully-mechanical checks live in this script.  Anything needing
@@ -30,34 +32,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT" || exit 5
 
-# Audit range.  Defaults to develop...HEAD -- the pre-push gate,
-# where the work under audit is the unpushed branch.  Override with
-# AUDIT_BASE / AUDIT_HEAD when auditing a master plan's accumulated
-# diff after its phases have already merged; see the "Two ways this
-# runbook is invoked" section of PUSH-AUDIT.md for the derivation.
-AUDIT_BASE_SET="${AUDIT_BASE+set}"
-AUDIT_BASE="${AUDIT_BASE:-develop}"
-AUDIT_HEAD="${AUDIT_HEAD:-HEAD}"
-AUDIT_RANGE="${AUDIT_BASE}...${AUDIT_HEAD}"
-
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 
-# An explicitly-set range that does not resolve, or resolves to nothing,
-# is the failure this override exists to prevent -- an audit that reports
-# "no findings" because it looked at an empty diff.  Say so loudly.
-if ! git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
-    if [[ -n "$AUDIT_BASE_SET" ]]; then
-        red "FAIL: AUDIT_BASE=$AUDIT_BASE does not resolve to a commit"
-        exit 6
-    fi
-    echo "NOTE: '$AUDIT_BASE' not found; diff-scoped checks are skipped."
-elif [[ -z "$(git diff --name-only "$AUDIT_RANGE")" ]]; then
-    echo "WARNING: $AUDIT_RANGE is an empty diff.  Every diff-scoped"
-    echo "check below will report nothing, and that is not a result."
-    echo "See PUSH-AUDIT.md, 'Two ways this runbook is invoked'."
-fi
+# Audit range resolution and validation is shared with
+# wave2-mechanical.sh; it exits 6 on a range that would make every
+# diff-scoped check below report nothing.
+# shellcheck source=tools/audit/audit-range.sh
+. "$SCRIPT_DIR/audit-range.sh"
+audit_range_init
 
 bold "=== wave 1a: pre-commit ==="
 if ! pre-commit run --all-files; then
@@ -149,19 +133,46 @@ fi
 # 3. Long-line check: warn on Rust source lines over 120 chars in changed
 #    files relative to the audit base.  Non-fatal — purely
 #    informational.
-if git rev-parse --verify "$AUDIT_BASE" >/dev/null 2>&1; then
-    LONG_LINES=$(git diff "$AUDIT_RANGE" --name-only -- '*.rs' \
-        | xargs -r awk 'length > 120 {print FILENAME":"NR": "length" chars"}' \
-        2>/dev/null || true)
-    if [[ -n "$LONG_LINES" ]]; then
-        echo "ADVISORY: lines over 120 chars in changed Rust files:"
-        echo "$LONG_LINES" | head -20
+#    Content comes from the audit head rather than the checkout, so
+#    the check still sees the right bytes when AUDIT_HEAD is not what
+#    is checked out.
+LONG_LINES=""
+while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    hits=$(audit_range_show "$f" \
+        | awk -v f="$f" 'length > 120 {print f":"NR": "length" chars"}')
+    if [[ -n "$hits" ]]; then
+        LONG_LINES+="$hits"$'\n'
     fi
+done < <(audit_range_files_matching '*.rs')
+if [[ -n "$LONG_LINES" ]]; then
+    echo "ADVISORY: lines over 120 chars in changed Rust files:"
+    echo "$LONG_LINES" | head -20
 fi
 
 green "PASS: wave 1b mechanical"
 echo
 
 bold "=== wave 1 complete ==="
+# The range only reaches here empty or unusable when it was left to
+# default -- an explicit one that selects nothing already exited 6.
+# Either way the diff-scoped checks proved nothing, and a green "all
+# checks passed" scrolling into view ten minutes after the warning
+# would be read as if they had.  Say it again, here, where it is read.
+if [[ -n "$AUDIT_RANGE_EMPTY" ]]; then
+    red "build, lint and tests passed, but $AUDIT_RANGE covered no"
+    red "changes, so the diff-scoped checks reported nothing rather"
+    red "than nothing-found.  Set AUDIT_BASE / AUDIT_HEAD and re-run"
+    red "before treating wave 1 as complete."
+    exit 6
+fi
+if [[ -z "$AUDIT_RANGE_USABLE" ]]; then
+    # No 'develop' to diff against -- a shallow clone, historically a
+    # NOTE rather than a failure.  Keep it non-fatal, but do not claim
+    # the diff-scoped checks covered anything.
+    red "build, lint and tests passed; diff-scoped checks were skipped"
+    red "because the audit range could not be resolved."
+    exit 0
+fi
 green "all mechanical checks passed; proceed to wave 2 (judgment agents)"
 exit 0
