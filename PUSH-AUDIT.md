@@ -88,15 +88,25 @@ resolution logic in `tools/audit/audit-range.sh`. In the
 briefs below, `git diff develop...HEAD` means "the audit
 range".
 
-Both scripts fail fast, with exit 6, on a range that would
-make every diff-scoped check report nothing: an
-`AUDIT_BASE` or `AUDIT_HEAD` that does not resolve, or an
-explicitly-set range whose diff is empty. A range left to
-default that turns out empty is a warning at the top *and*
-again in the closing summary, because that is where it
-gets read. Content-scanning checks read each file at
-`AUDIT_HEAD` rather than out of the working tree, so
-uncommitted edits are not audited — commit first.
+Both scripts fail fast, with exit 6, when an *explicitly
+set* `AUDIT_BASE` or `AUDIT_HEAD` does not resolve, or when
+the range you asked for has an empty diff. An empty range
+is reported at the top of the run and again in the closing
+summary, because by then the first one has scrolled away.
+
+The two differ on the range left to default. `wave1.sh`
+exits 6 when `develop...HEAD` is empty: build, lint and
+tests passing says nothing about a diff nobody looked at,
+and a green summary after a ten-minute Docker cycle reads
+as though it did. `wave2-mechanical.sh` prints the same
+warning and still exits 0 — it reports findings as text
+rather than as a status, and that is its documented
+contract. Neither fails on a range that will not resolve
+at all: a shallow clone with no `develop` stays a NOTE.
+
+Content-scanning checks read each file at `AUDIT_HEAD`
+rather than out of the working tree, so uncommitted edits
+are not audited — commit first.
 `tools/audit/test-audit-range.sh` pins all of that against
 a scratch repository, and runs in CI beside shellcheck.
 

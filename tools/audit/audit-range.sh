@@ -6,6 +6,7 @@
 #   audit_range_files       every file changed in the range
 #   audit_range_files_matching PATHSPEC...  the same, filtered
 #   audit_range_show FILE   that file's content *at the audit head*
+#   audit_range_closing_summary PRINTER   end-of-run range verdict
 #
 # and sets AUDIT_BASE, AUDIT_HEAD, AUDIT_RANGE, AUDIT_RANGE_USABLE and
 # AUDIT_RANGE_EMPTY.
@@ -25,10 +26,11 @@
 # AUDIT_RANGE_USABLE and AUDIT_RANGE_EMPTY are read by the sourcing
 # scripts, not here.  When this file is linted on its own -- which the
 # pre-commit hook does, being handed only the changed files -- those
-# readers are invisible and SC2034 fires on both.  (Mind the wrapping
-# below: a comment line whose first word is the linter's own name is
-# parsed as a directive, not as prose.)
-# shellcheck disable=SC2034
+# readers are invisible and SC2034 fires on both.  The suppressions are
+# on the two assignments rather than the file, so an unused variable
+# added later is still reported.  (Mind the wrapping in those comments:
+# a line whose first word is the linter's own name is parsed as a
+# directive, not as prose.)
 
 AUDIT_RANGE_EXIT=6
 
@@ -39,12 +41,19 @@ AUDIT_RANGE_EXIT=6
 # behaviour of the pre-push gate.
 audit_range_init() {
     local base_set head_set
-    base_set="${AUDIT_BASE+set}"
-    head_set="${AUDIT_HEAD+set}"
+    # ':+' rather than '+': an exported-but-empty value falls back to
+    # the default on the next two lines, so treating it as explicitly
+    # set would hard-fail the *default* range.  That is what a wrapper
+    # doing AUDIT_HEAD=$(git rev-parse ...) produces when the
+    # substitution fails.
+    base_set="${AUDIT_BASE:+set}"
+    head_set="${AUDIT_HEAD:+set}"
     AUDIT_BASE="${AUDIT_BASE:-develop}"
     AUDIT_HEAD="${AUDIT_HEAD:-HEAD}"
     AUDIT_RANGE="${AUDIT_BASE}...${AUDIT_HEAD}"
+    # shellcheck disable=SC2034
     AUDIT_RANGE_USABLE=""
+    # shellcheck disable=SC2034
     AUDIT_RANGE_EMPTY=""
 
     if ! git rev-parse --verify --quiet "$AUDIT_BASE^{commit}" >/dev/null; then
@@ -110,5 +119,42 @@ audit_range_files_matching() {
 # file deleted within the range would not be there to scan at all.
 # Files absent at the head are skipped silently.
 audit_range_show() {
-    git show "$AUDIT_HEAD:$1" 2>/dev/null || true
+    # Existence is checked separately from reading so that only the
+    # expected case is silent.  'git show' alone cannot tell a file
+    # deleted within the range from a corrupt object, a submodule
+    # gitlink or an unreadable tree, and every one of those would
+    # otherwise reach the caller as "no findings" -- the wrong answer
+    # this file exists to prevent.
+    git cat-file -e "$AUDIT_HEAD:$1" 2>/dev/null || return 0
+    if ! git show "$AUDIT_HEAD:$1" 2>/dev/null; then
+        echo "WARNING: could not read $1 at $AUDIT_HEAD" >&2
+    fi
+}
+
+# Restate an empty or unusable range at the end of a run, where it is
+# actually read -- the warning printed at the top is thousands of lines
+# gone by then.  Prints through $1, a function name -- 'echo', or
+# something that colours it.  Returns 6 when the range covered nothing,
+# which wave1.sh exits with; wave2-mechanical.sh reports findings as
+# text and stays 0 by contract, so it ignores the code.
+#
+# Shared rather than written out in both scripts: the two tails had
+# already drifted apart from each other and from the documentation.
+audit_range_closing_summary() {
+    # Required rather than defaulted: a defaulted argument makes every
+    # call site look argument-less to shellcheck (SC2119), and both
+    # callers have a printer they want anyway.
+    local say="$1"
+    if [[ -n "$AUDIT_RANGE_EMPTY" ]]; then
+        "$say" "WARNING: $AUDIT_RANGE covered no changes, so the"
+        "$say" "diff-scoped checks reported nothing rather than"
+        "$say" "nothing-found.  Set AUDIT_BASE / AUDIT_HEAD and re-run."
+        return 6
+    fi
+    if [[ -z "$AUDIT_RANGE_USABLE" ]]; then
+        "$say" "WARNING: the audit range could not be resolved, so"
+        "$say" "every diff-scoped check above was skipped."
+        return 0
+    fi
+    return 0
 }

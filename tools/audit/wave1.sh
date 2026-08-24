@@ -12,8 +12,12 @@
 #   3  cargo test failed
 #   4  style-conformance grep failed (raw println!/eprintln! found)
 #   5  could not cd to the repository root
-#   6  the audit range is unusable: AUDIT_BASE or AUDIT_HEAD was set
-#      but does not resolve, or an explicitly-set range is empty
+#   6  the audit range covered nothing: AUDIT_BASE or AUDIT_HEAD was
+#      set but does not resolve, an explicitly-set range is empty, or
+#      the defaulted develop...HEAD range is empty.  Note the last
+#      one -- wave1 hard-fails there, where wave2-mechanical.sh only
+#      warns; a build that passed on an empty range proved nothing
+#      about the diff.
 #
 # Style conformance is intentionally kept narrow here — only the
 # fully-mechanical checks live in this script.  Anything needing
@@ -157,22 +161,15 @@ bold "=== wave 1 complete ==="
 # The range only reaches here empty or unusable when it was left to
 # default -- an explicit one that selects nothing already exited 6.
 # Either way the diff-scoped checks proved nothing, and a green "all
-# checks passed" scrolling into view ten minutes after the warning
-# would be read as if they had.  Say it again, here, where it is read.
-if [[ -n "$AUDIT_RANGE_EMPTY" ]]; then
-    red "build, lint and tests passed, but $AUDIT_RANGE covered no"
-    red "changes, so the diff-scoped checks reported nothing rather"
-    red "than nothing-found.  Set AUDIT_BASE / AUDIT_HEAD and re-run"
-    red "before treating wave 1 as complete."
+# checks passed" scrolling into view ten minutes after the warning at
+# the top would be read as if they had.
+if ! audit_range_closing_summary red; then
+    # An empty range is fatal here: build, lint and tests passing says
+    # nothing about a diff that was never looked at.  A range that
+    # would not resolve at all returns 0 -- a shallow clone with no
+    # 'develop' has always been a NOTE rather than a failure.
+    red "wave 1 is not complete: see above."
     exit 6
-fi
-if [[ -z "$AUDIT_RANGE_USABLE" ]]; then
-    # No 'develop' to diff against -- a shallow clone, historically a
-    # NOTE rather than a failure.  Keep it non-fatal, but do not claim
-    # the diff-scoped checks covered anything.
-    red "build, lint and tests passed; diff-scoped checks were skipped"
-    red "because the audit range could not be resolved."
-    exit 0
 fi
 green "all mechanical checks passed; proceed to wave 2 (judgment agents)"
 exit 0

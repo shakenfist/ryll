@@ -94,38 +94,46 @@ if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
 fi
 echo
 
+# Both checks capture and test rather than piping to '|| echo'; the
+# '||' binds to head, which exits 0 on empty input, so the "(none)"
+# fallback could never fire and the header was followed by a blank
+# line.  A reader cannot tell "checked, found nothing" from "the check
+# did not run".  'grep -n' is dropped with them: it numbers lines
+# within the diff stream, not within any source file, so the numbers
+# meant nothing to the reader they were printed for.
 bold "=== wave 2d: security smoke ==="
 echo "new unsafe{} blocks in changed files:"
 if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
-    git diff "$AUDIT_RANGE" -- '*.rs' \
-        | grep -nE '^\+.*\bunsafe\b' \
-        | head -10 \
-        || echo "(none)"
+    UNSAFE=$(git diff "$AUDIT_RANGE" -- '*.rs' \
+        | grep -E '^\+.*\bunsafe\b' \
+        | head -10)
+    if [[ -n "$UNSAFE" ]]; then
+        echo "$UNSAFE"
+    else
+        echo "(none)"
+    fi
 fi
 echo
 
 echo "new .unwrap() / .expect() in non-test code:"
 if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
-    git diff "$AUDIT_RANGE" -- '*.rs' \
-        | grep -nE '^\+.*\.(unwrap|expect)\s*\(' \
-        | head -20 \
-        || echo "(none)"
-    echo "(review each: are they panic-safe given the inputs?)"
+    PANICKY=$(git diff "$AUDIT_RANGE" -- '*.rs' \
+        | grep -E '^\+.*\.(unwrap|expect)\s*\(' \
+        | head -20)
+    if [[ -n "$PANICKY" ]]; then
+        echo "$PANICKY"
+        echo "(review each: are they panic-safe given the inputs?)"
+    else
+        echo "(none)"
+    fi
 fi
 echo
 
 bold "=== wave 2 mechanical complete ==="
-# Same reasoning as wave1.sh's closing summary: an empty default range
-# means these checks reported nothing rather than nothing-found, and
-# the warning printed at the top is long gone by now.
-if [[ -n "$AUDIT_RANGE_EMPTY" ]]; then
-    echo "WARNING: $AUDIT_RANGE covered no changes.  Every check above"
-    echo "reported nothing because it looked at nothing.  Set"
-    echo "AUDIT_BASE / AUDIT_HEAD and re-run."
-elif [[ -z "$AUDIT_RANGE_USABLE" ]]; then
-    echo "WARNING: the audit range could not be resolved, so every"
-    echo "diff-scoped check above was skipped."
-fi
+# Shared with wave1.sh, which exits on the code this returns.  This
+# script reports findings as text and stays 0 by contract, so the
+# verdict is printed and the code deliberately dropped.
+audit_range_closing_summary echo || true
 echo "now spawn agents for the judgment-needing parts:"
 echo "  2a-judgment: code quality / missed abstractions"
 echo "  2c-judgment: doc accuracy vs code intent"
