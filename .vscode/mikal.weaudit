@@ -204,10 +204,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/audit/wave2-mechanical.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/build-ryll-wheel-in-container.sh",
       "author": "mikal"
     },
@@ -320,14 +316,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/audit/wave1.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/audit",
-      "author": "mikal"
-    },
-    {
       "path": "docs/channel-diagnostics-audit.md",
       "author": "mikal"
     },
@@ -408,10 +396,6 @@
       "author": "mikal"
     },
     {
-      "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
       "path": "MERGE-TEMPLATE.md",
       "author": "mikal"
     },
@@ -452,10 +436,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/codeql-analysis.yml",
       "author": "mikal"
     },
@@ -469,10 +449,6 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     }
   ],

@@ -9,10 +9,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "41a10d3c60539bf74fa337c00a3f0e773e6357ea",
-      "date": "2026-08-24"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
       "date": "2026-08-24"
@@ -52,10 +48,6 @@
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
-    },
-    "AGENTS.md": {
-      "sha": "8df3b465acfd467da5245995c1443a2d348b6983",
-      "date": "2026-08-18"
     },
     "MERGE-TEMPLATE.md": {
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
@@ -332,14 +324,6 @@
     "tools/address-comments-with-claude.sh": {
       "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
       "date": "2026-08-02"
-    },
-    "tools/audit/wave1.sh": {
-      "sha": "3b52c62321b89a308f7cff4da0d463d73d48cd30",
-      "date": "2026-08-02"
-    },
-    "tools/audit/wave2-mechanical.sh": {
-      "sha": "ee82df1ca6731d5be3ab1fee6071979587a61174",
-      "date": "2026-07-26"
     },
     "tools/build-ryll-wheel-in-container.sh": {
       "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
