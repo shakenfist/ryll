@@ -99,6 +99,10 @@ copy lives in shakenfist/development at
   `Status`; where they are prose sections it is a `Merged:` line in
   the phase's own section. The `Status` column keeps its single
   vocabulary term and nothing else (see `plan-status-vocabulary`).
+  A phase that landed in another repository records `<repo> <sha>
+  (#pr)` and is audited against that repository's default branch, as
+  part of the pull request that lands it; the plan's own push-audit
+  phase cites that audit rather than re-running it.
 - Phases that landed before the plan started recording them are
   reconstructed rather than left blank. Recover what you can from
   `gh pr list --state merged` and `git rev-list --first-parent`, and
