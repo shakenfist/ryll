@@ -72,9 +72,11 @@ copy lives in shakenfist/development at
 
 - Every master plan ends with a phase that runs the repository's
   `PUSH-AUDIT.md` over the whole plan's work. It is the last row of
-  the Execution table and it is not optional. Plans already marked
-  `Complete` before this convention landed are not reopened; the
-  rule binds every plan that is not yet `Complete`.
+  the Execution table and it is not optional. The rule binds every
+  plan that carries the phase, which is decidable from the plan file
+  alone: a plan that is already `Complete` and does not carry the
+  phase is not reopened to acquire one, and a plan that has the
+  phase runs it even if it reaches `Complete` before the phase does.
 - That phase audits the accumulated diff of every phase in the plan
   against the default branch, not the diff of the last phase alone.
   Auditing one phase at a time would miss what the phases did to
@@ -85,11 +87,34 @@ copy lives in shakenfist/development at
   branch is empty and would read as a clean audit. The range is not
   reliably derivable after the fact either: unrelated work lands on
   the default branch between phases, so anything anchored on "since
-  the plan file appeared" is far too wide. It has to be recorded:
-  each phase's merge commit goes into the plan as that phase lands,
-  in a `Merged` column where the Execution phases are a table. Keep
-  the commit out of the `Status` column, which holds one vocabulary
-  term and nothing else.
+  the plan file appeared" is far too wide. It has to be recorded. As
+  each phase lands, what put it on the default branch goes into the
+  plan: the merge commit of its pull request, whose diff against its
+  first parent is the whole of what landed, or -- where the phase
+  landed directly -- every commit of the phase, or its `first..last`
+  range. A single commit is only ever enough when it is a merge
+  commit.
+- Where the Execution phases are a table, that record is a `Merged`
+  column, added last so that a row which omits it still reaches
+  `Status`; where they are prose sections it is a `Merged:` line in
+  the phase's own section. The `Status` column keeps its single
+  vocabulary term and nothing else (see `plan-status-vocabulary`).
+- Phases that landed before the plan started recording them are
+  reconstructed rather than left blank. Recover what you can from
+  `gh pr list --state merged` and `git rev-list --first-parent`, and
+  say in the plan that the range was reconstructed. Do not trust a
+  path-filtered `git log` on its own: it lists the commits that
+  touched a path without saying which arrived directly and which
+  arrived inside a pull request, and recording a commit that came in
+  under a merge audits one commit of that pull request rather than
+  the pull request. A reconstructed record may be a summary table in
+  the audit phase's own section rather than a column or a line in
+  the Execution table, which keeps retrospective archaeology out of
+  a table that tracks live status. Where a phase accreted over
+  months of unrelated commits and no range is recoverable, say that
+  instead and name the paths the audit read -- an audit that says
+  what it could not scope is a result; one that silently audits
+  nothing is not.
 - Findings land as their own pull request against the default
   branch, and the plan is not complete until they are resolved or
   explicitly declined in writing. A finding that is declined says
@@ -104,10 +129,13 @@ copy lives in shakenfist/development at
 <!-- shared-block-end -->
 
 In this repository the Execution phases are the *Phase order*
-table each master plan carries, and `Merged` is a fourth column
-beside `Status`. See *Two ways this runbook is invoked* in
-`PUSH-AUDIT.md` for what the push-audit phase then does with
-those commits.
+table each master plan carries, and `Merged` is its last column,
+after `Status` — last because a row that omits it must still
+reach `Status`. Every phase here lands as its own pull request,
+so the cell holds one merge commit; the block's other shapes are
+for repositories where a phase lands directly. See *Two ways this
+runbook is invoked* in `PUSH-AUDIT.md` for what the push-audit
+phase then does with those commits.
 
 <!-- shared-block: plan-status-vocabulary v1 -->
 Plan status vocabulary (shared block; do not edit -- the canonical

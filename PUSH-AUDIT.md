@@ -45,11 +45,20 @@ the plan file appeared" is far too wide — measured on
 `PLAN-idle-cpu-and-latency`, 338 files against the five
 phases actually in it — and the phase branches are gone by
 then. It has to be *recorded*: as each phase of a master
-plan lands, put its merge commit in the `Merged` column of
-the plan's *Phase order* table. One SHA per phase is what
-makes this phase runnable at all. It does not go in the
-`Status` column, which the `plan-status-vocabulary` shared
-block reserves for a single term.
+plan lands, put what landed it in the `Merged` column of
+the plan's *Phase order* table. Recording it is what makes
+this phase runnable at all. It does not go in the `Status`
+column, which the `plan-status-vocabulary` shared block
+reserves for a single term.
+
+In this repository that is one SHA per phase, because every
+phase lands as its own pull request and a merge commit's
+diff against its first parent is the whole of it. That is a
+property of how ryll merges, not a general rule: the
+`plan-push-audit-phase` shared block asks for every commit
+of the phase, or its `first..last` range, where a phase
+lands directly on the default branch instead. A single
+commit is only ever enough when it is a merge commit.
 
 Given those commits, build the combined patch and hand the
 judgment agents its path, rather than a revision range:
@@ -77,10 +86,20 @@ branch, the range is exact and no filtering is needed.
 
 If the *Phase order* table records no commits — true of
 every plan written before this convention — reconstruct
-what you can from `git log` and the phase plan filenames,
+what you can from `gh pr list --state merged`,
+`git rev-list --first-parent` and the phase plan filenames,
 say in the findings how much of the plan you were actually
 able to see, and write the commits into the table so the
-next audit does not start from nothing.
+next audit does not start from nothing. Do not reconstruct
+from a path-filtered `git log` alone: it lists the commits
+that touched a path without saying which arrived directly
+and which arrived inside a pull request, so it will hand
+you a commit that came in under a merge and the audit will
+then cover one commit of that pull request rather than the
+pull request. It will also hand you commits that merely
+touched the same paths as some other plan's work, which is
+the wrong question — the range wanted is what this plan
+did, not what else was going on.
 
 `tools/audit/wave1.sh` and `tools/audit/wave2-mechanical.sh`
 both honour `AUDIT_BASE` and `AUDIT_HEAD`, sharing the
