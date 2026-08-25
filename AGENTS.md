@@ -248,7 +248,8 @@ is a runbook followed in place.)
   sub-agent execution model.
 - **`PUSH-AUDIT.md`** — pre-push audit for our own
   branches. Two-wave parallel sub-agent review (build /
-  style, then code quality / tests / docs / security).
+  style, then code quality / tests / docs / security),
+  run as the last phase of every master plan.
 - **`MERGE-TEMPLATE.md`** — review and merge process for
   external contributor PRs. Adds deterministic-scanner
   Wave 0, prompt-injection sub-agent, and a mandatory

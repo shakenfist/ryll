@@ -11,6 +11,13 @@
 #   2  rustfmt/clippy failed
 #   3  cargo test failed
 #   4  style-conformance grep failed (raw println!/eprintln! found)
+#   5  could not cd to the repository root
+#   6  the audit range covered nothing: AUDIT_BASE or AUDIT_HEAD was
+#      set but does not resolve, an explicitly-set range is empty, or
+#      the defaulted develop...HEAD range is empty.  Note the last
+#      one -- wave1 hard-fails there, where wave2-mechanical.sh only
+#      warns; a build that passed on an empty range proved nothing
+#      about the diff.
 #
 # Style conformance is intentionally kept narrow here — only the
 # fully-mechanical checks live in this script.  Anything needing
@@ -19,6 +26,7 @@
 # sub-agent.
 #
 # Usage: tools/audit/wave1.sh
+#        AUDIT_BASE=<sha> AUDIT_HEAD=develop tools/audit/wave1.sh
 # Run from the worktree root.
 
 set -u
@@ -31,6 +39,13 @@ cd "$REPO_ROOT" || exit 5
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+# Audit range resolution and validation is shared with
+# wave2-mechanical.sh; it exits 6 on a range that would make every
+# diff-scoped check below report nothing.
+# shellcheck source=tools/audit/audit-range.sh
+. "$SCRIPT_DIR/audit-range.sh"
+audit_range_init
 
 bold "=== wave 1a: pre-commit ==="
 if ! pre-commit run --all-files; then
@@ -120,20 +135,41 @@ if [[ -n "$UNGUARDED" ]]; then
 fi
 
 # 3. Long-line check: warn on Rust source lines over 120 chars in changed
-#    files relative to develop.  Non-fatal — purely informational.
-if git rev-parse --verify develop >/dev/null 2>&1; then
-    LONG_LINES=$(git diff develop...HEAD --name-only -- '*.rs' \
-        | xargs -r awk 'length > 120 {print FILENAME":"NR": "length" chars"}' \
-        2>/dev/null || true)
-    if [[ -n "$LONG_LINES" ]]; then
-        echo "ADVISORY: lines over 120 chars in changed Rust files:"
-        echo "$LONG_LINES" | head -20
+#    files relative to the audit base.  Non-fatal — purely
+#    informational.
+#    Content comes from the audit head rather than the checkout, so
+#    the check still sees the right bytes when AUDIT_HEAD is not what
+#    is checked out.
+LONG_LINES=""
+while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    hits=$(audit_range_show "$f" \
+        | awk -v f="$f" 'length > 120 {print f":"NR": "length" chars"}')
+    if [[ -n "$hits" ]]; then
+        LONG_LINES+="$hits"$'\n'
     fi
+done < <(audit_range_files_matching '*.rs')
+if [[ -n "$LONG_LINES" ]]; then
+    echo "ADVISORY: lines over 120 chars in changed Rust files:"
+    echo "$LONG_LINES" | head -20
 fi
 
 green "PASS: wave 1b mechanical"
 echo
 
 bold "=== wave 1 complete ==="
+# The range only reaches here empty or unusable when it was left to
+# default -- an explicit one that selects nothing already exited 6.
+# Either way the diff-scoped checks proved nothing, and a green "all
+# checks passed" scrolling into view ten minutes after the warning at
+# the top would be read as if they had.
+if ! audit_range_closing_summary red; then
+    # An empty range is fatal here: build, lint and tests passing says
+    # nothing about a diff that was never looked at.  A range that
+    # would not resolve at all returns 0 -- a shallow clone with no
+    # 'develop' has always been a NOTE rather than a failure.
+    red "wave 1 is not complete: see above."
+    exit 6
+fi
 green "all mechanical checks passed; proceed to wave 2 (judgment agents)"
 exit 0
