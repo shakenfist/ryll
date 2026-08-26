@@ -434,6 +434,20 @@ impl MainChannel {
         {
             let hb = last_heartbeat_ms.clone();
             let pid = std::process::id();
+            // audit-allow-println: the watchdog below reports through
+            // eprintln! rather than tracing, deliberately.  It exists to
+            // say something when the main thread has stopped responding,
+            // and the tracing subscriber is exactly the machinery that
+            // cannot be relied on in that state -- a wedged thread
+            // holding the global subscriber lock would swallow the one
+            // diagnostic worth having.  Writing straight to stderr takes
+            // no lock the stuck thread could be holding.
+            //
+            // Note this marker excludes the whole file from wave 1's
+            // raw-print check, which is the documented behaviour of the
+            // mechanism.  Moving the watchdog into its own module would
+            // scope the exclusion to it; recorded as a follow-up rather
+            // than done here.
             info!(
                 "main: K1 watchdog enabled (pid {}); will dump backtraces if heartbeat silent >5 s",
                 pid

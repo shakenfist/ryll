@@ -94,19 +94,81 @@ bold "=== wave 1b: mechanical style checks ==="
 #    We use a Python one-liner to filter: for each grep hit
 #    (format "path:lineno:text"), check whether the source
 #    file contains the marker anywhere; if so, skip it.
+#    The directories to scan come from the workspace `members`
+#    list in Cargo.toml, not from a list maintained here.  A
+#    hardcoded list was silently wrong for months: when the crate
+#    extraction moved most of the code into
+#    shakenfist-spice-renderer, this check -- the only style check
+#    that is fatal rather than advisory -- kept scanning the four
+#    crates it was written for and stopped seeing 46% of the
+#    workspace, renderer and webrtc included.  Deriving the list
+#    means adding a crate to the workspace extends the check.
+mapfile -t MEMBER_SRC_DIRS < <(
+    sed -n '/^\[workspace\]/,/^\[[^w]/p' Cargo.toml \
+        | sed -n 's/^[[:space:]]*"\([^"]*\)",\?[[:space:]]*$/\1\/src/p'
+)
+#    A parse failure here must be loud.  An empty list would make
+#    the check pass vacuously, which is the exact failure being
+#    fixed.
+if [[ ${#MEMBER_SRC_DIRS[@]} -eq 0 ]]; then
+    red "FAIL: could not read workspace members from Cargo.toml"
+    exit 4
+fi
 PRINTLN_HITS=$(grep -rn --include='*.rs' -E '^[[:space:]]*(println|eprintln)!' \
-    ryll/src shakenfist-spice-protocol/src shakenfist-spice-compression/src \
-    shakenfist-spice-usbredir/src 2>/dev/null \
-    | grep -v '#\[cfg(test)\]' \
+    "${MEMBER_SRC_DIRS[@]}" 2>/dev/null \
     | grep -v '/tests/' \
     | python3 -c "
+import re
 import sys
+
+
+def test_region_lines(path):
+    '''Line numbers (1-based) that lie in test-only code.
+
+    Two shapes count.  A #[cfg(test)] module, tracked to its closing
+    brace, and a #[test] function, tracked the same way.  The old
+    filter grepped each *hit line* for #[cfg(test)], which cannot
+    match: the attribute is never on the same line as the print, so
+    every test diagnostic reached the fatal check as a false
+    positive.
+    '''
+    lines = open(path).read().splitlines()
+    marked = set()
+    i = 0
+    while i < len(lines):
+        if re.match(r'\s*#\[(cfg\(test\)|test)\]', lines[i]):
+            # Find the opening brace of the item this attribute is on,
+            # then walk to its matching close.
+            j = i
+            while j < len(lines) and '{' not in lines[j]:
+                j += 1
+            depth = 0
+            while j < len(lines):
+                depth += lines[j].count('{') - lines[j].count('}')
+                marked.add(j + 1)
+                if depth <= 0:
+                    break
+                j += 1
+            i = j
+        i += 1
+    return marked
+
+
+cache = {}
 for line in sys.stdin:
     parts = line.split(':', 2)
-    if len(parts) >= 1:
+    if len(parts) >= 2:
+        path = parts[0]
         try:
-            content = open(parts[0]).read()
-            if 'audit-allow-println' in content:
+            lineno = int(parts[1])
+        except ValueError:
+            lineno = -1
+        try:
+            if 'audit-allow-println' in open(path).read():
+                continue
+            if path not in cache:
+                cache[path] = test_region_lines(path)
+            if lineno in cache[path]:
                 continue
         except OSError:
             pass

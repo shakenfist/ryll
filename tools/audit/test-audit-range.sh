@@ -25,6 +25,16 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
       GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX \
       GIT_NAMESPACE GIT_CEILING_DIRECTORIES
 
+# The audit bounds go too, and for the same reason.  These assertions
+# are about how audit-range.sh resolves a range in the scratch
+# repository; an inherited AUDIT_BASE or AUDIT_HEAD names a commit
+# that exists only in the real one, so every default-range assertion
+# fails.  That is not hypothetical: it is what happens when a master
+# plan's closing push-audit phase follows PUSH-AUDIT.md, which has
+# the operator export both before running wave1.sh -- which runs
+# pre-commit, which runs this script.
+unset AUDIT_BASE AUDIT_HEAD
+
 # These two are *set*, not unset: they are unset by default, and
 # unsetting them makes git fall back to ~/.gitconfig and /etc/gitconfig
 # rather than ignore them.  Pointing them at /dev/null is the
