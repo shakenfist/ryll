@@ -288,3 +288,202 @@ to redo, so stop for agreement rather than proceeding:
 - **Before step 6g acts on the 6e table**, agree the
   fix-or-decline split.  Declining a finding in writing is
   a judgment the operator owns, not the audit's.
+
+## Execution record: 2026-08-27
+
+### Step 6a — patch assembled
+
+`git diff 90a954b^1 1c28d6f` gave 25 files, 1 957
+insertions, 94 deletions; `git show 85bc901` appended one
+more file (`ryll/src/app.rs`, +41/-21).  That is the shape
+this plan predicted, so the gate passed and execution
+continued.  All `screenshot_paths` occurrences in the
+combined patch fall in the `85bc901` section, as expected.
+
+### Step 6b — wave 1: FAILED, exit 1, and the cause is the audit tooling
+
+Wave 1 did not get past its first stage.  The failure is
+not in the audited code — it is in the audit harness, and
+it fires *because* this phase follows `PUSH-AUDIT.md`'s
+documented procedure.
+
+`wave1.sh` stage 1a runs `pre-commit run --all-files`,
+which runs the `audit range smoke test` hook, which is
+`tools/audit/test-audit-range.sh`.  That script builds a
+scratch repository and asserts on range-resolution
+behaviour — but it does not clear `AUDIT_BASE` /
+`AUDIT_HEAD` from its environment.  With the bounds this
+phase requires exported, the scratch repo sees
+`AUDIT_BASE=90a954b^1`, a commit that does not exist there,
+and 13 assertions fail.  Demonstrated both ways:
+
+```
+$ env -u AUDIT_BASE -u AUDIT_HEAD tools/audit/test-audit-range.sh
+all audit-range assertions held
+$ AUDIT_BASE=90a954b^1 AUDIT_HEAD=1c28d6f tools/audit/test-audit-range.sh
+13 assertion(s) failed
+```
+
+This is the same class of bug as `9a4067e` ("Stop the audit
+test inheriting global git config"), which fixed inherited
+git config; inherited audit bounds were missed.
+
+The remaining wave 1 stages were therefore run by hand:
+
+- `./scripts/check-rust.sh check` (rustfmt + clippy): **pass**.
+- `cargo test --workspace`: **pass**, 787 tests, 0 failures.
+- Raw `println!`/`eprintln!` check: hits in `ryll/src/main.rs`
+  and `ryll/src/web/server.rs` are covered by
+  `audit-allow-println` markers; hits in
+  `shakenfist-spice-compression/` are test code.  Five
+  production hits in the `main_channel.rs` watchdog path
+  carry no marker and would trip exit 4 once the harness
+  bug above is fixed — a latent second wave 1 failure,
+  outside this plan's range.
+- Unguarded `logging::log_message` check: **inspects a
+  directory that no longer exists** — see the findings
+  table.
+
+### Step 6c — wave 2 mechanical, verbatim
+
+```
+=== wave 2a: TODO / FIXME / HACK in changed files ===
+(none)
+
+=== wave 2a: new #[allow(dead_code)] in changed files ===
+(none added)
+
+=== wave 2b: new test count in changed files ===
+new #[test] functions: 6
+rust files changed: 13
+
+=== wave 2c: doc files touched in changed set ===
+ARCHITECTURE.md
+README.md
+docs/plans/PLAN-idle-cpu-and-latency-phase-01-profile.md
+docs/plans/PLAN-idle-cpu-and-latency-phase-02-repaint.md
+docs/plans/PLAN-idle-cpu-and-latency-phase-03-logging.md
+docs/plans/PLAN-idle-cpu-and-latency-phase-04-latency.md
+docs/plans/PLAN-idle-cpu-and-latency-phase-05-metrics.md
+docs/plans/PLAN-idle-cpu-and-latency.md
+docs/plans/index.md
+docs/plans/order.yml
+
+=== wave 2d: security smoke ===
+new unsafe{} blocks in changed files:
++        // SAFETY: sysconf is async-signal-safe and has no unsafe
++        let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+
+new .unwrap() / .expect() in non-test code:
+(11 hits, all inside #[cfg(test)] modules on inspection)
+```
+
+### Step 6d — four judgment agents
+
+All four reported.  2c (documentation) found **no blocking
+gaps**: the patch's own `ARCHITECTURE.md` hunk documents
+the bug-report ZIP tree but not the repaint bridge or the
+PING latency source, and `57f5b62` closed that downstream
+on the same branch before the push.  No `phase <N>`
+leakage outside `docs/plans/`, and no wire-protocol change,
+so `shakenfist/kerbside/docs/` needs no review.
+
+The other three converged on one structural finding from
+three independent directions: the 42 hand-paired
+`event_tx.send(...)` / `repaint_notify.notify_one()` call
+sites.  All three enumerated the sites and all three found
+the pairing correct today; all three observed that nothing
+enforces it.  2b and 2a independently proposed the same
+fix, which is structural rather than test-shaped: collapse
+the pair into one `emit()` helper so the failure mode
+cannot be expressed.  That agreement is the strongest
+signal this audit produced.
+
+Full findings and their triage against current `develop`
+are in the table below.
+
+### Step 6e — findings triaged against current `develop`
+
+Twenty-one findings.  One is already fixed, eight moved
+with the crate extraction and travelled unchanged, and
+twelve are still present where they were.  Nothing was
+dropped as "already fixed" without naming the fix.
+
+| ID | Finding | Severity | Status | Current location |
+|----|---------|----------|--------|------------------|
+| T1 | `test-audit-range.sh` inherits `AUDIT_BASE`/`AUDIT_HEAD`; 13 assertions fail when set, breaking wave 1 via pre-commit | High (tooling) | still-present | `tools/audit/test-audit-range.sh:24-26`, whose `unset` covers only `GIT_*` |
+| T2 | Unguarded-`log_message` check greps `ryll/src/channels/`, gone since the crate extraction | Low (tooling) | still-present | `tools/audit/wave1.sh:126` |
+| T3 | Same check keys on `is_verbose()`, a convention since abandoned | Low (tooling) | still-present | `tools/audit/wave1.sh:123-135` |
+| T4 | 5 unmarked production `eprintln!` in the watchdog path | Low (style) | still-present, out of range | `shakenfist-spice-renderer/src/channels/main_channel.rs:461-509` |
+| **T5** | **`wave1.sh`'s fatal `println!` check does not scan `shakenfist-spice-renderer/` or `shakenfist-spice-webrtc/` at all** | **High (tooling)** | **still-present** | `tools/audit/wave1.sh:97-99` |
+| A1 | Hand-paired `send_event(...)` / `notify_one()` with no `emit()` helper | Low | moved, grew 42 → 58 sites | `shakenfist-spice-renderer/src/channels/*.rs` |
+| A2 | `use tokio::sync::Notify as RepaintNotify;` in main_channel only | Low | moved | `.../channels/main_channel.rs:7` |
+| A3 | CPU-percent formula duplicated (process and per-thread) | Low | moved | `.../metrics.rs:313`, `:343` |
+| A4 | `clk_tck()` `SAFETY:` comment justifies with the wrong concept | Low | moved | `.../metrics.rs:216-217` |
+| B1 | `linux::sample()` untested; delta arithmetic fused to I/O and `sleep` | Medium | moved | `.../metrics.rs:279-368` |
+| B2 | `parse_proc_stat` untested for truncated / non-numeric / no-paren input | Low | moved | `.../metrics.rs:144`, tests at `:876`, `:896` |
+| B3 | `parse_proc_status_kb` has no malformed-value test | Low | moved | `.../metrics.rs:184`, test `:913-927` |
+| B4 | Bug-report ZIP test covers only the `Unavailable` metrics variant | Low | still-present | `ryll/src/bugreport.rs:3451-3512` |
+| B5 | PING inter-arrival computation untested; no pure helper to test | Low | moved | `.../channels/main_channel.rs:1026-1037` |
+| B7 | playback gated on `is_verbose()` while six channels did not | Low | **already-fixed** | all 7 converged on `self.log_config.verbose` |
+| B8 | Metrics tests assert on raw JSON substrings | Low | moved | `.../metrics.rs:933`, `:944`, `:971` |
+| D1 | 2 s `thread::sleep` on the egui UI thread; false "gated on a file dialog" comment | **Medium, raise** | still-present | `ryll/src/bugreport.rs:1296`, comment `:1270-1275` |
+| D2 | PING handler emits `Latency` before writing PONG | Low | still-present, now bounded | `.../main_channel.rs:1032-1036` vs PONG `:1056` |
+| D3 | "Latency" is a server-chosen interval, emitted before `Ping::read()` validates | Low | still-present | `.../main_channel.rs:1031` vs `:1042` |
+| D4 | `pub fn sample` divides by unguarded `window_secs`; NaN into `sort_by(partial_cmp)` | Low | still-present, Linux path only | `.../metrics.rs:302`, sort `:351-355` |
+| D6 | `libc` not target-gated | Info | still-present, worse | `ryll/Cargo.toml:150-151` (dead), renderer `:89-90` (live) |
+| D7 | `info!`→`debug!` did not shrink `/tmp/ryll.log` | Info | still-present | `ryll/src/main.rs:197-201` |
+
+Five triage results changed the picture enough to record
+separately.
+
+**T5 is new, and it is the most serious thing this audit
+found.**  Chasing T4 showed that `wave1.sh`'s raw
+`println!`/`eprintln!` check — the one style check that is
+*fatal* rather than advisory — scans only `ryll/src`,
+`shakenfist-spice-protocol/src`,
+`shakenfist-spice-compression/src` and
+`shakenfist-spice-usbredir/src`.  It does not scan
+`shakenfist-spice-renderer/` or `shakenfist-spice-webrtc/`.
+Measured: those two hold 28 754 of the workspace's 62 024
+source lines, so **46% of the code is invisible to the one
+style check that can fail the build** — and the renderer
+alone (23 859 lines) is now larger than `ryll` (19 322).  So the
+five unmarked `eprintln!` calls in T4 would *not* trip
+exit 4 even with T1 fixed: the check passes vacuously on
+the crate it most needs to read.  Together T1, T2, T3 and
+T5 say the same thing — the audit harness was not updated
+when the crates were split, and three of its four
+range-scoped checks are now looking at the wrong places.
+
+**B7 is the only genuine fix, and it is what makes T3 a
+false positive.**  All seven channels converged on
+`self.log_config.verbose`; `is_verbose()` survives only at
+`ryll/src/settings.rs:27`, used once to build `LogConfig`.
+The wave 1 heuristic keys on the convention that lost.
+
+**D1 deserves raising rather than lowering.**  The other
+two `BugReport::new` call sites — `auto_snapshot.rs:245`
+and the pedantic observer at `bugreport.rs:1915` — were
+both wrapped in `tokio::task::spawn_blocking`, each with a
+comment about not stalling the executor.  The interactive
+path was not.  The codebase demonstrably knows about this
+hazard and fixed it everywhere except the one place a
+human is watching the window, and the comment still
+justifying it (`:1270-1275`) is contradicted by the two
+call sites that route around it.
+
+**D4 is half-fixed, and the fixed half is the fix.**  The
+macOS implementation added since April guards both divisors
+with `window.as_micros().max(1)`, sorts with `sort_by_key`
+instead of `partial_cmp`, and carries a zero-window
+regression test.  The Linux path it was modelled on got
+none of that.  The correct code already exists 150 lines
+below the defect.
+
+**D6 must be re-scoped before it is fixed.**  In `ryll` the
+dependency is not merely ungated but dead — no `libc::`
+reference remains in `ryll/src` — so that line should be
+deleted, not gated.  The renderer's live copy is used on
+both Linux and macOS, so the original suggestion of
+`cfg(target_os = "linux")` would break the macOS build.
