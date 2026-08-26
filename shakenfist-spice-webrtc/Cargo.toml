@@ -82,7 +82,7 @@ rand = "0.8"
 # via pkg-config and otherwise builds it from source with cmake —
 # both work in the devcontainer. The same crate could encode raw
 # PCM if SPICE ever negotiates an uncompressed playback format.
-opus = "0.3"
+opus = "0.4"
 
 # Renderer crate: provides EncodedFrame, EncoderControl, EncoderTask,
 # H264Encoder, and SyntheticFrameSource used for the media pumps
