@@ -182,11 +182,48 @@ if [[ -n "$PRINTLN_HITS" ]]; then
 fi
 green "PASS: no raw println!/eprintln!"
 
-# 2. No log_message calls outside an is_verbose() guard.  Heuristic:
+# 2. No log_message calls outside a verbosity guard.  Heuristic:
 #    every channel handler that calls logging::log_message should have
-#    a settings::is_verbose() check within the surrounding 5 lines.
-UNGUARDED=$(grep -rn -B5 'logging::log_message' ryll/src/channels/ 2>/dev/null \
-    | awk '/logging::log_message/ {hit=$0} /is_verbose/ {hit=""} END{if(hit) print hit}' \
+#    a verbosity check within the surrounding 5 lines.
+#
+#    Both halves of this check had gone stale.  It grepped
+#    ryll/src/channels/, a directory the crate extraction deleted --
+#    so it matched nothing and passed silently for months -- and it
+#    keyed on settings::is_verbose(), the convention all seven
+#    channels dropped in favour of the log_config.verbose field
+#    threaded in from settings::log_config().  Pointed at the right
+#    directory but still looking for is_verbose(), it would have
+#    called every one of them a violation.
+CHANNELS_DIR=shakenfist-spice-renderer/src/channels
+if [[ ! -d $CHANNELS_DIR ]]; then
+    red "FAIL: $CHANNELS_DIR does not exist; the log_message check has gone stale again"
+    exit 4
+fi
+#    The awk below reads grep -B5 groups, which are separated by
+#    "--".  For each log_message line it asks whether any of the
+#    context lines *preceding it in the same group* carries a
+#    verbosity guard.  The previous version tested the same two
+#    conditions in the wrong order -- it cleared its flag on a guard
+#    and then re-set it on the log_message line that followed, so a
+#    guard above the call never counted -- and it printed only
+#    whatever hit happened to be last.  Every guarded site was a
+#    candidate to be reported and every site but one could not be.
+UNGUARDED=$(grep -rn -B5 'logging::log_message' "$CHANNELS_DIR" 2>/dev/null \
+    | awk '
+        /^--$/ { n = 0; next }
+        /logging::log_message/ {
+            guarded = 0
+            for (i = 1; i <= n; i++) {
+                if (buf[i] ~ /log_config\.(verbose|intimate)|is_verbose/) {
+                    guarded = 1
+                }
+            }
+            if (!guarded) print $0
+            n = 0
+            next
+        }
+        { buf[++n] = $0 }
+    ' \
     || true)
 # The above heuristic is rough; only flag if ALL nearby is_verbose
 # checks are missing.  A more precise check is left to wave 2a.
