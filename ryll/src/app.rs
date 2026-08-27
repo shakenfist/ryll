@@ -124,6 +124,15 @@ const NOTIFICATION_SNAPSHOT_CAP: usize = 5;
 /// uses on the non-interactive paths.
 const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long `poll_pending_bug_report` waits for the sampler before
+/// giving up on it and writing the report anyway.
+///
+/// Four times the sample window: long enough that a sampler merely
+/// descheduled on a loaded host still lands its measurement, short
+/// enough that a dead one does not strand the re-entrancy guard for
+/// the rest of the session.
+const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
+
 /// Single entry in the notification-snapshot store. Owns a
 /// captured `TrafficBuffers` (cheap thanks to its Arc-shared
 /// payloads).
@@ -554,6 +563,14 @@ struct PendingBugReport {
     /// Slot the sampler thread fills exactly once. `None` while
     /// it is still inside its sample window.
     metrics_slot: Arc<std::sync::Mutex<Option<RuntimeMetrics>>>,
+    /// When the sample was started, so a sampler that never
+    /// reports cannot hold the re-entrancy guard forever. Nothing
+    /// in today's `metrics::sample` can fail to fill the slot --
+    /// both platform paths return `unavailable` rather than
+    /// panicking -- but the guard is the only thing standing
+    /// between a dead worker and an F12 key that silently refuses
+    /// for the rest of the session.
+    started_at: Instant,
 }
 
 /// The egui application
@@ -2569,7 +2586,17 @@ impl RyllApp {
 
         let (trigger, precomputed_png) = self.take_trigger_for_submit();
 
-        let surface = if report_type == BugReportType::Display {
+        // Copying the largest surface is a deep copy of the whole
+        // framebuffer -- 33 MB of RGBA at 3840x2160 -- on the UI thread,
+        // held for the ~2 s the sample is in flight. `assemble` reads it in
+        // exactly two places: as the screenshot when no PNG was precomputed
+        // at trigger time, and as the source for a region crop. In the
+        // common case (dialog open started the encoder, no region drawn)
+        // nothing reads it, so the copy is pure cost on the one thread this
+        // path exists to keep responsive.
+        let surface_is_readable = report_type == BugReportType::Display
+            && (precomputed_png.is_none() || region.is_some());
+        let surface = if surface_is_readable {
             self.surfaces
                 .values()
                 .map(|gs| gs.surface())
@@ -2594,6 +2621,7 @@ impl RyllApp {
                 }
                 ctx.request_repaint();
             });
+        let sampling = spawned.is_ok();
         if let Err(e) = spawned {
             // Thread spawn failed (OS resource pressure). Seed the
             // slot so the next poll still produces a report, and
@@ -2608,14 +2636,24 @@ impl RyllApp {
             self.egui_ctx.request_repaint();
         }
 
-        self.push_notification(
-            NotifySeverity::Info,
-            NotificationSource::BugReport,
-            format!(
-                "Capturing bug report — sampling runtime metrics for {} s",
-                BUG_REPORT_METRICS_WINDOW.as_secs()
-            ),
-        );
+        // The notification store is itself bug-report evidence, so it
+        // must not claim a sample is running that never started.
+        if sampling {
+            self.push_notification(
+                NotifySeverity::Info,
+                NotificationSource::BugReport,
+                format!(
+                    "Capturing bug report — sampling runtime metrics for {} s",
+                    BUG_REPORT_METRICS_WINDOW.as_secs()
+                ),
+            );
+        } else {
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::BugReport,
+                "Capturing bug report — runtime metrics unavailable",
+            );
+        }
 
         self.pending_bug_report = Some(PendingBugReport {
             report_type,
@@ -2625,6 +2663,7 @@ impl RyllApp {
             precomputed_png,
             surface,
             metrics_slot,
+            started_at: Instant::now(),
         });
     }
 
@@ -2643,8 +2682,30 @@ impl RyllApp {
             Ok(mut guard) => guard.take(),
             Err(_) => None,
         };
-        let Some(metrics) = metrics else {
-            return;
+        // A sampler that never reports would otherwise hold the
+        // re-entrancy guard for the life of the process, and every
+        // later F12 would be refused with "already being captured"
+        // after the user had typed a whole description. Past the
+        // deadline, write the report with what we have: a degraded
+        // report beats a permanently wedged key. The window is
+        // generous -- four times the sample -- because expiring a
+        // merely-slow sampler would lose a real measurement.
+        let metrics = match metrics {
+            Some(m) => m,
+            None => {
+                let waited = pending.started_at.elapsed();
+                if waited <= BUG_REPORT_METRICS_DEADLINE {
+                    return;
+                }
+                warn!(
+                    "app: bug-report metrics sampler did not report within {:?};                      writing the report without a sample",
+                    waited
+                );
+                RuntimeMetrics::unavailable(format!(
+                    "the metrics sampler thread did not report within {} s",
+                    BUG_REPORT_METRICS_DEADLINE.as_secs()
+                ))
+            }
         };
         let pending = self
             .pending_bug_report
