@@ -419,3 +419,98 @@ pub struct CursorImage {
     pub hot_spot_y: u16,
     pub pixels: Vec<u8>, // RGBA
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sink, its receiver, and the wake-up the renderer waits on.
+    ///
+    /// The receiver is returned rather than dropped so a test can decide
+    /// whether the consumer exists, is wedged, or has gone away — the three
+    /// states `emit` has to handle.
+    fn sink_pair(capacity: usize) -> (EventSink, mpsc::Receiver<ChannelEvent>, Arc<Notify>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        let repaint = Arc::new(Notify::new());
+        (EventSink::new(tx, Arc::clone(&repaint)), rx, repaint)
+    }
+
+    #[tokio::test]
+    async fn emit_queues_the_event_and_wakes_the_renderer() {
+        let (sink, mut rx, repaint) = sink_pair(4);
+
+        sink.emit(ChannelEvent::SessionInitialized(7)).await;
+
+        match rx.try_recv() {
+            Ok(ChannelEvent::SessionInitialized(id)) => assert_eq!(id, 7),
+            other => panic!("expected SessionInitialized(7), got {:?}", other),
+        }
+        // notify_one leaves a permit behind when nobody is waiting, so this
+        // resolves at once if -- and only if -- emit signalled.
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit must wake the renderer");
+    }
+
+    #[tokio::test]
+    async fn a_wedged_consumer_does_not_hang_the_sender() {
+        let (sink, _rx, repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        // Fill the only slot. `_rx` is held, so the channel is not closed --
+        // it is simply never polled, which is what a wedged renderer looks
+        // like from here.
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        // Consume the permit that emit left, so the assertion at the end
+        // is about the *second* emit rather than this one.  Bounded, so a
+        // regression that stops signalling fails here instead of hanging.
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("the first emit must wake the renderer");
+
+        // The second send can never complete. It has to give up on its own
+        // 50 ms deadline; the outer bound is a backstop so a regression
+        // fails the test rather than hanging the suite.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            sink.emit(ChannelEvent::SessionInitialized(2)),
+        )
+        .await
+        .expect("emit must abandon a blocked send rather than hang");
+
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("a timed-out emit must still wake the renderer");
+    }
+
+    #[tokio::test]
+    async fn a_send_within_the_deadline_still_delivers() {
+        // The timeout arm must not cost delivery on the normal path: the
+        // distinction that matters is elapsed-deadline versus closed
+        // receiver, and only the former is worth warning about.
+        let (sink, mut rx, _repaint) = sink_pair(4);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        sink.emit(ChannelEvent::SessionInitialized(9)).await;
+
+        match rx.try_recv() {
+            Ok(ChannelEvent::SessionInitialized(id)) => assert_eq!(id, 9),
+            other => panic!("expected SessionInitialized(9), got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dropped_receiver_is_not_an_error() {
+        let (sink, rx, repaint) = sink_pair(1);
+        drop(rx);
+
+        // A closed receiver means the renderer is already shutting down.
+        // This must not panic, and must still signal: a bridge task may be
+        // waiting on the notify to observe the shutdown.
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit must wake the renderer even after the receiver is gone");
+    }
+}

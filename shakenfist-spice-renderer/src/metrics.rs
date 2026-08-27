@@ -1131,9 +1131,14 @@ VmData:\t   65536 kB\n\
             (1000, 0),
             &[(1, "a", 0, 0), (2, "b", 10, 0), (3, "c", 0, 0)],
         );
+        // tids 1 and 3 burn the same 7 ticks, and are listed here in
+        // descending tid order.  `sort_by` is stable, so without the
+        // tid tie-break they would come back 3-then-1, in whatever
+        // order readdir happened to hand them over; the tie-break is
+        // what makes the output independent of that.
         let after = snap(
             (1050, 0),
-            &[(1, "a", 5, 0), (2, "b", 10, 0), (3, "c", 7, 0)],
+            &[(3, "c", 7, 0), (2, "b", 10, 0), (1, "a", 7, 0)],
         );
         let m = linux::diff_snapshots(
             &before,
@@ -1150,10 +1155,10 @@ VmData:\t   65536 kB\n\
         );
         assert_eq!(threads.len(), 3);
         assert!(threads.iter().all(|t| t.cpu_percent.is_finite()));
-        // Still sorted descending, with the idle threads tie-broken
-        // by ascending tid.
-        assert_eq!(threads[0].tid, 3);
-        assert_eq!(threads[1].tid, 1);
+        // Still sorted descending, with the two equally-busy threads
+        // tie-broken by ascending tid rather than by input order.
+        assert_eq!(threads[0].tid, 1);
+        assert_eq!(threads[1].tid, 3);
         assert_eq!(threads[2].tid, 2);
     }
 

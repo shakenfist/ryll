@@ -316,10 +316,12 @@ impl InputsChannel {
                             self.process_messages().await?;
                         }
                         Err(e) => {
-                            self.events.emit(ChannelEvent::Error {
+                            self.events
+                                .emit(ChannelEvent::Error {
                                     channel: ChannelType::Inputs,
                                     message: format!("read error: {}", e),
-                                }).await;
+                                })
+                                .await;
                             break;
                         }
                     }
