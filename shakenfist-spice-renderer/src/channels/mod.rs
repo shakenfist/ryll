@@ -6,6 +6,7 @@ pub mod main_channel;
 pub mod playback;
 pub mod usbredir;
 pub mod volume;
+mod watchdog;
 pub mod webdav;
 
 pub use cursor::CursorChannel;
