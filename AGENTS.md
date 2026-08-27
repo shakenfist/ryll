@@ -100,7 +100,10 @@ that table is an incomplete change.
 1. Add variant to `ChannelEvent` enum in
    `shakenfist-spice-renderer/src/channels/mod.rs`
 2. Send from relevant channel handler in
-   `shakenfist-spice-renderer/src/channels/`
+   `shakenfist-spice-renderer/src/channels/`, via
+   `self.events.emit(...)` — never a bare `event_tx`. `EventSink`
+   couples the queue to the repaint wake-up so a new event cannot
+   forget it and leave the UI stale.
 3. Handle in `process_events()` in `ryll/src/app.rs`
 
 ### Modifying protocol handling

@@ -264,9 +264,15 @@ flowchart TB
 ```
 
 - **event_tx/event_rx**: Channel handlers send events (images, cursor pos, stats)
-  to the UI thread. Each `event_tx.send()` is paired with a
-  `repaint_notify.notify_one()` on a shared `Arc<tokio::sync::Notify>`,
-  which a small bridge task forwards to `egui::Context::request_repaint()`.
+  to the UI thread through an `EventSink`, which owns both the bounded
+  `mpsc` sender and a shared `Arc<tokio::sync::Notify>` and signals the
+  latter as part of `emit()`. A small bridge task forwards that signal to
+  `egui::Context::request_repaint()`. The two used to be sibling fields
+  paired by hand at every send site, so an event that forgot the wake-up
+  left the UI stale with nothing to diagnose; binding them into one type
+  makes forgetting impossible rather than merely discouraged. The main
+  channel's sink additionally carries `MAIN_EVENT_SEND_TIMEOUT`, so a
+  wedged consumer warns instead of hanging the read loop.
   This lets egui sleep when nothing is happening rather than polling
   at 60 Hz; idle CPU drops by an order of magnitude on systems without
   GPU acceleration. A 1 Hz `request_repaint_after` fallback covers
