@@ -5,7 +5,6 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::image_cache::BoundedImageCache;
@@ -33,7 +32,7 @@ use shakenfist_spice_protocol::{
     IMAGE_FLAGS_CACHE_ME,
 };
 
-use super::ChannelEvent;
+use super::{ChannelEvent, EventSink};
 
 struct StreamState {
     surface_id: u32,
@@ -556,8 +555,7 @@ pub type SharedGlzDictionary = Arc<GlzDictionary>;
 pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     buffer: Vec<u8>,
     glz_dictionary: SharedGlzDictionary,
     /// MJPEG decoder backend selected once at construction via
@@ -670,8 +668,7 @@ impl DisplayChannel {
     pub fn new(
         channel_id: u8,
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -684,8 +681,7 @@ impl DisplayChannel {
         DisplayChannel {
             channel_id,
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             buffer: Vec::with_capacity(1024 * 1024),
             glz_dictionary,
             jpeg_decoder: best_for_platform(),
@@ -880,11 +876,9 @@ impl DisplayChannel {
 
             if n == 0 {
                 info!("display: channel disconnected");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Display))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events
+                    .emit(ChannelEvent::Disconnected(ChannelType::Display))
+                    .await;
                 break;
             }
 
@@ -1053,16 +1047,14 @@ impl DisplayChannel {
                     ));
                 }
 
-                self.event_tx
-                    .send(ChannelEvent::SurfaceCreated {
+                self.events
+                    .emit(ChannelEvent::SurfaceCreated {
                         display_channel_id: self.channel_id,
                         surface_id: surface.surface_id,
                         width: surface.width,
                         height: surface.height,
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
             }
 
             display_server::SURFACE_DESTROY => {
@@ -1074,14 +1066,12 @@ impl DisplayChannel {
                         logging::log_detail(&format!("surface_id={}", surface_id));
                     }
 
-                    self.event_tx
-                        .send(ChannelEvent::SurfaceDestroyed {
+                    self.events
+                        .emit(ChannelEvent::SurfaceDestroyed {
                             display_channel_id: self.channel_id,
                             surface_id,
                         })
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 }
             }
 
@@ -1188,13 +1178,11 @@ impl DisplayChannel {
 
             display_server::MARK => {
                 debug!("display: mark");
-                self.event_tx
-                    .send(ChannelEvent::DisplayMark {
+                self.events
+                    .emit(ChannelEvent::DisplayMark {
                         produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
             }
 
             display_server::SET_ACK => {
@@ -1268,11 +1256,7 @@ impl DisplayChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
 
             display_server::INVALIDATE_LIST => {
@@ -1593,8 +1577,8 @@ impl DisplayChannel {
                             stream.last_decode_ok_ts_secs = Some(now_secs);
                             stream.last_decode_duration_us = decode_duration_us;
                             let surface_id = stream.surface_id;
-                            self.event_tx
-                                .send(ChannelEvent::ImageReady {
+                            self.events
+                                .emit(ChannelEvent::ImageReady {
                                     display_channel_id: self.channel_id,
                                     surface_id,
                                     left,
@@ -1605,9 +1589,7 @@ impl DisplayChannel {
                                     image_id: 0,
                                     produced_at_secs: now_secs,
                                 })
-                                .await
-                                .ok();
-                            self.repaint_notify.notify_one();
+                                .await;
                         }
                         Ok(None) => {
                             // No complete frame assembled yet — this is
@@ -2368,8 +2350,8 @@ impl DisplayChannel {
                             .copy_from_slice(&out_pixels[src_off..src_off + sub_w * 4]);
                     }
 
-                    self.event_tx
-                        .send(build_image_event(
+                    self.events
+                        .emit(build_image_event(
                             composite,
                             self.channel_id,
                             base.surface_id,
@@ -2381,13 +2363,11 @@ impl DisplayChannel {
                             img.image_id,
                             self.traffic.elapsed().as_secs_f64(),
                         ))
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 }
             } else {
-                self.event_tx
-                    .send(build_image_event(
+                self.events
+                    .emit(build_image_event(
                         composite,
                         self.channel_id,
                         base.surface_id,
@@ -2399,9 +2379,7 @@ impl DisplayChannel {
                         img.image_id,
                         self.traffic.elapsed().as_secs_f64(),
                     ))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
             }
         }
 
@@ -2442,8 +2420,8 @@ impl DisplayChannel {
                         "display: draw_fill: non-null mask, painting unmasked"
                     );
                 }
-                self.event_tx
-                    .send(ChannelEvent::FillRect {
+                self.events
+                    .emit(ChannelEvent::FillRect {
                         display_channel_id: self.channel_id,
                         surface_id: base.surface_id,
                         rect: (base.left, base.top, base.right, base.bottom),
@@ -2451,9 +2429,7 @@ impl DisplayChannel {
                         clip: base.clip_rects,
                         produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
             }
         }
 
@@ -2480,8 +2456,8 @@ impl DisplayChannel {
             );
         }
 
-        self.event_tx
-            .send(ChannelEvent::FillRect {
+        self.events
+            .emit(ChannelEvent::FillRect {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
                 rect: (base.left, base.top, base.right, base.bottom),
@@ -2489,9 +2465,7 @@ impl DisplayChannel {
                 clip: base.clip_rects,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
+            .await;
 
         Ok(())
     }
@@ -2533,17 +2507,15 @@ impl DisplayChannel {
             );
         }
 
-        self.event_tx
-            .send(ChannelEvent::Invert {
+        self.events
+            .emit(ChannelEvent::Invert {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
                 rect: (base.left, base.top, base.right, base.bottom),
                 clip: base.clip_rects,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
+            .await;
 
         Ok(())
     }
@@ -2552,8 +2524,8 @@ impl DisplayChannel {
         log_draw_base_if_verbose(self.log_config, payload, "copy_bits");
         let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
 
-        self.event_tx
-            .send(ChannelEvent::CopyBits {
+        self.events
+            .emit(ChannelEvent::CopyBits {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
                 src_x,
@@ -2562,9 +2534,7 @@ impl DisplayChannel {
                 clip: base.clip_rects,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
+            .await;
 
         Ok(())
     }

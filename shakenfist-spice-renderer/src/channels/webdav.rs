@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
@@ -26,7 +26,7 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, WebdavCommand};
+use super::{ChannelEvent, EventSink, WebdavCommand};
 
 /// Response data from a per-client reader task back to the main loop.
 struct MuxResponse {
@@ -49,8 +49,7 @@ struct MuxClient {
 
 pub struct WebdavChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
     buffer: Vec<u8>,
     capture: Option<Arc<dyn CaptureSink>>,
@@ -118,8 +117,7 @@ impl WebdavChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         webdav_rx: mpsc::Receiver<WebdavCommand>,
         auto_share_dir: Option<ShareDirConfig>,
         capture: Option<Arc<dyn CaptureSink>>,
@@ -131,8 +129,7 @@ impl WebdavChannel {
         let (response_tx, response_rx) = mpsc::channel(256);
         WebdavChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             webdav_rx,
             buffer: Vec::with_capacity(65536),
             capture,
@@ -185,11 +182,7 @@ impl WebdavChannel {
 
     async fn run_loop(&mut self) -> Result<()> {
         info!("webdav: channel started");
-        self.event_tx
-            .send(ChannelEvent::WebdavChannelReady)
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
+        self.events.emit(ChannelEvent::WebdavChannelReady).await;
 
         // If a shared directory was configured via CLI, create the server
         if let Some(ref dir) = self.shared_dir {
@@ -201,25 +194,21 @@ impl WebdavChannel {
                         path_str, dir.read_only,
                     );
                     self.server = Some(server);
-                    self.event_tx
-                        .send(ChannelEvent::WebdavSharingStarted {
+                    self.events
+                        .emit(ChannelEvent::WebdavSharingStarted {
                             path: path_str,
                             read_only: dir.read_only,
                         })
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 }
                 Err(e) => {
                     error!("webdav: failed to create server for {}: {}", path_str, e);
-                    self.event_tx
-                        .send(ChannelEvent::WebdavError(format!(
+                    self.events
+                        .emit(ChannelEvent::WebdavError(format!(
                             "Failed to share {}: {}",
                             path_str, e
                         )))
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 }
             }
         }
@@ -252,11 +241,7 @@ impl WebdavChannel {
                     if n == 0 {
                         info!("webdav: channel disconnected");
                         self.shutdown_all_clients();
-                        self.event_tx
-                            .send(ChannelEvent::Disconnected(ChannelType::Webdav))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Webdav)).await;
                         break;
                     }
 
@@ -402,11 +387,7 @@ impl WebdavChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
             unknown => {
                 logging::log_unknown_once("webdav", unknown, payload);
@@ -655,25 +636,21 @@ impl WebdavChannel {
                         );
                         self.server = Some(server);
                         self.shared_dir = Some(ShareDirConfig { path, read_only });
-                        self.event_tx
-                            .send(ChannelEvent::WebdavSharingStarted {
+                        self.events
+                            .emit(ChannelEvent::WebdavSharingStarted {
                                 path: path_str,
                                 read_only,
                             })
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                            .await;
                     }
                     Err(e) => {
                         error!("webdav: failed to create server for {}: {}", path_str, e);
-                        self.event_tx
-                            .send(ChannelEvent::WebdavError(format!(
+                        self.events
+                            .emit(ChannelEvent::WebdavError(format!(
                                 "Failed to share {}: {}",
                                 path_str, e
                             )))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                            .await;
                     }
                 }
             }
@@ -682,11 +659,7 @@ impl WebdavChannel {
                 self.shutdown_all_clients();
                 self.server = None;
                 self.shared_dir = None;
-                self.event_tx
-                    .send(ChannelEvent::WebdavSharingStopped)
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::WebdavSharingStopped).await;
             }
         }
         Ok(())

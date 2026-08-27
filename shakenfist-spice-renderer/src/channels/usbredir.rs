@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 #[cfg(target_os = "linux")]
 use nusb::MaybeFuture;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "linux")]
@@ -35,12 +35,11 @@ use shakenfist_spice_usbredir::parser::UsbredirParser;
 
 use crate::snapshots::RedirectedDevice;
 
-use super::{ChannelEvent, UsbCommand};
+use super::{ChannelEvent, EventSink, UsbCommand};
 
 pub struct UsbredirChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     usb_rx: mpsc::Receiver<UsbCommand>,
     buffer: Vec<u8>,
     capture: Option<Arc<dyn CaptureSink>>,
@@ -107,8 +106,7 @@ impl UsbredirChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         usb_rx: mpsc::Receiver<UsbCommand>,
         auto_connect_disks: Vec<VirtualDiskConfig>,
         capture: Option<Arc<dyn CaptureSink>>,
@@ -120,8 +118,7 @@ impl UsbredirChannel {
         let (interrupt_tx, interrupt_rx) = mpsc::channel(64);
         UsbredirChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             usb_rx,
             buffer: Vec::with_capacity(65536),
             capture,
@@ -175,8 +172,7 @@ impl UsbredirChannel {
 
     async fn run_loop(&mut self) -> Result<()> {
         info!("usbredir: channel started");
-        self.event_tx.send(ChannelEvent::UsbChannelReady).await.ok();
-        self.repaint_notify.notify_one();
+        self.events.emit(ChannelEvent::UsbChannelReady).await;
 
         // Send our hello immediately
         self.send_hello().await?;
@@ -209,11 +205,7 @@ impl UsbredirChannel {
                     if n == 0 {
                         info!("usbredir: channel disconnected");
                         self.stop_all_interrupt_polls();
-                        self.event_tx
-                            .send(ChannelEvent::Disconnected(ChannelType::Usbredir))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Usbredir)).await;
                         break;
                     }
 
@@ -359,11 +351,7 @@ impl UsbredirChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
             unknown => {
                 logging::log_unknown_once("usbredir", unknown, payload);
@@ -465,11 +453,7 @@ impl UsbredirChannel {
                         Err(e) => {
                             let msg = format!("Failed to open {}: {}", disk.path.display(), e);
                             warn!("usbredir: {}", msg);
-                            self.event_tx
-                                .send(ChannelEvent::UsbConnectFailed(msg))
-                                .await
-                                .ok();
-                            self.repaint_notify.notify_one();
+                            self.events.emit(ChannelEvent::UsbConnectFailed(msg)).await;
                         }
                     }
                 }
@@ -780,11 +764,7 @@ impl UsbredirChannel {
                     Err(e) => {
                         let msg = format!("Failed to enumerate USB devices: {}", e);
                         warn!("usbredir: {}", msg);
-                        self.event_tx
-                            .send(ChannelEvent::UsbConnectFailed(msg))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::UsbConnectFailed(msg)).await;
                         return Ok(());
                     }
                 };
@@ -800,11 +780,7 @@ impl UsbredirChannel {
                             bus, address,
                         );
                         warn!("usbredir: {}", msg);
-                        self.event_tx
-                            .send(ChannelEvent::UsbConnectFailed(msg))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::UsbConnectFailed(msg)).await;
                     }
                     Some(info) => match RealDevice::open(&info).await {
                         Ok(dev) => {
@@ -816,11 +792,7 @@ impl UsbredirChannel {
                                 bus, address, e,
                             );
                             warn!("usbredir: {}", msg);
-                            self.event_tx
-                                .send(ChannelEvent::UsbConnectFailed(msg))
-                                .await
-                                .ok();
-                            self.repaint_notify.notify_one();
+                            self.events.emit(ChannelEvent::UsbConnectFailed(msg)).await;
                         }
                     },
                 }
@@ -839,11 +811,7 @@ impl UsbredirChannel {
                     Err(e) => {
                         let msg = format!("Failed to open {}: {}", path.display(), e);
                         warn!("usbredir: {}", msg);
-                        self.event_tx
-                            .send(ChannelEvent::UsbConnectFailed(msg))
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::UsbConnectFailed(msg)).await;
                     }
                 }
             }
@@ -896,11 +864,9 @@ impl UsbredirChannel {
         self.backend = Some(backend);
         info!("usbredir: device connected: {}", desc);
         self.update_snapshot();
-        self.event_tx
-            .send(ChannelEvent::UsbDeviceConnected(desc))
-            .await
-            .ok();
-        self.repaint_notify.notify_one();
+        self.events
+            .emit(ChannelEvent::UsbDeviceConnected(desc))
+            .await;
         Ok(())
     }
 
@@ -918,11 +884,7 @@ impl UsbredirChannel {
             self.device_disconnect_total += 1;
             self.last_device_event_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
             self.update_snapshot();
-            self.event_tx
-                .send(ChannelEvent::UsbDeviceDisconnected)
-                .await
-                .ok();
-            self.repaint_notify.notify_one();
+            self.events.emit(ChannelEvent::UsbDeviceDisconnected).await;
         }
         Ok(())
     }

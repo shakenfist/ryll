@@ -2,7 +2,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::snapshots::{CursorCacheEntry, CursorSnapshot};
@@ -17,12 +16,11 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, CursorImage};
+use super::{ChannelEvent, CursorImage, EventSink};
 
 pub struct CursorChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     buffer: Vec<u8>,
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<dyn CaptureSink>>,
@@ -61,8 +59,7 @@ impl CursorChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -71,8 +68,7 @@ impl CursorChannel {
     ) -> Self {
         CursorChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             buffer: Vec::with_capacity(65536),
             cursor_cache: HashMap::new(),
             capture,
@@ -135,11 +131,9 @@ impl CursorChannel {
 
             if n == 0 {
                 info!("cursor: channel disconnected");
-                self.event_tx
-                    .send(ChannelEvent::Disconnected(ChannelType::Cursor))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events
+                    .emit(ChannelEvent::Disconnected(ChannelType::Cursor))
+                    .await;
                 break;
             }
 
@@ -223,15 +217,13 @@ impl CursorChannel {
                     payload.len()
                 );
 
-                self.event_tx
-                    .send(ChannelEvent::CursorPosition {
+                self.events
+                    .emit(ChannelEvent::CursorPosition {
                         x: init.x,
                         y: init.y,
                         visible: init.visible != 0,
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
 
                 // SpiceCursor data follows the 9-byte INIT header
                 self.parse_and_emit_cursor(&payload[CursorInit::SIZE..])
@@ -248,15 +240,13 @@ impl CursorChannel {
                     payload.len()
                 );
 
-                self.event_tx
-                    .send(ChannelEvent::CursorPosition {
+                self.events
+                    .emit(ChannelEvent::CursorPosition {
                         x: set.x,
                         y: set.y,
                         visible: set.visible != 0,
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
 
                 // SpiceCursor data follows the 5-byte SET header
                 self.parse_and_emit_cursor(&payload[CursorSet::SIZE..])
@@ -269,29 +259,25 @@ impl CursorChannel {
                     let y = u16::from_le_bytes([payload[2], payload[3]]);
                     debug!("cursor: move: ({},{})", x, y);
 
-                    self.event_tx
-                        .send(ChannelEvent::CursorPosition {
+                    self.events
+                        .emit(ChannelEvent::CursorPosition {
                             x,
                             y,
                             visible: true,
                         })
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 }
             }
 
             cursor_server::HIDE => {
                 info!("cursor: hide");
-                self.event_tx
-                    .send(ChannelEvent::CursorPosition {
+                self.events
+                    .emit(ChannelEvent::CursorPosition {
                         x: 0,
                         y: 0,
                         visible: false,
                     })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                    .await;
             }
 
             cursor_server::RESET => {
@@ -396,11 +382,7 @@ impl CursorChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
 
             unknown => {
@@ -451,11 +433,9 @@ impl CursorChannel {
         if from_cache {
             if let Some(img) = self.cursor_cache.get(&header.unique_id) {
                 debug!("cursor: using cached cursor id={}", header.unique_id);
-                self.event_tx
-                    .send(ChannelEvent::CursorShape(img.clone()))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events
+                    .emit(ChannelEvent::CursorShape(img.clone()))
+                    .await;
             } else {
                 warn!(
                     "cursor: cache miss for id={} (cache has {} entries)",
@@ -474,11 +454,7 @@ impl CursorChannel {
                 debug!("cursor: caching cursor id={}", header.unique_id);
                 self.cursor_cache.insert(header.unique_id, img.clone());
             }
-            self.event_tx
-                .send(ChannelEvent::CursorShape(img))
-                .await
-                .ok();
-            self.repaint_notify.notify_one();
+            self.events.emit(ChannelEvent::CursorShape(img)).await;
         }
     }
 

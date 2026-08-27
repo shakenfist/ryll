@@ -213,9 +213,12 @@ mod linux {
 
     /// Read the clock-ticks-per-second from sysconf.
     fn clk_tck() -> f64 {
-        // SAFETY: sysconf is async-signal-safe and has no unsafe
-        // preconditions beyond a valid constant argument.
+        // SAFETY: `_SC_CLK_TCK` is a valid libc name constant, and
+        // sysconf takes no pointers and returns a plain c_long, so
+        // there is no aliasing or lifetime obligation to uphold.
         let v = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        // `<= 0` covers both the error return (-1) and a name the
+        // implementation leaves unset (0).
         if v <= 0 {
             100.0
         } else {
@@ -224,9 +227,30 @@ mod linux {
     }
 
     /// Snapshot tick counts for the process and all its threads.
-    struct Snapshot {
-        proc_stat: ProcStat,
-        threads: Vec<(u64, String, u64, u64)>, // (tid, name, utime, stime)
+    pub(super) struct Snapshot {
+        pub(super) proc_stat: ProcStat,
+        pub(super) threads: Vec<(u64, String, u64, u64)>, // (tid, name, utime, stime)
+    }
+
+    /// The /proc values that are read once rather than differenced.
+    /// Passed into `diff_snapshots` so that function performs no
+    /// I/O and is unit-testable without a live /proc.
+    pub(super) struct ProcReadings {
+        /// VmRSS in kB; 0 when /proc/self/status was unreadable.
+        pub(super) rss_kb: u64,
+        /// VmSize in kB; 0 when /proc/self/status was unreadable.
+        pub(super) vm_size_kb: u64,
+        /// Seconds since boot from /proc/uptime, or None when that
+        /// read failed — process uptime is then reported as 0.
+        pub(super) sys_uptime_secs: Option<f64>,
+    }
+
+    /// CPU percentage for a tick delta: ticks divided by `tck`
+    /// (clock ticks per second) gives CPU seconds, divided again by
+    /// the wall-clock window. `window_secs` must be non-zero — see
+    /// the clamp in `diff_snapshots`.
+    fn cpu_percent(delta_ticks: u64, tck: f64, window_secs: f64) -> f64 {
+        delta_ticks as f64 / tck / window_secs * 100.0
     }
 
     fn take_snapshot() -> Option<Snapshot> {
@@ -299,67 +323,89 @@ mod linux {
             }
         };
 
-        let window_secs = window.as_secs_f64();
+        // Memory is a current value, not a delta, so it is read once
+        // at the end of the window.
+        let status_txt = read_proc("/proc/self/status").unwrap_or_default();
+        let readings = ProcReadings {
+            rss_kb: parse_proc_status_kb(&status_txt, "VmRSS:").unwrap_or(0),
+            vm_size_kb: parse_proc_status_kb(&status_txt, "VmSize:").unwrap_or(0),
+            sys_uptime_secs: proc_uptime_secs(),
+        };
+
+        diff_snapshots(&snap_a, &snap_b, window, tck, &readings)
+    }
+
+    /// Turn two snapshots taken `window` apart into a
+    /// `RuntimeMetrics::Linux`. Pure: no I/O, no sleeping, so the
+    /// delta arithmetic is unit-testable with synthetic snapshots.
+    ///
+    /// `tck` is clock ticks per second (from `clk_tck`, never zero).
+    /// Saturating subtraction covers counters that appear to move
+    /// backwards, which /proc should never do but which must not
+    /// panic if it does.
+    pub(super) fn diff_snapshots(
+        before: &Snapshot,
+        after: &Snapshot,
+        window: Duration,
+        tck: f64,
+        readings: &ProcReadings,
+    ) -> RuntimeMetrics {
+        // `window.as_micros().max(1)` mirrors the macOS guard: an
+        // unclamped zero window divides by zero, yielding NaN or
+        // infinity and — via NaN — a non-total sort order below,
+        // which the standard sort detects and panics on.
+        let window_secs = window.as_micros().max(1) as f64 / 1_000_000.0;
 
         // Process-level CPU%.
-        let proc_utime_delta = snap_b
-            .proc_stat
-            .utime
-            .saturating_sub(snap_a.proc_stat.utime);
-        let proc_stime_delta = snap_b
-            .proc_stat
-            .stime
-            .saturating_sub(snap_a.proc_stat.stime);
-        let proc_cpu = (proc_utime_delta + proc_stime_delta) as f64 / tck / window_secs * 100.0;
-
-        // Memory from /proc/self/status (use second snapshot for
-        // current values).
-        let status_txt = read_proc("/proc/self/status").unwrap_or_default();
-        let rss_kb = parse_proc_status_kb(&status_txt, "VmRSS:").unwrap_or(0);
-        let vm_size_kb = parse_proc_status_kb(&status_txt, "VmSize:").unwrap_or(0);
+        let proc_utime_delta = after.proc_stat.utime.saturating_sub(before.proc_stat.utime);
+        let proc_stime_delta = after.proc_stat.stime.saturating_sub(before.proc_stat.stime);
+        let proc_cpu = cpu_percent(proc_utime_delta + proc_stime_delta, tck, window_secs);
 
         // Process uptime: /proc/uptime gives seconds since boot;
         // starttime is ticks since boot, so
         // uptime = sys_uptime - starttime/clk_tck.
-        let uptime_secs = if let Some(sys_up) = proc_uptime_secs() {
-            let start_secs = snap_b.proc_stat.starttime as f64 / tck;
-            (sys_up - start_secs).max(0.0)
-        } else {
-            0.0
+        let uptime_secs = match readings.sys_uptime_secs {
+            Some(sys_up) => (sys_up - after.proc_stat.starttime as f64 / tck).max(0.0),
+            None => 0.0,
         };
 
         // Per-thread CPU%.
-        // Build a lookup from snap_a tid → (utime, stime).
-        let mut a_map: std::collections::HashMap<u64, (u64, u64)> =
-            std::collections::HashMap::new();
-        for (tid, _, ut, st) in &snap_a.threads {
-            a_map.insert(*tid, (*ut, *st));
-        }
+        // Build a lookup from the first snapshot's tid → (utime, stime).
+        let before_by_tid: std::collections::HashMap<u64, (u64, u64)> = before
+            .threads
+            .iter()
+            .map(|(tid, _, ut, st)| (*tid, (*ut, *st)))
+            .collect();
 
-        let mut threads = Vec::new();
-        for (tid, name, ut_b, st_b) in snap_b.threads {
-            let (ut_a, st_a) = a_map.get(&tid).copied().unwrap_or((ut_b, st_b));
+        let mut threads = Vec::with_capacity(after.threads.len());
+        for (tid, name, ut_b, st_b) in &after.threads {
+            // A thread absent from the first snapshot started
+            // mid-window: baseline it against itself so it reports
+            // 0% rather than its whole accumulated CPU.
+            let (ut_a, st_a) = before_by_tid.get(tid).copied().unwrap_or((*ut_b, *st_b));
             let delta = ut_b.saturating_sub(ut_a) + st_b.saturating_sub(st_a);
-            let cpu_percent = delta as f64 / tck / window_secs * 100.0;
             threads.push(ThreadMetrics {
-                tid,
-                name,
-                cpu_percent,
+                tid: *tid,
+                name: name.clone(),
+                cpu_percent: cpu_percent(delta, tck, window_secs),
             });
         }
-        // Sort by descending CPU% for readability.
+        // Sort by descending CPU% for readability, tid ascending to
+        // break ties so the JSON does not depend on readdir order.
+        // `total_cmp` is a total order for every f64, including the
+        // NaN that `partial_cmp` could not order.
         threads.sort_by(|a, b| {
             b.cpu_percent
-                .partial_cmp(&a.cpu_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.cpu_percent)
+                .then_with(|| a.tid.cmp(&b.tid))
         });
 
         RuntimeMetrics::Linux {
             sample_window_ms: window.as_millis() as u64,
             process: ProcessMetrics {
                 cpu_percent: proc_cpu,
-                rss_kb,
-                vm_size_kb,
+                rss_kb: readings.rss_kb,
+                vm_size_kb: readings.vm_size_kb,
                 uptime_secs,
             },
             threads,
@@ -925,6 +971,190 @@ VmData:\t   65536 kB\n\
         assert_eq!(linux::parse_proc_status_kb(status, "VmPeak:"), Some(204800));
         // Missing key returns None.
         assert_eq!(linux::parse_proc_status_kb(status, "VmSwap:"), None);
+    }
+
+    // ── diff_snapshots ─────────────────────────────────────
+    //
+    // The two-snapshot delta arithmetic is exercised directly with
+    // synthetic snapshots — no /proc read and no sleep — so these
+    // cover the cases a live sample cannot be made to produce.
+
+    /// Ticks per second used by the diff tests, standing in for
+    /// `clk_tck()`; 100 is the near-universal Linux value.
+    #[cfg(target_os = "linux")]
+    const TEST_TCK: f64 = 100.0;
+
+    #[cfg(target_os = "linux")]
+    fn snap(proc_ticks: (u64, u64), threads: &[(u64, &str, u64, u64)]) -> linux::Snapshot {
+        linux::Snapshot {
+            proc_stat: linux::ProcStat {
+                comm: "ryll".to_string(),
+                utime: proc_ticks.0,
+                stime: proc_ticks.1,
+                // 1000 ticks = 10 s after boot at TEST_TCK.
+                starttime: 1000,
+            },
+            threads: threads
+                .iter()
+                .map(|(tid, name, ut, st)| (*tid, name.to_string(), *ut, *st))
+                .collect(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn readings(sys_uptime_secs: Option<f64>) -> linux::ProcReadings {
+        linux::ProcReadings {
+            rss_kb: 2048,
+            vm_size_kb: 8192,
+            sys_uptime_secs,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn unwrap_linux(m: RuntimeMetrics) -> (ProcessMetrics, Vec<ThreadMetrics>) {
+        match m {
+            RuntimeMetrics::Linux {
+                process, threads, ..
+            } => (process, threads),
+            other => panic!("expected the Linux variant, got {:?}", other),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_diff_snapshots_basic() {
+        // 1 s window at 100 ticks/s. Process burns 50 user + 10
+        // system ticks = 0.6 s of CPU = 60%. Threads: tid 1 burns
+        // 40 ticks (40%), tid 2 burns 10 user + 10 system (20%).
+        let before = snap((1000, 500), &[(1, "main", 100, 0), (2, "worker", 200, 50)]);
+        let after = snap((1050, 510), &[(1, "main", 140, 0), (2, "worker", 210, 60)]);
+        let m = linux::diff_snapshots(
+            &before,
+            &after,
+            Duration::from_secs(1),
+            TEST_TCK,
+            &readings(Some(100.0)),
+        );
+        match &m {
+            RuntimeMetrics::Linux {
+                sample_window_ms,
+                platform,
+                ..
+            } => {
+                assert_eq!(*sample_window_ms, 1000);
+                assert_eq!(platform, "linux");
+            }
+            other => panic!("expected the Linux variant, got {:?}", other),
+        }
+        let (process, threads) = unwrap_linux(m);
+        assert!(
+            (process.cpu_percent - 60.0).abs() < 0.01,
+            "expected ~60%, got {}",
+            process.cpu_percent
+        );
+        assert_eq!(process.rss_kb, 2048);
+        assert_eq!(process.vm_size_kb, 8192);
+        // Boot was 100 s ago, the process started 10 s after boot.
+        assert!(
+            (process.uptime_secs - 90.0).abs() < 0.01,
+            "expected ~90 s uptime, got {}",
+            process.uptime_secs
+        );
+        // Sorted by descending CPU%.
+        assert_eq!(threads.len(), 2);
+        assert_eq!(threads[0].tid, 1);
+        assert_eq!(threads[0].name, "main");
+        assert!((threads[0].cpu_percent - 40.0).abs() < 0.01);
+        assert_eq!(threads[1].tid, 2);
+        assert!((threads[1].cpu_percent - 20.0).abs() < 0.01);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_diff_snapshots_counter_goes_backwards() {
+        // /proc counters are monotonic in practice; if one appears
+        // to rewind, saturating_sub must yield 0% rather than
+        // wrapping to an enormous delta or panicking.
+        let before = snap((1000, 500), &[(1, "main", 100, 100)]);
+        let after = snap((900, 400), &[(1, "main", 90, 90)]);
+        let m = linux::diff_snapshots(
+            &before,
+            &after,
+            Duration::from_secs(1),
+            TEST_TCK,
+            &readings(None),
+        );
+        let (process, threads) = unwrap_linux(m);
+        assert_eq!(process.cpu_percent, 0.0);
+        // No /proc/uptime reading available: uptime reports 0.
+        assert_eq!(process.uptime_secs, 0.0);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].cpu_percent, 0.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_diff_snapshots_new_thread() {
+        // A thread that appears only in the second snapshot started
+        // mid-window: report 0%, not the whole of its accumulated
+        // CPU attributed to this window.
+        let before = snap((1000, 0), &[(1, "main", 100, 0)]);
+        let after = snap(
+            (1050, 0),
+            &[(1, "main", 150, 0), (99, "newcomer", 9999, 9999)],
+        );
+        let m = linux::diff_snapshots(
+            &before,
+            &after,
+            Duration::from_secs(1),
+            TEST_TCK,
+            &readings(None),
+        );
+        let (_, threads) = unwrap_linux(m);
+        assert_eq!(threads.len(), 2);
+        let newcomer = threads
+            .iter()
+            .find(|t| t.tid == 99)
+            .expect("newcomer present");
+        assert_eq!(newcomer.cpu_percent, 0.0);
+        assert_eq!(newcomer.name, "newcomer");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_linux_diff_snapshots_zero_window() {
+        // A zero-duration window must not divide by zero: NaN
+        // percentages make the descending-CPU sort a non-total
+        // order, which the standard sort panics on. The divisor is
+        // clamped to 1 µs so every percentage stays finite.
+        let before = snap(
+            (1000, 0),
+            &[(1, "a", 0, 0), (2, "b", 10, 0), (3, "c", 0, 0)],
+        );
+        let after = snap(
+            (1050, 0),
+            &[(1, "a", 5, 0), (2, "b", 10, 0), (3, "c", 7, 0)],
+        );
+        let m = linux::diff_snapshots(
+            &before,
+            &after,
+            Duration::ZERO,
+            TEST_TCK,
+            &readings(Some(100.0)),
+        );
+        let (process, threads) = unwrap_linux(m);
+        assert!(
+            process.cpu_percent.is_finite(),
+            "process percent must be finite: {}",
+            process.cpu_percent
+        );
+        assert_eq!(threads.len(), 3);
+        assert!(threads.iter().all(|t| t.cpu_percent.is_finite()));
+        // Still sorted descending, with the idle threads tie-broken
+        // by ascending tid.
+        assert_eq!(threads[0].tid, 3);
+        assert_eq!(threads[1].tid, 1);
+        assert_eq!(threads[2].tid, 2);
     }
 
     // ── RuntimeMetrics serialisation ───────────────────────

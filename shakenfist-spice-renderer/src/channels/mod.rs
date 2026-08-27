@@ -20,8 +20,12 @@ pub use volume::VolumeControl;
 pub use webdav::WebdavChannel;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, Notify};
+use tracing::warn;
 
 use crate::notification::NotificationEntry;
 use crate::usb::UsbDeviceInfo;
@@ -36,6 +40,62 @@ use shakenfist_spice_protocol::ChannelType;
 pub enum RequestId {
     Int(i64),
     Str(String),
+}
+
+/// Where every channel hands a `ChannelEvent` to the renderer.
+///
+/// An event only reaches the screen if the renderer is woken after it is
+/// queued. The queue and the wake-up used to be two separate fields, paired
+/// by hand at every send site, so a newly added event that forgot the
+/// wake-up would leave the UI stale with nothing to diagnose. Binding them
+/// into one type makes the wake-up part of sending rather than something a
+/// call site has to remember.
+#[derive(Clone)]
+pub struct EventSink {
+    tx: mpsc::Sender<ChannelEvent>,
+    repaint: Arc<Notify>,
+    send_timeout: Option<Duration>,
+}
+
+impl EventSink {
+    pub fn new(tx: mpsc::Sender<ChannelEvent>, repaint: Arc<Notify>) -> Self {
+        EventSink {
+            tx,
+            repaint,
+            send_timeout: None,
+        }
+    }
+
+    /// Abandon a send that blocks for longer than `limit`, warning instead of
+    /// hanging. Off by default; see `MAIN_EVENT_SEND_TIMEOUT` in `session.rs`
+    /// for why the main channel opts in.
+    pub fn with_send_timeout(mut self, limit: Duration) -> Self {
+        self.send_timeout = Some(limit);
+        self
+    }
+
+    /// Queue `event` and wake the renderer. A closed receiver means the
+    /// renderer is already shutting down, which is not worth reporting.
+    pub async fn emit(&self, event: ChannelEvent) {
+        match self.send_timeout {
+            None => {
+                self.tx.send(event).await.ok();
+            }
+            Some(limit) => {
+                if tokio::time::timeout(limit, self.tx.send(event))
+                    .await
+                    .is_err()
+                {
+                    warn!(
+                        "channels: event send timed out after {:?}; \
+                         renderer event consumer is wedged or starved",
+                        limit
+                    );
+                }
+            }
+        }
+        self.repaint.notify_one();
+    }
 }
 
 /// Events sent from channels to the main application
