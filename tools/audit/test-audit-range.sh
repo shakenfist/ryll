@@ -129,6 +129,17 @@ fi
 git -C "$REPO" config user.email audit@example.com
 git -C "$REPO" config user.name 'Audit Test'
 
+# The same belt-and-braces treatment for the audit bounds.  The unset
+# above is what fixes the bug; this is what keeps it fixed.  Every
+# assertion below this line reasons about a range audit-range.sh
+# resolves for itself, so an edit that moves the unset after this
+# point, or a third bound variable added to audit-range.sh and not
+# added there, would silently test the wrong range again.
+if [[ -n "${AUDIT_BASE:-}" || -n "${AUDIT_HEAD:-}" ]]; then
+    red "FAIL: AUDIT_BASE/AUDIT_HEAD still set; the default-range assertions would test the wrong range"
+    exit 1
+fi
+
 # --- an empty repository, before any commit exists ---------------------
 out="$(run_init)"
 assert_contains "empty repository is a NOTE, not a failure" "exit:0" "$out"

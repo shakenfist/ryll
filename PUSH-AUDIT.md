@@ -129,6 +129,13 @@ are not audited — commit first.
 `tools/audit/test-audit-range.sh` pins all of that against
 a scratch repository, and runs in CI beside shellcheck.
 
+The wave 1b style checks have the same failure mode — a
+scan pointed at a directory that no longer exists prints
+exactly what a clean scan prints — and
+`tools/audit/test-wave1-style.sh` pins them the same way,
+against fixture sources with known answers. Both run as
+pre-commit hooks on any change under `tools/audit/`.
+
 Three items in the management checklist at the end read
 differently here. Findings become their own PR against
 `develop` rather than fixes on an unpushed branch; the
