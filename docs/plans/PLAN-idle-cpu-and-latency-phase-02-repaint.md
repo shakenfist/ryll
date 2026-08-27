@@ -188,7 +188,21 @@ rather than glossed.
 Method is phase 1's: sum `utime + stime` from
 `/proc/<pid>/task/<tid>/stat` across every thread, before
 and after a timed window, converted to percent of one core
-at `CLK_TCK` = 100.
+at `CLK_TCK` = 100.  That is now
+[`tools/measure-idle-cpu.sh`](https://github.com/shakenfist/ryll/blob/develop/tools/measure-idle-cpu.sh)
+rather than a recipe, so the next person to make a CPU
+claim about ryll can reproduce these numbers instead of
+quoting them:
+
+```
+tools/measure-idle-cpu.sh "$(pgrep -f 'ryll --direct')" 60
+```
+
+It reports per-thread-group and per-thread figures as well
+as the total, which matters here: the whole finding was
+that the cost sat in 16 llvmpipe rasteriser threads rather
+than in anything `top` would show against the main
+thread.
 
 ### Idle, connected, no input
 
