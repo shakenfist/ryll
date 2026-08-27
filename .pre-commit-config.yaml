@@ -38,6 +38,13 @@ repos:
         pass_filenames: false
         files: ^tools/audit/
 
+      - id: wave1-style-test
+        name: wave 1b style check smoke test
+        entry: ./tools/audit/test-wave1-style.sh
+        language: script
+        pass_filenames: false
+        files: ^tools/audit/
+
   - repo: local
     hooks:
       - id: bidi-check

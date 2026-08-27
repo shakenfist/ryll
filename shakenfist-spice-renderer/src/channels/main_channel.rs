@@ -412,111 +412,15 @@ impl MainChannel {
             Some(i)
         };
 
-        // K1 watchdog. Spawns a plain std::thread (NOT a tokio
-        // task — by design: if tokio's runtime is somehow
-        // wedged, this thread is unaffected) that monitors the
-        // heartbeat timestamp. If main's heartbeat goes silent
-        // for >5 s, the watchdog shells out to `gdb --batch -p
-        // $$ -ex 'thread apply all bt'` to capture all-thread
-        // backtraces at the moment of the freeze, *before* the
-        // server-side rcc disconnect tears everything down.
-        // Output lands in /tmp with a timestamped filename. The
-        // watchdog fires once per silence period to avoid
-        // multiple dumps for the same hang.
-        //
-        // Opt-in via RYLL_WATCHDOG_GDB=1. Requires `gdb` on
-        // PATH and either a permissive `kernel.yama.ptrace_scope`
-        // (=0) or `cap_sys_ptrace`.
+        // The watchdog thread and its heartbeat.  The store side stays
+        // here (see the select loop below); the thread itself lives in
+        // watchdog.rs, so its deliberate raw-stderr reporting -- and the
+        // wave 1 exemption marker justifying it -- scope to that module
+        // rather than to all of this file.  Note that naming the marker
+        // here in full would exempt this file again, which is the whole
+        // thing the move was for.
         let last_heartbeat_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        if std::env::var("RYLL_WATCHDOG_GDB")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
-            let hb = last_heartbeat_ms.clone();
-            let pid = std::process::id();
-            info!(
-                "main: K1 watchdog enabled (pid {}); will dump backtraces if heartbeat silent >5 s",
-                pid
-            );
-            std::thread::Builder::new()
-                .name("ryll-watchdog".into())
-                .spawn(move || {
-                    use std::sync::atomic::Ordering;
-                    let mut fired = false;
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        let last = hb.load(Ordering::Relaxed);
-                        if last == 0 {
-                            continue;
-                        }
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        let gap_ms = now.saturating_sub(last);
-                        if gap_ms > 5_000 {
-                            if !fired {
-                                fired = true;
-                                let bt_path = format!("/tmp/ryll-watchdog-bt-{}-{}.txt", pid, now);
-                                eprintln!(
-                                    "ryll-watchdog: main heartbeat silent for {} ms, \
-                                     capturing all-thread backtrace via gdb -> {}",
-                                    gap_ms, bt_path
-                                );
-                                let bt_file = match std::fs::File::create(&bt_path) {
-                                    Ok(f) => f,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "ryll-watchdog: could not create {}: {}",
-                                            bt_path, e
-                                        );
-                                        continue;
-                                    }
-                                };
-                                let status = std::process::Command::new("gdb")
-                                    .args([
-                                        "--batch",
-                                        "-p",
-                                        &pid.to_string(),
-                                        "-ex",
-                                        "set pagination off",
-                                        "-ex",
-                                        "thread apply all bt",
-                                        "-ex",
-                                        "detach",
-                                        "-ex",
-                                        "quit",
-                                    ])
-                                    .stdout(bt_file)
-                                    .stderr(std::process::Stdio::null())
-                                    .status();
-                                match status {
-                                    Ok(s) if s.success() => {
-                                        eprintln!(
-                                            "ryll-watchdog: backtrace captured to {}",
-                                            bt_path
-                                        );
-                                    }
-                                    Ok(s) => {
-                                        eprintln!(
-                                            "ryll-watchdog: gdb exited with status {:?}; \
-                                             check {} for partial output",
-                                            s.code(),
-                                            bt_path
-                                        );
-                                    }
-                                    Err(e) => {
-                                        eprintln!("ryll-watchdog: failed to spawn gdb: {}", e);
-                                    }
-                                }
-                            }
-                        } else {
-                            fired = false;
-                        }
-                    }
-                })
-                .expect("failed to spawn ryll-watchdog thread");
-        }
+        super::watchdog::spawn_if_enabled(&last_heartbeat_ms);
         // Diagnostic heartbeat for the K1 hang investigation
         // (sessions 001b/c/d/f/g). main's task has been observed
         // to silently stop polling some time after T+465 across
