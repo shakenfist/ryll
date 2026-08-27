@@ -166,6 +166,15 @@ Exit codes:
 | 4    | raw `println!`/`eprintln!` found            |
 | 5    | could not `cd` to the repository root       |
 | 6    | audit range unusable, or empty by default   |
+| 7    | a style check could not find what it scans  |
+
+Code 7 is deliberately not 4.  Four means the code under
+audit is wrong; seven means the audit is — the workspace
+members would not parse, or the channels directory has
+moved again.  A check that cannot find its subject
+otherwise reports success, which is how wave 1's only
+fatal style check came to miss 46% of the workspace for
+months without anyone noticing.
 
 `wave2-mechanical.sh` shares codes 5 and 6 and otherwise
 exits 0; it reports findings as text rather than as a

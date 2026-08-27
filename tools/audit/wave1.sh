@@ -18,6 +18,15 @@
 #      one -- wave1 hard-fails there, where wave2-mechanical.sh only
 #      warns; a build that passed on an empty range proved nothing
 #      about the diff.
+#   7  a wave 1b check could not locate what it scans: the
+#      workspace members would not parse out of Cargo.toml, or the
+#      channels directory has moved again.  Kept distinct from 4 on
+#      purpose -- 4 means the code under audit is wrong, 7 means the
+#      audit is.  A caller that cannot tell those apart will
+#      eventually "fix" the wrong one.  Note that 7 makes a
+#      previously advisory section fatal: a check that cannot find
+#      its subject reports success, which is exactly how the
+#      log_message check stayed broken for months.
 #
 # Style conformance is intentionally kept narrow here — only the
 # fully-mechanical checks live in this script.  Anything needing
@@ -45,6 +54,11 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 # diff-scoped check below report nothing.
 # shellcheck source=tools/audit/audit-range.sh
 . "$SCRIPT_DIR/audit-range.sh"
+
+# The two wave 1b style checks, in a sourceable file so
+# tools/audit/test-wave1-style.sh can exercise them against fixtures.
+# shellcheck source=tools/audit/wave1-checks.sh
+. "$SCRIPT_DIR/wave1-checks.sh"
 audit_range_init
 
 bold "=== wave 1a: pre-commit ==="
@@ -91,89 +105,25 @@ bold "=== wave 1b: mechanical style checks ==="
 #    print in a file is the expected pattern and the marker
 #    documents the rationale inline.
 #
-#    We use a Python one-liner to filter: for each grep hit
-#    (format "path:lineno:text"), check whether the source
-#    file contains the marker anywhere; if so, skip it.
-#    The directories to scan come from the workspace `members`
-#    list in Cargo.toml, not from a list maintained here.  A
-#    hardcoded list was silently wrong for months: when the crate
-#    extraction moved most of the code into
-#    shakenfist-spice-renderer, this check -- the only style check
-#    that is fatal rather than advisory -- kept scanning the four
-#    crates it was written for and stopped seeing 46% of the
-#    workspace, renderer and webrtc included.  Deriving the list
-#    means adding a crate to the workspace extends the check.
-mapfile -t MEMBER_SRC_DIRS < <(
-    sed -n '/^\[workspace\]/,/^\[[^w]/p' Cargo.toml \
-        | sed -n 's/^[[:space:]]*"\([^"]*\)",\?[[:space:]]*$/\1\/src/p'
-)
+#    The filtering -- both the marker and the exclusion of
+#    test-only code -- lives in filter-println-hits.py beside this
+#    script, and the scan directories come from the workspace
+#    `members` list rather than a list maintained here.  Both moved
+#    out of this file so tools/audit/test-wave1-style.sh can call
+#    them against fixtures; see wave1-checks.sh for why each one
+#    reads the way it does.
+mapfile -t MEMBER_SRC_DIRS < <(workspace_member_src_dirs Cargo.toml)
 #    A parse failure here must be loud.  An empty list would make
 #    the check pass vacuously, which is the exact failure being
 #    fixed.
 if [[ ${#MEMBER_SRC_DIRS[@]} -eq 0 ]]; then
     red "FAIL: could not read workspace members from Cargo.toml"
-    exit 4
+    exit 7
 fi
 PRINTLN_HITS=$(grep -rn --include='*.rs' -E '^[[:space:]]*(println|eprintln)!' \
     "${MEMBER_SRC_DIRS[@]}" 2>/dev/null \
     | grep -v '/tests/' \
-    | python3 -c "
-import re
-import sys
-
-
-def test_region_lines(path):
-    '''Line numbers (1-based) that lie in test-only code.
-
-    Two shapes count.  A #[cfg(test)] module, tracked to its closing
-    brace, and a #[test] function, tracked the same way.  The old
-    filter grepped each *hit line* for #[cfg(test)], which cannot
-    match: the attribute is never on the same line as the print, so
-    every test diagnostic reached the fatal check as a false
-    positive.
-    '''
-    lines = open(path).read().splitlines()
-    marked = set()
-    i = 0
-    while i < len(lines):
-        if re.match(r'\s*#\[(cfg\(test\)|test)\]', lines[i]):
-            # Find the opening brace of the item this attribute is on,
-            # then walk to its matching close.
-            j = i
-            while j < len(lines) and '{' not in lines[j]:
-                j += 1
-            depth = 0
-            while j < len(lines):
-                depth += lines[j].count('{') - lines[j].count('}')
-                marked.add(j + 1)
-                if depth <= 0:
-                    break
-                j += 1
-            i = j
-        i += 1
-    return marked
-
-
-cache = {}
-for line in sys.stdin:
-    parts = line.split(':', 2)
-    if len(parts) >= 2:
-        path = parts[0]
-        try:
-            lineno = int(parts[1])
-        except ValueError:
-            lineno = -1
-        try:
-            if 'audit-allow-println' in open(path).read():
-                continue
-            if path not in cache:
-                cache[path] = test_region_lines(path)
-            if lineno in cache[path]:
-                continue
-        except OSError:
-            pass
-    print(line, end='')
-" \
+    | python3 "$SCRIPT_DIR/filter-println-hits.py" \
     || true)
 if [[ -n "$PRINTLN_HITS" ]]; then
     red "FAIL: raw println!/eprintln! found:"
@@ -186,18 +136,14 @@ green "PASS: no raw println!/eprintln!"
 #    every channel handler that calls logging::log_message should have
 #    a verbosity check within the surrounding 5 lines.
 #
-#    Both halves of this check had gone stale.  It grepped
-#    ryll/src/channels/, a directory the crate extraction deleted --
-#    so it matched nothing and passed silently for months -- and it
-#    keyed on settings::is_verbose(), the convention all seven
-#    channels dropped in favour of the log_config.verbose field
-#    threaded in from settings::log_config().  Pointed at the right
-#    directory but still looking for is_verbose(), it would have
-#    called every one of them a violation.
+#    Both halves of this check had gone stale -- it scanned a
+#    directory the crate extraction deleted, and keyed on a
+#    convention all seven channels had dropped.  wave1-checks.sh
+#    carries the detail.
 CHANNELS_DIR=shakenfist-spice-renderer/src/channels
 if [[ ! -d $CHANNELS_DIR ]]; then
     red "FAIL: $CHANNELS_DIR does not exist; the log_message check has gone stale again"
-    exit 4
+    exit 7
 fi
 #    The awk below reads grep -B5 groups, which are separated by
 #    "--".  For each log_message line it asks whether any of the
@@ -208,25 +154,10 @@ fi
 #    guard above the call never counted -- and it printed only
 #    whatever hit happened to be last.  Every guarded site was a
 #    candidate to be reported and every site but one could not be.
-UNGUARDED=$(grep -rn -B5 'logging::log_message' "$CHANNELS_DIR" 2>/dev/null \
-    | awk '
-        /^--$/ { n = 0; next }
-        /logging::log_message/ {
-            guarded = 0
-            for (i = 1; i <= n; i++) {
-                if (buf[i] ~ /log_config\.(verbose|intimate)|is_verbose/) {
-                    guarded = 1
-                }
-            }
-            if (!guarded) print $0
-            n = 0
-            next
-        }
-        { buf[++n] = $0 }
-    ' \
-    || true)
-# The above heuristic is rough; only flag if ALL nearby is_verbose
-# checks are missing.  A more precise check is left to wave 2a.
+UNGUARDED=$(unguarded_log_messages "$CHANNELS_DIR")
+# Advisory: this heuristic has known false positives where one guard
+# wraps several calls (see unguarded_log_messages).  A precise check
+# would have to parse, and is left to wave 2a.
 if [[ -n "$UNGUARDED" ]]; then
     echo "ADVISORY: possibly-unguarded logging::log_message:"
     echo "$UNGUARDED"
