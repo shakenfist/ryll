@@ -199,7 +199,7 @@ guest). Out of scope for this plan.
 | 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete | 6d52665 |
 | 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete | 6d52665 |
 | 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete | 6d52665 |
-| 6. Push audit | [PLAN-idle-cpu-and-latency-phase-06-push-audit.md](PLAN-idle-cpu-and-latency-phase-06-push-audit.md) | Not started | — |
+| 6. Push audit | [PLAN-idle-cpu-and-latency-phase-06-push-audit.md](PLAN-idle-cpu-and-latency-phase-06-push-audit.md) | In progress | — |
 
 Phase 1 informs phase 2: if profiling shows logging is the
 dominant cost, swap their order.  *Profiling result: the
@@ -365,6 +365,158 @@ worth a look before release.  Recorded, not fixed: it is
 phase 4's design, not phase 2's, and changing it is outside
 what closing phase 2 authorises.
 
+### Items deferred from the push audit
+
+Phase 6 produced 21 findings.  Every one is fixed or
+declined below, which is what the phase's definition of
+done requires.  The findings table, with current locations
+and triage status, is in
+[the phase 6 plan](PLAN-idle-cpu-and-latency-phase-06-push-audit.md).
+
+**Fixed in #325.**
+
+* **T1** — `test-audit-range.sh` inherited `AUDIT_BASE` /
+  `AUDIT_HEAD`, so following `PUSH-AUDIT.md` failed wave 1.
+  Landed in #325.
+* **T5** — wave 1's fatal `println!` check scanned four
+  hardcoded crates and had stopped seeing 46% of the
+  workspace.  Landed in #325, along with the test-region
+  filter it depended on.
+* **T4** — the renderer watchdog's `eprintln!` calls are
+  deliberate (the tracing subscriber cannot be trusted when
+  the main thread is wedged) and now carry an
+  `audit-allow-println` marker.  Landed in #325.
+**Fixed in #327**, except T2 and T3, which folded into
+#325 because it already owned that file.
+
+* **T2, T3** — the unguarded-`log_message` check greps a
+  directory the crate extraction deleted, and keys on the
+  `is_verbose()` convention all seven channels abandoned.
+  Repointed at the renderer's channels and rewritten
+  against `log_config.verbose`.  The heuristic itself was
+  also inverted -- it cleared its flag on a guard and
+  re-set it on the `log_message` line that followed, so a
+  guard *above* a call, which is every guard in the
+  codebase, never counted -- and it reported at most one
+  site.  Both fixed.
+* **D1** — the 2 s `thread::sleep` in `BugReport::new` ran
+  on the egui UI thread.  Moved off it, and the comment
+  claiming the path is "gated on a file dialog" is deleted:
+  it was never true for `generate_bug_report`, which
+  resolves `--bug-report-dir`, `<capture>/bug-reports/`, or
+  `current_dir()`.
+
+  A note for anyone reading the finding rather than the
+  fix: the audit recommended `tokio::task::spawn_blocking`,
+  copying the two call sites that already use it.  That
+  would panic.  `eframe::run_native` is called outside any
+  tokio runtime, and every runtime in the GUI build is
+  created inside a `std::thread::spawn`, so there is no
+  runtime on the UI thread to spawn onto.  The pattern for
+  this side is a named `std::thread::Builder` writing into
+  a slot the UI polls, which
+  `PLAN-bugreport-trigger-snapshot-phase-02-snapshot.md:422`
+  already spells out — "not `tokio::spawn_blocking`".
+
+  Two things the finding did not mention turned up in the
+  doing.  No guard stopped a second bug report starting
+  while the first was sampling — all three submit paths
+  clear the dialog state immediately, so F12 was live again
+  at once; `pending_bug_report.is_some()` is now that
+  guard.  And deferring the report by two seconds would
+  have cropped `screenshot-region.png` from a frame two
+  seconds after the user drew the region, so the surface
+  pixels are copied at submit time.
+* **D2** — the PING handler emitted `Latency` before
+  writing PONG.  Moved below the PONG write.
+* **D3** — the status bar said `Latency:` for a
+  server-chosen inter-PING interval.  Relabelled *PING
+  interval*, and the sample now follows `Ping::read()` so a
+  truncated PING produces none.
+* **D4** — `sample()`'s unguarded `window_secs` divisor and
+  its non-total `partial_cmp` sort.  Fixed by mirroring the
+  macOS path, which already had the guard, `sort_by_key`
+  and a zero-window regression test.
+* **D6** — `libc` is dead in `ryll` (no `libc::` reference
+  remains) and was deleted there; the renderer's live copy
+  is gated `cfg(any(target_os = "linux", target_os =
+  "macos"))`.  Note the audit's original suggestion of
+  `cfg(target_os = "linux")` would have broken the macOS
+  build.
+* **A1** — the hand-paired `send_event(...)` /
+  `notify_one()` sites collapsed into a single `EventSink`
+  whose `emit()` does both, so a missed pairing can no
+  longer be written.  Three judgment agents found the
+  duplication independently and two proposed this fix.
+  **All three also reported the pairing complete, and it
+  was not.**  Implementing the fix turned up 62 event sends
+  against 59 notifies on `develop`: `main_channel.rs`
+  emitted `AgentConnected(true)` and `AgentConnected(false)`
+  with no notify at all, so the UI did not repaint on guest
+  agent connect or disconnect until the 1 Hz fallback
+  fired.  Low severity — bounded to a second of staleness —
+  but a real defect, and exactly the silent failure this
+  refactor makes unwriteable.  Worth recording that three
+  independent enumerations agreeing did not make the claim
+  true; the structural fix found what the reading did not.
+* **A2, A3, A4** — the `Notify as RepaintNotify` import
+  inconsistency, the twice-written CPU-percent formula, and
+  the `SAFETY` comment that justified an FFI call with
+  async-signal-safety, which is the wrong concept.
+* **B1, B5** — `linux::sample()` and the PING interval
+  computation were untestable because they were fused to
+  I/O and to a message-dispatch arm.  Extracted as pure
+  `diff_snapshots()` and `ping_interval_ms()` and unit
+  tested.
+
+**Declined, with reasons.**
+
+* **B2, B3, B4, B8** — remaining test gaps: adversarial
+  `/proc` inputs (truncated lines, non-numeric fields, no
+  parens), the bug-report ZIP test covering only the
+  `Unavailable` variant, and tests asserting on raw JSON
+  substrings rather than deserialising.  Declined for now:
+  every `/proc` failure path already degrades to
+  `RuntimeMetrics::unavailable` through `?` and `.ok()`
+  rather than panicking, so these are coverage gaps rather
+  than latent defects, and B1's extraction makes the
+  arithmetic they would guard testable directly.  Worth
+  revisiting if the metrics module grows.
+* **D7** — demoting protocol logging `info!` → `debug!` did
+  not shrink `/tmp/ryll.log`, because the file layer is
+  constructed only under `--verbose` and filtered at
+  `DEBUG`.  The demotion quieted non-verbose stderr, which
+  is where the CPU concern was.  The `EnvFilter` question
+  is already tracked as #313; declined here as a duplicate.
+
+**Already fixed before the audit ran.**
+
+* **B7** — playback gated `log_message` on
+  `settings::is_verbose()` while the other six channels did
+  not.  All seven have since converged on
+  `self.log_config.verbose`.  This is also why T3's
+  heuristic became a false-positive generator.
+
+### Bugs fixed during this work
+
+* The UI did not repaint when the guest agent connected or
+  disconnected.  `main_channel.rs` sent
+  `ChannelEvent::AgentConnected` twice without the paired
+  repaint notification, so the status bar showed the change
+  only when the 1 Hz fallback next fired.  Found while
+  implementing A1's `EventSink`, not by the audit passes
+  that read the same code.  Fixed by construction.
+
+Beyond that, the audit found no bug that phases 1-5
+introduced into shipped behaviour.  What it did find, and what #325 fixes,
+is that the audit harness itself had not been updated when
+the crates were split: three of wave 1's four range-scoped
+checks were pointed at paths that no longer existed, and
+the only check that can fail a build had stopped seeing
+46% of the workspace.  The remaining code findings are
+robustness and honesty fixes rather than defects with a
+reproducer, and are listed above.
+
 ### Future work
 
 * True keystroke-to-display latency measurement (would
@@ -377,9 +529,6 @@ what closing phase 2 authorises.
   collapsed to fewer tokio tasks (one task per channel
   may be overkill for sparse channels like cursor/inputs).
 
-### Bugs fixed during this work
-
-(To be filled in as we go.)
 
 ### Documentation index maintenance
 
