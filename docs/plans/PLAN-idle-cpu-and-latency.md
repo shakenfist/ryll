@@ -385,7 +385,13 @@ and triage status, is in
 * **T4** — the renderer watchdog's `eprintln!` calls are
   deliberate (the tracing subscriber cannot be trusted when
   the main thread is wedged) and now carry an
-  `audit-allow-println` marker.  Landed in #325.
+  `audit-allow-println` marker.  Review of #325 pointed out
+  that the marker exempts a whole file, so on
+  `main_channel.rs` it blinded the fatal print check to the
+  largest file in the crate the same PR exists to make
+  visible.  The watchdog moved to
+  `channels/watchdog.rs`, scoping the exemption from 1934
+  lines to about 130.  Landed in #325.
 **Fixed in #327**, except T2 and T3, which folded into
 #325 because it already owned that file.
 
