@@ -540,6 +540,12 @@ pub mod message_names {
     /// Used by the traffic viewer to annotate capability
     /// bitmask values with symbolic names.
     ///
+    /// Looks up `capabilities::DISPLAY_CAP_NAMES`, the single
+    /// source of truth for this mapping, rather than duplicating
+    /// it in a match arm here. See that table's doc comment for
+    /// why: a match arm here can silently omit a bit that a new
+    /// `DISPLAY_*` constant adds, with no compiler or test error.
+    ///
     /// # Example
     ///
     /// ```
@@ -550,18 +556,11 @@ pub mod message_names {
     /// );
     /// ```
     pub fn display_cap_name(bit: u8) -> Option<&'static str> {
-        match bit {
-            0 => Some("sized_stream"),
-            1 => Some("monitors_config"),
-            2 => Some("composite"),
-            3 => Some("a8_surface"),
-            4 => Some("stream_report"),
-            5 => Some("lz4_compression"),
-            8 => Some("multi_codec"),
-            9 => Some("codec_mjpeg"),
-            11 => Some("codec_h264"),
-            _ => None,
-        }
+        let mask = 1u32.checked_shl(bit as u32)?;
+        capabilities::DISPLAY_CAP_NAMES
+            .iter()
+            .find(|(cap, _)| *cap == mask)
+            .map(|(_, name)| *name)
     }
 }
 
@@ -890,6 +889,37 @@ mod tests {
             d & capabilities::DISPLAY_CODEC_H264,
             0,
             "DEFAULT_DISPLAY must include DISPLAY_CODEC_H264"
+        );
+    }
+
+    // The durable guard for Q2-6: every capability the client actually
+    // advertises in DEFAULT_DISPLAY must have a name, independent of
+    // which bits happen to be allocated today. Unlike a test that pins
+    // specific bit numbers (which passes as soon as those bits are
+    // named and says nothing about the next one), this walks every set
+    // bit in DEFAULT_DISPLAY and fails if any of them resolves to
+    // `None` -- so a future `DISPLAY_*` constant added to
+    // capabilities::DEFAULT_DISPLAY without a matching entry in
+    // capabilities::DISPLAY_CAP_NAMES breaks the build immediately,
+    // rather than shipping a traffic viewer that silently drops one of
+    // the client's own advertised capabilities.
+    #[test]
+    fn display_cap_name_covers_default_display() {
+        use crate::constants::capabilities;
+        let mut unnamed = Vec::new();
+        for bit in 0..32u8 {
+            let mask = 1u32 << bit;
+            if capabilities::DEFAULT_DISPLAY & mask != 0
+                && message_names::display_cap_name(bit).is_none()
+            {
+                unnamed.push(bit);
+            }
+        }
+        assert!(
+            unnamed.is_empty(),
+            "DEFAULT_DISPLAY sets bit(s) {unnamed:?} with no entry in \
+             capabilities::DISPLAY_CAP_NAMES -- the traffic viewer would \
+             render these as unlabelled bits"
         );
     }
 }
