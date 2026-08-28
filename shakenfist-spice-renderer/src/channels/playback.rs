@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 use super::volume::VolumeControl;
+use crate::opcode_counters::OpcodeCounters;
 use crate::{
     ByteCounter, LogConfig, NotificationEntry, NotificationSource, OpusPacketSink, TrafficSink,
 };
@@ -448,14 +449,9 @@ pub struct PlaybackChannel {
     /// reused across audio-session restarts so the counters are
     /// cumulative over the channel's lifetime.
     audio_counters: Arc<AudioCounters>,
-    /// Baseline per-opcode receive count.
-    messages_recv_by_opcode: BTreeMap<u16, u64>,
-    /// Baseline per-opcode send count.
-    messages_send_by_opcode: BTreeMap<u16, u64>,
-    /// Baseline last unknown opcode.
-    last_unknown_opcode: Option<u16>,
-    /// Baseline unknown-opcode count.
-    unknown_opcode_count: u64,
+    /// Bounded per-opcode message counters; flushed to the
+    /// snapshot by `update_snapshot`. See `OpcodeCounters`.
+    opcodes: OpcodeCounters,
     /// Per-session metadata for the currently-active audio
     /// session (Some between START and STOP).
     current_session: Option<crate::snapshots::PlaybackSessionInfo>,
@@ -526,10 +522,10 @@ impl PlaybackChannel {
             opus_sink,
             cancel,
             audio_counters: AudioCounters::new(),
-            messages_recv_by_opcode: BTreeMap::new(),
-            messages_send_by_opcode: BTreeMap::new(),
-            last_unknown_opcode: None,
-            unknown_opcode_count: 0,
+            opcodes: OpcodeCounters::new(
+                message_names::playback_server,
+                message_names::playback_client,
+            ),
             current_session: None,
             start_count: 0,
             stop_count: 0,
@@ -629,10 +625,11 @@ impl PlaybackChannel {
             self.buffer.drain(..total);
             let msg_type = header.message_type;
 
-            // Per-opcode recv counter (baseline addition; mirrors
-            // 4B's pattern). Bumped before dispatch so both known
-            // and unknown opcodes are counted uniformly.
-            *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+            // Counted before dispatch so both known and unknown
+            // opcodes reach the counters. Opcodes with no protocol
+            // name fold into the unknown-opcode fields rather than
+            // growing the map; see `OpcodeCounters`.
+            self.opcodes.record_recv(msg_type);
 
             if self.log_config.verbose {
                 logging::log_message(
@@ -862,8 +859,7 @@ impl PlaybackChannel {
                 }
                 _ => {
                     logging::log_unknown_once("playback", msg_type, &payload);
-                    self.unknown_opcode_count = self.unknown_opcode_count.saturating_add(1);
-                    self.last_unknown_opcode = Some(msg_type);
+                    self.opcodes.note_unknown(msg_type);
                 }
             }
         }
@@ -975,9 +971,8 @@ impl PlaybackChannel {
                 payload_size,
             );
         }
-        // Per-opcode send counter — single send path, single
-        // bump site (mirrors 4B's inputs/cursor/main pattern).
-        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Single send path, so this is the only send-count site.
+        self.opcodes.record_send(msg_type);
         match &mut self.stream {
             SpiceStream::Plain(s) => {
                 use tokio::io::AsyncWriteExt;
@@ -1016,10 +1011,7 @@ impl PlaybackChannel {
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
 
             // Baseline additions.
-            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
-            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
-            snap.last_unknown_opcode = self.last_unknown_opcode;
-            snap.unknown_opcode_count = self.unknown_opcode_count;
+            self.opcodes.publish_into(&mut *snap);
 
             // Per-session audio state.
             snap.current_session = self.current_session.clone();

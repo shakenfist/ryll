@@ -144,7 +144,15 @@ pub struct DecodeResult {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct DisplaySnapshot {
     pub image_cache_entries: usize,
+    /// The most recently used image-cache keys, MRU first, truncated
+    /// to `MAX_SNAPSHOT_IMAGE_CACHE_IDS` (see the display channel).
+    /// Not the full key set: the cache can hold hundreds of thousands
+    /// of entries and this field is rebuilt on every snapshot publish,
+    /// which is on the send path. `image_cache_entries` carries the
+    /// true total.
     pub image_cache_ids: Vec<u64>,
+    /// Total bytes of decoded pixel data currently held. Excludes the
+    /// per-entry container overhead the cache charges against its cap.
     pub image_cache_bytes: usize,
     pub recent_decodes: VecDeque<DecodeResult>,
     pub ack_generation: u32,
@@ -209,6 +217,27 @@ pub struct DisplaySnapshot {
     /// or socket-read when triaging a "video not keeping up" report.
     /// See `docs/plans/PLAN-video-keeping-up.md`.
     pub writer_dropped_count: u64,
+    /// Per-opcode receive counts since session start.
+    /// Maps server-opcode → number of messages received with
+    /// that opcode. Only opcodes this build has a protocol name
+    /// for get an entry; the rest fold into
+    /// `unknown_opcode_count`.
+    pub messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Per-opcode send counts since session start.
+    /// Maps client-opcode → number of messages sent with
+    /// that opcode.
+    pub messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
+    /// Most recent opcode received that was not handled by any
+    /// known match arm, or that this build has no name for.
+    pub last_unknown_opcode: Option<u16>,
+    /// Total count of unrecognised opcodes received since
+    /// session start.
+    pub unknown_opcode_count: u64,
+    /// Cumulative count of `STREAM_CREATE` messages refused
+    /// because `MAX_CONCURRENT_STREAMS` were already open. A
+    /// non-zero value means the server asked for more concurrent
+    /// video streams than the client will carry decoders for.
+    pub streams_rejected_total: u64,
     /// Currently-open SPICE video streams (one entry per active
     /// `STREAM_CREATE`). Empty when the server has not promoted
     /// any region to a stream. See `StreamSnapshot`.
@@ -523,7 +552,9 @@ pub struct MainSnapshot {
     /// Number of REPLY-eligible requests sent without a matching
     /// REPLY yet. Increments on send; decrements (saturating)
     /// on REPLY receipt. Persistently > 0 means the agent is
-    /// wedged.
+    /// wedged. Saturates at `MAX_OUTSTANDING_AGENT_REQUESTS`
+    /// (see the main channel), so the ceiling value means "at
+    /// least that many", not exactly that many.
     pub outstanding_agent_request_count: u32,
 }
 
@@ -685,14 +716,16 @@ pub struct RedirectedDevice {
     pub device_class: u8,
     /// Session-relative seconds when the device was connected.
     pub attached_at_secs: f64,
-    /// Bytes sent to the guest for this device (placeholder;
-    /// per-device byte accounting not yet implemented).
-    // TODO: track per-device byte counts.
+    /// usbredir-protocol bytes sent toward the guest for this
+    /// device since it was connected, counted as framed usbredir
+    /// messages (header included) before SPICE framing and any
+    /// SPICEVMC compression. Reset per device attachment, so it
+    /// is not comparable with `UsbredirSnapshot::bytes_out`,
+    /// which counts SPICE wire bytes for the whole channel.
     pub bytes_to_guest: u64,
-    /// Bytes received from the guest for this device
-    /// (placeholder; per-device byte accounting not yet
-    /// implemented).
-    // TODO: track per-device byte counts.
+    /// usbredir-protocol bytes received from the guest for this
+    /// device since it was connected, counted after SPICEVMC
+    /// decompression. Same caveats as `bytes_to_guest`.
     pub bytes_from_guest: u64,
 }
 

@@ -205,6 +205,9 @@ shakenfist-spice-renderer/src/
 ├── mm_clock.rs          # Shared monotonic SPICE mm_time clock
 ├── notification.rs      # NotificationEntry, NotificationSource
 ├── notification_sink.rs # NotificationSink trait
+├── opcode_counters.rs   # OpcodeCounters: the bounded per-opcode
+│                        #   recv/send counters every channel publishes
+│                        #   into its snapshot
 ├── traffic.rs           # TrafficSink trait
 ├── log_config.rs        # LogConfig value type
 ├── snapshots.rs         # Channel-state snapshot types

@@ -12,6 +12,7 @@ use nusb::MaybeFuture;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::opcode_counters::OpcodeCounters;
 #[cfg(target_os = "linux")]
 use crate::usb::real::RealDevice;
 use crate::usb::virtual_msc::VirtualMsc;
@@ -78,11 +79,9 @@ pub struct UsbredirChannel {
     client_caps: u32,
     backend: Option<DeviceBackend>,
 
-    // Per-opcode counters (baseline additions, 4B pattern).
-    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
-    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
-    last_unknown_opcode: Option<u16>,
-    unknown_opcode_count: u64,
+    /// Bounded per-opcode message counters; flushed to the
+    /// snapshot by `update_snapshot`. See `OpcodeCounters`.
+    opcodes: OpcodeCounters,
 
     // USB device tracking.
     redirected_devices: Vec<RedirectedDevice>,
@@ -141,10 +140,10 @@ impl UsbredirChannel {
             server_caps: 0,
             client_caps: 0,
             backend: None,
-            messages_recv_by_opcode: std::collections::BTreeMap::new(),
-            messages_send_by_opcode: std::collections::BTreeMap::new(),
-            last_unknown_opcode: None,
-            unknown_opcode_count: 0,
+            opcodes: OpcodeCounters::new(
+                message_names::spicevmc_server,
+                message_names::spicevmc_client,
+            ),
             redirected_devices: Vec::new(),
             device_connect_total: 0,
             device_disconnect_total: 0,
@@ -276,9 +275,11 @@ impl UsbredirChannel {
             );
         }
 
-        // Increment per-opcode recv counter before dispatch so
-        // both known and unknown opcodes are counted uniformly.
-        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Count before dispatch so both known and unknown opcodes
+        // reach the counters. Opcodes with no protocol name fold into
+        // the unknown-opcode fields rather than growing the map; see
+        // `OpcodeCounters`.
+        self.opcodes.record_recv(msg_type);
 
         match msg_type {
             spicevmc_server::DATA => {
@@ -355,8 +356,7 @@ impl UsbredirChannel {
             }
             unknown => {
                 logging::log_unknown_once("usbredir", unknown, payload);
-                self.unknown_opcode_count += 1;
-                self.last_unknown_opcode = Some(unknown);
+                self.opcodes.note_unknown(unknown);
             }
         }
 
@@ -364,6 +364,7 @@ impl UsbredirChannel {
     }
 
     async fn handle_vmc_data(&mut self, payload: &[u8]) -> Result<()> {
+        self.record_device_bytes_from_guest(payload.len());
         self.parser.feed(payload);
 
         while let Some(msg) = self.parser.next_message()? {
@@ -848,12 +849,16 @@ impl UsbredirChannel {
             .await?;
 
         // Track the device in our active set.
+        // Byte counters start at zero and accumulate for as long as
+        // this attachment lasts; see `record_device_bytes_to_guest`.
+        // The EP_INFO / INTERFACE_INFO / DEVICE_CONNECT messages sent
+        // just above precede the entry and so are not counted against
+        // it.
         self.redirected_devices.push(RedirectedDevice {
             vendor_id: dev.vendor_id,
             product_id: dev.product_id,
             device_class: dev.device_class,
             attached_at_secs,
-            // TODO: track per-device byte counts.
             bytes_to_guest: 0,
             bytes_from_guest: 0,
         });
@@ -988,7 +993,29 @@ impl UsbredirChannel {
             );
         }
         let usbredir_msg = make_usbredir_message(usbredir_type, id, payload);
+        self.record_device_bytes_to_guest(usbredir_msg.len());
         self.send_data(&usbredir_msg).await
+    }
+
+    /// Attribute `n` usbredir-protocol bytes to the attached device.
+    ///
+    /// The channel carries at most one backend at a time (see
+    /// `connect_device` / `disconnect_device`), so `redirected_devices`
+    /// holds at most one entry and "the attached device" is
+    /// unambiguous. Bytes that flow before a device is attached — the
+    /// hello exchange — belong to no device and are dropped here; the
+    /// channel-wide `bytes_in` / `bytes_out` still count them.
+    fn record_device_bytes_to_guest(&mut self, n: usize) {
+        if let Some(device) = self.redirected_devices.last_mut() {
+            device.bytes_to_guest = device.bytes_to_guest.saturating_add(n as u64);
+        }
+    }
+
+    /// See [`record_device_bytes_to_guest`][Self::record_device_bytes_to_guest].
+    fn record_device_bytes_from_guest(&mut self, n: usize) {
+        if let Some(device) = self.redirected_devices.last_mut() {
+            device.bytes_from_guest = device.bytes_from_guest.saturating_add(n as u64);
+        }
     }
 
     /// Send raw bytes wrapped in a SPICEVMC_DATA SPICE message.
@@ -1010,8 +1037,8 @@ impl UsbredirChannel {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "usbredir", msg_type, msg_type_str, payload_size);
         }
-        // Increment per-opcode send counter here — single send path.
-        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Single send path, so this is the only send-count site.
+        self.opcodes.record_send(msg_type);
         self.send(data).await
     }
 
@@ -1042,10 +1069,7 @@ impl UsbredirChannel {
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
             snap.writer_dropped_count = self.capture_dropped_count;
             // Baseline additions (4B pattern).
-            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
-            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
-            snap.last_unknown_opcode = self.last_unknown_opcode;
-            snap.unknown_opcode_count = self.unknown_opcode_count;
+            self.opcodes.publish_into(&mut *snap);
             // USB-redirection specifics.
             snap.redirected_devices = self.redirected_devices.clone();
             snap.device_connect_total = self.device_connect_total;

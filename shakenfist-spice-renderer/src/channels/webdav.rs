@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::opcode_counters::OpcodeCounters;
 use crate::webdav::mux::{self, MuxDemuxer, MuxFrame};
 use crate::webdav::server::WebdavServer;
 use crate::{
@@ -77,11 +78,9 @@ pub struct WebdavChannel {
     pong_send_count: u32,
     last_ping_recv_ts_secs: Option<f64>,
 
-    // Per-opcode counters (baseline additions, 4B pattern).
-    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
-    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
-    last_unknown_opcode: Option<u16>,
-    unknown_opcode_count: u64,
+    /// Bounded per-opcode message counters; flushed to the
+    /// snapshot by `update_snapshot`. See `OpcodeCounters`.
+    opcodes: OpcodeCounters,
 
     // HTTP / WebDAV specifics.
     http_requests_received: u64,
@@ -148,10 +147,10 @@ impl WebdavChannel {
             ping_recv_count: 0,
             pong_send_count: 0,
             last_ping_recv_ts_secs: None,
-            messages_recv_by_opcode: std::collections::BTreeMap::new(),
-            messages_send_by_opcode: std::collections::BTreeMap::new(),
-            last_unknown_opcode: None,
-            unknown_opcode_count: 0,
+            opcodes: OpcodeCounters::new(
+                message_names::spicevmc_server,
+                message_names::spicevmc_client,
+            ),
             http_requests_received: 0,
             http_response_bytes_sent: 0,
             last_request_ts_secs: None,
@@ -312,9 +311,11 @@ impl WebdavChannel {
             );
         }
 
-        // Increment per-opcode recv counter before dispatch so
-        // both known and unknown opcodes are counted uniformly.
-        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Count before dispatch so both known and unknown opcodes
+        // reach the counters. Opcodes with no protocol name fold into
+        // the unknown-opcode fields rather than growing the map; see
+        // `OpcodeCounters`.
+        self.opcodes.record_recv(msg_type);
 
         match msg_type {
             spicevmc_server::DATA => {
@@ -391,8 +392,7 @@ impl WebdavChannel {
             }
             unknown => {
                 logging::log_unknown_once("webdav", unknown, payload);
-                self.unknown_opcode_count += 1;
-                self.last_unknown_opcode = Some(unknown);
+                self.opcodes.note_unknown(unknown);
             }
         }
 
@@ -727,8 +727,8 @@ impl WebdavChannel {
             let payload_size = data.len().saturating_sub(6) as u32;
             logging::log_message("sent", "webdav", msg_type, msg_type_str, payload_size);
         }
-        // Increment per-opcode send counter here — single send path.
-        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Single send path, so this is the only send-count site.
+        self.opcodes.record_send(msg_type);
         self.send(data).await
     }
 
@@ -759,10 +759,7 @@ impl WebdavChannel {
             snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
             snap.writer_dropped_count = self.capture_dropped_count;
             // Baseline additions (4B pattern).
-            snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
-            snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
-            snap.last_unknown_opcode = self.last_unknown_opcode;
-            snap.unknown_opcode_count = self.unknown_opcode_count;
+            self.opcodes.publish_into(&mut *snap);
             // HTTP / WebDAV specifics.
             snap.http_requests_received = self.http_requests_received;
             snap.http_response_bytes_sent = self.http_response_bytes_sent;
