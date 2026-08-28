@@ -404,7 +404,7 @@ are in the table below.
 
 ### Step 6e — findings triaged against current `develop`
 
-Twenty-one findings.  One is already fixed, eight moved
+Twenty-two findings.  One is already fixed, nine moved
 with the crate extraction and travelled unchanged, and
 twelve are still present where they were.  Nothing was
 dropped as "already fixed" without naming the fix.
@@ -487,3 +487,68 @@ reference remains in `ryll/src` — so that line should be
 deleted, not gated.  The renderer's live copy is used on
 both Linux and macOS, so the original suggestion of
 `cfg(target_os = "linux")` would break the macOS build.
+
+### Step 6f — `PUSH-AUDIT.md` corrected
+
+`99136d6` ("Record that a contiguous phase range is
+derivable"), merged in PR #326.  The runbook keeps its
+warning about the naive range — 340 files here, today —
+and now records that where a plan's phases landed
+contiguously on one branch,
+`<first-plan-commit>^1..<last-plan-commit>` gives an exact
+range, with the caution that the contiguous case is luck
+rather than method.
+
+### Step 6g — fix-or-decline, and where the fixes landed
+
+The management call on all 22 findings is recorded in the
+master plan under *Items deferred from the push audit*
+(`2223c44`, PR #326).  Sixteen were fixed, five declined in
+writing, and one — B7 — was already fixed before the audit
+ran.  The fixes went out as two PRs rather than the one the
+phase anticipated, because the harness findings blocked the
+code findings from being verified:
+
+| PR | Merge | Findings |
+|----|-------|----------|
+| #325 | `6fecb50` | T1, T5, T4, and T2/T3, which folded in because that PR already owned `wave1.sh` |
+| #327 | `192265f` | D1, D2, D3, D4, D6, A1, A2, A3, A4, B1, B5 |
+
+Declined: B2, B3, B4, B8 (test-coverage gaps behind paths
+that already degrade to `RuntimeMetrics::unavailable`) and
+D7 (a duplicate of issue #313).  Reasons are in the master
+plan.
+
+Two things worth carrying forward.  A1's `EventSink`
+refactor found a real defect — `AgentConnected` sent with
+no paired repaint notify — that three independent judgment
+agents had each read past while reporting the pairing
+complete; the structural fix found what the reading did
+not.  And the audit's own recommendation on D1
+(`tokio::task::spawn_blocking`) would have panicked, since
+the UI thread has no runtime to spawn onto.
+
+### Definition of done — checked at closeout
+
+Every item holds.  The two status items were the last
+outstanding, and this commit closes them:
+
+- Range: `git diff --stat 90a954b^1 1c28d6f | tail -1`
+  reports 25 files; the assembled patch also carried
+  `ryll/src/app.rs` from `85bc901`.  Recorded under step 6a.
+- Wave 1 exit code recorded (1, harness bug), wave 2
+  mechanical output recorded verbatim, all four judgment
+  agents reported.  Steps 6b, 6c, 6d.
+- The 6e table has a status on every row, and its one
+  `already-fixed` row names what fixed it.
+- The master plan's *Items deferred from the push audit*
+  marks every finding fixed or declined, with reasons.
+- The master plan's *Bugs fixed during this work* section
+  is no longer the placeholder.
+- `PUSH-AUDIT.md` no longer claims this plan's range is
+  underivable.
+- The master plan's phase 6 row reads `Complete` and
+  `docs/plans/index.md` shows the master plan as
+  `Complete`.
+- `pre-commit run --all-files` and `make test` both pass on
+  `develop` at the point of closeout.

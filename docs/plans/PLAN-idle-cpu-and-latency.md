@@ -199,7 +199,7 @@ guest). Out of scope for this plan.
 | 3. Demote protocol logging | [PLAN-idle-cpu-and-latency-phase-03-logging.md](PLAN-idle-cpu-and-latency-phase-03-logging.md) | Complete | 6d52665 |
 | 4. Real latency from PING/PONG | [PLAN-idle-cpu-and-latency-phase-04-latency.md](PLAN-idle-cpu-and-latency-phase-04-latency.md) | Complete | 6d52665 |
 | 5. Capture runtime metrics in bug reports | [PLAN-idle-cpu-and-latency-phase-05-metrics.md](PLAN-idle-cpu-and-latency-phase-05-metrics.md) | Complete | 6d52665 |
-| 6. Push audit | [PLAN-idle-cpu-and-latency-phase-06-push-audit.md](PLAN-idle-cpu-and-latency-phase-06-push-audit.md) | In progress | — |
+| 6. Push audit | [PLAN-idle-cpu-and-latency-phase-06-push-audit.md](PLAN-idle-cpu-and-latency-phase-06-push-audit.md) | Complete | bf7a16f, with the findings fixed in 6fecb50 and 192265f |
 
 Phase 1 informs phase 2: if profiling shows logging is the
 dominant cost, swap their order.  *Profiling result: the
@@ -367,7 +367,7 @@ what closing phase 2 authorises.
 
 ### Items deferred from the push audit
 
-Phase 6 produced 21 findings.  Every one is fixed or
+Phase 6 produced 22 findings.  Every one is fixed or
 declined below, which is what the phase's definition of
 done requires.  The findings table, with current locations
 and triage status, is in
