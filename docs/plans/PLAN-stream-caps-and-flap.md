@@ -1070,7 +1070,92 @@ Items deliberately deferred from this plan:
 
 ### Bugs fixed during this work
 
-(Populated during execution.)
+Fixed while the phases ran, rather than as findings:
+
+- The still-image JPEG path missed the per-platform decoder
+  wiring and was still on pure-Rust at ~263 ms/frame
+  (`eb730d8`, found in session 006).
+- `AUTO_LZ` made the server stop using GLZ entirely and cost
+  +25% `bytes_in`; reverted to `AUTO_GLZ` (`0a86a22`).
+- The GLZ dictionary was a second unbounded cache the
+  bug-report snapshot was summing into the image-cache
+  figure; found by the 12D smoke test failing, fixed in
+  12E-12F.
+- The auto-snapshot task leaked across reconnects; retired
+  and respawned instead (`cd44a0c`).
+- A MiB cap conversion could overflow on 32-bit
+  (`3ddd0a1`).
+- Status-bar pointer events leaked into the guest (phase
+  14, `671d166`).
+
+The push audit's own findings are separate; see below.
+
+### Items deferred from the push audit
+
+Phase 18 audited the accumulated diff
+(`d416338...cd4c7d9`, 64 files, 16 159 insertions) and
+produced 51 findings. The full triage table, with each
+finding verified against the patch and then classified
+against current `develop`, is in
+[PLAN-stream-caps-and-flap-phase-18-push-audit.md](PLAN-stream-caps-and-flap-phase-18-push-audit.md).
+
+**Nothing is deferred.** The operator's decision on
+2026-08-29 was to fix every in-scope finding, including the
+advisory duplication items. The dispositions are therefore:
+
+- **Fixed** — every finding classified `still-present` or
+  `moved`, across all severities, in a separate PR against
+  `develop`.
+- **Declined as out of scope** — five findings, each because
+  it is not this plan's work rather than because it is not
+  worth fixing:
+  - `S1-9` (lz4 `row_bytes` unchecked, uncapped allocation):
+    byte-identical at the audit base `d416338`, so it
+    predates the range. Worth fixing, but under its own
+    change rather than attributed here.
+  - `Q2-7` (`capture.rs` odd-dimension TODO): also
+    pre-existing, and since removed by `b3bbf72`.
+  - `W-1` (123-character line at `ryll/src/config.rs:19`):
+    belongs to `d723074`, a foreign commit that rode the
+    same branch.
+  - `Q2-3` (`mjpeg_duration_stats` naming): refuted. The
+    comment justifies the reuse rather than conceding a
+    problem, and the function genuinely is codec-agnostic.
+  - `D-5` (whether `shakenfist/kerbside` docs need review
+    for opcodes 102/103/105): a question for that
+    repository, raised there rather than resolved here.
+- **No action needed** — six findings already fixed on
+  `develop` by later work, each naming what fixed it:
+  `D-1` (`d1b2f60`, `7332cb7`, `f1b307c`), `D-3` and `D-4`
+  (relocated by PRs #222 and #277), `Q2-7` (`b3bbf72`), and
+  the two `Q2-8` instances partly cleaned by `f1b307c`.
+
+Three findings are worth naming individually because they
+outlive the fix:
+
+1. **`S1-1`, the only HIGH.** The macOS ImageIO backend
+   passed no container hint and no magic-byte check, so a
+   server could route crafted TIFF/HEIF bytes into ImageIO
+   sub-decoders. The Windows backend pins
+   `GUID_ContainerFormatJpeg`. Two backends written days
+   apart for the same job disagreed about whether to
+   constrain the container, and the permissive one was the
+   only backend macOS ever selected.
+2. **`T-3` / `T-4`, a CI gap the audit surfaced by
+   accident.** The `MAX_DECODED_JPEG_DIMENSION` allocation
+   bound is enforced inline in `cfg(target_os)`-gated
+   bodies on macOS and Windows, and
+   `.github/workflows/ci.yml` runs `cargo build` plus a web
+   smoke on those platforms — never `cargo test`. An
+   allocation guard against hostile input had no test
+   coverage on two of three platforms.
+3. **`D-2`, which inverted on inspection.**
+   `docs/development-macos.md` claimed the openh264 crate
+   "downloads a pre-built library at build time". True of
+   older releases, false of the pinned `openh264-sys2`
+   0.9.8, which compiles vendored source — so the document
+   offered a remedy for a failure mode that no longer
+   exists and hid the one that does.
 
 ### Documentation index maintenance
 
