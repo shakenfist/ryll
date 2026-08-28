@@ -280,7 +280,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 7. Preference messages | [PLAN-stream-caps-and-flap-phase-07-pref-messages.md](PLAN-stream-caps-and-flap-phase-07-pref-messages.md) | Code landed (7A-7C); session 006 measurement drove AUTO_LZ → AUTO_GLZ revert (server stopped using GLZ entirely under AUTO_LZ; +25% bytes_in). 7D smoke folded into the next 005-style run. | — |
 | 8. Live streaming indicator + flap notification | [PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md](PLAN-stream-caps-and-flap-phase-08-streaming-indicator.md) | Code landed. | — |
 | 9. Vdagent responsiveness probe | [PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md](PLAN-stream-caps-and-flap-phase-09-vdagent-probe.md) | Code landed (9A-9D). 9E operator smoke (deliberately freeze the guest agent to verify the Warn notification fires) is pending. | — |
-| 10. Documentation | (no separate plan — docs catch-all dispatched directly) | Complete. ARCHITECTURE.md capability table + README CLI flag docs + troubleshooting JPEG-decoder subsection landed across three commits (faa8ebd9 / c4849822 / dfc59950). Phase-9D's vdagent docs already covered the agent-probe surface. | — |
+| 10. Documentation | (no separate plan — docs catch-all dispatched directly) | Complete. Capability table + CLI flag docs + troubleshooting JPEG-decoder subsection landed across three commits (faa8ebd9 / c4849822 / dfc59950). The first two landed in `ARCHITECTURE.md` and `README.md` and have since been relocated by the `readme-pitch` (PR #222) and `llm-doc-structure` (PR #277) work: the capability table is now in `docs/spice-protocol.md`, the CLI flags in `docs/features.md` and `docs/diagnostics.md`. Phase-9D's vdagent docs already covered the agent-probe surface. | — |
 | 11. Remove spurious-PONG keepalive | [PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md](PLAN-stream-caps-and-flap-phase-11-remove-pong-keepalive.md) | 11A landed (main channel); 11B doc cleanup landed (channel-diagnostics-audit + plan addendum); inputs-channel `send_idle_keepalive` kept (decision recorded in phase 11 plan — different mechanism + no visible side effects + cross-channel-idleness hypothesis); 11C long-idle soak pending. | — |
 | 12. Bounded image cache | [completed/PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md](completed/PLAN-stream-caps-and-flap-phase-12-bounded-image-cache.md) | **Complete.** 12A-12C landed; 12D smoke FAILED (revealed GlzDictionary was a second unbounded cache the snapshot was summing in); 12E (bound GLZ), 12F (split snapshot fields), 12G (docs) all landed; 12H verified in session 005b — `glz_dictionary_bytes` held at 247 MiB / 256 cap across 67 snapshots over 670 s with eviction firing, `image_cache_bytes` stayed at 0, no RSS drift. | — |
 | 13. Investigate intermittent server-side streaming | [PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md](PLAN-stream-caps-and-flap-phase-13-streaming-intermittency.md) | **Parked.** Session 006 confirmed the trace-ring/VRAM diminishing-returns curve (165→85→77 OOMs/min at 64/128/256 MiB) but uncovered a bigger blocker: the 1024×768 YouTube video almost never crosses `is_stream_start` (1–2 video stream creates per 10 min vs ~100 cursor / scrollbar creates). All four 006 bundles show `streams_created_total = 0` client-side. Findings folded into the phase 13 plan's "Session 006 findings" section. Resume after non-video phases close. | — |
@@ -288,7 +288,7 @@ session 002b showed that MJPEG decode in the pure-Rust
 | 15. Track down `build_tcp_frame: payload too large` warns | [PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md](PLAN-stream-caps-and-flap-phase-15-build-tcp-frame-warn.md) | 15B (one-shot backtrace) landed; no fires across 006 bundles. Awaiting fresh reproduction. | — |
 | 16. Evaluate guest driver options for video streaming | [PLAN-stream-caps-and-flap-phase-16-qxl-viability.md](PLAN-stream-caps-and-flap-phase-16-qxl-viability.md) | **Parked.** Concept stub. Resume alongside phase 13 after non-video phases close. | — |
 | 17. Patched libspice-server for hypothesis validation | [PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md](PLAN-stream-caps-and-flap-phase-17-patched-libspice-validation.md) | **Parked.** Value uncertain after 006: bumping `NUM_TRACE_ITEMS` 8→128 helps cursor / scrollbar flap, but does not address why the YouTube video itself isn't a stream. Hold off on the .deb build until the predicate question is answered. | — |
-| 18. Push audit | PLAN-stream-caps-and-flap-phase-18-push-audit.md | Not started | — |
+| 18. Push audit | [PLAN-stream-caps-and-flap-phase-18-push-audit.md](PLAN-stream-caps-and-flap-phase-18-push-audit.md) | In progress | — |
 
 ### Closeout — non-video work remaining
 
@@ -875,9 +875,18 @@ Per-phase intent:
   commits; record each phase's as it lands in the `Merged`
   column of the table above, and reconstruct the ones that
   landed before this convention. *Two ways this runbook is
-  invoked* in `PUSH-AUDIT.md` has the rest.
-  Recommended planning effort: **low** (the runbook does the
-  work; the phase plan is a wrapper).
+  invoked* in `PUSH-AUDIT.md` has the rest. The
+  reconstruction turned out to be cheap: every phase landed
+  on the `feedback-002` branch in two pull requests, #102
+  (`f22416a`) and #105 (`cd4c7d9`), which are adjacent on
+  `develop`'s first-parent history, so `d416338...cd4c7d9`
+  is an exact range — 64 files, 16 159 insertions.
+  Recommended planning effort: **medium**. It was recorded
+  here as **low** on the assumption that the phase plan is a
+  wrapper around the runbook; the accumulated diff is about
+  ten times the size of the only previous closing audit in
+  this repository, and splitting it across judgment agents
+  is a design decision the wrapper does not make for you.
 
 ## Agent guidance
 
