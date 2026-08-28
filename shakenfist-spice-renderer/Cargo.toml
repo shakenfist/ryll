@@ -86,9 +86,6 @@ socket2 = { version = "0.6", features = ["all"] }
 # USB device access (pure Rust, no libusb)
 nusb = "0.2"
 
-# Per-thread CPU metrics via sysconf(_SC_CLK_TCK) (Linux only)
-libc = "0.2"
-
 # Zlib decompression for SPICE ZLIB_GLZ_RGB (type 107), used in
 # the display channel
 flate2 = "1"
@@ -124,6 +121,13 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
+
+# Runtime metrics (src/metrics.rs) are the only libc consumer:
+# sysconf(_SC_CLK_TCK) on Linux, and the Mach task/thread FFI on
+# macOS. Both cfgs are needed — gating to Linux alone breaks the
+# macOS build.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

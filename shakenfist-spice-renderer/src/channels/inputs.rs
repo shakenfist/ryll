@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -21,7 +21,7 @@ use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, InputEvent};
+use super::{ChannelEvent, EventSink, InputEvent};
 
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
@@ -119,8 +119,7 @@ struct PasteState {
 
 pub struct InputsChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     input_rx: mpsc::Receiver<InputEvent>,
     buffer: Vec<u8>,
     last_key_time: Option<Instant>,
@@ -188,8 +187,7 @@ impl InputsChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         input_rx: mpsc::Receiver<InputEvent>,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
@@ -200,8 +198,7 @@ impl InputsChannel {
     ) -> Self {
         InputsChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             input_rx,
             buffer: Vec::with_capacity(4096),
             last_key_time: None,
@@ -310,11 +307,7 @@ impl InputsChannel {
                     match result {
                         Ok(0) => {
                             info!("inputs: channel disconnected");
-                            self.event_tx
-                                .send(ChannelEvent::Disconnected(ChannelType::Inputs))
-                                .await
-                                .ok();
-                            self.repaint_notify.notify_one();
+                            self.events.emit(ChannelEvent::Disconnected(ChannelType::Inputs)).await;
                             break;
                         }
                         Ok(_) => {
@@ -323,14 +316,12 @@ impl InputsChannel {
                             self.process_messages().await?;
                         }
                         Err(e) => {
-                            self.event_tx
-                                .send(ChannelEvent::Error {
+                            self.events
+                                .emit(ChannelEvent::Error {
                                     channel: ChannelType::Inputs,
                                     message: format!("read error: {}", e),
                                 })
-                                .await
-                                .ok();
-                            self.repaint_notify.notify_one();
+                                .await;
                             break;
                         }
                     }
@@ -582,11 +573,7 @@ impl InputsChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.event_tx
-                    .send(ChannelEvent::Notification(entry))
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
 
             unknown => {
@@ -842,25 +829,21 @@ impl InputsChannel {
                             count, sample_str
                         );
                         error!("inputs: {}", reason);
-                        self.event_tx
-                            .send(ChannelEvent::PasteFailed { reason, request_id })
-                            .await
-                            .ok();
-                        self.repaint_notify.notify_one();
+                        self.events
+                            .emit(ChannelEvent::PasteFailed { reason, request_id })
+                            .await;
                         return Ok(());
                     }
                 };
 
                 if keys.is_empty() {
-                    self.event_tx
-                        .send(ChannelEvent::PasteCompleted {
+                    self.events
+                        .emit(ChannelEvent::PasteCompleted {
                             chars: 0,
                             elapsed_ms: 0,
                             request_id,
                         })
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                     return Ok(());
                 }
 
@@ -1067,11 +1050,9 @@ impl InputsChannel {
                 let reason = "paste cancelled (client disconnected)".to_string();
                 info!("inputs: paste cancelled by cancellation token");
                 self.paste_state = None;
-                self.event_tx
-                    .send(ChannelEvent::PasteFailed { reason, request_id })
-                    .await
-                    .ok();
-                self.repaint_notify.notify_one();
+                self.events
+                    .emit(ChannelEvent::PasteFailed { reason, request_id })
+                    .await;
                 return Ok(());
             }
         }
@@ -1134,15 +1115,13 @@ impl InputsChannel {
                         "inputs: paste complete: {} chars in {}ms",
                         chars, elapsed_ms
                     );
-                    self.event_tx
-                        .send(ChannelEvent::PasteCompleted {
+                    self.events
+                        .emit(ChannelEvent::PasteCompleted {
                             chars,
                             elapsed_ms,
                             request_id,
                         })
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                        .await;
                 } else {
                     state.sub_step = PasteSubStep::Press;
                     state.next_fire = Instant::now() + state.half_delay;

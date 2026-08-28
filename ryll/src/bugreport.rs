@@ -1269,10 +1269,12 @@ impl BugReport {
     /// Assemble a bug report from the available data.
     ///
     /// Note: this function samples runtime metrics over a 2-second
-    /// window before assembling the rest of the report.  The sample
-    /// blocks the calling thread, which is acceptable because bug
-    /// report saving is already a deliberate, non-interactive
-    /// operation gated on a file dialog.
+    /// window before assembling the rest of the report, and that
+    /// sample blocks the calling thread outright.  Callers must run
+    /// it somewhere a two-second stall is harmless: the tokio paths
+    /// wrap it in `spawn_blocking`, and the GUI submit path samples
+    /// on its own worker thread and calls `assemble` directly
+    /// rather than coming through here.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         report_type: BugReportType,
@@ -1313,9 +1315,10 @@ impl BugReport {
 
     /// Assemble a bug report with a caller-supplied `RuntimeMetrics`.
     ///
-    /// This is the inner implementation used by both `new()` (which
-    /// samples real metrics) and by tests (which inject a stub to
-    /// avoid a 2-second sleep).
+    /// This is the inner implementation used by `new()` (which
+    /// samples real metrics inline), by callers that took the
+    /// sample on another thread first (the GUI submit path), and by
+    /// tests (which inject a stub to avoid a 2-second sleep).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn assemble(
         report_type: BugReportType,

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Notify};
 use tracing::{debug, error, info, warn};
 
 use super::volume::VolumeControl;
@@ -18,7 +17,7 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
 
-use super::ChannelEvent;
+use super::{ChannelEvent, EventSink};
 
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
@@ -407,8 +406,7 @@ impl AudioThread {
 
 pub struct PlaybackChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<Notify>,
+    events: EventSink,
     buffer: Vec<u8>,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
@@ -490,8 +488,7 @@ impl PlaybackChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<Notify>,
+        events: EventSink,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<crate::snapshots::PlaybackSnapshot>>,
@@ -502,8 +499,7 @@ impl PlaybackChannel {
     ) -> Self {
         PlaybackChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             buffer: Vec::with_capacity(65536),
             byte_counter,
             traffic,
@@ -596,11 +592,9 @@ impl PlaybackChannel {
             let n = match read_result {
                 Some(Ok(0)) => {
                     info!("playback: channel disconnected");
-                    self.event_tx
-                        .send(ChannelEvent::Disconnected(ChannelType::Playback))
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                    self.events
+                        .emit(ChannelEvent::Disconnected(ChannelType::Playback))
+                        .await;
                     break;
                 }
                 Some(Ok(n)) => n,
@@ -717,11 +711,7 @@ impl PlaybackChannel {
                     if let Some(v) = notify.visibility {
                         entry = entry.with_visibility(v);
                     }
-                    self.event_tx
-                        .send(ChannelEvent::Notification(entry))
-                        .await
-                        .ok();
-                    self.repaint_notify.notify_one();
+                    self.events.emit(ChannelEvent::Notification(entry)).await;
                 }
                 playback_server::START => {
                     if payload.len() >= 14 {

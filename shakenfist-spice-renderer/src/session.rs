@@ -36,7 +36,7 @@ use crate::capture_sink::CaptureSink;
 #[cfg(feature = "audio")]
 use crate::channels::PlaybackChannel;
 use crate::channels::{
-    ChannelEvent, CursorChannel, DisplayChannel, InputEvent, InputsChannel, MainChannel,
+    ChannelEvent, CursorChannel, DisplayChannel, EventSink, InputEvent, InputsChannel, MainChannel,
     UsbCommand, UsbredirChannel, VolumeControl, WebdavChannel, WebdavCommand,
 };
 use crate::clipboard::ClipboardBackend;
@@ -55,6 +55,14 @@ use crate::traffic::TrafficSink;
 /// to match.
 pub const EVENT_CHANNEL_SIZE: usize = 1024;
 pub const INPUT_CHANNEL_SIZE: usize = 256;
+
+/// How long the main channel will block queueing an event before giving up
+/// and warning. K1 (session-001) was an abandoned-receiver deadlock where
+/// main blocked forever on `send().await`; the root cause was fixed by
+/// removing the intermediate temp channel, and this deadline is what makes
+/// a recurrence show up in the log instead of as a silent hang. Only main
+/// carries it — the secondary channels have no equivalent history.
+const MAIN_EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capacity of the per-headless broadcast bus that fans
 /// `ChannelEvent`s out to multiple subscribers (the headless stats
@@ -225,10 +233,11 @@ pub async fn run_connection(
 
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
+    let events = EventSink::new(event_tx, repaint_notify);
+
     let mut main_channel = MainChannel::new(
         main_stream,
-        event_tx.clone(),
-        repaint_notify.clone(),
+        events.clone().with_send_timeout(MAIN_EVENT_SEND_TIMEOUT),
         capture.clone(),
         byte_counter.clone(),
         traffic.clone(),
@@ -284,8 +293,7 @@ pub async fn run_connection(
                 let mut channel = DisplayChannel::new(
                     channel_id,
                     stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
+                    events.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -307,8 +315,7 @@ pub async fn run_connection(
                     .await?;
                 let mut channel = CursorChannel::new(
                     stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
+                    events.clone(),
                     capture.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
@@ -327,8 +334,7 @@ pub async fn run_connection(
                     .await?;
                 let mut channel = InputsChannel::new(
                     stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
+                    events.clone(),
                     input_rx,
                     capture.clone(),
                     byte_counter.clone(),
@@ -352,8 +358,7 @@ pub async fn run_connection(
                         .await?;
                     let mut channel = UsbredirChannel::new(
                         stream,
-                        event_tx.clone(),
-                        repaint_notify.clone(),
+                        events.clone(),
                         usb_rx,
                         virtual_disks.clone(),
                         capture.clone(),
@@ -381,8 +386,7 @@ pub async fn run_connection(
                         .await?;
                     let mut channel = WebdavChannel::new(
                         stream,
-                        event_tx.clone(),
-                        repaint_notify.clone(),
+                        events.clone(),
                         webdav_rx,
                         share_dir.clone(),
                         capture.clone(),
@@ -410,8 +414,7 @@ pub async fn run_connection(
                     .await?;
                 let mut channel = PlaybackChannel::new(
                     stream,
-                    event_tx.clone(),
-                    repaint_notify.clone(),
+                    events.clone(),
                     byte_counter.clone(),
                     traffic.clone(),
                     snapshots.playback.clone(),
@@ -480,14 +483,12 @@ pub async fn run_connection(
             Ok(Err(e)) => {
                 let message = format!("channel error: {}", e);
                 error!("session: {}: {}", channel_type.name(), message);
-                event_tx
-                    .send(ChannelEvent::Error {
+                events
+                    .emit(ChannelEvent::Error {
                         channel: channel_type,
                         message,
                     })
-                    .await
-                    .ok();
-                repaint_notify.notify_one();
+                    .await;
             }
             Ok(Ok(())) => {}
         }

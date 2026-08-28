@@ -6104,7 +6104,6 @@ dependencies = [
  "hyper-util",
  "image",
  "jpeg-decoder",
- "libc",
  "lz4_flex",
  "mp4",
  "nusb",

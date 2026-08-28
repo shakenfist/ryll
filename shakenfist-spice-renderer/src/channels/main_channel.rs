@@ -4,7 +4,6 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::Notify as RepaintNotify;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -23,7 +22,7 @@ use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
 };
 
-use super::ChannelEvent;
+use super::{ChannelEvent, EventSink};
 
 /// Parse a SpiceMsgMainMouseMode payload. The SPICE wire format
 /// is two little-endian `uint16`s — `supported_modes` followed by
@@ -47,6 +46,15 @@ pub(crate) fn parse_mouse_mode_payload(payload: &[u8]) -> Option<(u16, u16)> {
 /// often reverts to SERVER/relative mode).
 pub(crate) fn should_request_client_mouse_mode(supported: u32, current: u32) -> bool {
     supported & MOUSE_MODE_CLIENT != 0 && current != MOUSE_MODE_CLIENT
+}
+
+/// Milliseconds between two consecutive server PINGs, or `None` on the
+/// first PING of a session, where there is no earlier timestamp to diff
+/// against. `f32` matches the `LatencyTracker` history the sample feeds;
+/// sub-millisecond precision is not visible in a sparkline.
+fn ping_interval_ms(last: Option<Instant>, now: Instant) -> Option<f32> {
+    let last = last?;
+    Some(((now - last).as_secs_f64() * 1000.0) as f32)
 }
 
 /// Normalise text so the clipboard echo dedup is invariant
@@ -167,8 +175,7 @@ const STUCK_AGENT_NOTIFY_COOLDOWN: std::time::Duration = std::time::Duration::fr
 
 pub struct MainChannel {
     stream: SpiceStream,
-    event_tx: mpsc::Sender<ChannelEvent>,
-    repaint_notify: Arc<RepaintNotify>,
+    events: EventSink,
     buffer: Vec<u8>,
     session_id: Option<u32>,
     agent_connected: bool,
@@ -283,8 +290,7 @@ impl MainChannel {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: SpiceStream,
-        event_tx: mpsc::Sender<ChannelEvent>,
-        repaint_notify: Arc<RepaintNotify>,
+        events: EventSink,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -299,8 +305,7 @@ impl MainChannel {
     ) -> Self {
         MainChannel {
             stream,
-            event_tx,
-            repaint_notify,
+            events,
             buffer: Vec::with_capacity(65536),
             session_id: None,
             agent_connected: false,
@@ -500,9 +505,7 @@ impl MainChannel {
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
-                            .await;
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
                         break;
                     }
 
@@ -540,9 +543,7 @@ impl MainChannel {
                     resize_debounce = None;
                     if let Some((width, height)) = self.pending_monitors_config {
                         info!("main: resize debounced: {}x{}", width, height);
-                        self.send_event(ChannelEvent::MonitorsConfig { width, height })
-                            .await;
-                        self.repaint_notify.notify_one();
+                        self.events.emit(ChannelEvent::MonitorsConfig { width, height }).await;
                         self.maybe_send_agent_monitors_config().await?;
                     }
                 }
@@ -568,9 +569,7 @@ impl MainChannel {
                     if let Ok(mut snap) = self.snapshot.lock() {
                         snap.keepalive_timeout_fired = true;
                     }
-                    self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
-                        .await;
-                    self.repaint_notify.notify_one();
+                    self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
                     break;
                 }
                 _ = vdagent_probe.tick() => {
@@ -668,8 +667,7 @@ impl MainChannel {
                                     NotificationSource::Internal,
                                     message,
                                 );
-                                self.send_event(ChannelEvent::Notification(entry)).await;
-                                self.repaint_notify.notify_one();
+                                self.events.emit(ChannelEvent::Notification(entry)).await;
                                 self.last_stuck_agent_notification_at = Some(Instant::now());
                                 last_arm = "stuck_agent_check+notify_done";
                             } else {
@@ -794,11 +792,12 @@ impl MainChannel {
                     self.connect_agent().await?;
                 }
 
-                self.send_event(ChannelEvent::SessionInitialized(init.session_id))
+                self.events
+                    .emit(ChannelEvent::SessionInitialized(init.session_id))
                     .await;
-                self.send_event(ChannelEvent::AgentConnected(self.agent_connected))
+                self.events
+                    .emit(ChannelEvent::AgentConnected(self.agent_connected))
                     .await;
-                self.repaint_notify.notify_one();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
                     2 => "client (absolute)",
@@ -811,9 +810,9 @@ impl MainChannel {
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
                 );
-                self.send_event(ChannelEvent::MouseMode(init.current_mouse_mode))
+                self.events
+                    .emit(ChannelEvent::MouseMode(init.current_mouse_mode))
                     .await;
-                self.repaint_notify.notify_one();
 
                 // Request client mouse mode (absolute positioning) if
                 // the server supports it. Client mode allows absolute
@@ -853,9 +852,9 @@ impl MainChannel {
                     if current as u32 == MOUSE_MODE_CLIENT {
                         self.mouse_mode_request_pending = false;
                     }
-                    self.send_event(ChannelEvent::MouseMode(current as u32))
+                    self.events
+                        .emit(ChannelEvent::MouseMode(current as u32))
                         .await;
-                    self.repaint_notify.notify_one();
 
                     // The server often reverts to SERVER mode after a
                     // guest reboot; re-request CLIENT mode so the
@@ -921,24 +920,14 @@ impl MainChannel {
                     let _ = sig.send(channels.clone());
                 }
 
-                self.send_event(ChannelEvent::ChannelsAvailable(channels))
+                self.events
+                    .emit(ChannelEvent::ChannelsAvailable(channels))
                     .await;
-                self.repaint_notify.notify_one();
             }
 
             main_server::PING => {
                 let now = Instant::now();
-                if let Some(last) = self.last_ping_at {
-                    // f32 storage matches the LatencyTracker history
-                    // Vec<f32>; loss of precision is irrelevant for a
-                    // sub-millisecond sparkline.
-                    let sample_ms = (now - last).as_secs_f64() * 1000.0;
-                    self.send_event(ChannelEvent::Latency {
-                        sample_ms: sample_ms as f32,
-                    })
-                    .await;
-                    self.repaint_notify.notify_one();
-                }
+                let interval_ms = ping_interval_ms(self.last_ping_at, now);
                 self.last_ping_at = Some(now);
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
@@ -964,6 +953,12 @@ impl MainChannel {
                 if ping.id > 0 && self.session_id.is_some() && !self.channels_requested {
                     self.channels_requested = true;
                     self.request_channels_list().await?;
+                }
+
+                // Last, so a truncated PING is torn down without leaving a
+                // sample behind and a stalled renderer cannot delay the PONG.
+                if let Some(sample_ms) = interval_ms {
+                    self.events.emit(ChannelEvent::Latency { sample_ms }).await;
                 }
             }
 
@@ -1013,28 +1008,27 @@ impl MainChannel {
                 if let Some(v) = notify.visibility {
                     entry = entry.with_visibility(v);
                 }
-                self.send_event(ChannelEvent::Notification(entry)).await;
-                self.repaint_notify.notify_one();
+                self.events.emit(ChannelEvent::Notification(entry)).await;
             }
 
             main_server::DISCONNECTING => {
                 info!("main: server sent disconnect notification");
-                self.send_event(ChannelEvent::Disconnected(ChannelType::Main))
+                self.events
+                    .emit(ChannelEvent::Disconnected(ChannelType::Main))
                     .await;
-                self.repaint_notify.notify_one();
             }
 
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
-                self.send_event(ChannelEvent::AgentConnected(true)).await;
+                self.events.emit(ChannelEvent::AgentConnected(true)).await;
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
-                self.send_event(ChannelEvent::AgentConnected(false)).await;
+                self.events.emit(ChannelEvent::AgentConnected(false)).await;
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
                 // Drop probe bookkeeping tied to the previous
@@ -1145,28 +1139,6 @@ impl MainChannel {
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
-    }
-
-    /// Send a `ChannelEvent` to the renderer with a 5 s timeout
-    /// and silent-drop on closed-receiver. K1 (session-001) was an
-    /// abandoned-receiver deadlock where main blocked forever on
-    /// `event_tx.send().await`; the root cause was fixed by
-    /// removing the intermediate temp channel, but this helper is
-    /// defense-in-depth so the next time something similar
-    /// regresses we see a `warn!` line within 5 seconds instead of
-    /// a silent multi-minute hang.
-    async fn send_event(&self, ev: ChannelEvent) {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), self.event_tx.send(ev)).await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(_closed)) => {}
-            Err(_elapsed) => {
-                warn!(
-                    "main: event_tx.send() timed out after 5 s; \
-                     renderer event consumer is wedged or starved"
-                );
-            }
-        }
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports
@@ -1641,12 +1613,14 @@ impl MainChannel {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::{
         build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
-        parse_vd_agent_reply, should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES,
-        VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE,
-        VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG,
-        VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
+        VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
+        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG,
+        VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1820,5 +1794,29 @@ mod tests {
             0xff, 0xff, // trailing garbage
         ];
         assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
+    }
+
+    #[test]
+    fn ping_interval_ms_needs_a_previous_ping() {
+        assert_eq!(ping_interval_ms(None, Instant::now()), None);
+    }
+
+    #[test]
+    fn ping_interval_ms_reports_the_gap_in_milliseconds() {
+        let last = Instant::now();
+        let now = last + std::time::Duration::from_millis(250);
+        assert_eq!(ping_interval_ms(Some(last), now), Some(250.0));
+    }
+
+    #[test]
+    fn ping_interval_ms_survives_a_days_long_gap() {
+        // A suspended laptop can resume with an enormous gap; the f32
+        // cast must still yield a finite, roughly correct number rather
+        // than an infinity that would flatten the sparkline.
+        let last = Instant::now();
+        let now = last + std::time::Duration::from_secs(86_400);
+        let sample = ping_interval_ms(Some(last), now).expect("previous ping present");
+        assert!(sample.is_finite());
+        assert!((sample - 86_400_000.0).abs() < 1.0, "sample was {}", sample);
     }
 }

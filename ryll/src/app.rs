@@ -37,6 +37,7 @@ use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
 use shakenfist_spice_renderer::channels::VolumeControl;
+use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
     ChannelEvent, ClipboardBackend, CursorImage, InputEvent, UsbCommand, WebdavCommand,
@@ -117,6 +118,20 @@ const NOTIFICATION_SNAPSHOT_TTL: Duration = Duration::from_secs(60);
 /// Maximum number of live notification snapshots retained at any
 /// one time. Oldest is evicted when a sixth notification fires.
 const NOTIFICATION_SNAPSHOT_CAP: usize = 5;
+
+/// Window for the runtime-metrics sample taken when a bug report
+/// is submitted from the GUI. Matches the window `BugReport::new`
+/// uses on the non-interactive paths.
+const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
+
+/// How long `poll_pending_bug_report` waits for the sampler before
+/// giving up on it and writing the report anyway.
+///
+/// Four times the sample window: long enough that a sampler merely
+/// descheduled on a loaded host still lands its measurement, short
+/// enough that a dead one does not strand the re-entrancy guard for
+/// the rest of the session.
+const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
 
 /// Single entry in the notification-snapshot store. Owns a
 /// captured `TrafficBuffers` (cheap thanks to its Arc-shared
@@ -526,6 +541,38 @@ struct TriggerSnapshot {
     png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
 }
 
+/// A GUI-submitted bug report waiting on its runtime-metrics
+/// sample.
+///
+/// `metrics::sample` blocks for `BUG_REPORT_METRICS_WINDOW`, so
+/// the UI thread hands the sample to a worker and parks the rest
+/// of the submission here. Everything is captured at submit time
+/// rather than re-read when the sample lands, so the zip
+/// describes the frame the user was looking at when they pressed
+/// Capture and not the one two seconds later.
+struct PendingBugReport {
+    report_type: BugReportType,
+    description: String,
+    region: Option<ReportRegion>,
+    trigger: Option<TriggerTimestamps>,
+    precomputed_png: Option<Vec<u8>>,
+    /// Submit-time RGBA of the largest surface plus its
+    /// dimensions. `None` for non-Display reports and when no
+    /// surface exists yet.
+    surface: Option<(Vec<u8>, u32, u32)>,
+    /// Slot the sampler thread fills exactly once. `None` while
+    /// it is still inside its sample window.
+    metrics_slot: Arc<std::sync::Mutex<Option<RuntimeMetrics>>>,
+    /// When the sample was started, so a sampler that never
+    /// reports cannot hold the re-entrancy guard forever. Nothing
+    /// in today's `metrics::sample` can fail to fill the slot --
+    /// both platform paths return `unavailable` rather than
+    /// panicking -- but the guard is the only thing standing
+    /// between a dead worker and an F12 key that silently refuses
+    /// for the rest of the session.
+    started_at: Instant,
+}
+
 /// The egui application
 pub struct RyllApp {
     // Communication channels
@@ -706,6 +753,13 @@ pub struct RyllApp {
     // timestamps and (if ready) the PNG bytes at submit time.
     // `discard_trigger_snapshot` drops it on cancel.
     pending_trigger: Option<TriggerSnapshot>,
+
+    // A GUI-submitted bug report whose runtime-metrics sample is
+    // still running on a worker thread; `poll_pending_bug_report`
+    // writes the zip once it lands. Doubles as the re-entrancy
+    // guard — `finish_bug_report` refuses a second submission
+    // while this is `Some`.
+    pending_bug_report: Option<PendingBugReport>,
 
     // Region selection state (Display bug reports)
     region_select_active: bool,
@@ -994,9 +1048,9 @@ impl RyllApp {
 
         // Repaint when channel events arrive; 1s fallback for time-based UI.
         // The bridge task waits on the Arc<Notify> and pings egui any time a
-        // channel handler signals it.  Channel handlers call notify_one()
-        // after each event_tx.send(), so egui sleeps when nothing is happening
-        // and wakes immediately when something is.
+        // channel handler signals it.  Every channel event goes out through
+        // `EventSink::emit`, which signals as part of sending, so egui sleeps
+        // when nothing is happening and wakes immediately when something is.
         let repaint_notify = Arc::new(Notify::new());
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let event_tx_clone = event_tx.clone();
@@ -1135,6 +1189,7 @@ impl RyllApp {
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
             pending_trigger: None,
+            pending_bug_report: None,
             region_select_active: false,
             region_drag_start: None,
             region_drag_end: None,
@@ -2251,43 +2306,40 @@ impl RyllApp {
         (Some(trigger), png)
     }
 
-    /// Generate a bug report and write it to disk.
+    /// Assemble a parked bug report and write it to disk.
     /// Returns the path of the written zip file.
     ///
-    /// `trigger` carries the trigger-time timestamps captured
-    /// when the dialog opened; `precomputed_screenshot_png`
-    /// carries the PNG that the background encoder produced
-    /// from the trigger-time surface. Both are `None` if the
-    /// dialog wasn't open when this was called (e.g. a
-    /// dev-only path that triggers reports without a
-    /// dialog, though none exists today) — `BugReport`
-    /// falls back to the submit-time behaviour in that case.
-    pub fn generate_bug_report(
+    /// Goes to `BugReport::assemble` rather than
+    /// `BugReport::new` because the runtime-metrics sample has
+    /// already been taken off the UI thread — see
+    /// `finish_bug_report`.
+    ///
+    /// `pending.trigger` carries the trigger-time timestamps
+    /// captured when the dialog opened; `pending.precomputed_png`
+    /// carries the PNG that the background encoder produced from
+    /// the trigger-time surface. Both are `None` if the dialog
+    /// wasn't open when the report was started (e.g. a dev-only
+    /// path that triggers reports without a dialog, though none
+    /// exists today) — `BugReport` falls back to the submit-time
+    /// behaviour in that case.
+    fn generate_bug_report(
         &self,
-        report_type: BugReportType,
-        description: String,
-        region: Option<ReportRegion>,
-        trigger: Option<TriggerTimestamps>,
-        precomputed_screenshot_png: Option<Vec<u8>>,
+        pending: PendingBugReport,
+        runtime_metrics: RuntimeMetrics,
     ) -> anyhow::Result<std::path::PathBuf> {
-        // Keep the live surface-pixels fallback path. It's the safety net
+        // Keep the surface-pixels fallback path. It's the safety net
         // when the background encoder wasn't spawned or hasn't finished,
-        // and `BugReport::new` also crops it to produce the submit-time
-        // region image.
-        let surface_data = if report_type == BugReportType::Display {
-            self.surfaces
-                .values()
-                .map(|gs| gs.surface())
-                .max_by_key(|s| (s.width as u64) * (s.height as u64))
-                .map(|s| (s.pixels(), s.width, s.height))
-        } else {
-            None
-        };
+        // and `BugReport::assemble` also crops it to produce the
+        // submit-time region image.
+        let surface_data = pending
+            .surface
+            .as_ref()
+            .map(|(pixels, width, height)| (pixels.as_slice(), *width, *height));
 
-        let report = BugReport::new(
-            report_type,
-            description,
-            region,
+        let report = BugReport::assemble(
+            pending.report_type,
+            pending.description,
+            pending.region,
             &self.target_host,
             self.target_port,
             &self.traffic,
@@ -2295,8 +2347,9 @@ impl RyllApp {
             &self.app_snapshot,
             &self.notifications,
             surface_data,
-            trigger,
-            precomputed_screenshot_png,
+            runtime_metrics,
+            pending.trigger,
+            pending.precomputed_png,
         )?;
 
         let output_dir = self.manual_bug_report_dir();
@@ -2502,15 +2555,164 @@ impl RyllApp {
         }
     }
 
-    /// Run a bug report and set the status bar message from the result.
+    /// Start a bug report submitted from the GUI.
+    ///
+    /// Captures everything only the UI thread can reach, then
+    /// hands the runtime-metrics sample to a worker thread;
+    /// `poll_pending_bug_report` assembles and writes the zip
+    /// once the sample lands. Sampling inline would freeze the
+    /// window for the whole sample window and stall the UI
+    /// thread's draining of the bounded channel-event queue,
+    /// back-pressuring every SPICE read loop behind it.
     fn finish_bug_report(
         &mut self,
         report_type: BugReportType,
         description: String,
         region: Option<ReportRegion>,
     ) {
+        if self.pending_bug_report.is_some() {
+            // Nothing above this call guards re-entry: every
+            // submit path clears `show_bug_dialog` /
+            // `region_select_active` before the previous report
+            // has been written, so F12 is live again immediately.
+            self.discard_trigger_snapshot();
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::BugReport,
+                "A bug report is already being captured — ignoring this one",
+            );
+            return;
+        }
+
         let (trigger, precomputed_png) = self.take_trigger_for_submit();
-        match self.generate_bug_report(report_type, description, region, trigger, precomputed_png) {
+
+        // Copying the largest surface is a deep copy of the whole
+        // framebuffer -- 33 MB of RGBA at 3840x2160 -- on the UI thread,
+        // held for the ~2 s the sample is in flight. `assemble` reads it in
+        // exactly two places: as the screenshot when no PNG was precomputed
+        // at trigger time, and as the source for a region crop. In the
+        // common case (dialog open started the encoder, no region drawn)
+        // nothing reads it, so the copy is pure cost on the one thread this
+        // path exists to keep responsive.
+        let surface_is_readable = report_type == BugReportType::Display
+            && (precomputed_png.is_none() || region.is_some());
+        let surface = if surface_is_readable {
+            self.surfaces
+                .values()
+                .map(|gs| gs.surface())
+                .max_by_key(|s| (s.width as u64) * (s.height as u64))
+                .map(|s| (s.pixels().to_vec(), s.width, s.height))
+        } else {
+            None
+        };
+
+        let metrics_slot: Arc<std::sync::Mutex<Option<RuntimeMetrics>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_for_thread = Arc::clone(&metrics_slot);
+        let ctx = self.egui_ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("ryll-bugreport-metrics".to_string())
+            .spawn(move || {
+                let metrics = shakenfist_spice_renderer::metrics::sample(BUG_REPORT_METRICS_WINDOW);
+                // A poisoned Mutex means the UI thread panicked;
+                // there is nobody left to hand the sample to.
+                if let Ok(mut guard) = slot_for_thread.lock() {
+                    *guard = Some(metrics);
+                }
+                ctx.request_repaint();
+            });
+        let sampling = spawned.is_ok();
+        if let Err(e) = spawned {
+            // Thread spawn failed (OS resource pressure). Seed the
+            // slot so the next poll still produces a report, and
+            // ask for the frame the sampler would have requested.
+            debug!("app: failed to spawn bug-report metrics thread: {}", e);
+            if let Ok(mut guard) = metrics_slot.lock() {
+                *guard = Some(RuntimeMetrics::unavailable(format!(
+                    "failed to spawn the metrics sampler thread: {}",
+                    e
+                )));
+            }
+            self.egui_ctx.request_repaint();
+        }
+
+        // The notification store is itself bug-report evidence, so it
+        // must not claim a sample is running that never started.
+        if sampling {
+            self.push_notification(
+                NotifySeverity::Info,
+                NotificationSource::BugReport,
+                format!(
+                    "Capturing bug report — sampling runtime metrics for {} s",
+                    BUG_REPORT_METRICS_WINDOW.as_secs()
+                ),
+            );
+        } else {
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::BugReport,
+                "Capturing bug report — runtime metrics unavailable",
+            );
+        }
+
+        self.pending_bug_report = Some(PendingBugReport {
+            report_type,
+            description,
+            region,
+            trigger,
+            precomputed_png,
+            surface,
+            metrics_slot,
+            started_at: Instant::now(),
+        });
+    }
+
+    /// Write a parked bug report once its metrics sample lands.
+    /// Called once per frame; a no-op until the sampler thread
+    /// has filled the slot.
+    fn poll_pending_bug_report(&mut self) {
+        let Some(pending) = self.pending_bug_report.as_ref() else {
+            return;
+        };
+        // `try_lock`, not `lock`: losing the race against the
+        // sampler's single write costs one frame, whereas blocking
+        // here would reintroduce the stall this path exists to
+        // avoid.
+        let metrics = match pending.metrics_slot.try_lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => None,
+        };
+        // A sampler that never reports would otherwise hold the
+        // re-entrancy guard for the life of the process, and every
+        // later F12 would be refused with "already being captured"
+        // after the user had typed a whole description. Past the
+        // deadline, write the report with what we have: a degraded
+        // report beats a permanently wedged key. The window is
+        // generous -- four times the sample -- because expiring a
+        // merely-slow sampler would lose a real measurement.
+        let metrics = match metrics {
+            Some(m) => m,
+            None => {
+                let waited = pending.started_at.elapsed();
+                if waited <= BUG_REPORT_METRICS_DEADLINE {
+                    return;
+                }
+                warn!(
+                    "app: bug-report metrics sampler did not report within {:?};                      writing the report without a sample",
+                    waited
+                );
+                RuntimeMetrics::unavailable(format!(
+                    "the metrics sampler thread did not report within {} s",
+                    BUG_REPORT_METRICS_DEADLINE.as_secs()
+                ))
+            }
+        };
+        let pending = self
+            .pending_bug_report
+            .take()
+            .expect("pending bug report checked immediately above");
+
+        match self.generate_bug_report(pending, metrics) {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
                 info!("app: {}", msg);
@@ -2893,6 +3095,8 @@ impl eframe::App for RyllApp {
         // Tick the bandwidth tracker
         self.bandwidth.tick();
 
+        self.poll_pending_bug_report();
+
         // Escape during region selection: skip and generate without region
         if self.region_select_active {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -3027,7 +3231,7 @@ impl eframe::App for RyllApp {
             .show_collapsible(ui, &mut show_stats, |ui| {
                 ui.horizontal(|ui| {
                     if !self.latency.history.is_empty() {
-                        ui.label(format!("Latency: {}", self.latency.label()));
+                        ui.label(format!("PING interval: {}", self.latency.label()));
                     }
                     if self.latency.history.len() >= 2 {
                         let max_val = self.latency.history.iter().cloned().fold(1.0f32, f32::max);
