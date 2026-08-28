@@ -38,18 +38,45 @@ audit's own edits. Auditing that reports "no findings" for
 the wrong reason, which is the failure the phase exists to
 prevent.
 
-What is wanted is the plan's accumulated diff, and it is
-not reliably derivable after the fact. Unrelated work
-lands on `develop` between phases, so "everything since
-the plan file appeared" is far too wide — measured on
-`PLAN-idle-cpu-and-latency`, 338 files against the five
-phases actually in it — and the phase branches are gone by
-then. It has to be *recorded*: as each phase of a master
-plan lands, put what landed it in the `Merged` column of
-the plan's *Phase order* table. Recording it is what makes
-this phase runnable at all. It does not go in the `Status`
-column, which the `plan-status-vocabulary` shared block
-reserves for a single term.
+What is wanted is the plan's accumulated diff, and the
+obvious way to get it does not work. Unrelated work lands
+on `develop` between phases, so "everything since the plan
+file appeared" is far too wide — measured on
+`PLAN-idle-cpu-and-latency`, 340 files and 119 684
+insertions against the five phases actually in it — and the
+phase branches are gone by then. It has to be *recorded*:
+as each phase of a master plan lands, put what landed it in
+the `Merged` column of the plan's *Phase order* table.
+Recording it is what makes this phase runnable at all. It
+does not go in the `Status` column, which the
+`plan-status-vocabulary` shared block reserves for a single
+term.
+
+Recording it is what makes the phase *reliable*; it is not
+always the only way. Where a plan's phases landed
+contiguously on one branch — no unrelated commit
+interleaved among them — the range
+`<first-plan-commit>^1..<last-plan-commit>` is exact, and
+recoverable from `git log` long after the branch is gone.
+`PLAN-idle-cpu-and-latency` turned out to be such a case
+when its own audit phase ran: all five phases landed in a
+single pull request, and `90a954b^1..1c28d6f` isolates them
+to 25 files and 1 957 insertions. So when the `Merged`
+column is empty, look at how the phases landed before
+concluding the diff is unrecoverable.
+
+Two cautions, because the contiguous case is luck rather
+than design. Check that nothing unrelated landed *between*
+the bounding commits — on that plan, two commits sat just
+above the last phase commit and one of them was half in
+scope, which is a patch to assemble by hand rather than a
+range to widen. And check that the branch carried only the
+one plan: that pull request also carried a second plan's
+work, entirely below the base, so the merge commit's own
+diff was the wrong patch even though the range was right.
+When a plan's phases interleave with other work, or a phase
+landed directly on `develop` among unrelated commits, only
+the recorded `Merged` column will do.
 
 In this repository that is one SHA per phase, because every
 phase lands as its own pull request and a merge commit's
