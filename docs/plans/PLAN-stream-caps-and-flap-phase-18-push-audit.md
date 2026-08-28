@@ -315,7 +315,7 @@ produce findings recorded in this file rather than code.
 
 | Step | Effort | Model | Isolation | Brief for sub-agent |
 |------|--------|-------|-----------|---------------------|
-| 18a | low | haiku | none | Assemble the audit patches. `git diff d416338 cd4c7d9 > /tmp/plan-audit.patch`, then four area sub-patches from the same range, using `git diff d416338 cd4c7d9 -- <paths>`: (i) `compression.patch` — `shakenfist-spice-compression/`; (ii) `renderer.patch` — `shakenfist-spice-renderer/`; (iii) `client.patch` — `ryll/`; (iv) `docs.patch` — `docs/ ARCHITECTURE.md README.md AGENTS.md` and any other `*.md`. Print the diffstat of each and of the whole. Expected shape, and the gate for step 18b: the whole patch is **64 files, 16 159 insertions, 623 deletions**; if it is not, the range broke and everything after this is wasted. Do not interpret anything; this step only assembles. |
+| 18a | low | haiku | none | Assemble the audit patches. `git diff d416338 cd4c7d9 > /tmp/plan-audit.patch`, then four area sub-patches from the same range, using `git diff d416338 cd4c7d9 -- <paths>`: (i) `compression.patch` — `shakenfist-spice-compression/`; (ii) `renderer.patch` — `shakenfist-spice-renderer/`; (iii) `client.patch` — `ryll/`; (iv) `docs.patch` — `docs/ ARCHITECTURE.md README.md AGENTS.md` and any other `*.md`; (v) `protocol.patch` — `shakenfist-spice-protocol/ tools/ Cargo.lock deny.toml`. The five sub-patches must together cover every file in the whole patch except `.github/workflows/manual-build.yml`, which is the one foreign file this phase excludes; print the set difference to prove it. Print the diffstat of each and of the whole. The fifth sub-patch exists because the obvious four-way split silently drops 360 insertions of this plan's own work — the SPICE capability and opcode constants in `shakenfist-spice-protocol/src/constants.rs` (+119), the name lookups in `logging.rs` (+89), the `gen-swatches-jpeg` fixture generator (+64), and the `Cargo.lock` / `deny.toml` entries for the three new decoder dependencies (+88). Expected shape, and the gate for step 18b: the whole patch is **64 files, 16 159 insertions, 623 deletions**; if it is not, the range broke and everything after this is wasted. Do not interpret anything; this step only assembles. |
 | 18b | low | sonnet | none | Run wave 1: `AUDIT_BASE=d416338 AUDIT_HEAD=cd4c7d9 tools/audit/wave1.sh`. Exit codes are tabulated in `PUSH-AUDIT.md`. Two things to know before reading the output. First, wave 1's build, lint and test stages run against the **current tree**, not the audit range, so a failure there means something regressed on `develop` today rather than something wrong with this plan — say which it is. Second, the range-scoped style checks read file content **at `AUDIT_HEAD`**, i.e. at its 2026-06-01 state, so a long-line or unguarded-`log_message` hit may already have been fixed; report them, do not fix them, and mark each as needing the step 18e check. Note in the report whether the `println!`/`eprintln!` check actually scanned `shakenfist-spice-renderer/` and `shakenfist-spice-compression/` — it could not before PR #325, and those two crates hold most of this diff. If wave 1 fails on codes 1-3, stop and report; do not proceed to wave 2. |
 | 18c | low | sonnet | none | Run `AUDIT_BASE=d416338 AUDIT_HEAD=cd4c7d9 tools/audit/wave2-mechanical.sh` and report its output verbatim, then add the style-conformance judgment review from `PUSH-AUDIT.md`'s *Style conformance — judgment portion* against `/tmp/plan-audit.patch`. Two areas deserve particular attention. (i) The `repaint_notify.notify_one()` pairing requirement (`docs/design-decisions.md` decision #17): this plan added event sends across the display, playback, usbredir, webdav and main channels — check every `send_event` / `event_tx.send` site in the patch has its pairing. (ii) Channel-prefix log conventions on the new diagnostic logging, which this plan added a lot of. Skip the five non-plan commits listed in this plan's survey section (`7115df8`, `d723074`, `6650b86`, `098bb0a`, and the `PLAN-streaming-test-automation.md` hunks). |
 | 18d | medium-to-high | sonnet (2a, 2b, 2c), opus (2d) | none | Six judgment agents from `PUSH-AUDIT.md`, run in parallel, each given a **patch file path** rather than a revision range. Use the runbook's briefs verbatim, with the additions below. All six: the patch is from 2026-06-01; report what the patch shows and do **not** check it against the current tree — that is step 18e's job, and six agents redundantly repeating it is the waste this split exists to avoid. All six: skip the five non-plan commits named in the survey. **2a-1** (code quality, `compression.patch`) — the four JPEG backends in `jpeg.rs` and the MJPEG/H.264 dispatch in `video.rs` are the place a missed abstraction would show; check the backends against the `JpegDecoder` trait for logic that should have been shared. **2a-2** (code quality, `renderer.patch` + `client.patch`) — phase 4 expanded four channel snapshots from the same template; look for the copy-paste that implies. **2b** (test review, whole patch) — `jpeg.rs`, `video.rs`, `lz4.rs` and `byte_bounded_lru.rs` are the new-module cases; note explicitly which of the four platform JPEG backends can be tested on Linux CI and which cannot, since "untested" and "untestable here" are different findings. **2c** (documentation review, `docs.patch` plus the whole patch for context) — note that the capability table now lives in `docs/spice-protocol.md` and the CLI flags in `docs/features.md` / `docs/diagnostics.md`, having been relocated by PRs #222 and #277; do not report their absence from `ARCHITECTURE.md` and `README.md` as a gap. **2d-1** (security, opus, high effort, `compression.patch`) — the highest-value target in this audit. `jpeg.rs` parses attacker-controlled JPEG across ImageIO (macOS FFI), WIC (Windows COM), VA-API (`dlopen`-probed, with hand-rolled JPEG header parsing) and mozjpeg; `video.rs` feeds openh264 wire data; `lz4.rs` decompresses on server-supplied sizes; `byte_bounded_lru.rs` and the GLZ dictionary cap bound memory a malicious server controls. Check unchecked indexing, unbounded or attacker-sized allocation, integer overflow in size arithmetic, `unsafe` invariants and `Send`/`Sync` claims on FFI handles, and COM threading. **2d-2** (security, opus, high effort, `renderer.patch` + `client.patch`) — concurrency and resource exhaustion: the auto-snapshot tokio task and its file rotation cap, the shared `MmClock`, the vdagent probe's reply bookkeeping on the main channel, and whether any new bug-report path can be driven to unbounded disk or memory growth by the server. |
@@ -414,3 +414,256 @@ redo, so stop for agreement rather than proceeding:
 - **Before step 18g acts on the 18e table**, agree the
   fix-or-decline split.  Declining a finding in writing is a
   judgment the operator owns, not the audit's.
+
+## Execution record: 2026-08-29
+
+### Step 18a — patches assembled, and the split was wrong
+
+`git diff d416338 cd4c7d9` gave exactly the predicted shape —
+**64 files, 16 159 insertions, 623 deletions** — so the gate
+passed.
+
+The four-way split in this plan's original 18a brief did not.
+It covered 57 of 64 files; seven fell through, five of them
+this plan's own work: `shakenfist-spice-protocol/src/constants.rs`
+(+119, the capability and opcode constants the whole plan is
+about), `logging.rs` (+89), `tools/gen-swatches-jpeg/` (+64),
+and `Cargo.lock` / `deny.toml` (+88, the three new decoder
+dependencies). A fifth sub-patch, `protocol.patch`, was added
+and the brief corrected. Coverage is now 63 of 64, the
+remainder being `.github/workflows/manual-build.yml`, which is
+the one foreign file this phase excludes by design.
+
+Lesson for the next closing audit: assert that the sub-patches
+sum to the whole *before* spending on judgment agents. A
+missing slice is silent — the agents report on what they were
+given and nobody notices what they were not.
+
+### Step 18b — wave 1: exit 0
+
+`pre-commit run --all-files`, `./scripts/check-rust.sh check`
+and `cargo test --workspace` all pass on the current tree.
+
+The question this phase most wanted answered came back yes:
+the fatal raw `println!`/`eprintln!` check **did** scan
+`shakenfist-spice-renderer/` and `shakenfist-spice-compression/`
+this run. `tools/audit/wave1-checks.sh` derives its scan set
+from the `Cargo.toml` workspace members and produced six
+directories. The 46%-of-the-workspace blind spot the
+`idle-cpu-and-latency` audit found is genuinely fixed, which
+matters here because those two crates hold roughly 6 700 of
+the 8 829 Rust insertions under audit.
+
+One style finding: a 123-character line at
+`ryll/src/config.rs:19`. It is the `RYLL_GIT_SHA` `--version`
+line from foreign commit `d723074`, so it is out of scope. Not
+carried forward.
+
+### Step 18c — wave 2 mechanical, verbatim
+
+```
+=== wave 2a: TODO / FIXME / HACK in changed files ===
+ryll/src/bugreport.rs:1352:        // TODO: Connection reports (BugReportType::Connection) today only
+ryll/src/capture.rs:366:        // pre-existing behaviour. TODO: repack when source dims are odd.
+shakenfist-spice-renderer/src/channels/usbredir.rs:883:            // TODO: track per-device byte counts.
+shakenfist-spice-renderer/src/snapshots.rs:695:    // TODO: track per-device byte counts.
+shakenfist-spice-renderer/src/snapshots.rs:700:    // TODO: track per-device byte counts.
+
+=== wave 2a: new #[allow(dead_code)] in changed files ===
++    /// `vaTerminate`. `#[allow(dead_code)]` because we never
++    #[allow(dead_code)]
++    /// `#[allow(dead_code)]` because we never call methods on
++    #[allow(dead_code)]
++    #[allow(dead_code)]
++    #[allow(dead_code)]
+(if any of the above were added in this branch, consider whether the dead code can be deleted instead)
+
+=== wave 2b: new test count in changed files ===
+new #[test] functions: 106
+rust files changed: 28
+
+=== wave 2d: security smoke ===
+new unsafe{} blocks in changed files:
++        // Safety: with_data is unsafe because `options` generics
++        let source = unsafe { CGImageSource::with_data(&cf_data, None) }?;
++        // Safety: count and image_at_index are unsafe for the same
++        if unsafe { source.count() } == 0 {
++        let cg_image = unsafe { source.image_at_index(0, None) }?;
++        // Safety: CGBitmapContextCreate is unsafe because `data`
++        let context = unsafe {
++        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
++            match unsafe { CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) }
++        let stream = match unsafe { factory.CreateStream() } {
+
+new .unwrap() / .expect() in non-test code:
++                                .expect("auto-snapshot: failed to build tokio runtime");
++            let snap = self.channel_snapshots.display.lock().unwrap();
++        let mut f = std::fs::File::create(path).unwrap();
++        f.write_all(b"fake").unwrap();
++        let tmp = tempfile::tempdir().unwrap();
++        let tmp = tempfile::tempdir().unwrap();
++        let tmp = tempfile::tempdir().unwrap();
++            .expect("wait_for_cancel must return promptly when flag already set");
++            .expect("waiter task must complete within one poll after cancel set")
++            .expect("waiter task must not panic");
++                    let guard = buf.lock().unwrap();
++        let json = serde_json::to_string_pretty(&snap).unwrap();
++        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
++        let json = serde_json::to_string_pretty(&snap).unwrap();
++        let raw = serde_json::to_string(&PlaybackCodec::Raw).unwrap();
++        let opus = serde_json::to_string(&PlaybackCodec::Opus).unwrap();
++        let other = serde_json::to_string(&PlaybackCodec::Other(42)).unwrap();
++        let json = serde_json::to_string_pretty(&snap).unwrap();
++        let json = serde_json::to_string_pretty(&snap).unwrap();
++        let outcome = self.images.lock().unwrap().insert(image_id, pixels);
+(review each: are they panic-safe given the inputs?)
+```
+
+Style conformance passed. The `repaint_notify.notify_one()`
+pairing (`docs/design-decisions.md` decision #17) holds at
+every site the patch adds or touches — only two are genuine
+`ChannelEvent` sends; the rest of the diff's "send" hits are
+the new per-opcode wire counters. Channel log prefixes are
+correct and no field silently changed units.
+
+### Step 18d — six judgment agents
+
+All six reported. Two structural observations are worth more
+than any individual finding.
+
+**The agents corrected this plan's own premises, three times.**
+The VA-API "hand-rolled JPEG header parsing" that this plan
+called "the single most suspicious thing in the diff" does not
+exist: `VaapiDecoder::decode` (`jpeg.rs:1253`) is a probe-only
+stub delegating to an embedded mozjpeg fallback, verified
+directly. The GLZ dictionary does not reimplement byte
+accounting; it correctly reuses the new `ByteBoundedLru`. And
+`snapshots.rs` gained zero tests — the serialisation tests this
+plan sent an agent looking for live in `bugreport.rs`.
+
+**Wave 1's green result is narrower than it reads.** The macOS
+`imageio_tests` and Windows `wic_tests` do not compile on
+Linux, and `.github/workflows/ci.yml:465-479` runs only
+`cargo build --release -p ryll` plus a web smoke on those two
+platforms — never `cargo test`. So of the "106 new tests", a
+platform-gated subset has never run anywhere in CI.
+
+### Step 18e — findings triaged against current `develop`
+
+Fifty-one findings. Both triage agents were told that
+`already-fixed` requires naming the fix, and both complied.
+The headline numbers: **one HIGH survives**, four findings were
+refuted outright, three were ruled out of this plan's scope,
+and six are already fixed on `develop`.
+
+The compression crate barely moved since this landed (the only
+commits touching `jpeg.rs` / `video.rs` / `lz4.rs` in the
+interval are comment-only), so its findings are live. The
+renderer and client drifted substantially, and that is where
+the already-fixed rows are.
+
+| ID | Finding | Severity | Verified | Status | Current location |
+|----|---------|----------|----------|--------|------------------|
+| **S1-1** | **`ImageIoDecoder` passes no format hint or magic-byte check, so ImageIO sniffs the container and server bytes can reach TIFF/HEIF/WebP/JP2/RAW sub-decoders. The WIC sibling pins `GUID_ContainerFormatJpeg`; macOS always selects this backend.** | **HIGH** | CONFIRMED | **still-present** | `jpeg.rs:320`; contrast `:628`; selector `:1315` |
+| S1-2 | `JpegDecoderRsDecoder` applies no size bound and its rustdoc falsely claims it matches `jpeg-decoder`'s internal cap (that cap is `usize::MAX`) | Medium | CONFIRMED | still-present | `jpeg.rs:91-135`, doc `:34-44` |
+| S1-3 | 16384 cap still permits a 1 GiB frame; `MozJpegDecoder` double-buffers to ~2 GiB; decoded dims never cross-checked against the STREAM_CREATE rect | Medium | CONFIRMED, corrected | still-present | `jpeg.rs:44`, `:209`, `:222-225` |
+| S1-4 | GLZ byte-cap eviction makes a pre-existing 100 ms per-reference stall newly reachable, and the wait is provably futile for an evicted id | Medium | CONFIRMED, split | still-present (cap half in scope) | eviction `glz.rs:65-88`; stall `:373-393` |
+| S1-5 | `WicDecoder` fabricates `&mut [u8]` from `&[u8]`; UB regardless of writes, and the SAFETY comment addresses the wrong hazard | Medium | CONFIRMED | still-present | `jpeg.rs:610-613` |
+| S1-6 | H.264 path has no decoded-dimension cap | Medium | OVERSTATED | still-present | `video.rs:326-334` |
+| S1-7 | `JpegDecoderRsDecoder` never validates `rgba.len() == w*h*4` where `MozJpegDecoder` does | Low | OVERSTATED | still-present | `jpeg.rs:113-121` vs `:211-222` |
+| S1-8 | VA-API probe allocates `vec![0; max_profiles]` from an unvalidated driver `c_int` | Low | CONFIRMED, corrected | still-present | `jpeg.rs:1131`, `:1159` |
+| S1-9 | lz4 `row_bytes` unchecked and uncapped allocation | Low | CONFIRMED pre-existing | **out-of-scope** | byte-identical at `d416338` |
+| S1-9b | New test codifies "truncated payload returns partial zero-filled image" as intended | Advisory | CONFIRMED | still-present | `lz4.rs:343` |
+| S1-10 | DHT cached before any decode attempt and never invalidated on failure | Low | CONFIRMED | still-present | `video.rs:183-193` |
+| S2-1 | Repeated `MAIN_INIT` re-emits `SessionInitialized` with no once-guard; each spawns a fresh OS thread and tokio runtime | Medium | CONFIRMED premise, severity down | still-present | `main_channel.rs:796`, `app.rs:1562`, `:1627` |
+| S2-2 | Per-frame UI-thread deep clone of uncapped `streams_active` under the snapshot mutex | Medium | CONFIRMED | still-present | `app.rs:3210`, `display.rs:568`, `:1364` |
+| S2-3 | Opcode maps keyed on a server-controlled `u16` (65 536 keys) cloned under the mutex on every batch and every send | Medium | CONFIRMED | still-present | six channel modules; `main_channel.rs:1126` |
+| S2-4 | `STREAM_ACTIVATE_REPORT` `max_window_size` / `timeout_ms` unvalidated; the `as i32` cast sign-flips | Medium | CONFIRMED | still-present | `display.rs:113-114`, `:1689`, `:2804` |
+| S2-5 | Auto-snapshot cap is a file count, not a byte budget (~1 GB at defaults); `interval` uses `Burst` | Low | CONFIRMED | still-present | `auto_snapshot.rs:130`, `:201` |
+| S2-6 | Every `STREAM_CREATE` allocates a `Box<dyn VideoDecoder>`; re-CREATE overwrites without `retire_stream` | Medium | CONFIRMED | still-present | `display.rs:1343`, `:1364`, `:853` |
+| S2-7 | `ByteBoundedLru` counts only `value.len()`; `image_cache_ids` collected and sorted on every snapshot | Medium | CONFIRMED | still-present | `byte_bounded_lru.rs:107`, `image_cache.rs:100` |
+| S2-8 | `drain_all_pcap_bytes` holds six ring mutexes across full iterations, then materialises ~50 MB | Low | CONFIRMED | still-present | `bugreport.rs:559-577` |
+| S2-9 | Auto-snapshot cancel set only at the next `SessionInitialized`; a non-reconnecting session writes forever | Low | CONFIRMED | still-present | `app.rs:1589` |
+| S2-10 | `prune_to_cap` blocks the executor | Info | OVERSTATED | still-present | `auto_snapshot.rs:292` |
+| S2-11 | Zero-valued CLI caps panic at startup | Low | CONFIRMED | still-present | `main.rs:974`, `auto_snapshot.rs:201` |
+| S2-12 | `outstanding_agent_request_count` drifts upward | Info | CONFIRMED | still-present | `main_channel.rs:1338` |
+| S2-13 | `unreachable!()` on the STREAM_DATA decode dispatch | Info | CONFIRMED | moved | `display.rs:1614` |
+| Q1-1 | Dimension-validation block triplicated (structurally, not verbatim) | Advisory | OVERSTATED | still-present | `jpeg.rs:194`, `:334`, `:657` |
+| Q1-2 | RGBA buffer allocation duplicated | Advisory | CONFIRMED | still-present | `jpeg.rs:345`, `:709` |
+| Q1-3 | Empty-input short-circuit duplicated | Minor | CONFIRMED | still-present | `jpeg.rs:308`, `:563` |
+| Q1-4 | `DecodedJpeg` and `DecodedFrame` structurally identical; one rebuilt from the other | Advisory | CONFIRMED | still-present | `jpeg.rs:29`, `video.rs:49`, `:195` |
+| Q1-5 | `FnVaCreateConfig` unused typedef | Advisory | CONFIRMED | still-present | `jpeg.rs:944` |
+| Q1-6 | `unsafe impl Send/Sync for VaapiDecoder` sound only by an unenforced invariant | Advisory | CONFIRMED | still-present | `jpeg.rs:1219` |
+| Q1-7 | `VaapiDecoder` docstring roadmap paragraph | Advisory | OVERSTATED | still-present, narrowed | `jpeg.rs:802-812` |
+| Q2-1 | Six-way copy-paste of the opcode-counter block | Advisory | CONFIRMED | still-present | six channel modules |
+| Q2-2 | Baseline-assert boilerplate repeated across four snapshot tests | Advisory | CONFIRMED | still-present | `bugreport.rs:2341-2600` |
+| Q2-3 | `mjpeg_duration_stats` "comment concedes the name is misleading" | — | **REFUTED** | out-of-scope | `display.rs:2777` |
+| Q2-4 | 22-line doc comment attached to `wait_for_cancel` instead of `run_auto_snapshot_loop` | Low | CONFIRMED | still-present | `auto_snapshot.rs:172-197` |
+| Q2-5 | `DisconnectCause` main-channel keepalive fields hardcoded `0`/`None` with no comment | Medium | CONFIRMED | still-present | `bugreport.rs:1086-1087` |
+| Q2-6 | `display_cap_name()` omits bits 6 and 12, both in `DEFAULT_DISPLAY`; `_ => None` hides it | Low | CONFIRMED | still-present | `logging.rs:552-565` |
+| Q2-7 | `capture.rs` odd-dimension TODO | — | CONFIRMED pre-existing | out-of-scope, since removed | gone; `b3bbf72` |
+| Q2-8 | Review-process metadata in shipped comments | Advisory | CONFIRMED, partly fixed | still-present, reduced | `main_channel.rs:1463`; one removed by `f1b307c` |
+| Q2-9 | Three duplicate TODOs; `bytes_to_guest`/`bytes_from_guest` always zero in the payload | Low | CONFIRMED | moved | `snapshots.rs:690`, `:695` |
+| T-1 | 137 new `assert!(json.contains(…))` substring assertions; exactly one converted to a typed assertion | Low | CONFIRMED | still-present | `bugreport.rs`, 190 now vs 53 at base |
+| T-2 | No test exercises `MAX_DECODED_JPEG_DIMENSION` | Advisory | CONFIRMED | still-present | no test references the constant |
+| T-3 | The dimension cap is inline in `cfg`-gated bodies with zero CI coverage on any platform CI runs | **Medium** | CONFIRMED, severity up | still-present | `jpeg.rs:333`, `:657` |
+| T-4 | Wave 1's green run never compiled the macOS/Windows tests; that CI matrix never runs `cargo test` | Info | CONFIRMED | still-present | `ci.yml:465-479` |
+| T-5 | No zero-length-packet test through the `VideoDecoder` wrapper | Advisory | CONFIRMED | still-present | `video.rs:953` |
+| T-6 | No cascading-eviction or churn test for `byte_bounded_lru` | Advisory | CONFIRMED | still-present | `byte_bounded_lru.rs:290` |
+| T-7 | lz4 overflow guards untested | Advisory | CONFIRMED | still-present | `lz4.rs:388` |
+| T-8 | `swatches.jpg` fixture used only by macOS/Windows tests | Advisory | CONFIRMED | still-present | `jpeg.rs:1535`, `:1653` |
+| T-9 | `make test-qemu` recommended; no unit test stands up a real SPICE session | Advisory | CONFIRMED | still-present | process |
+| D-1 | "phase \<number\>" references in non-plan docs | — | **REFUTED** on current `develop` | **already-fixed** | 0 hits; `d1b2f60`, `7332cb7`, `f1b307c` |
+| D-2 | Video-decode build dependencies undocumented | Low | OVERSTATED | mostly fixed; narrow gap live | see below |
+| D-3 | README auto-snapshot subsection | Advisory | CONFIRMED at patch time | already-fixed | `docs/features.md:145` |
+| D-4 | ARCHITECTURE.md auto-snapshot subsection | Advisory | CONFIRMED at patch time | already-fixed | `docs/diagnostics.md:165` |
+| D-5 | New opcodes may warrant a kerbside doc review | Info | not checked | out-of-scope | — |
+| W-2 | `wave1.sh`'s two range-scoped checks disagree about what "the audit range" means: one greps the live tree, the other reads `AUDIT_HEAD` | Low (tooling) | CONFIRMED | still-present | `wave1.sh:143` vs `:176` |
+
+Four results changed the picture enough to record separately.
+
+**S1-1 is the only HIGH, and the asymmetry is the argument.**
+The Windows backend pins `GUID_ContainerFormatJpeg`; the macOS
+one passes `None` and lets ImageIO sniff. Two backends written
+days apart for the same job disagree about whether to constrain
+the container, and the permissive one is the only backend
+macOS ever selects. That is a one-line fix with a clear
+precedent inside the same file.
+
+**D-1 was the loudest finding and it is entirely gone.** The
+documentation agent reported "phase \<number\>" references
+across five non-plan documents and rated it blocking; the
+triage agent re-ran the check against current `develop` and
+found **zero** hits, cleaned by `d1b2f60`, `7332cb7` and
+`f1b307c`. This is what the triage step is for, and it is the
+strongest argument in this plan's favour for auditing the
+historical diff and triaging afterwards rather than skipping
+straight to today's tree.
+
+**D-2 inverted on inspection.** Most of the removed AGENTS.md
+build-dependency content *was* re-homed. What survives is
+narrower and worse than a gap: `docs/development-macos.md:214`
+still says the openh264 crate "downloads a pre-built library at
+build time", which was true of older releases and is false of
+the pinned `openh264-sys2 0.9.8`, which compiles vendored
+source. So the document offers a remedy for a failure mode that
+no longer exists and hides the one that does — a missing C
+toolchain, which `docs/development.md:62-69`'s `apt-get` list
+also omits. The 2c agent's blanket "all accuracy checks passed"
+did not catch this.
+
+**T-3 went up, not down.** `MAX_DECODED_JPEG_DIMENSION` is an
+allocation bound against hostile input, and on two of three
+platforms it is enforced by code that no CI job compiles, let
+alone runs. Factoring the check into a platform-independent
+helper fixes T-3, Q1-1 and S1-2 in one change — the
+highest-leverage item in this audit.
+
+### Step 18f — the derivation recorded
+
+The `Merged` column now names `f22416a` (PR #102) for phases
+1-8, 12, 14 and 15, `cd4c7d9` (PR #105) for phases 9 and 10,
+both for phase 11 (11A and 11B landed separately), and keeps
+the em dash for the parked 13, 16 and 17. A paragraph below the
+table records the range derivation and the five foreign commits
+inside it.
