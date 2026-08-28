@@ -878,10 +878,23 @@ pub struct RyllApp {
     /// and respawn. Setting to `true` causes the loop to exit at
     /// the next 500 ms poll.
     auto_snapshot_cancel: Option<Arc<AtomicBool>>,
+    /// Join handle for the auto-snapshot thread currently running,
+    /// if any. Retained so a respawn can *wait* for the outgoing
+    /// thread to exit rather than merely signalling it: signalling
+    /// alone lets threads accumulate whenever sessions arrive faster
+    /// than the ~500 ms retire poll, which a server repeating
+    /// SPICE_MSG_MAIN_INIT can arrange at will.
+    auto_snapshot_thread: Option<std::thread::JoinHandle<()>>,
     /// Whether the one-shot "Auto-snapshot mode enabled" startup
     /// notification has been pushed. Latched on the first spawn
     /// so per-reconnect respawns don't repeat the notification.
     auto_snapshot_startup_notified: bool,
+
+    /// Session id from the most recent `SessionInitialized`, or
+    /// `None` before the first session. Lets `process_events` tell a
+    /// repeated `SPICE_MSG_MAIN_INIT` for the session we already hold
+    /// (a duplicate, to be dropped) from a genuinely new one.
+    current_session_id: Option<u32>,
 
     /// Most recent time the streaming-flap notification fired. Used by
     /// `streaming_state::classify` to enforce the 60 s cool-down between
@@ -1243,7 +1256,9 @@ impl RyllApp {
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
             auto_snapshot_cancel: None,
+            auto_snapshot_thread: None,
             auto_snapshot_startup_notified: false,
+            current_session_id: None,
             last_flap_notification_ts: None,
         }
     }
@@ -1256,6 +1271,11 @@ impl RyllApp {
         if let Some(prev) = self.connection_cancel.take() {
             prev.store(true, Ordering::Relaxed);
         }
+        // The auto-snapshot task about to be replaced holds Arcs to
+        // the `traffic` / `channel_snapshots` this function is about
+        // to swap out, so its remaining zips would describe a session
+        // that no longer exists. Signal now; the respawn joins.
+        self.signal_auto_snapshot_retire();
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -1419,6 +1439,43 @@ impl RyllApp {
         self.reconnect();
     }
 
+    /// Ask the running auto-snapshot task to retire, without waiting
+    /// for it.
+    ///
+    /// Called on every critical disconnect. Until this existed the
+    /// cancel flag was only raised by the *next* `SessionInitialized`,
+    /// so a server that accepted one session and then refused every
+    /// reconnect left the last task writing full-size zips of a frozen
+    /// pcap for as long as ryll stayed open. Deliberately does not
+    /// join: this runs on the egui UI thread and an in-flight zip
+    /// write can take seconds. The join happens at respawn instead,
+    /// where the flag raised here has usually already been acted on.
+    fn signal_auto_snapshot_retire(&self) {
+        if let Some(cancel) = &self.auto_snapshot_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Retire the running auto-snapshot task and wait for its thread
+    /// to exit.
+    ///
+    /// Called immediately before a respawn so at most one
+    /// auto-snapshot thread is ever alive: the loop notices the flag
+    /// at its next 500 ms poll, and a zip write already inside
+    /// `spawn_blocking` does not notice it at all until it finishes,
+    /// so signal-without-join would let threads pile up faster than
+    /// they retire. A no-op when the mode is disabled or nothing is
+    /// running.
+    fn retire_auto_snapshot_task(&mut self) {
+        self.signal_auto_snapshot_retire();
+        self.auto_snapshot_cancel = None;
+        if let Some(handle) = self.auto_snapshot_thread.take() {
+            if handle.join().is_err() {
+                warn!("app: auto-snapshot thread panicked; continuing without it");
+            }
+        }
+    }
+
     /// Drive the `ReconnectState` machine in response to a critical
     /// disconnect (Main/Display/Inputs going down, or any
     /// `ChannelEvent::Error`). Callers are responsible for writing
@@ -1442,8 +1499,10 @@ impl RyllApp {
 
         // Even if the state machine ignores the event, the
         // connection itself has gone — clear surfaces / cursor so
-        // the next paint shows a clean canvas.
+        // the next paint shows a clean canvas, and tell the
+        // auto-snapshot task to stop capturing a dead session.
         self.connected = false;
+        self.signal_auto_snapshot_retire();
         self.surfaces.clear();
         self.cursor_image = None;
         self.cursor_texture = None;
@@ -1560,7 +1619,24 @@ impl RyllApp {
             }
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
+                    // Nothing on the wire obliges a server to send
+                    // SPICE_MSG_MAIN_INIT exactly once, and the renderer
+                    // emits this event for every one it decodes. Re-running
+                    // the arm for the session we already hold would
+                    // re-announce the connection and respawn the
+                    // auto-snapshot task once per ~36-byte message, so drop
+                    // the duplicate here. A *different* session id is a
+                    // genuinely new session (the link was rebuilt without
+                    // this side seeing a disconnect) and falls through.
+                    if self.connected && self.current_session_id == Some(session_id) {
+                        debug!(
+                            "app: ignoring duplicate SessionInitialized for session {}",
+                            session_id
+                        );
+                        continue;
+                    }
                     info!("app: session {} initialized", session_id);
+                    self.current_session_id = Some(session_id);
                     self.connected = true;
                     // A fresh successful link clears any pending
                     // reconnect state. Whether this resulted from
@@ -1583,19 +1659,26 @@ impl RyllApp {
                     // per session: `reconnect()` replaces `self.traffic` and
                     // `self.channel_snapshots` with fresh instances, so any
                     // task spawned for the previous session is holding stale
-                    // Arcs. Signal it to retire (it will exit within ~500 ms),
-                    // then spawn a fresh task with the current Arcs.
+                    // Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
-                        if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
-                            prev_cancel.store(true, Ordering::Relaxed);
-                        }
+                        // Retire *and join* before spawning, so at most one
+                        // auto-snapshot thread exists at any moment. In the
+                        // ordinary reconnect path the cancel flag was already
+                        // raised at disconnect, so the outgoing thread has had
+                        // the whole reconnect interval to wind down and this
+                        // join returns immediately.
+                        self.retire_auto_snapshot_task();
                         let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
                         let cap = self.auto_snapshot_cap;
+                        let byte_cap = crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_BYTE_CAP;
                         let cancel = Arc::new(AtomicBool::new(false));
                         self.auto_snapshot_cancel = Some(cancel.clone());
 
                         // One-shot startup notification — fire only on
                         // the first session so reconnects don't spam.
+                        // Both budgets are quoted: the count alone tells
+                        // the operator nothing about how much disk the
+                        // mode is authorised to use.
                         if !self.auto_snapshot_startup_notified {
                             self.auto_snapshot_startup_notified = true;
                             self.push_notification(
@@ -1603,10 +1686,11 @@ impl RyllApp {
                                 NotificationSource::Internal,
                                 format!(
                                     "Auto-snapshot mode enabled \
-                                     — every {}s, max {} snapshots, \
+                                     — every {}s, max {} snapshots / {} MiB, \
                                      saving to {}",
                                     interval_secs,
                                     cap,
+                                    byte_cap / (1024 * 1024),
                                     output_dir.display(),
                                 ),
                             );
@@ -1622,15 +1706,34 @@ impl RyllApp {
                             output_dir,
                             interval: Duration::from_secs(interval_secs),
                             cap,
+                            byte_cap,
                             cancel,
                         };
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Builder::new_current_thread()
+                        let handle = std::thread::spawn(move || {
+                            // A runtime that will not build means an
+                            // opt-in diagnostic feature does not start;
+                            // it is not grounds to abort ryll. The
+                            // previous `.expect()` here panicked a thread
+                            // the UI thread later joins, taking the GUI
+                            // down with a feature nobody asked to be
+                            // fatal.
+                            let rt = match tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
-                                .expect("auto-snapshot: failed to build tokio runtime");
+                            {
+                                Ok(rt) => rt,
+                                Err(e) => {
+                                    warn!(
+                                        "auto-snapshot: cannot build tokio runtime, mode \
+                                         inactive for this session: {}",
+                                        e
+                                    );
+                                    return;
+                                }
+                            };
                             rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
                         });
+                        self.auto_snapshot_thread = Some(handle);
                     }
                 }
 
@@ -3195,19 +3298,25 @@ impl eframe::App for RyllApp {
         // The result drives the status-bar indicator below; a fired
         // notification (Flapping + cool-down elapsed) is pushed before we
         // render so the bell can pick it up on the same frame.
-        let (streaming_state, streams_active_for_tooltip) = {
+        let streaming_state = {
             let snap = self
                 .channel_snapshots
                 .display
                 .lock()
                 .expect("lock poisoned");
+            // `classify` borrows the snapshot; nothing is copied out of
+            // it here. The per-stream detail the tooltip wants is read
+            // back under the lock inside `on_hover_ui` below, on the
+            // frames the pointer is actually over the indicator —
+            // cloning `streams_active` (two heap Strings per stream)
+            // every frame to serve a tooltip almost nobody is looking
+            // at was pure waste on the UI thread.
             let (state, notif) = streaming_state::classify(
                 &snap,
                 Instant::now(),
                 self.traffic.session_start(),
                 self.last_flap_notification_ts,
             );
-            let active = snap.streams_active.clone();
             drop(snap);
             if let Some(notification) = notif {
                 self.last_flap_notification_ts = Some(Instant::now());
@@ -3217,7 +3326,7 @@ impl eframe::App for RyllApp {
                     notification.message,
                 );
             }
-            (state, active)
+            state
         };
 
         // egui 0.35: `TopBottomPanel`/`SidePanel` were unified into
@@ -3331,68 +3440,69 @@ impl eframe::App for RyllApp {
                         // renders as a tofu box in egui's monochrome font; ▶
                         // keeps the visual cue (something "playing") without
                         // the font problem.
-                        let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
-                            match &streaming_state {
-                                StreamingState::Off => (
-                                    egui::Color32::from_rgb(120, 120, 120),
-                                    vec!["No streams active".to_string()],
-                                ),
-                                StreamingState::Active => {
-                                    let mut lines =
-                                        Vec::with_capacity(streams_active_for_tooltip.len() + 1);
-                                    lines.push(format!(
-                                        "{} active stream{}",
-                                        streams_active_for_tooltip.len(),
-                                        if streams_active_for_tooltip.len() == 1 {
-                                            ""
-                                        } else {
-                                            "s"
-                                        },
-                                    ));
-                                    let now_secs = self.traffic.elapsed().as_secs_f64();
-                                    for s in &streams_active_for_tooltip {
-                                        let codec = match s.codec_type {
-                                            1 => "MJPEG".to_string(),
-                                            2 => "VP8".to_string(),
-                                            3 => "H264".to_string(),
-                                            4 => "VP9".to_string(),
-                                            5 => "H265".to_string(),
-                                            other => format!("codec{}", other),
-                                        };
-                                        let lifetime = (now_secs - s.created_at_secs).max(0.0);
-                                        lines.push(format!(
-                                            "codec={} {}x{} frames={} lifetime={:.0}s",
-                                            codec,
-                                            s.stream_width,
-                                            s.stream_height,
-                                            s.frames_decoded_ok,
-                                            lifetime,
-                                        ));
-                                    }
-                                    (egui::Color32::from_rgb(60, 180, 60), lines)
-                                }
-                                StreamingState::RecentlyDestroyed { secs_since } => (
-                                    egui::Color32::from_rgb(220, 160, 60),
-                                    vec![format!("Last stream destroyed {:.1}s ago", secs_since)],
-                                ),
-                                StreamingState::Flapping {
-                                    destroys_in_window,
-                                    window_secs,
-                                    mean_lifetime_secs,
-                                } => (
-                                    egui::Color32::from_rgb(220, 60, 60),
-                                    vec![format!(
-                                        "Streams flapping: {} destroys in {:.0} s, \
-                                         mean lifetime {:.1} s",
-                                        destroys_in_window, window_secs, mean_lifetime_secs,
-                                    )],
-                                ),
-                            };
+                        let icon_colour = match &streaming_state {
+                            StreamingState::Off => egui::Color32::from_rgb(120, 120, 120),
+                            StreamingState::Active => egui::Color32::from_rgb(60, 180, 60),
+                            StreamingState::RecentlyDestroyed { .. } => {
+                                egui::Color32::from_rgb(220, 160, 60)
+                            }
+                            StreamingState::Flapping { .. } => egui::Color32::from_rgb(220, 60, 60),
+                        };
                         let icon_text = egui::RichText::new("\u{25B6}").color(icon_colour);
                         let icon_resp = ui.label(icon_text);
-                        icon_resp.on_hover_ui(|ui| {
-                            for line in &tooltip_lines {
-                                ui.label(line);
+                        // Every string below is built inside the hover
+                        // closure, which egui only runs on the frames the
+                        // tooltip is actually shown.
+                        icon_resp.on_hover_ui(|ui| match &streaming_state {
+                            StreamingState::Off => {
+                                ui.label("No streams active");
+                            }
+                            StreamingState::Active => {
+                                let snap = self
+                                    .channel_snapshots
+                                    .display
+                                    .lock()
+                                    .expect("lock poisoned");
+                                let active = &snap.streams_active;
+                                ui.label(format!(
+                                    "{} active stream{}",
+                                    active.len(),
+                                    if active.len() == 1 { "" } else { "s" },
+                                ));
+                                let now_secs = self.traffic.elapsed().as_secs_f64();
+                                for s in active {
+                                    let codec = match s.codec_type {
+                                        1 => "MJPEG".to_string(),
+                                        2 => "VP8".to_string(),
+                                        3 => "H264".to_string(),
+                                        4 => "VP9".to_string(),
+                                        5 => "H265".to_string(),
+                                        other => format!("codec{}", other),
+                                    };
+                                    let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                    ui.label(format!(
+                                        "codec={} {}x{} frames={} lifetime={:.0}s",
+                                        codec,
+                                        s.stream_width,
+                                        s.stream_height,
+                                        s.frames_decoded_ok,
+                                        lifetime,
+                                    ));
+                                }
+                            }
+                            StreamingState::RecentlyDestroyed { secs_since } => {
+                                ui.label(format!("Last stream destroyed {:.1}s ago", secs_since));
+                            }
+                            StreamingState::Flapping {
+                                destroys_in_window,
+                                window_secs,
+                                mean_lifetime_secs,
+                            } => {
+                                ui.label(format!(
+                                    "Streams flapping: {} destroys in {:.0} s, \
+                                     mean lifetime {:.1} s",
+                                    destroys_in_window, window_secs, mean_lifetime_secs,
+                                ));
                             }
                         });
 

@@ -99,7 +99,7 @@ written to JSON for bug reports.
 
 | Snapshot struct | Channel | Key fields |
 |----------------|---------|------------|
-| `DisplaySnapshot` | Display | Image cache size/IDs, recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters, pcap writer-queue drop counter, ACK state, bytes in/out, image cache statistics (cap in bytes, LRU eviction count, bytes evicted) from `BoundedImageCache` |
+| `DisplaySnapshot` | Display | Image cache size and 64 most-recent IDs, per-opcode recv/send maps, unknown-opcode counter, stream lifecycle counters (created/destroyed/rejected), recent decode results (last 20) with per-decode wall-time, decode/socket/ACK diagnostic counters, pcap writer-queue drop counter, ACK state, bytes in/out, image cache statistics (cap in bytes, LRU eviction count, bytes evicted) from `BoundedImageCache` |
 | `InputsSnapshot` | Inputs | Button state, motion count, recent input events (last 50), per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
 | `CursorSnapshot` | Cursor | Cursor cache contents, ACK state, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
 | `MainSnapshot` | Main | Session ID, mm_time, keepalive, per-opcode recv/send maps, unknown-opcode counter, pcap writer-queue drop counter, bytes in/out |
@@ -113,7 +113,11 @@ All channel snapshots share an eight-field transport common baseline
 `ping_recv_count`, `pong_send_count`, `last_ping_recv_ts_secs`,
 `writer_dropped_count`) plus four baseline additions
 (`messages_recv_by_opcode`, `messages_send_by_opcode`,
-`last_unknown_opcode`, `unknown_opcode_count`). See the
+`last_unknown_opcode`, `unknown_opcode_count`), produced by the
+shared `OpcodeCounters` type. Only opcodes the protocol crate has a
+name for get their own map entry — a server-chosen opcode this build
+does not recognise is folded into `unknown_opcode_count` so the map
+cannot be grown from the wire. See the
 [channel diagnostics audit](channel-diagnostics-audit.md) for the full
 audit matrix and minimum-baseline rationale.
 
@@ -418,21 +422,35 @@ Key design points:
 - `AutoSnapshotState` in `ryll/src/auto_snapshot.rs` bundles the
   Arc handles the task needs (traffic, channel snapshots, app
   snapshot, notifications, target host/port, output dir, cap,
-  interval). All are already Arc-backed on `RyllApp`.
+  byte cap, interval). All are already Arc-backed on `RyllApp`.
 - The task runs in its own std::thread with a dedicated
   `tokio::runtime::Builder::new_current_thread` runtime, spawned
-  once on the first `ChannelEvent::SessionInitialized` (a latch
-  prevents a second spawn on reconnect).
+  on `ChannelEvent::SessionInitialized`. `reconnect()` replaces
+  the traffic and channel-snapshot Arcs wholesale, so each
+  session gets its own task: the app raises the outgoing task's
+  cancel flag at disconnect and *joins* its thread before
+  spawning the replacement, which keeps the live thread count at
+  one no matter how often sessions are announced. A repeated
+  `SPICE_MSG_MAIN_INIT` for the session already in hand is
+  discarded as a duplicate rather than treated as a new session.
+  If the dedicated runtime cannot be built, the mode simply does
+  not start for that session and logs a warning.
 - A startup `NotifySeverity::Info` notification confirms the mode
   is active: `"Auto-snapshot mode enabled — every {N}s, max {cap}
-  snapshots, saving to {path}"`.
+  snapshots / {byte cap} MiB, saving to {path}"`.
 - The stats panel renders `"Auto-snapshot: {saved}/{cap}"` when
   the mode is active; the line is hidden when disabled.
 - Rolling cap: after each successful write, `prune_to_cap` lists
   `ryll-auto-snapshot-*.zip` in the output dir, sorts
   lexicographically (= chronologically by filename construction),
-  and deletes the oldest beyond cap. `auto_snapshots_pruned`
-  in `AppSnapshot` tracks the total deleted.
+  and deletes the oldest until both budgets are satisfied — at
+  most `--auto-snapshot-cap` files *and* at most
+  `DEFAULT_AUTO_SNAPSHOT_BYTE_CAP` (512 MiB) of them. The byte
+  budget exists because the count alone does not bound disk use:
+  `traffic.pcap` is stored uncompressed and merges all six rings,
+  so a busy session's zip approaches the 50 MiB ring budget and
+  20 of those are roughly a gigabyte. `auto_snapshots_pruned` in
+  `AppSnapshot` tracks the total deleted.
 - Write failures: `warn!` always; a `NotifySeverity::Warn`
   notification is pushed at most once per 5-minute cool-down so a
   persistent disk error does not spam the panel. The interval task

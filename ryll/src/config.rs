@@ -122,7 +122,11 @@ pub struct Args {
     /// ~2 s sampling runtime metrics; shorter intervals cause overlapping
     /// samples which is harmless but wasteful). Values below 10 s log
     /// a warning at startup.
-    #[arg(long)]
+    ///
+    /// 0 is rejected at parse time: `tokio::time::interval` panics on a
+    /// zero period, so accepting it would turn a typo into a crash
+    /// several seconds into the session.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub auto_snapshot_interval: Option<u64>,
 
     /// Maximum number of auto-snapshot zips to keep on disk
@@ -218,7 +222,11 @@ pub struct Args {
     /// for images the server flagged with CACHE_ME; without a
     /// cap, video workloads can consume gigabytes (see
     /// session-002g).
-    #[arg(long, default_value_t = 256)]
+    ///
+    /// 0 is rejected at parse time: the byte-bounded LRU behind the
+    /// cache asserts a non-zero capacity, so a zero here would abort
+    /// during connection setup rather than report a bad argument.
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(1..))]
     pub image_cache_cap_mib: u64,
 
     /// Maximum total bytes for the shared SPICE GLZ dictionary, in MiB.
@@ -226,7 +234,10 @@ pub struct Args {
     /// images so cross-frame references resolve; without a cap,
     /// full-screen ZlibGlzRgb workloads observed in sessions 003a /
     /// 004d-g consumed gigabytes (~30 MiB/s of growth).
-    #[arg(long, default_value_t = 256)]
+    ///
+    /// 0 is rejected at parse time, for the same reason as
+    /// `--image-cache-cap-mib`.
+    #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(1..))]
     pub glz_dictionary_cap_mib: u64,
 }
 

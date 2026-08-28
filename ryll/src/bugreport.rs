@@ -562,21 +562,33 @@ impl TrafficBuffers {
             use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
             use pcap_file::DataLink;
 
-            // Collect every entry from every channel.
-            let mut entries: Vec<(std::time::Duration, Vec<std::sync::Arc<[u8]>>)> = Vec::new();
+            // Snapshot every channel as a flat (timestamp, segment)
+            // list. Two things matter here. Each ring's mutex is held
+            // only for its own copy loop and released before the sort
+            // and the serialisation below — holding it across those
+            // would block that channel's record_sent / record_received
+            // for the whole of a ~50 MiB write. And segments are
+            // collected flat rather than one Vec per entry, which drops
+            // an allocation per entry from a list that runs to the
+            // hundreds of thousands.
+            let mut segments: Vec<(std::time::Duration, std::sync::Arc<[u8]>)> = Vec::new();
             for name in &CHANNELS {
                 if let Some(buf) = self.buffer_for(name) {
                     let guard = buf.lock().expect("lock poisoned");
+                    segments.reserve(guard.entries().len());
                     for entry in guard.entries().iter() {
-                        let mut segs: Vec<std::sync::Arc<[u8]>> = vec![entry.pcap_frame.clone()];
-                        segs.extend(entry.additional_segments.iter().cloned());
-                        entries.push((entry.timestamp, segs));
+                        segments.push((entry.timestamp, entry.pcap_frame.clone()));
+                        for seg in &entry.additional_segments {
+                            segments.push((entry.timestamp, seg.clone()));
+                        }
                     }
                 }
             }
 
             // Sort by timestamp so the merged pcap is chronological.
-            entries.sort_by_key(|(ts, _)| *ts);
+            // `sort_by_key` is stable, so the segments of a single
+            // entry keep their relative order within one timestamp.
+            segments.sort_by_key(|(ts, _)| *ts);
 
             let header = PcapHeader {
                 datalink: DataLink::ETHERNET,
@@ -584,11 +596,9 @@ impl TrafficBuffers {
             };
             let mut output = Vec::new();
             let mut pcap = PcapWriter::with_header(&mut output, header).ok()?;
-            for (ts, segs) in &entries {
-                for seg in segs {
-                    let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
-                    pcap.write_packet(&packet).ok();
-                }
+            for (ts, seg) in &segments {
+                let packet = PcapPacket::new(*ts, seg.len() as u32, &seg[..]);
+                pcap.write_packet(&packet).ok();
             }
             Some(output)
         }
@@ -1025,11 +1035,21 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
-    /// Idle keepalives this client sent on this channel. Today only
-    /// the inputs channel sends these; the field is present on every
-    /// entry for uniform JSON shape, with 0 / None where
-    /// unimplemented.
-    pub client_keepalive_send_count: u32,
+    /// Idle keepalives this client sent on this channel, or `None`
+    /// when the channel has no client-side keepalive mechanism at
+    /// all. The field stays on every entry for a uniform JSON shape.
+    ///
+    /// Only the inputs channel implements one. The main channel used
+    /// to, and `MainChannel::send_idle_keepalive` has since been
+    /// removed — reporting a bare `0` for it claimed the mechanism had
+    /// run and never fired, which is precisely the wrong answer to
+    /// give someone reading a main-channel disconnect report. `None`
+    /// says "no such mechanism"; `Some(0)` says "it exists and never
+    /// fired".
+    pub client_keepalive_send_count: Option<u32>,
+    /// Session-relative timestamp of the most recent idle keepalive
+    /// this client sent on this channel. `None` when none has been
+    /// sent, or when the channel has no keepalive mechanism.
     pub last_client_keepalive_send_ts_secs: Option<f64>,
 }
 
@@ -1083,7 +1103,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1099,7 +1119,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1115,7 +1135,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: s.client_keepalive_send_count,
+                    client_keepalive_send_count: Some(s.client_keepalive_send_count),
                     last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
                 },
             );
@@ -1131,7 +1151,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1147,7 +1167,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1163,7 +1183,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1179,7 +1199,7 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: 0,
+                    client_keepalive_send_count: None,
                     last_client_keepalive_send_ts_secs: None,
                 },
             );
@@ -1964,6 +1984,7 @@ impl BugReport {
 mod tests {
     use super::*;
     use crate::notifications::NotificationStore;
+    use serde_json::json;
 
     #[test]
     fn test_ring_buffer_push_and_evict() {
@@ -2162,91 +2183,113 @@ mod tests {
             mjpeg_decoder_backend: "jpeg-decoder".to_string(),
             video_decoder_backend: "jpeg-decoder".to_string(),
         });
-        let json = serde_json::to_string_pretty(&snap).unwrap();
-        assert!(json.contains("\"image_cache_entries\": 3"));
-        assert!(json.contains("\"image_type\": \"GlzRgb\""));
-        assert!(json.contains("\"bytes_in\": 100000"));
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(v["image_cache_entries"], json!(3));
+        assert_eq!(v["bytes_in"], json!(100_000));
         // Decode, socket-read and ack fields visible in
         // channel-state.json.
-        assert!(json.contains("\"decode_duration_us\": 1234"));
-        assert!(json.contains("\"decode_total_count\": 7"));
-        assert!(json.contains("\"decode_failed_count\": 1"));
-        assert!(json.contains("\"decode_from_cache_count\": 2"));
-        assert!(json.contains("\"decode_recent_min_us\": 250"));
-        assert!(json.contains("\"decode_recent_max_us\": 9000"));
-        assert!(json.contains("\"decode_recent_mean_us\": 1500"));
-        assert!(json.contains("\"socket_read_count\": 42"));
-        assert!(json.contains("\"socket_reads_at_chunk_cap\": 5"));
-        assert!(json.contains("\"socket_max_chunk_bytes\": 262144"));
-        assert!(json.contains("\"ack_send_count\": 3"));
-        assert!(json.contains("\"last_ack_send_ts_secs\": 4.25"));
-        assert!(json.contains("\"recent_ack_intervals_secs\""));
+        assert_eq!(v["recent_decodes"][0]["image_type"], json!("GlzRgb"));
+        assert_eq!(v["recent_decodes"][0]["decode_duration_us"], json!(1234));
+        assert_eq!(v["decode_total_count"], json!(7));
+        assert_eq!(v["decode_failed_count"], json!(1));
+        assert_eq!(v["decode_from_cache_count"], json!(2));
+        assert_eq!(v["decode_recent_min_us"], json!(250));
+        assert_eq!(v["decode_recent_max_us"], json!(9000));
+        assert_eq!(v["decode_recent_mean_us"], json!(1500));
+        assert_eq!(v["socket_read_count"], json!(42));
+        assert_eq!(v["socket_reads_at_chunk_cap"], json!(5));
+        assert_eq!(v["socket_max_chunk_bytes"], json!(262_144));
+        assert_eq!(v["ack_send_count"], json!(3));
+        assert_eq!(v["last_ack_send_ts_secs"], json!(4.25));
+        assert_eq!(v["recent_ack_intervals_secs"], json!([0.42]));
         // Pcap writer-queue drop counter.
-        assert!(json.contains("\"writer_dropped_count\": 11"));
+        assert_eq!(v["writer_dropped_count"], json!(11));
+
         // Stream-diagnostics fields. The presence of these in the
         // serialised display channel state is what lets a bug
         // report answer "did MJPEG frames arrive / decode / paint?".
-        assert!(json.contains("\"streams_active\""));
-        assert!(json.contains("\"stream_id\": 38"));
-        assert!(json.contains("\"codec_type\": 1"));
-        assert!(json.contains("\"stream_width\": 1600"));
-        assert!(json.contains("\"frames_received\": 240"));
-        assert!(json.contains("\"frames_decoded_ok\": 200"));
-        assert!(json.contains("\"frames_decode_failed\": 40"));
-        assert!(json.contains("\"last_frame_ts_secs\": 45.5"));
-        assert!(json.contains("\"last_decode_ok_ts_secs\": 45.4"));
-        assert!(json.contains("\"last_decode_duration_us\": 18321"));
-        assert!(json.contains("\"streams_created_total\": 2"));
-        assert!(json.contains("\"streams_destroyed_total\": 1"));
-        assert!(json.contains("\"stream_data_orphan_count\": 3"));
+        //
+        // Read out of the arrays by index rather than searched for
+        // in the document text: the two streams below differ only in
+        // their field *values*, so a substring check could not tell
+        // which array a match came from, and passed as long as the
+        // number appeared somewhere.
+        let active = v["streams_active"]
+            .as_array()
+            .expect("streams_active must serialise as an array");
+        assert_eq!(active.len(), 1);
+        let stream = &active[0];
+        assert_eq!(stream["stream_id"], json!(38));
+        assert_eq!(stream["codec_type"], json!(1));
+        assert_eq!(stream["stream_width"], json!(1600));
+        assert_eq!(stream["frames_received"], json!(240));
+        assert_eq!(stream["frames_decoded_ok"], json!(200));
+        assert_eq!(stream["frames_decode_failed"], json!(40));
+        assert_eq!(stream["last_frame_ts_secs"], json!(45.5));
+        assert_eq!(stream["last_decode_ok_ts_secs"], json!(45.4));
+        assert_eq!(stream["last_decode_duration_us"], json!(18_321));
+        // An active stream carries no destroy timestamp.
+        assert_eq!(stream["destroyed_at_secs"], json!(null));
+        assert_eq!(v["streams_created_total"], json!(2));
+        assert_eq!(v["streams_destroyed_total"], json!(1));
+        assert_eq!(v["stream_data_orphan_count"], json!(3));
+
         // Recently-destroyed ring: counters survive teardown so a
         // bug report between flap cycles still answers "did MJPEG
         // decode during stream X's life?". destroyed_at_secs is
         // always Some for entries in the ring.
-        assert!(json.contains("\"streams_recently_destroyed\""));
-        assert!(json.contains("\"stream_id\": 37"));
-        assert!(json.contains("\"destroyed_at_secs\": 6.25"));
+        let destroyed = v["streams_recently_destroyed"]
+            .as_array()
+            .expect("streams_recently_destroyed must serialise as an array");
+        assert_eq!(destroyed.len(), 1);
+        assert_eq!(destroyed[0]["stream_id"], json!(37));
+        assert_eq!(destroyed[0]["destroyed_at_secs"], json!(6.25));
+
         // STREAM_ACTIVATE_REPORT fields: verify that
         // activation state and last-sent-report mirrors are
         // visible in channel-state.json.
-        assert!(json.contains("\"report_is_active\": true"));
-        assert!(json.contains("\"report_unique_id\": 3735928559"));
-        assert!(json.contains("\"report_max_window_size\": 5"));
-        assert!(json.contains("\"report_timeout_ms\": 1000"));
-        assert!(json.contains("\"report_send_count\": 3"));
-        assert!(json.contains("\"last_report_sent_ts_secs\": 12.5"));
-        assert!(json.contains("\"last_report_num_frames\": 5"));
-        assert!(json.contains("\"last_report_num_drops\": 1"));
-        assert!(json.contains("\"last_report_last_frame_delay\": -42"));
-        assert!(json.contains("\"stream_reports_sent_total\": 17"));
-        assert!(json.contains("\"stream_reports_unsupported_signals_sent\": 2"));
+        assert_eq!(stream["report_is_active"], json!(true));
+        assert_eq!(stream["report_unique_id"], json!(3_735_928_559u64));
+        assert_eq!(stream["report_max_window_size"], json!(5));
+        assert_eq!(stream["report_timeout_ms"], json!(1000));
+        assert_eq!(stream["report_send_count"], json!(3));
+        assert_eq!(stream["last_report_sent_ts_secs"], json!(12.5));
+        assert_eq!(stream["last_report_num_frames"], json!(5));
+        assert_eq!(stream["last_report_num_drops"], json!(1));
+        assert_eq!(stream["last_report_last_frame_delay"], json!(-42));
+        assert_eq!(v["stream_reports_sent_total"], json!(17));
+        assert_eq!(v["stream_reports_unsupported_signals_sent"], json!(2));
+
         // MJPEG decoder backend name visible in bug reports so a report
         // identifies which decode path ran.
-        assert!(json.contains("\"mjpeg_decoder_backend\": \"jpeg-decoder\""));
-        // Aggregate MJPEG decode duration fields.
-        assert!(json.contains("\"mjpeg_decode_recent_min_us\": 1200"));
-        assert!(json.contains("\"mjpeg_decode_recent_max_us\": 45000"));
-        assert!(json.contains("\"mjpeg_decode_recent_mean_us\": 8500"));
-        assert!(json.contains("\"mjpeg_decode_total_count\": 350"));
-        assert!(json.contains("\"mjpeg_decode_failed_count\": 2"));
+        assert_eq!(stream["mjpeg_decoder_backend"], json!("jpeg-decoder"));
         // General-purpose video_decoder_backend field visible for every stream
         // regardless of codec. For MJPEG streams this matches mjpeg_decoder_backend;
         // for H.264 it would show "H264 (openh264)" while mjpeg_decoder_backend is
         // empty.
-        assert!(json.contains("\"video_decoder_backend\": \"jpeg-decoder\""));
+        assert_eq!(stream["video_decoder_backend"], json!("jpeg-decoder"));
+
+        // Aggregate MJPEG decode duration fields.
+        assert_eq!(v["mjpeg_decode_recent_min_us"], json!(1200));
+        assert_eq!(v["mjpeg_decode_recent_max_us"], json!(45000));
+        assert_eq!(v["mjpeg_decode_recent_mean_us"], json!(8500));
+        assert_eq!(v["mjpeg_decode_total_count"], json!(350));
+        assert_eq!(v["mjpeg_decode_failed_count"], json!(2));
         // Aggregate H.264 decode duration fields (same shape and naming
         // convention as the MJPEG aggregates).
-        assert!(json.contains("\"h264_decode_recent_min_us\": 5000"));
-        assert!(json.contains("\"h264_decode_recent_max_us\": 28000"));
-        assert!(json.contains("\"h264_decode_recent_mean_us\": 12500"));
-        assert!(json.contains("\"h264_decode_total_count\": 120"));
-        assert!(json.contains("\"h264_decode_failed_count\": 1"));
+        assert_eq!(v["h264_decode_recent_min_us"], json!(5000));
+        assert_eq!(v["h264_decode_recent_max_us"], json!(28000));
+        assert_eq!(v["h264_decode_recent_mean_us"], json!(12500));
+        assert_eq!(v["h264_decode_total_count"], json!(120));
+        assert_eq!(v["h264_decode_failed_count"], json!(1));
         // Link-up preference-message send markers must appear in
         // channel-state.json so a bug-report reader can confirm the client
         // asked for AUTO_LZ and the H264/MJPEG codec ordering without
         // reading the pcap.
-        assert!(json.contains("\"pref_compression_sent\": true"));
-        assert!(json.contains("\"pref_video_codec_type_sent\": true"));
+        assert_eq!(v["pref_compression_sent"], json!(true));
+        assert_eq!(v["pref_video_codec_type_sent"], json!(true));
         // Bounded image-cache eviction and cap fields. These must appear in
         // bug reports so an operator can tell how much eviction pressure the
         // session experienced and what cap was in effect.
@@ -2264,15 +2307,22 @@ mod tests {
         snap.glz_dictionary_cap_bytes = 268_435_456;
         snap.glz_dictionary_evictions_total = 5;
         snap.glz_dictionary_evicted_bytes_total = 1_048_576;
-        let json = serde_json::to_string_pretty(&snap).unwrap();
-        assert!(json.contains("\"image_cache_evictions_total\": 42"));
-        assert!(json.contains("\"image_cache_evicted_bytes_total\": 441450496"));
-        assert!(json.contains("\"image_cache_cap_bytes\": 268435456"));
-        assert!(json.contains("\"glz_dictionary_entries\": 17"));
-        assert!(json.contains("\"glz_dictionary_bytes\": 4194304"));
-        assert!(json.contains("\"glz_dictionary_cap_bytes\": 268435456"));
-        assert!(json.contains("\"glz_dictionary_evictions_total\": 5"));
-        assert!(json.contains("\"glz_dictionary_evicted_bytes_total\": 1048576"));
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let with_caps: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(with_caps["image_cache_evictions_total"], json!(42));
+        assert_eq!(
+            with_caps["image_cache_evicted_bytes_total"],
+            json!(441_450_496u64)
+        );
+        assert_eq!(with_caps["image_cache_cap_bytes"], json!(268_435_456u64));
+        assert_eq!(with_caps["glz_dictionary_entries"], json!(17));
+        assert_eq!(with_caps["glz_dictionary_bytes"], json!(4_194_304u64));
+        assert_eq!(with_caps["glz_dictionary_cap_bytes"], json!(268_435_456u64));
+        assert_eq!(with_caps["glz_dictionary_evictions_total"], json!(5));
+        assert_eq!(
+            with_caps["glz_dictionary_evicted_bytes_total"],
+            json!(1_048_576u64)
+        );
     }
 
     #[test]
@@ -2295,17 +2345,19 @@ mod tests {
         snap.messages_recv_by_opcode.insert(101, 5);
         snap.messages_recv_by_opcode.insert(102, 2);
         snap.messages_send_by_opcode.insert(1, 10);
-        let json = serde_json::to_string_pretty(&snap).unwrap();
-        assert!(json.contains("\"button_state\": 1"));
-        assert!(json.contains("\"event_type\": \"KeyDown\""));
-        assert!(json.contains("\"writer_dropped_count\": 4"));
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"101\": 5"));
-        assert!(json.contains("\"102\": 2"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"1\": 10"));
-        assert!(json.contains("\"last_unknown_opcode\": 48879"));
-        assert!(json.contains("\"unknown_opcode_count\": 3"));
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_baseline_channel_fields(
+            &v,
+            4,
+            3,
+            48879,
+            json!({"101": 5, "102": 2}),
+            json!({"1": 10}),
+        );
+        assert_eq!(v["button_state"], json!(1));
+        assert_eq!(v["recent_events"][0]["event_type"], json!("KeyDown"));
     }
 
     #[test]
@@ -2326,15 +2378,42 @@ mod tests {
         });
         snap.messages_recv_by_opcode.insert(200, 7);
         snap.messages_send_by_opcode.insert(3, 4);
-        let json = serde_json::to_string_pretty(&snap).unwrap();
-        assert!(json.contains("\"cursor_id\": 99"));
-        assert!(json.contains("\"writer_dropped_count\": 9"));
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"200\": 7"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"3\": 4"));
-        assert!(json.contains("\"last_unknown_opcode\": 255"));
-        assert!(json.contains("\"unknown_opcode_count\": 1"));
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_baseline_channel_fields(&v, 9, 1, 255, json!({"200": 7}), json!({"3": 4}));
+        assert_eq!(v["cache_entries"], json!(1));
+        assert_eq!(v["cache_contents"][0]["cursor_id"], json!(99));
+    }
+
+    /// Assert the fields every per-channel snapshot carries: the
+    /// writer-drop counter, the unknown-opcode pair, and the two
+    /// opcode histograms compared as whole maps (serde renders their
+    /// integer keys as decimal strings).
+    ///
+    /// Every per-channel serialisation test repeats this set, so it is
+    /// expressed once here.
+    ///
+    /// Lookups are by field name. The substring assertions this
+    /// replaces were satisfied by the expected text appearing anywhere
+    /// in the document — `json.contains("32768")` passes on a stray
+    /// 32768 in an unrelated field, and every one of them breaks on a
+    /// cosmetic change to the pretty-printer. The pattern is the one
+    /// already used for `recent_agent_reply_lag_us` per PR #105 review
+    /// #2 item 9, generalised.
+    fn assert_baseline_channel_fields(
+        v: &serde_json::Value,
+        writer_dropped_count: u64,
+        unknown_opcode_count: u64,
+        last_unknown_opcode: u64,
+        messages_recv_by_opcode: serde_json::Value,
+        messages_send_by_opcode: serde_json::Value,
+    ) {
+        assert_eq!(v["writer_dropped_count"], json!(writer_dropped_count));
+        assert_eq!(v["unknown_opcode_count"], json!(unknown_opcode_count));
+        assert_eq!(v["last_unknown_opcode"], json!(last_unknown_opcode));
+        assert_eq!(v["messages_recv_by_opcode"], messages_recv_by_opcode);
+        assert_eq!(v["messages_send_by_opcode"], messages_send_by_opcode);
     }
 
     #[test]
@@ -2364,37 +2443,24 @@ mod tests {
         snap.messages_send_by_opcode.insert(5, 8);
         snap.recent_agent_reply_lag_us.push_back(820);
         snap.recent_agent_reply_lag_us.push_back(850);
-        let json = serde_json::to_string_pretty(&snap).unwrap();
-        assert!(json.contains("\"session_id\": 42"));
-        assert!(json.contains("\"writer_dropped_count\": 2"));
-        assert!(json.contains("\"mm_time_now\": 123456"));
-        assert!(json.contains("\"mm_time_set_count\": 7"));
-        assert!(json.contains("\"last_mm_time_set_ts_secs\": 12.5"));
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"10\": 3"));
-        assert!(json.contains("\"20\": 1"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"5\": 8"));
-        assert!(json.contains("\"last_unknown_opcode\": 4660"));
-        assert!(json.contains("\"unknown_opcode_count\": 2"));
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert_baseline_channel_fields(&v, 2, 2, 4660, json!({"10": 3, "20": 1}), json!({"5": 8}));
+
+        assert_eq!(v["session_id"], json!(42));
+        // STREAM_REPORT mm_time visibility.
+        assert_eq!(v["mm_time_now"], json!(123_456));
+        assert_eq!(v["mm_time_set_count"], json!(7));
+        assert_eq!(v["last_mm_time_set_ts_secs"], json!(12.5));
         // Vdagent reply-lag fields.
-        assert!(json.contains("\"agent_request_count\": 5"));
-        assert!(json.contains("\"agent_reply_count\": 4"));
-        assert!(json.contains("\"agent_reply_error_count\": 1"));
-        assert!(json.contains("\"last_agent_reply_ts_secs\": 30.5"));
-        assert!(json.contains("\"last_agent_reply_lag_us\": 850"));
-        assert!(json.contains("\"recent_agent_reply_lag_us\""));
-        assert!(json.contains("\"outstanding_agent_request_count\": 1"));
-        // Stronger check on the ring: deserialise and assert the
-        // exact array contents. The substring check this replaces
-        // ("820" anywhere in the JSON) would have matched a stray
-        // 820 in any other numeric field — fine today, brittle as
-        // the snapshot grows. Per PR #105 review #2 item 9.
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed["recent_agent_reply_lag_us"],
-            serde_json::json!([820, 850])
-        );
+        assert_eq!(v["agent_request_count"], json!(5));
+        assert_eq!(v["agent_reply_count"], json!(4));
+        assert_eq!(v["agent_reply_error_count"], json!(1));
+        assert_eq!(v["last_agent_reply_ts_secs"], json!(30.5));
+        assert_eq!(v["last_agent_reply_lag_us"], json!(850));
+        assert_eq!(v["outstanding_agent_request_count"], json!(1));
+        assert_eq!(v["recent_agent_reply_lag_us"], json!([820, 850]));
     }
 
     #[test]
@@ -2435,62 +2501,66 @@ mod tests {
         snap.messages_recv_by_opcode.insert(101, 100);
         snap.messages_recv_by_opcode.insert(103, 2);
         snap.messages_send_by_opcode.insert(3, 2);
-        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         // Transport common + baseline.
-        assert!(json.contains("\"bytes_in\": 4096"));
-        assert!(json.contains("\"writer_dropped_count\": 1"));
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"101\": 100"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"3\": 2"));
-        assert!(json.contains("\"last_unknown_opcode\": 49374"));
-        assert!(json.contains("\"unknown_opcode_count\": 4"));
+        assert_baseline_channel_fields(
+            &v,
+            1,
+            4,
+            49374,
+            json!({"101": 100, "103": 2}),
+            json!({"3": 2}),
+        );
+        assert_eq!(v["bytes_in"], json!(4096));
 
         // Per-session.
-        assert!(json.contains("\"current_session\""));
-        assert!(json.contains("\"started_at_secs\": 3.5"));
-        assert!(json.contains("\"mm_time_at_start\": 2882400018"));
-        assert!(json.contains("\"sample_rate_hz\": 48000"));
-        assert!(json.contains("\"channels\": 2"));
-        assert!(json.contains("\"kind\": \"opus\""));
-        assert!(json.contains("\"start_count\": 2"));
-        assert!(json.contains("\"stop_count\": 1"));
+        let session = &v["current_session"];
+        assert_eq!(session["started_at_secs"], json!(3.5));
+        assert_eq!(session["mm_time_at_start"], json!(2_882_400_018u64));
+        assert_eq!(session["sample_rate_hz"], json!(48000));
+        assert_eq!(session["channels"], json!(2));
+        // Adjacently tagged enum: a unit variant is `kind` alone.
+        assert_eq!(session["codec"], json!({"kind": "opus"}));
+        assert_eq!(v["start_count"], json!(2));
+        assert_eq!(v["stop_count"], json!(1));
 
         // Data plumbing.
-        assert!(json.contains("\"data_packets_received\": 100"));
-        assert!(json.contains("\"data_packets_decoded\": 98"));
-        assert!(json.contains("\"data_packets_decode_failed\": 2"));
-        assert!(json.contains("\"data_bytes_received\": 65536"));
-        assert!(json.contains("\"pcm_bytes_produced\": 1048576"));
-        assert!(json.contains("\"recent_decode_durations_us\""));
-        assert!(json.contains("180"));
-        assert!(json.contains("220"));
+        assert_eq!(v["data_packets_received"], json!(100));
+        assert_eq!(v["data_packets_decoded"], json!(98));
+        assert_eq!(v["data_packets_decode_failed"], json!(2));
+        assert_eq!(v["data_bytes_received"], json!(65536));
+        assert_eq!(v["pcm_bytes_produced"], json!(1_048_576));
+        assert_eq!(v["recent_decode_durations_us"], json!([180, 220]));
 
         // Device-side.
-        assert!(json.contains("\"device_callbacks_total\": 500"));
-        assert!(json.contains("\"device_underrun_count\": 7"));
-        assert!(json.contains("\"ring_overflow_count\": 3"));
-        assert!(json.contains("\"samples_consumed_total\": 96000"));
+        assert_eq!(v["device_callbacks_total"], json!(500));
+        assert_eq!(v["device_underrun_count"], json!(7));
+        assert_eq!(v["ring_overflow_count"], json!(3));
+        assert_eq!(v["samples_consumed_total"], json!(96000));
 
         // Server-controlled params.
-        assert!(json.contains("\"last_volume_per_channel\""));
-        assert!(json.contains("32768"));
-        assert!(json.contains("\"last_mute\": false"));
-        assert!(json.contains("\"last_latency_ms\": 40"));
+        assert_eq!(v["last_volume_per_channel"], json!([32768, 32768]));
+        assert_eq!(v["last_mute"], json!(false));
+        assert_eq!(v["last_latency_ms"], json!(40));
     }
 
     #[test]
     fn test_playback_codec_round_trips() {
         // Tuple-variant Other is the failure-prone case; check it
-        // serialises with `kind` + `value` as expected.
-        let raw = serde_json::to_string(&PlaybackCodec::Raw).unwrap();
-        assert!(raw.contains("\"kind\":\"raw\""), "got {}", raw);
-        let opus = serde_json::to_string(&PlaybackCodec::Opus).unwrap();
-        assert!(opus.contains("\"kind\":\"opus\""), "got {}", opus);
-        let other = serde_json::to_string(&PlaybackCodec::Other(42)).unwrap();
-        assert!(other.contains("\"kind\":\"other\""), "got {}", other);
-        assert!(other.contains("\"value\":42"), "got {}", other);
+        // serialises with `kind` + `value` as expected. Whole-value
+        // equality additionally pins down that the unit variants emit
+        // no `value` key, which the substring checks could not see.
+        fn as_value(codec: &PlaybackCodec) -> serde_json::Value {
+            serde_json::from_str(&serde_json::to_string(codec).unwrap()).unwrap()
+        }
+        assert_eq!(as_value(&PlaybackCodec::Raw), json!({"kind": "raw"}));
+        assert_eq!(as_value(&PlaybackCodec::Opus), json!({"kind": "opus"}));
+        assert_eq!(
+            as_value(&PlaybackCodec::Other(42)),
+            json!({"kind": "other", "value": 42})
+        );
     }
 
     #[test]
@@ -2521,37 +2591,36 @@ mod tests {
             bytes_to_guest: 0,
             bytes_from_guest: 0,
         });
-        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         // Transport common.
-        assert!(json.contains("\"bytes_in\": 8192"));
-        assert!(json.contains("\"bytes_out\": 512"));
-        assert!(json.contains("\"ping_recv_count\": 1"));
-        assert!(json.contains("\"writer_dropped_count\": 0"));
+        assert_eq!(v["bytes_in"], json!(8192));
+        assert_eq!(v["bytes_out"], json!(512));
+        assert_eq!(v["ping_recv_count"], json!(1));
 
         // Baseline additions.
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"1\": 50"));
-        assert!(json.contains("\"2\": 10"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"last_unknown_opcode\": 57005"));
-        assert!(json.contains("\"unknown_opcode_count\": 2"));
+        assert_baseline_channel_fields(&v, 0, 2, 57005, json!({"1": 50, "2": 10}), json!({"1": 1}));
 
         // USB-redirection specifics.
-        assert!(json.contains("\"redirected_devices\""));
-        assert!(json.contains("\"vendor_id\": 7531"));
-        assert!(json.contains("\"product_id\": 260"));
-        assert!(json.contains("\"device_class\": 8"));
-        assert!(json.contains("\"attached_at_secs\": 1.5"));
-        assert!(json.contains("\"bytes_to_guest\": 0"));
-        assert!(json.contains("\"bytes_from_guest\": 0"));
-        assert!(json.contains("\"device_connect_total\": 1"));
-        assert!(json.contains("\"device_disconnect_total\": 0"));
-        assert!(json.contains("\"last_device_event_ts_secs\": 1.5"));
+        let devices = v["redirected_devices"]
+            .as_array()
+            .expect("redirected_devices must serialise as an array");
+        assert_eq!(devices.len(), 1);
+        let device = &devices[0];
+        assert_eq!(device["vendor_id"], json!(7531));
+        assert_eq!(device["product_id"], json!(260));
+        assert_eq!(device["device_class"], json!(8));
+        assert_eq!(device["attached_at_secs"], json!(1.5));
+        assert_eq!(device["bytes_to_guest"], json!(0));
+        assert_eq!(device["bytes_from_guest"], json!(0));
+        assert_eq!(v["device_connect_total"], json!(1));
+        assert_eq!(v["device_disconnect_total"], json!(0));
+        assert_eq!(v["last_device_event_ts_secs"], json!(1.5));
 
         // Protocol caps.
-        assert!(json.contains("\"server_caps\": 255"));
-        assert!(json.contains("\"client_caps\": 26"));
+        assert_eq!(v["server_caps"], json!(255));
+        assert_eq!(v["client_caps"], json!(26));
     }
 
     #[test]
@@ -2575,30 +2644,24 @@ mod tests {
         snap.messages_recv_by_opcode.insert(1, 10);
         snap.messages_recv_by_opcode.insert(5, 2);
         snap.messages_send_by_opcode.insert(3, 7);
-        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let text = serde_json::to_string_pretty(&snap).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
 
         // Transport common.
-        assert!(json.contains("\"bytes_in\": 4096"));
-        assert!(json.contains("\"bytes_out\": 2048"));
-        assert!(json.contains("\"ping_recv_count\": 2"));
-        assert!(json.contains("\"writer_dropped_count\": 0"));
+        assert_eq!(v["bytes_in"], json!(4096));
+        assert_eq!(v["bytes_out"], json!(2048));
+        assert_eq!(v["ping_recv_count"], json!(2));
 
         // Baseline additions.
-        assert!(json.contains("\"messages_recv_by_opcode\""));
-        assert!(json.contains("\"1\": 10"));
-        assert!(json.contains("\"5\": 2"));
-        assert!(json.contains("\"messages_send_by_opcode\""));
-        assert!(json.contains("\"3\": 7"));
-        assert!(json.contains("\"last_unknown_opcode\": 48879"));
-        assert!(json.contains("\"unknown_opcode_count\": 1"));
+        assert_baseline_channel_fields(&v, 0, 1, 48879, json!({"1": 10, "5": 2}), json!({"3": 7}));
 
         // HTTP / WebDAV specifics.
-        assert!(json.contains("\"http_requests_received\": 3"));
-        assert!(json.contains("\"http_response_bytes_sent\": 65536"));
-        assert!(json.contains("\"active_session_count\": 1"));
-        assert!(json.contains("\"last_request_ts_secs\": 0.5"));
-        assert!(json.contains("\"last_response_ts_secs\": 0.9"));
-        assert!(json.contains("\"decompressed_size_limit_exceeded_count\": 1"));
+        assert_eq!(v["http_requests_received"], json!(3));
+        assert_eq!(v["http_response_bytes_sent"], json!(65536));
+        assert_eq!(v["active_session_count"], json!(1));
+        assert_eq!(v["last_request_ts_secs"], json!(0.5));
+        assert_eq!(v["last_response_ts_secs"], json!(0.9));
+        assert_eq!(v["decompressed_size_limit_exceeded_count"], json!(1));
     }
 
     #[test]
@@ -3811,12 +3874,13 @@ mod tests {
         let per_channel = DisconnectCause::collect_per_channel(&snapshots);
 
         let inputs = per_channel.get("inputs").expect("inputs entry missing");
-        assert_eq!(inputs.client_keepalive_send_count, 7);
+        assert_eq!(inputs.client_keepalive_send_count, Some(7));
         assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
 
-        // Only the inputs channel implements a client-side keepalive;
-        // every other channel reports zero / None in the uniform
-        // PerChannelDiagnostics shape.
+        // Only the inputs channel implements a client-side keepalive.
+        // Every other channel must report None, not Some(0): the main
+        // channel's keepalive was removed, and a zero there would read
+        // as "the mechanism ran and never fired".
         for ch in [
             "main", "display", "cursor", "playback", "usbredir", "webdav",
         ] {
@@ -3824,8 +3888,8 @@ mod tests {
                 .get(ch)
                 .unwrap_or_else(|| panic!("missing {}", ch));
             assert_eq!(
-                entry.client_keepalive_send_count, 0,
-                "{} should report zero keepalives sent",
+                entry.client_keepalive_send_count, None,
+                "{} has no keepalive mechanism and must report None",
                 ch
             );
             assert_eq!(
