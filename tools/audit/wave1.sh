@@ -140,21 +140,50 @@ green "PASS: no raw println!/eprintln!"
 #    directory the crate extraction deleted, and keyed on a
 #    convention all seven channels had dropped.  wave1-checks.sh
 #    carries the detail.
+#
+#    Content comes from the audit head, the same as the long-line
+#    check below, rather than the live working tree: this check used
+#    to `grep -r` the checkout directly, so on a historical audit
+#    range (AUDIT_HEAD != what's checked out, see PUSH-AUDIT.md, "Two
+#    ways this runbook is invoked") it silently answered a different
+#    question from every other range-scoped check in this script.
+#    audit_range_tree_files finds the file list at AUDIT_HEAD instead
+#    of `find`/`-d` on the checkout, so a moved-or-deleted directory
+#    is caught there and not masked by whatever happens to be on
+#    disk; audit_range_show reads each file's bytes the same way the
+#    long-line check does.
 CHANNELS_DIR=shakenfist-spice-renderer/src/channels
-if [[ ! -d $CHANNELS_DIR ]]; then
-    red "FAIL: $CHANNELS_DIR does not exist; the log_message check has gone stale again"
-    exit 7
+UNGUARDED=""
+mapfile -t CHANNELS_HEAD_FILES < <(audit_range_tree_files "$CHANNELS_DIR")
+if [[ ${#CHANNELS_HEAD_FILES[@]} -eq 0 ]]; then
+    if [[ -n "$AUDIT_RANGE_USABLE" ]]; then
+        red "FAIL: $CHANNELS_DIR does not exist at $AUDIT_HEAD; the log_message check has gone stale again"
+        exit 7
+    fi
+    # Range unusable (audit_range_init already printed a NOTE): every
+    # other range-scoped check goes quiet here too, so this one does
+    # as well rather than reading a live directory none of its peers
+    # would agree is "the audit range".
+else
+    CHANNELS_SNAPSHOT="$(mktemp -d)"
+    for f in "${CHANNELS_HEAD_FILES[@]}"; do
+        mkdir -p "$CHANNELS_SNAPSHOT/$(dirname "$f")"
+        audit_range_show "$f" > "$CHANNELS_SNAPSHOT/$f"
+    done
+    #    The awk below reads grep -B5 groups, which are separated by
+    #    "--".  For each log_message line it asks whether any of the
+    #    context lines *preceding it in the same group* carries a
+    #    verbosity guard.  The previous version tested the same two
+    #    conditions in the wrong order -- it cleared its flag on a
+    #    guard and then re-set it on the log_message line that
+    #    followed, so a guard above the call never counted -- and it
+    #    printed only whatever hit happened to be last.  Every
+    #    guarded site was a candidate to be reported and every site
+    #    but one could not be.
+    UNGUARDED=$(unguarded_log_messages "$CHANNELS_SNAPSHOT/$CHANNELS_DIR" \
+        | sed "s#^$CHANNELS_SNAPSHOT/##")
+    rm -rf "$CHANNELS_SNAPSHOT"
 fi
-#    The awk below reads grep -B5 groups, which are separated by
-#    "--".  For each log_message line it asks whether any of the
-#    context lines *preceding it in the same group* carries a
-#    verbosity guard.  The previous version tested the same two
-#    conditions in the wrong order -- it cleared its flag on a guard
-#    and then re-set it on the log_message line that followed, so a
-#    guard above the call never counted -- and it printed only
-#    whatever hit happened to be last.  Every guarded site was a
-#    candidate to be reported and every site but one could not be.
-UNGUARDED=$(unguarded_log_messages "$CHANNELS_DIR")
 # Advisory: this heuristic has known false positives where one guard
 # wraps several calls (see unguarded_log_messages).  A precise check
 # would have to parse, and is left to wave 2a.
