@@ -5,7 +5,9 @@
 /// 2. Pixels from previously decompressed images (cross-frame references)
 use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
+use lru::LruCache;
 use std::io::{Cursor, Read};
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use crate::byte_bounded_lru::ByteBoundedLru;
@@ -15,6 +17,18 @@ const GLZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
 /// Total timeout for a cross-frame reference miss (ms).
 const CROSS_REF_TIMEOUT_MS: u64 = 100;
+
+/// Number of cap-evicted image ids remembered as tombstones.
+///
+/// A tombstone only has to outlive the window in which a frame can
+/// still reference the image the cap dropped, which is a handful of
+/// frames — the sliding window the server encodes against is far
+/// shorter than this. 4096 ids cost tens of KiB against a
+/// dictionary cap measured in hundreds of MiB, and the set is
+/// itself a bounded LRU, so it cannot grow into the unbounded cache
+/// the byte cap exists to prevent. Forgetting a tombstone is safe:
+/// the reference just falls back to the old wait-and-timeout path.
+const EVICTED_ID_TOMBSTONES: usize = 4096;
 
 /// Default byte cap for [`GlzDictionary`] when constructed via
 /// [`GlzDictionary::new`] / [`Default`].  The CLI wiring in
@@ -35,6 +49,11 @@ pub const DEFAULT_GLZ_DICT_CAP_BYTES: usize = 256 * 1024 * 1024;
 pub struct GlzDictionary {
     images: Mutex<ByteBoundedLru>,
     notify: tokio::sync::Notify,
+    /// Image ids the byte cap has evicted, most recent
+    /// `EVICTED_ID_TOMBSTONES` kept.  A cross-frame reference to
+    /// one of these can fail immediately instead of waiting out
+    /// `CROSS_REF_TIMEOUT_MS`; see [`GlzDictionary::was_evicted`].
+    evicted_ids: Mutex<LruCache<u64, ()>>,
     /// Whether the first cap-driven eviction has been logged at
     /// info level this session.  Subsequent evictions log at debug
     /// to avoid spamming on high-rate workloads.
@@ -53,6 +72,9 @@ impl GlzDictionary {
         Self {
             images: Mutex::new(ByteBoundedLru::new(cap_bytes)),
             notify: tokio::sync::Notify::new(),
+            evicted_ids: Mutex::new(LruCache::new(
+                NonZeroUsize::new(EVICTED_ID_TOMBSTONES).expect("tombstone capacity is non-zero"),
+            )),
             first_eviction_logged: Mutex::new(false),
         }
     }
@@ -61,13 +83,27 @@ impl GlzDictionary {
     /// waiters blocked on a cross-frame reference.
     ///
     /// May evict the least-recently-used entries to keep total
-    /// bytes within the configured cap.
+    /// bytes within the configured cap.  Evicted ids are
+    /// tombstoned so later cross-frame references to them fail
+    /// fast rather than waiting for an image that is not coming
+    /// back; inserting an id clears any tombstone it had.
     pub fn insert(&self, image_id: u64, pixels: Vec<u8>) {
+        let mut evicted_keys: Vec<u64> = Vec::new();
         let outcome = self
             .images
             .lock()
             .expect("lock poisoned")
-            .insert(image_id, pixels);
+            .insert_recording_evicted(image_id, pixels, &mut evicted_keys);
+
+        {
+            let mut tombstones = self.evicted_ids.lock().expect("lock poisoned");
+            for id in &evicted_keys {
+                tombstones.put(*id, ());
+            }
+            // This id is live again, so it is no longer a dead end.
+            tombstones.pop(&image_id);
+        }
+
         if let crate::byte_bounded_lru::InsertOutcome::InsertedAfterEviction {
             evicted,
             freed_bytes,
@@ -87,6 +123,27 @@ impl GlzDictionary {
             }
         }
         self.notify.notify_waiters();
+    }
+
+    /// Whether `image_id` was dropped by the dictionary's byte cap
+    /// and is not back.
+    ///
+    /// A cross-frame reference to such an id is provably futile:
+    /// the image was in the dictionary once, so no other channel is
+    /// about to insert it, and blocking on the notify would burn
+    /// the whole `CROSS_REF_TIMEOUT_MS` per missing reference.
+    /// Only cap-driven evictions are tombstoned — a server-driven
+    /// `remove` / `evict_older_than` may legitimately be followed
+    /// by the image being sent again.
+    ///
+    /// Tombstones are bounded, so a `false` here does not mean the
+    /// image is coming: it only means the caller should take the
+    /// slow wait-and-timeout path.
+    pub fn was_evicted(&self, image_id: u64) -> bool {
+        self.evicted_ids
+            .lock()
+            .expect("lock poisoned")
+            .contains(&image_id)
     }
 
     /// Remove a specific image from the dictionary.
@@ -361,6 +418,27 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 
                 let prev_pixels = match prev_pixels {
                     Some(p) => p,
+                    None if dictionary.was_evicted(source_id) => {
+                        // The byte cap dropped this image. It was in the
+                        // dictionary once, so nothing is going to insert
+                        // it during the wait — and a segment-heavy image
+                        // can carry hundreds of references, each of
+                        // which would otherwise cost the full
+                        // CROSS_REF_TIMEOUT_MS. Treat it as an immediate
+                        // miss. Logged at debug because one image can
+                        // produce a great many of these; the eviction
+                        // itself is logged by GlzDictionary::insert.
+                        tracing::debug!(
+                            "glz: cross-image ref to id {} was evicted by the dictionary \
+                             cap; skipping the {}ms wait (current={}, dist={})",
+                            source_id,
+                            CROSS_REF_TIMEOUT_MS,
+                            image_id,
+                            image_dist
+                        );
+                        out_idx += length * 4;
+                        continue;
+                    }
                     None => {
                         // Wait for the image to be inserted by another
                         // channel, with a total timeout as a safety net.
@@ -550,5 +628,99 @@ mod tests {
     fn dict_cap_bytes_surface() {
         let dict = GlzDictionary::with_cap(123_456);
         assert_eq!(dict.cap_bytes(), 123_456);
+    }
+
+    #[test]
+    fn dict_tombstones_cap_evicted_ids_only() {
+        let dict = GlzDictionary::with_cap(300);
+        dict.insert(1, vec![0u8; 100]);
+        dict.insert(2, vec![0u8; 100]);
+        dict.insert(3, vec![0u8; 100]);
+        assert!(!dict.was_evicted(1));
+
+        // Pushes past the cap: id 1 (LRU) is evicted.
+        dict.insert(4, vec![0u8; 100]);
+        assert!(dict.was_evicted(1), "cap-evicted id should be tombstoned");
+        assert!(!dict.was_evicted(2), "live id must not be tombstoned");
+
+        // Server-driven removal is not an eviction: the server may
+        // simply send the image again.
+        assert!(dict.remove(&2));
+        assert!(!dict.was_evicted(2));
+
+        // Re-inserting a tombstoned id clears its tombstone.
+        dict.insert(1, vec![0u8; 100]);
+        assert!(
+            !dict.was_evicted(1),
+            "re-inserted id must not stay tombstoned"
+        );
+    }
+
+    /// Build a GLZ image whose single segment is a cross-frame
+    /// reference to `image_id - 1`.
+    ///
+    /// Byte layout after the 33-byte header:
+    ///   ctrl  0x40 — length bits 2, pixel_flag 0 (previous image),
+    ///                pixel_offset low nibble 0
+    ///   code1 0x00 — no additional pixel offset
+    ///   code2 0x01 — image_flag 0, image_dist 1
+    fn glz_cross_ref_image(image_id: u64) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(GLZ_MAGIC);
+        data.extend_from_slice(&[0, 1]); // version major
+        data.extend_from_slice(&[0, 0]); // version minor
+        data.push(0x10); // type packed, top_down set
+        data.extend_from_slice(&2u32.to_be_bytes()); // width
+        data.extend_from_slice(&2u32.to_be_bytes()); // height
+        data.extend_from_slice(&8u32.to_be_bytes()); // stride
+        data.extend_from_slice(&image_id.to_be_bytes());
+        data.extend_from_slice(&0u32.to_be_bytes()); // win_head_dist
+        data.extend_from_slice(&[0x40, 0x00, 0x01]);
+        data
+    }
+
+    #[test]
+    fn cross_ref_to_evicted_id_does_not_wait() {
+        let dict = GlzDictionary::with_cap(200);
+        // Insert id 4, then push it out with two more images so the
+        // cap evicts it and leaves a tombstone.
+        dict.insert(4, vec![0u8; 100]);
+        dict.insert(5, vec![0u8; 100]);
+        dict.insert(6, vec![0u8; 100]);
+        assert!(dict.was_evicted(4), "test setup: id 4 should be evicted");
+
+        let data = glz_cross_ref_image(5);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = std::time::Instant::now();
+        let result = rt.block_on(decompress_glz(&data, &dict));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "decode should still succeed: {result:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS / 2),
+            "reference to an evicted id must not wait for the timeout (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn cross_ref_to_unknown_id_still_waits() {
+        // The counterpart to the test above: an id the dictionary has
+        // never held might still arrive from another channel, so the
+        // wait is kept. This is what makes the fast path above a
+        // meaningful assertion rather than a tautology.
+        let dict = GlzDictionary::with_cap(1024);
+        assert!(!dict.was_evicted(4));
+
+        let data = glz_cross_ref_image(5);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = std::time::Instant::now();
+        let result = rt.block_on(decompress_glz(&data, &dict));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok(), "decode should still succeed: {result:?}");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(CROSS_REF_TIMEOUT_MS),
+            "an unknown id should still wait out the timeout (took {elapsed:?})"
+        );
     }
 }

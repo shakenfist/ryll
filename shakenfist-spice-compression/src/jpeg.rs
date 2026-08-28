@@ -23,9 +23,20 @@ use tracing::{info, warn};
 
 /// A decoded JPEG frame: RGBA pixels plus width/height.
 ///
-/// Using a named struct rather than a tuple lets each backend
-/// validate dimensions before allocating the RGBA buffer —
-/// a guard against runaway sizes from malformed frames.
+/// Every backend upholds the same invariant: `width` and
+/// `height` are non-zero and no greater than
+/// [`MAX_DECODED_JPEG_DIMENSION`], and `rgba.len()` is exactly
+/// `width * height * 4` — which is what lets consumers index
+/// `rgba` from the dimensions without re-checking.
+///
+/// Build one through [`DecodedJpeg::zeroed`] (backends that
+/// paint into a buffer we hand them) or
+/// [`DecodedJpeg::from_rgba`] (backends that hand us a finished
+/// buffer). Both enforce the invariant, so the guard against a
+/// hostile frame header lives in one platform-independent place
+/// rather than being retyped inside each `cfg`-gated backend
+/// where no CI leg can reach it. The fields stay public because
+/// downstream crates destructure the struct.
 pub struct DecodedJpeg {
     pub rgba: Vec<u8>,
     pub width: u32,
@@ -37,11 +48,128 @@ pub struct DecodedJpeg {
 /// side at 16K just fits) while capping the resulting RGBA
 /// allocation at 16384×16384×4 = 1 GiB rather than the JPEG
 /// maximum of 65535×65535×4 ≈ 17 GiB — a hostile or buggy
-/// server cannot force a multi-GB allocation per frame. Matches
-/// `jpeg-decoder` 0.3's internal default cap so the per-platform
-/// backends and the pure-Rust fallback agree on what's
-/// "implausible".
+/// server cannot force a multi-GB allocation per frame.
+///
+/// This is our bound, not a library default: `jpeg-decoder` 0.3
+/// ships `usize::MAX` as its decoding-buffer limit, so the
+/// pure-Rust backend only honours the cap because
+/// `JpegDecoderRsDecoder::decode` passes
+/// [`MAX_DECODED_RGBA_BYTES`] to `set_max_decoding_buffer_size`
+/// first. The platform backends have no equivalent knob and are
+/// bounded by [`DecodedJpeg::zeroed`] instead.
 pub const MAX_DECODED_JPEG_DIMENSION: u32 = 16384;
+
+/// Byte ceiling implied by [`MAX_DECODED_JPEG_DIMENSION`]:
+/// 16384 × 16384 × 4 = 1 GiB.
+///
+/// Fed to `jpeg_decoder::Decoder::set_max_decoding_buffer_size`,
+/// whose unit is `components × width × height` output bytes.
+/// JPEG has at most 4 components, so this bounds that crate's
+/// internal allocation by the same 1 GiB the RGBA output is
+/// bounded by — a loose bound (a 1×65535 frame passes it and is
+/// then rejected on dimensions) but one that applies *before*
+/// the crate allocates rather than after.
+pub const MAX_DECODED_RGBA_BYTES: usize =
+    (MAX_DECODED_JPEG_DIMENSION as usize) * (MAX_DECODED_JPEG_DIMENSION as usize) * 4;
+
+impl DecodedJpeg {
+    /// Validate `width`/`height`, then allocate the zeroed RGBA
+    /// buffer the backend will paint into.
+    ///
+    /// This is the allocation guard: it runs *before*
+    /// `vec![0; w * h * 4]`, so a frame header claiming
+    /// 65535×65535 costs a warning rather than 17 GiB. `backend`
+    /// names the caller in that warning so a bug report says
+    /// which decoder dropped the frame.
+    ///
+    /// Dimensions arrive as `usize` because ImageIO reports them
+    /// that way; the other backends widen their `u32`, which is
+    /// lossless on every target this crate builds for.
+    pub fn zeroed(backend: &str, width: usize, height: usize) -> Option<Self> {
+        let (width, height) = validated_dimensions(backend, width, height)?;
+        Some(DecodedJpeg {
+            rgba: vec![0u8; (width as usize) * (height as usize) * 4],
+            width,
+            height,
+        })
+    }
+
+    /// Wrap an RGBA buffer a backend has already produced.
+    ///
+    /// Applies the same dimension bound as [`DecodedJpeg::zeroed`]
+    /// and additionally rejects a buffer whose length is not
+    /// exactly `width * height * 4`. A mismatch means the decoder
+    /// and the frame header disagree about the geometry, and
+    /// every consumer of `rgba` indexes it assuming they agree.
+    pub fn from_rgba(backend: &str, width: usize, height: usize, rgba: Vec<u8>) -> Option<Self> {
+        let (width, height) = validated_dimensions(backend, width, height)?;
+        let expected = (width as usize) * (height as usize) * 4;
+        if rgba.len() != expected {
+            warn!(
+                "{}: decoded buffer is {} bytes, expected {} for {}x{}, dropping frame",
+                backend,
+                rgba.len(),
+                expected,
+                width,
+                height
+            );
+            return None;
+        }
+        Some(DecodedJpeg {
+            rgba,
+            width,
+            height,
+        })
+    }
+}
+
+/// Bound a frame's dimensions before anything is allocated for
+/// it, narrowing them to `u32` on success.
+///
+/// Deliberately free of any `cfg` gate: three of the four
+/// backends that call it are inside `#[cfg(target_os = ...)]`
+/// bodies, and this repo's CI runs `cargo test` on Linux only,
+/// so a copy per backend is a copy that is never executed by any
+/// test. See `dimension_guard_tests` below.
+fn validated_dimensions(backend: &str, width: usize, height: usize) -> Option<(u32, u32)> {
+    let max = MAX_DECODED_JPEG_DIMENSION as usize;
+    if width == 0 || height == 0 || width > max || height > max {
+        warn!(
+            "{}: implausible dimensions {}x{}, dropping frame (cap: {})",
+            backend, width, height, MAX_DECODED_JPEG_DIMENSION
+        );
+        return None;
+    }
+    // Both sides are <= MAX_DECODED_JPEG_DIMENSION, itself a u32
+    // constant, so neither narrowing cast can truncate.
+    Some((width as u32, height as u32))
+}
+
+/// Gate a payload on the JPEG SOI marker (`FF D8`) before any
+/// decoder touches it. Also subsumes the empty-input check every
+/// backend used to open with.
+///
+/// This matters most on macOS. `CGImageSourceCreateWithData`
+/// with no options dictionary *sniffs* the container format, so
+/// bytes the server delivered as an MJPEG frame could otherwise
+/// be routed into ImageIO's TIFF, HEIF, WebP, JPEG 2000 or
+/// camera-RAW sub-decoders — parsers that were never in this
+/// client's intended trust path, and the historical source of
+/// Apple's 0-click image-parsing bugs. Requiring SOI here keeps
+/// server bytes on the JPEG path on every platform, including
+/// the one where the format is chosen for us.
+fn is_jpeg_payload(backend: &str, data: &[u8]) -> bool {
+    if data.starts_with(&[0xFF, 0xD8]) {
+        return true;
+    }
+    warn!(
+        "{}: {} byte payload does not open with the JPEG SOI marker, dropping frame: header={:02x?}",
+        backend,
+        data.len(),
+        &data[..data.len().min(4)]
+    );
+    false
+}
 
 /// Stateless JPEG decoder.
 ///
@@ -90,7 +218,16 @@ impl Default for JpegDecoderRsDecoder {
 
 impl JpegDecoder for JpegDecoderRsDecoder {
     fn decode(&self, data: &[u8]) -> Option<DecodedJpeg> {
+        if !is_jpeg_payload("JpegDecoderRsDecoder", data) {
+            return None;
+        }
+
         let mut decoder = jpeg_decoder::Decoder::new(data);
+        // jpeg-decoder's own default limit is `usize::MAX`, so
+        // without this the crate allocates whatever the frame
+        // header claims before we ever get to inspect the
+        // dimensions. See MAX_DECODED_RGBA_BYTES for the unit.
+        decoder.set_max_decoding_buffer_size(MAX_DECODED_RGBA_BYTES);
         let pixels = match decoder.decode() {
             Ok(p) => p,
             Err(e) => {
@@ -104,13 +241,21 @@ impl JpegDecoder for JpegDecoderRsDecoder {
             }
         };
         let info = decoder.info()?;
-        let width = info.width as u32;
-        let height = info.height as u32;
+        let width = info.width as usize;
+        let height = info.height as usize;
 
         let rgba = match info.pixel_format {
             jpeg_decoder::PixelFormat::RGB24 => {
                 let mut out = Vec::with_capacity(pixels.len() * 4 / 3);
-                for chunk in pixels.chunks(3) {
+                // as_chunks, not chunks(3): the chunk type is
+                // `[u8; 3]`, so the indexing below cannot panic
+                // and a short trailing remainder is discarded
+                // rather than read past its end. jpeg-decoder's
+                // contract says RGB24 output is a whole number of
+                // pixels so the remainder is always empty — this
+                // simply declines to take that on trust.
+                let (triples, _remainder) = pixels.as_chunks::<3>();
+                for chunk in triples {
                     out.push(chunk[0]);
                     out.push(chunk[1]);
                     out.push(chunk[2]);
@@ -134,11 +279,10 @@ impl JpegDecoder for JpegDecoderRsDecoder {
             }
         };
 
-        Some(DecodedJpeg {
-            rgba,
-            width,
-            height,
-        })
+        // Bounds the dimensions (the crate's buffer limit above
+        // is a looser, byte-count bound) and checks that the
+        // buffer we just built matches them.
+        DecodedJpeg::from_rgba("JpegDecoderRsDecoder", width, height, rgba)
     }
 
     fn name(&self) -> &'static str {
@@ -180,54 +324,33 @@ impl Default for MozJpegDecoder {
 #[cfg(feature = "mozjpeg")]
 impl JpegDecoder for MozJpegDecoder {
     fn decode(&self, data: &[u8]) -> Option<DecodedJpeg> {
+        if !is_jpeg_payload("MozJpegDecoder", data) {
+            return None;
+        }
+
         // libjpeg's error handler longjmps; the `mozjpeg` crate
         // turns that into a Rust panic. Catch it so a malformed
         // frame returns None rather than crashing the channel.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let decomp = mozjpeg::Decompress::new_mem(data).ok()?;
-            let width = decomp.width() as u32;
-            let height = decomp.height() as u32;
-            // Bound the allocation. See MAX_DECODED_JPEG_DIMENSION
-            // — caps the resulting RGBA buffer at 1 GiB rather
-            // than the JPEG maximum (~17 GiB) so a hostile server
-            // cannot force a multi-GB allocation per frame.
-            if width == 0
-                || height == 0
-                || width > MAX_DECODED_JPEG_DIMENSION
-                || height > MAX_DECODED_JPEG_DIMENSION
-            {
-                warn!(
-                    "MozJpegDecoder: implausible dimensions {}x{}, dropping frame",
-                    width, height
-                );
-                return None;
-            }
+            // Bound the dimensions before asking libjpeg for
+            // scanlines, so an implausible frame header costs a
+            // warning rather than a multi-GB allocation.
+            let (width, height) =
+                validated_dimensions("MozJpegDecoder", decomp.width(), decomp.height())?;
             let mut started = decomp.rgba().ok()?;
             // `read_scanlines::<[u8; 4]>` returns one element
             // per pixel; flatten into the RGBA byte buffer the
             // trait contract requires.
             let pixels: Vec<[u8; 4]> = started.read_scanlines().ok()?;
             started.finish().ok()?;
-            let expected = (width as usize) * (height as usize);
-            if pixels.len() != expected {
-                warn!(
-                    "MozJpegDecoder: scanline count {} != expected {} for {}x{}",
-                    pixels.len(),
-                    expected,
-                    width,
-                    height
-                );
-                return None;
-            }
-            let mut rgba = Vec::with_capacity(expected * 4);
+            let mut rgba = Vec::with_capacity(pixels.len() * 4);
             for px in &pixels {
                 rgba.extend_from_slice(px);
             }
-            Some(DecodedJpeg {
-                rgba,
-                width,
-                height,
-            })
+            // from_rgba rejects a scanline count that disagrees
+            // with the frame header.
+            DecodedJpeg::from_rgba("MozJpegDecoder", width as usize, height as usize, rgba)
         }));
         match result {
             Ok(opt) => opt,
@@ -304,9 +427,12 @@ impl JpegDecoder for ImageIoDecoder {
         };
         use objc2_image_io::CGImageSource;
 
-        // Reject empty input early so we don't allocate a CFData
-        // for a frame that's obviously not a JPEG.
-        if data.is_empty() {
+        // Reject anything that is not SOI-prefixed before a
+        // CFData exists for it. This is load-bearing here, not
+        // just an early-out: see `is_jpeg_payload` for why an
+        // ImageIO source built from unsniffed bytes is a wider
+        // attack surface than a JPEG decoder.
+        if !is_jpeg_payload("ImageIoDecoder", data) {
             return None;
         }
 
@@ -317,6 +443,15 @@ impl JpegDecoder for ImageIoDecoder {
         // Safety: with_data is unsafe because `options` generics
         // must be of the correct type; we pass None so there's no
         // generic-typed dictionary to get wrong.
+        //
+        // Passing None also leaves ImageIO to sniff the container
+        // format. `kCGImageSourceTypeIdentifierHint` = "public.jpeg"
+        // would state the expected type, but building that options
+        // dictionary needs objc2-core-foundation's `CFDictionary`
+        // and `CFString` features, which this crate does not enable
+        // (see Cargo.toml) — and the hint is advisory regardless:
+        // ImageIO falls back to sniffing when the data does not
+        // match it. The SOI check above is the guarantee.
         let source = unsafe { CGImageSource::with_data(&cf_data, None) }?;
 
         // Safety: count and image_at_index are unsafe for the same
@@ -330,28 +465,12 @@ impl JpegDecoder for ImageIoDecoder {
         let width = CGImage::width(Some(&cg_image));
         let height = CGImage::height(Some(&cg_image));
 
-        // Bound the allocation. See MAX_DECODED_JPEG_DIMENSION.
-        if width == 0
-            || height == 0
-            || width as u32 > MAX_DECODED_JPEG_DIMENSION
-            || height as u32 > MAX_DECODED_JPEG_DIMENSION
-        {
-            warn!(
-                "ImageIoDecoder: implausible dimensions {}x{}, dropping frame",
-                width, height
-            );
-            return None;
-        }
-        let width_u32 = width as u32;
-        let height_u32 = height as u32;
+        // Bounds the dimensions and hands back the zeroed RGBA
+        // buffer the bitmap context paints into. The context
+        // borrows the pointer for the duration of its lifetime;
+        // `decoded` outlives the context, which we drop below.
+        let mut decoded = DecodedJpeg::zeroed("ImageIoDecoder", width, height)?;
         let bytes_per_row = width * 4;
-        let buf_len = bytes_per_row * height;
-
-        // Pre-allocate zeroed RGBA buffer that the bitmap context
-        // will paint into. The context borrows the pointer for the
-        // duration of its lifetime; we keep `rgba` alive until we
-        // drop the context below.
-        let mut rgba = vec![0u8; buf_len];
 
         let color_space = CGColorSpace::new_device_rgb()?;
 
@@ -362,12 +481,13 @@ impl JpegDecoder for ImageIoDecoder {
         let bitmap_info =
             CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
 
-        // Safety: CGBitmapContextCreate is unsafe because `data`
-        // must remain valid for the context's lifetime. We hold
-        // `rgba` until after the context is dropped below.
+        // Safety: CGBitmapContextCreate is unsafe because the
+        // pixel buffer must remain valid for the context's
+        // lifetime. `decoded` is a local and is not moved until
+        // after the context is dropped below.
         let context = unsafe {
             CGBitmapContextCreate(
-                rgba.as_mut_ptr().cast::<core::ffi::c_void>(),
+                decoded.rgba.as_mut_ptr().cast::<core::ffi::c_void>(),
                 width,
                 height,
                 8,
@@ -386,21 +506,18 @@ impl JpegDecoder for ImageIoDecoder {
         );
         CGContext::draw_image(Some(&context), rect, Some(&cg_image));
 
-        // Drop the context so the borrowed `rgba.as_mut_ptr()` is
-        // no longer held. (Strictly speaking the lifetime is over
-        // when `context` goes out of scope at end-of-function, but
-        // dropping explicitly here makes the dataflow obvious.)
+        // Drop the context so the borrowed
+        // `decoded.rgba.as_mut_ptr()` is no longer held.
+        // (Strictly speaking the lifetime is over when `context`
+        // goes out of scope at end-of-function, but dropping
+        // explicitly here makes the dataflow obvious.)
         drop(context);
         drop(color_space);
         drop(cg_image);
         drop(source);
         drop(cf_data);
 
-        Some(DecodedJpeg {
-            rgba,
-            width: width_u32,
-            height: height_u32,
-        })
+        Some(decoded)
     }
 
     fn name(&self) -> &'static str {
@@ -559,9 +676,11 @@ impl JpegDecoder for WicDecoder {
         };
         use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
-        // Reject empty input early — WIC will fail on it anyway
-        // but the error path is cheaper to short-circuit here.
-        if data.is_empty() {
+        // Reject anything that is not SOI-prefixed. WIC would
+        // fail on it anyway (the container GUID below pins the
+        // JPEG decoder), but the check is cheaper here and is
+        // the same gate every other backend applies.
+        if !is_jpeg_payload("WicDecoder", data) {
             return None;
         }
 
@@ -583,11 +702,22 @@ impl JpegDecoder for WicDecoder {
                 }
             };
 
-        // Create a WIC stream and initialise it from our in-memory
-        // byte slice. CreateStream returns an IWICStream which is
-        // an ISequentialStream; InitializeFromMemory does NOT copy
-        // the buffer — the caller (us) must keep `data` alive for
-        // the stream's lifetime. See the SAFETY note on the
+        // WIC's InitializeFromMemory takes `&mut [u8]` and does
+        // NOT copy: the stream reads through that pointer for its
+        // whole lifetime. Conjuring a `&mut` from our `&[u8]`
+        // parameter would be undefined behaviour whatever WIC then
+        // does with it — a unique reference aliasing a live shared
+        // borrow is something the compiler may mark `noalias` and
+        // optimise against. So WIC gets a private copy instead.
+        // `owned` is declared before `stream` so it drops after
+        // it, and nothing reads or writes `owned` again while the
+        // stream is alive. A memcpy of a few tens of KB per frame
+        // is the right price for soundness on the MJPEG path.
+        let mut owned = data.to_vec();
+
+        // Create a WIC stream and initialise it from that copy.
+        // CreateStream returns an IWICStream which is an
+        // ISequentialStream. See the SAFETY note on the
         // InitializeFromMemory call below.
         let stream = match unsafe { factory.CreateStream() } {
             Ok(s) => s,
@@ -597,21 +727,16 @@ impl JpegDecoder for WicDecoder {
             }
         };
 
-        // SAFETY: InitializeFromMemory takes a *mut u8 + length.
-        // The WIC contract is that the memory must remain valid
-        // for the lifetime of the stream — the docs say the call
-        // does NOT copy. We keep `data` alive (it's a parameter
-        // borrow) for the entire decode call, and the stream is
-        // dropped at end-of-function before `data` goes out of
-        // scope. The cast from &[u8] to *mut u8 is sound because
-        // WIC only reads from the buffer (it's a decoder source);
-        // it never writes through this pointer.
-        if let Err(e) = unsafe {
-            stream.InitializeFromMemory(std::slice::from_raw_parts_mut(
-                data.as_ptr() as *mut u8,
-                data.len(),
-            ))
-        } {
+        // SAFETY: InitializeFromMemory requires the buffer to stay
+        // valid, unmoved and unaliased for the stream's lifetime.
+        // `owned` is a local `Vec` we alone own: the `&mut` handed
+        // to WIC is derived from that unique owner rather than
+        // fabricated from a shared borrow, `owned` outlives
+        // `stream` (declared earlier, so dropped later — and
+        // `stream` is explicitly dropped below in any case), and
+        // no other reference to its buffer exists while the stream
+        // holds one.
+        if let Err(e) = unsafe { stream.InitializeFromMemory(&mut owned) } {
             warn!("WicDecoder: IWICStream::InitializeFromMemory failed: {e}");
             return None;
         }
@@ -654,17 +779,10 @@ impl JpegDecoder for WicDecoder {
             warn!("WicDecoder: IWICBitmapFrameDecode::GetSize failed: {e}");
             return None;
         }
-        if width == 0
-            || height == 0
-            || width > MAX_DECODED_JPEG_DIMENSION
-            || height > MAX_DECODED_JPEG_DIMENSION
-        {
-            warn!(
-                "WicDecoder: implausible dimensions {}x{}, dropping frame (cap: {})",
-                width, height, MAX_DECODED_JPEG_DIMENSION,
-            );
-            return None;
-        }
+        // Bounds the dimensions and allocates the zeroed output
+        // buffer in one step; None here drops the frame before
+        // the converter and the copy.
+        let mut decoded = DecodedJpeg::zeroed("WicDecoder", width as usize, height as usize)?;
 
         // Set up a format converter to force RGBA byte order
         // regardless of the JPEG's native colour space. JPEGs are
@@ -702,19 +820,17 @@ impl JpegDecoder for WicDecoder {
             return None;
         }
 
-        // Allocate the output buffer. 4 bytes per pixel; we've
-        // already bounded width and height to
-        // MAX_DECODED_JPEG_DIMENSION above so this can't overflow
-        // on a 64-bit platform.
+        // 4 bytes per pixel; DecodedJpeg::zeroed has already
+        // bounded width and height to MAX_DECODED_JPEG_DIMENSION
+        // so this can't overflow on a 64-bit platform.
         let stride = (width as usize) * 4;
-        let buf_len = stride * (height as usize);
-        let mut rgba = vec![0u8; buf_len];
 
         // CopyPixels signature: an optional source rect (None = full
         // image), the destination stride in bytes, and the
         // destination buffer slice. The buffer must be at least
-        // stride * height bytes; we just allocated exactly that.
-        if let Err(e) = unsafe { converter.CopyPixels(std::ptr::null(), stride as u32, &mut rgba) }
+        // stride * height bytes; `zeroed` allocated exactly that.
+        if let Err(e) =
+            unsafe { converter.CopyPixels(std::ptr::null(), stride as u32, &mut decoded.rgba) }
         {
             warn!("WicDecoder: IWICBitmapSource::CopyPixels failed: {e}");
             return None;
@@ -723,20 +839,15 @@ impl JpegDecoder for WicDecoder {
         // Drop the COM objects in reverse construction order.
         // Strictly speaking the lifetimes end at end-of-function
         // anyway, but explicit drops make the dataflow obvious
-        // and ensure the stream (which borrowed `data`) is
-        // released before this function returns and `data` could
-        // theoretically be invalidated by a caller's drop.
+        // and ensure the stream (which reads through `owned`) is
+        // released before `owned` itself drops.
         drop(converter);
         drop(frame);
         drop(decoder);
         drop(stream);
         drop(factory);
 
-        Some(DecodedJpeg {
-            rgba,
-            width,
-            height,
-        })
+        Some(decoded)
     }
 
     fn name(&self) -> &'static str {
@@ -798,34 +909,28 @@ impl JpegDecoder for WicDecoder {
 /// VA-API was the chosen path even while the actual decode
 /// still flows through libjpeg-turbo.
 ///
-/// The follow-up step that wires up real VA-API decode will
-/// need to dlsym the larger function surface (vaCreateConfig,
-/// vaCreateContext, vaCreateSurfaces, vaCreateBuffer,
-/// vaBeginPicture, vaRenderPicture, vaEndPicture,
-/// vaSyncSurface, vaDeriveImage, vaMapBuffer, vaUnmapBuffer,
-/// vaDestroyImage, vaDestroyBuffer, vaDestroyContext,
-/// vaDestroyConfig, vaDestroySurfaces) and parse JPEG SOF/
-/// DHT/DQT segments. Reference implementations: ffmpeg's
-/// `libavcodec/vaapi_mjpeg.c` and chromium's
-/// `media/gpu/vaapi/vaapi_jpeg_decoder.cc`.
+/// What that follow-up has to dlsym and parse, and which
+/// reference implementations to read, is recorded under
+/// "Deferred VA-API decode path" in
+/// `docs/plans/PLAN-stream-caps-and-flap-phase-03-jpeg-decoders.md`.
 ///
 /// # Field ordering and Drop
 ///
-/// `display` must drop before `libva` / `libva_drm` — the
-/// libva display references function pointers backed by the
-/// loaded .so, and tearing down the .so first would leave a
+/// The display must be torn down before `libva` /
+/// `libva_drm` unmap — it references function pointers backed
+/// by the loaded .so, and unmapping first would leave a
 /// dangling pointer in any callback libva runs from its
-/// destructor. Rust drops fields in declaration order, so the
-/// declaration order below (display first, then libraries)
-/// is the correct one. Explicit `Drop` impl calls
-/// `vaTerminate` to release the libva display before the .so
-/// unmaps.
+/// destructor. The explicit `Drop` impl calls `vaTerminate`
+/// and runs to completion before any field drops, so the
+/// ordering holds regardless of declaration order.
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
 pub struct VaapiDecoder {
-    /// VA display handle. Opaque pointer returned by
-    /// `vaGetDisplayDRM`; passed back to `vaTerminate` on
-    /// drop. Non-null while the decoder is alive.
-    display: vaapi::VADisplay,
+    /// The libva display handle plus the `vaTerminate` pointer
+    /// that releases it, behind a wrapper that only hands them
+    /// out through `&mut self`. See [`vaapi::LibvaHandles`] —
+    /// that privacy is what keeps the `unsafe impl Send`/`Sync`
+    /// below honest.
+    va: vaapi::LibvaHandles,
     /// File descriptor for `/dev/dri/renderD128`. The libva
     /// display borrows this fd; closing it before
     /// `vaTerminate` would leave the driver poking a closed
@@ -835,10 +940,6 @@ pub struct VaapiDecoder {
     /// to extend the fd's lifetime to match the decoder's.
     #[allow(dead_code)]
     drm_fd: std::os::fd::OwnedFd,
-    /// `vaTerminate` function pointer captured at probe time
-    /// so `Drop` doesn't have to re-dlsym. Required for
-    /// clean teardown.
-    va_terminate: vaapi::FnVaTerminate,
     /// libva.so.2 handle. Kept alive so the dlsym'd function
     /// pointers stay valid for the decoder's lifetime.
     /// `#[allow(dead_code)]` because we never call methods on
@@ -862,7 +963,7 @@ pub struct VaapiDecoder {
 /// `<va/va.h>` for the full surface.
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
 mod vaapi {
-    use std::os::raw::{c_char, c_int, c_uint, c_void};
+    use std::os::raw::{c_char, c_int, c_void};
 
     /// Opaque libva display handle. Returned by
     /// `vaGetDisplayDRM`, passed to every other libva call,
@@ -892,6 +993,24 @@ mod vaapi {
     /// decode) entry point — the standard one for JPEG.
     /// `<va/va.h>` declares it as enum value 1.
     pub const VA_ENTRYPOINT_VLD: c_int = 1;
+
+    /// Sanity bound on the profile and entrypoint counts a
+    /// driver may report from `vaMaxNumProfiles` /
+    /// `vaMaxNumEntrypoints`. libva 2.x defines roughly 60
+    /// profiles and 15 entrypoints, so 1024 is far beyond any
+    /// plausible growth.
+    ///
+    /// Neither `vaQueryConfigProfiles` nor
+    /// `vaQueryConfigEntrypoints` takes a capacity argument —
+    /// the driver writes up to the count it just reported — so
+    /// allocating less than that count would be a heap overflow
+    /// rather than a truncation. The only safe response to an
+    /// implausible count is therefore to refuse VA-API outright,
+    /// which is what the probe does. Trust boundary here is the
+    /// local libva driver, not the SPICE server; this guards
+    /// against a broken driver reporting `i32::MAX` (an ~8 GiB
+    /// allocation), not against an attacker.
+    pub const VA_MAX_QUERY_ENTRIES: c_int = 1024;
 
     // Function pointer typedefs. Naming convention: `FnVa<Name>`
     // mirrors the C function name with the leading `va`
@@ -932,24 +1051,60 @@ mod vaapi {
         num_entrypoints: *mut c_int,
     ) -> VAStatus;
 
-    // ----- The wider surface, declared but not currently used.
-    // Listed here so the follow-up implementing real VA-API
-    // decode has a single place to consult. Removing these
-    // typedefs would force the follow-up to re-derive them from
-    // <va/va.h> — keeping them inline costs nothing and signals
-    // intent.
+    /// The libva state a live `VaapiDecoder` owns: the display
+    /// handle and the `vaTerminate` pointer that releases it.
+    ///
+    /// The fields are private to this submodule and reachable
+    /// only through `&mut self`, which is the compile-time half
+    /// of the `unsafe impl Send`/`Sync for VaapiDecoder`
+    /// argument further down this file. Those impls are sound
+    /// only while nothing touches the raw `VADisplay` from a
+    /// shared borrow, and `decode(&self, ..)` holds nothing
+    /// else. So a future real VA-API decode path cannot quietly
+    /// start calling libva from `decode`: it has to come here
+    /// and widen the accessors first, which is the point at
+    /// which the `Send`/`Sync` reasoning must be revisited. The
+    /// answer then is an internal `Mutex<VADisplay>` — libva
+    /// thread-safety is driver-dependent — not a `&self`
+    /// accessor.
+    pub struct LibvaHandles {
+        display: VADisplay,
+        va_terminate: FnVaTerminate,
+    }
 
-    /// `VAStatus vaCreateConfig(VADisplay, VAProfile, VAEntrypoint, VAConfigAttrib*, int, VAConfigID*)`
-    /// Not currently dlsym'd; follow-up.
-    #[allow(dead_code)]
-    pub type FnVaCreateConfig = unsafe extern "C" fn(
-        dpy: VADisplay,
-        profile: c_int,
-        entrypoint: c_int,
-        attrib_list: *mut c_void,
-        num_attribs: c_int,
-        config_id: *mut c_uint,
-    ) -> VAStatus;
+    impl LibvaHandles {
+        /// `display` must be the non-null handle from a
+        /// successful `vaGetDisplayDRM` + `vaInitialize` pair,
+        /// and `va_terminate` the `vaTerminate` symbol dlsym'd
+        /// from a libva the caller keeps mapped for at least as
+        /// long as the returned value.
+        pub fn new(display: VADisplay, va_terminate: FnVaTerminate) -> Self {
+            LibvaHandles {
+                display,
+                va_terminate,
+            }
+        }
+
+        /// Release the display, at most once. Takes `&mut self`
+        /// deliberately — see the type docstring.
+        ///
+        /// # Safety
+        ///
+        /// The libva shared object the `vaTerminate` pointer was
+        /// dlsym'd from must still be mapped. `VaapiDecoder`
+        /// guarantees that by calling this from its `Drop`,
+        /// which runs before its `libloading::Library` fields
+        /// drop.
+        pub unsafe fn terminate(&mut self) {
+            if self.display.is_null() {
+                return;
+            }
+            let _status = (self.va_terminate)(self.display);
+            // Null the handle so a second call is a no-op rather
+            // than a use-after-free.
+            self.display = std::ptr::null_mut();
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
@@ -1119,9 +1274,10 @@ impl VaapiDecoder {
         // how big a buffer to allocate.
         // SAFETY: pointer is non-null + initialised.
         let max_profiles = unsafe { va_max_num_profiles(display) };
-        if max_profiles <= 0 {
-            // Some driver returned a non-sensible count.
-            // Tear down and bail.
+        if max_profiles <= 0 || max_profiles > vaapi::VA_MAX_QUERY_ENTRIES {
+            // Some driver returned a non-sensible count. Tear
+            // down and bail rather than sizing an allocation
+            // from it — see VA_MAX_QUERY_ENTRIES.
             // SAFETY: vaTerminate on the display we
             // initialised.
             unsafe { va_terminate(display) };
@@ -1140,7 +1296,11 @@ impl VaapiDecoder {
             debug!("VA-API probe: vaQueryConfigProfiles failed: status {status}");
             return None;
         }
-        let supported_profiles = &profiles[..num_profiles.max(0) as usize];
+        // Clamp to what we actually allocated: a driver that
+        // reports more results than the buffer it was handed
+        // would otherwise panic the probe on a slice index.
+        let returned = (num_profiles.max(0) as usize).min(profiles.len());
+        let supported_profiles = &profiles[..returned];
         if !supported_profiles.contains(&vaapi::VA_PROFILE_JPEG_BASELINE) {
             unsafe { va_terminate(display) };
             debug!("VA-API probe: VAProfileJPEGBaseline not supported by driver");
@@ -1151,7 +1311,7 @@ impl VaapiDecoder {
         // VAEntrypointVLD. Same allocation pattern as profiles.
         // SAFETY: as above.
         let max_entrypoints = unsafe { va_max_num_entrypoints(display) };
-        if max_entrypoints <= 0 {
+        if max_entrypoints <= 0 || max_entrypoints > vaapi::VA_MAX_QUERY_ENTRIES {
             unsafe { va_terminate(display) };
             debug!("VA-API probe: vaMaxNumEntrypoints returned {max_entrypoints}");
             return None;
@@ -1173,7 +1333,9 @@ impl VaapiDecoder {
             debug!("VA-API probe: vaQueryConfigEntrypoints(JPEGBaseline) failed: status {status}");
             return None;
         }
-        let supported_entrypoints = &entrypoints[..num_entrypoints.max(0) as usize];
+        // Clamped for the same reason as the profile list above.
+        let returned = (num_entrypoints.max(0) as usize).min(entrypoints.len());
+        let supported_entrypoints = &entrypoints[..returned];
         if !supported_entrypoints.contains(&vaapi::VA_ENTRYPOINT_VLD) {
             unsafe { va_terminate(display) };
             debug!("VA-API probe: VAEntrypointVLD not supported for JPEGBaseline");
@@ -1185,9 +1347,8 @@ impl VaapiDecoder {
         // currently delegates to mozjpeg.
         debug!("VA-API probe: passed (libva {major}.{minor}, JPEGBaseline+VLD supported)");
         Some(VaapiDecoder {
-            display,
+            va: vaapi::LibvaHandles::new(display, va_terminate),
             drm_fd,
-            va_terminate,
             libva,
             libva_drm,
             fallback: MozJpegDecoder::new(),
@@ -1203,18 +1364,22 @@ impl VaapiDecoder {
 // What makes the promise sound TODAY: `decode(&self, ...)`
 // delegates to `self.fallback.decode(...)` (the embedded
 // `MozJpegDecoder`, which is `Send + Sync`) and never touches
-// the libva fields. The libva fields are read only in `Drop`,
-// where exclusive `&mut self` access is statically guaranteed.
+// the libva handles. Those are reachable only through
+// `vaapi::LibvaHandles`, whose fields are private to that
+// submodule and whose only accessor takes `&mut self` — so
+// "decode never touches libva" is enforced by the compiler
+// here, not by whoever next edits `decode` remembering to read
+// this comment. That is the tripwire: adding a real VA-API
+// decode path means widening `LibvaHandles`, and the type's
+// docstring sends you back here.
 //
-// When the real VA-API decode path lands (the deferred follow-
-// up acknowledged in the struct docstring), this comment is no
-// longer accurate: libva thread-safety is driver-dependent
-// (Intel iHD, Mesa, etc. each implement their own locking
-// policy) and there is no portable guarantee that `VADisplay`
-// tolerates concurrent calls. At that point the libva calls
-// must be wrapped in an internal `Mutex<VADisplay>` so we own
-// the synchronisation rather than trusting whichever driver
-// happens to be loaded.
+// When that happens this comment stops being accurate: libva
+// thread-safety is driver-dependent (Intel iHD, Mesa, etc. each
+// implement their own locking policy) and there is no portable
+// guarantee that `VADisplay` tolerates concurrent calls. At
+// that point the libva calls must be wrapped in an internal
+// `Mutex<VADisplay>` so we own the synchronisation rather than
+// trusting whichever driver happens to be loaded.
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
 unsafe impl Send for VaapiDecoder {}
 #[cfg(all(target_os = "linux", feature = "mozjpeg"))]
@@ -1224,22 +1389,19 @@ unsafe impl Sync for VaapiDecoder {}
 impl Drop for VaapiDecoder {
     fn drop(&mut self) {
         // Tear down the libva display before the underlying
-        // .so unmaps. The Rust field-drop order matches the
-        // declaration order (display.drop runs first, then
-        // drm_fd, then libva, then libva_drm); calling
-        // vaTerminate explicitly here is what releases the
-        // libva-side resources the display refers to.
+        // .so unmaps. `Drop::drop` for the struct runs to
+        // completion before any field drops, so terminating
+        // here is what releases the libva-side resources while
+        // the .so and the DRM fd are both still alive.
         //
-        // SAFETY: self.display is non-null (proved in
-        // try_new) and self.va_terminate is the captured
-        // function pointer from the still-loaded libva.so.
-        if !self.display.is_null() {
-            let _status = unsafe { (self.va_terminate)(self.display) };
-            // Don't log the status — Drop runs at session
-            // shutdown and a tracing call from Drop can
-            // surface in unexpected places (e.g. test
-            // harnesses that consume stderr).
-        }
+        // SAFETY: `LibvaHandles::terminate` requires the libva
+        // .so to still be mapped; it is — `libva` and
+        // `libva_drm` are fields of `self` and drop only after
+        // this method returns. The status is deliberately not
+        // logged: Drop runs at session shutdown and a tracing
+        // call from Drop can surface in unexpected places (e.g.
+        // test harnesses that consume stderr).
+        unsafe { self.va.terminate() };
         // drm_fd, libva, libva_drm, fallback drop in order
         // after this returns.
     }
@@ -1879,5 +2041,144 @@ mod best_for_platform_linux_tests {
         let acceptable =
             name.starts_with("VA-API") || matches!(name, "libjpeg-turbo" | "jpeg-decoder");
         assert!(acceptable, "unexpected backend name on Linux: {name}");
+    }
+}
+
+/// Tests for the platform-independent decode guards.
+///
+/// These are the point of `validated_dimensions`,
+/// `DecodedJpeg::zeroed` / `from_rgba` and `is_jpeg_payload`
+/// being free of any `cfg` gate: the same allocation bound and
+/// the same SOI gate protect all four backends, and this module
+/// exercises them on the one platform where CI actually runs
+/// `cargo test`. Before the helpers existed, the two copies with
+/// the widest reach lived inside `#[cfg(target_os = "macos")]`
+/// and `#[cfg(target_os = "windows")]` bodies and no CI leg on
+/// any platform executed either.
+#[cfg(test)]
+mod dimension_guard_tests {
+    use super::*;
+
+    /// The 32×32 four-swatch fixture shared with the macOS and
+    /// Windows backend tests.
+    const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/swatches.jpg");
+
+    #[test]
+    fn max_rgba_bytes_is_the_square_of_the_dimension_cap() {
+        assert_eq!(MAX_DECODED_RGBA_BYTES, 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn validated_dimensions_accepts_plausible_frames() {
+        assert_eq!(validated_dimensions("t", 1, 1), Some((1, 1)));
+        assert_eq!(validated_dimensions("t", 1920, 1080), Some((1920, 1080)));
+        let max = MAX_DECODED_JPEG_DIMENSION as usize;
+        assert_eq!(
+            validated_dimensions("t", max, max),
+            Some((MAX_DECODED_JPEG_DIMENSION, MAX_DECODED_JPEG_DIMENSION)),
+            "the cap itself must be accepted, not rejected"
+        );
+    }
+
+    #[test]
+    fn validated_dimensions_rejects_zero_sides() {
+        assert!(validated_dimensions("t", 0, 16).is_none());
+        assert!(validated_dimensions("t", 16, 0).is_none());
+        assert!(validated_dimensions("t", 0, 0).is_none());
+    }
+
+    #[test]
+    fn validated_dimensions_rejects_oversized_sides() {
+        let over = MAX_DECODED_JPEG_DIMENSION as usize + 1;
+        assert!(validated_dimensions("t", over, 16).is_none());
+        assert!(validated_dimensions("t", 16, over).is_none());
+        // The JPEG maximum, and the value a hostile frame header
+        // would most plausibly claim.
+        assert!(validated_dimensions("t", 65535, 65535).is_none());
+        assert!(validated_dimensions("t", usize::MAX, usize::MAX).is_none());
+    }
+
+    #[test]
+    fn zeroed_allocates_exactly_four_bytes_per_pixel() {
+        let frame = DecodedJpeg::zeroed("t", 7, 5).expect("7x5 is plausible");
+        assert_eq!(frame.width, 7);
+        assert_eq!(frame.height, 5);
+        assert_eq!(frame.rgba.len(), 7 * 5 * 4);
+        assert!(frame.rgba.iter().all(|&b| b == 0), "buffer must be zeroed");
+    }
+
+    /// The guard that matters: an implausible frame header must
+    /// be refused *before* the multi-gigabyte allocation, not
+    /// after. If this ever regresses the test process itself
+    /// tries to allocate 17 GiB.
+    #[test]
+    fn zeroed_refuses_to_allocate_for_implausible_dimensions() {
+        assert!(DecodedJpeg::zeroed("t", 65535, 65535).is_none());
+        assert!(DecodedJpeg::zeroed("t", 0, 0).is_none());
+    }
+
+    #[test]
+    fn from_rgba_accepts_a_correctly_sized_buffer() {
+        let frame = DecodedJpeg::from_rgba("t", 3, 2, vec![0xAB; 3 * 2 * 4]).expect("exact length");
+        assert_eq!((frame.width, frame.height), (3, 2));
+        assert_eq!(frame.rgba.len(), 24);
+    }
+
+    #[test]
+    fn from_rgba_rejects_a_buffer_that_disagrees_with_the_header() {
+        // Short by one pixel: every consumer indexes `rgba` from
+        // the dimensions, so this would be an out-of-bounds read
+        // downstream rather than a dropped frame.
+        assert!(DecodedJpeg::from_rgba("t", 3, 2, vec![0; 3 * 2 * 4 - 4]).is_none());
+        assert!(DecodedJpeg::from_rgba("t", 3, 2, vec![0; 3 * 2 * 4 + 4]).is_none());
+        assert!(DecodedJpeg::from_rgba("t", 3, 2, Vec::new()).is_none());
+    }
+
+    #[test]
+    fn from_rgba_applies_the_dimension_bound_too() {
+        assert!(DecodedJpeg::from_rgba("t", 65535, 1, vec![0; 4]).is_none());
+    }
+
+    #[test]
+    fn is_jpeg_payload_accepts_only_soi_prefixed_data() {
+        assert!(is_jpeg_payload("t", &[0xFF, 0xD8]));
+        assert!(is_jpeg_payload("t", FIXTURE));
+
+        assert!(!is_jpeg_payload("t", &[]));
+        assert!(!is_jpeg_payload("t", &[0xFF]));
+        // EOI, not SOI.
+        assert!(!is_jpeg_payload("t", &[0xFF, 0xD9, 0x00]));
+        // The containers ImageIO would otherwise sniff its way
+        // into: TIFF (little- and big-endian), RIFF/WebP, PNG.
+        assert!(!is_jpeg_payload("t", b"II*\0\0\0\0\0"));
+        assert!(!is_jpeg_payload("t", b"MM\0*\0\0\0\0"));
+        assert!(!is_jpeg_payload("t", b"RIFF\0\0\0\0WEBP"));
+        assert!(!is_jpeg_payload("t", b"\x89PNG\r\n\x1a\n"));
+    }
+
+    /// The pure-Rust backend had no dimension bound at all
+    /// before these helpers landed. Decoding the shared fixture
+    /// proves the guard is wired into the normal path without
+    /// rejecting valid frames, and that
+    /// `set_max_decoding_buffer_size` does not cap a real one.
+    #[test]
+    fn jpeg_decoder_rs_decodes_the_fixture_within_the_bound() {
+        let decoder = JpegDecoderRsDecoder::new();
+        let decoded = decoder
+            .decode(FIXTURE)
+            .expect("JpegDecoderRsDecoder returned None on the fixture");
+        assert_eq!(decoded.width, 32);
+        assert_eq!(decoded.height, 32);
+        assert_eq!(decoded.rgba.len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn jpeg_decoder_rs_rejects_non_jpeg_payloads() {
+        let decoder = JpegDecoderRsDecoder::new();
+        assert!(decoder.decode(&[]).is_none());
+        // A TIFF header delivered as an MJPEG frame. On macOS
+        // this is the payload that used to reach ImageIO's TIFF
+        // decoder; every backend now refuses it up front.
+        assert!(decoder.decode(b"II*\0\0\0\0\0").is_none());
     }
 }

@@ -36,6 +36,22 @@ pub const SPICE_VIDEO_CODEC_TYPE_MJPEG: u8 = 1;
 pub const SPICE_VIDEO_CODEC_TYPE_H264: u8 = 3;
 
 // ---------------------------------------------------------------------------
+// Decoded-frame limits
+// ---------------------------------------------------------------------------
+
+/// Upper bound on either side of a decoded video frame, in pixels.
+///
+/// A decoded frame costs the same allocation whichever codec
+/// produced it, so the cap has to be identical across backends: if
+/// the H.264 path were looser than the MJPEG one a hostile server
+/// would simply announce an H.264 stream. Aliased to
+/// [`crate::jpeg::MAX_DECODED_JPEG_DIMENSION`] rather than restated
+/// so the two cannot drift apart; see that constant for why 16384
+/// is the number (1 GiB of RGBA at the limit, with headroom for
+/// displays beyond 8K).
+pub const MAX_DECODED_VIDEO_DIMENSION: u32 = crate::jpeg::MAX_DECODED_JPEG_DIMENSION;
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -50,6 +66,26 @@ pub struct DecodedFrame {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// A still-image JPEG decode is already a decoded frame.
+///
+/// `DecodedJpeg` and `DecodedFrame` carry the same three fields for
+/// two different layers: the `JpegDecoder` backends produce the
+/// former, the `VideoDecoder` stream path consumes the latter. The
+/// distinction is worth keeping — H.264 dimensions may be rounded up
+/// to a macroblock boundary, which is a property of the video layer
+/// and not of any JPEG — but the conversion between them should not
+/// be spelled out field by field at each call site, where a
+/// transposed `width`/`height` would compile silently.
+impl From<DecodedJpeg> for DecodedFrame {
+    fn from(jpeg: DecodedJpeg) -> Self {
+        Self {
+            rgba: jpeg.rgba,
+            width: jpeg.width,
+            height: jpeg.height,
+        }
+    }
 }
 
 /// Errors returned by [`VideoDecoder::decode`] and [`for_stream`].
@@ -147,16 +183,23 @@ pub fn for_stream(
 /// Wraps the per-platform [`JpegDecoder`] backend and maintains a
 /// per-stream DHT cache. SPICE's MJPEG framing omits the
 /// Huffman tables (`DHT` segment) from every frame after the
-/// first. `MJpegVideoDecoder` extracts the DHT from the first
-/// frame that carries one and injects it into subsequent
-/// DHT-less frames so the underlying JPEG decoder always receives
-/// a fully-formed JPEG byte stream.
+/// first. `MJpegVideoDecoder` remembers the DHT of the most recent
+/// frame that carried one *and decoded* and injects it into
+/// subsequent DHT-less frames, so the underlying JPEG decoder
+/// always receives a fully-formed JPEG byte stream.
 ///
-/// The DHT logic is identical to the pre-refactor path in
-/// `display.rs:1460-1470`; it has been moved here so the
-/// display-channel dispatch loop is codec-agnostic.
+/// The DHT logic moved here from the pre-refactor path in
+/// `display.rs:1460-1470` so the display-channel dispatch loop is
+/// codec-agnostic; the only behavioural difference is that the
+/// cache is now updated after a successful decode rather than
+/// before the attempt.
 pub struct MJpegVideoDecoder {
     inner: Arc<dyn JpegDecoder>,
+    /// Huffman tables carried by the most recent frame that both
+    /// carried a DHT *and* decoded successfully. Injected into
+    /// later DHT-less frames. See [`MJpegVideoDecoder::decode`]
+    /// for why a candidate DHT is not cached until its own frame
+    /// has decoded.
     cached_dht: Option<Vec<u8>>,
 }
 
@@ -176,14 +219,20 @@ impl MJpegVideoDecoder {
 
 impl VideoDecoder for MJpegVideoDecoder {
     fn decode(&mut self, packet: &[u8]) -> Result<Option<DecodedFrame>, VideoDecoderError> {
-        // Extract any DHT segment present in this packet and cache
-        // it so we can inject it into future DHT-less frames.
-        // If the packet has no DHT but we have a cached one, inject
-        // the cached DHT before decoding.
+        // A frame that carries its own DHT is decoded as-is; a
+        // DHT-less frame gets the cached tables injected first.
+        //
+        // The cache is only updated once the frame the tables came
+        // from has decoded successfully. Committing before the
+        // decode would let a server plant one malformed DHT and
+        // break every subsequent DHT-less frame until a frame with
+        // usable tables happened along — a single bad frame becomes
+        // an open-ended stall. On failure the previous cache entry
+        // is left in place: it decoded something once, which is
+        // more than the candidate can claim.
         let dht = extract_dht_segments(packet);
         let owned;
         let frame_data = if !dht.is_empty() {
-            self.cached_dht = Some(dht);
             packet
         } else if let Some(ref cached) = self.cached_dht {
             owned = inject_dht(packet, cached);
@@ -192,16 +241,14 @@ impl VideoDecoder for MJpegVideoDecoder {
             packet
         };
 
-        match self.inner.decode(frame_data) {
-            Some(DecodedJpeg {
-                rgba,
-                width,
-                height,
-            }) => Ok(Some(DecodedFrame {
-                rgba,
-                width,
-                height,
-            })),
+        let decoded = self.inner.decode(frame_data);
+        match decoded {
+            Some(jpeg) => {
+                if !dht.is_empty() {
+                    self.cached_dht = Some(dht);
+                }
+                Ok(Some(jpeg.into()))
+            }
             None => Err(VideoDecoderError::Decode(
                 "MJPEG decode returned None".to_string(),
             )),
@@ -227,9 +274,11 @@ impl VideoDecoder for MJpegVideoDecoder {
 /// `STREAM_DATA` packet on a stream is fed in order so reference
 /// frames remain valid.
 ///
-/// `consecutive_failures` is a small counter used to escalate
-/// persistent decoder errors from `debug!` to `warn!` after three
-/// failures in a row. It resets on any
+/// `consecutive_failures` drives a two-stage escalation:
+/// `H264_WARN_AFTER_CONSECUTIVE_FAILURES` failures in a row
+/// promote the log from `debug!` to `warn!`, and
+/// `H264_TERMINAL_CONSECUTIVE_FAILURES` of them latch the decoder
+/// off entirely (see `terminal`). The counter resets on any
 /// successful decode (including `Ok(None)`, which is a normal
 /// "need more data" outcome — not an error).
 pub struct H264VideoDecoder {
@@ -239,11 +288,19 @@ pub struct H264VideoDecoder {
     /// requires exactly `width * height * 4` bytes and panics
     /// otherwise, so we resize on dimension change.
     rgba_scratch: Vec<u8>,
-    /// Number of consecutive `Err` returns from
-    /// [`openh264::decoder::Decoder::decode`]. Reset to zero on
-    /// any non-error return (including the "not enough data yet"
-    /// `Ok(None)` case).
+    /// Number of consecutive failed decodes — both `Err` returns
+    /// from [`openh264::decoder::Decoder::decode`] and frames we
+    /// reject ourselves for implausible dimensions. Reset to zero
+    /// on any successful decode (including the "not enough data
+    /// yet" `Ok(None)` case).
     consecutive_failures: u32,
+    /// Latched once `consecutive_failures` reaches
+    /// `H264_TERMINAL_CONSECUTIVE_FAILURES`. Every later
+    /// `decode` call returns the terminal error without touching
+    /// the codec, so a stream that will never resync stops
+    /// consuming CPU. Only a new decoder (a fresh
+    /// `STREAM_CREATE`) clears it.
+    terminal: bool,
     /// The SPICE wire convention we assume is Annex B framing (NALU start
     /// codes), but the assumption has not been validated against a real
     /// H.264-capable spice-server. On the first decode call per decoder
@@ -258,6 +315,22 @@ pub struct H264VideoDecoder {
 /// the log level from `debug!` to `warn!`. Chosen to avoid noise
 /// from single-packet glitches but surface persistent corruption.
 const H264_WARN_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
+
+/// Number of consecutive H.264 decode errors after which the
+/// decoder gives up on the stream and fails every subsequent
+/// packet without invoking the codec.
+///
+/// A healthy stream recovers at the next key frame, so a run this
+/// long — roughly two seconds at 30 fps, longer at the frame rates
+/// SPICE streams typically run at — means the bitstream is not
+/// going to resync. Without the latch a server can keep an
+/// unbounded number of streams burning decode CPU on garbage for
+/// as long as the session lasts, because nothing on the
+/// `STREAM_DATA` path tears a stream down: the display channel
+/// counts `frames_decode_failed` and keeps feeding packets in.
+/// The latch is the decoder's own half of that policy; deciding to
+/// destroy the stream is the display channel's call to make.
+const H264_TERMINAL_CONSECUTIVE_FAILURES: u32 = 60;
 
 impl H264VideoDecoder {
     /// Construct a new openh264-backed decoder.
@@ -275,13 +348,49 @@ impl H264VideoDecoder {
             decoder,
             rgba_scratch: Vec::new(),
             consecutive_failures: 0,
+            terminal: false,
             framing_logged: false,
         })
+    }
+
+    /// Record a failed decode and produce the error to return.
+    ///
+    /// Escalates the log level at
+    /// `H264_WARN_AFTER_CONSECUTIVE_FAILURES` and latches
+    /// `terminal` at `H264_TERMINAL_CONSECUTIVE_FAILURES`.
+    fn note_failure(&mut self, msg: String) -> VideoDecoderError {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        if self.consecutive_failures == H264_WARN_AFTER_CONSECUTIVE_FAILURES {
+            warn!(
+                "H264 decode: {} consecutive failures; stream may be corrupted: {}",
+                self.consecutive_failures, msg
+            );
+        }
+        if self.consecutive_failures >= H264_TERMINAL_CONSECUTIVE_FAILURES && !self.terminal {
+            self.terminal = true;
+            warn!(
+                "H264 decode: {} consecutive failures; giving up on this stream, \
+                 all further packets will be rejected without decoding: {}",
+                self.consecutive_failures, msg
+            );
+        }
+        VideoDecoderError::Decode(msg)
     }
 }
 
 impl VideoDecoder for H264VideoDecoder {
     fn decode(&mut self, packet: &[u8]) -> Result<Option<DecodedFrame>, VideoDecoderError> {
+        // The stream has already failed for long enough to be
+        // declared dead; reject the packet without touching the
+        // codec.
+        if self.terminal {
+            return Err(VideoDecoderError::Decode(format!(
+                "H264 decoder disabled after {} consecutive failures; \
+                 the stream must be recreated to retry",
+                self.consecutive_failures
+            )));
+        }
+
         // SPICE STREAM_DATA carries H.264 NAL units in Annex B
         // framing (start codes `00 00 00 01` between NALUs).
         // `openh264::decoder::Decoder::decode` accepts Annex B
@@ -310,49 +419,60 @@ impl VideoDecoder for H264VideoDecoder {
                 kind,
             );
         }
-        match self.decoder.decode(packet) {
-            Ok(None) => {
-                // Decoder consumed the packet but has not yet
-                // assembled a full picture (e.g. SPS/PPS only, or
-                // the IDR slice is still missing). This is not an
-                // error — keep the failure counter at zero.
-                self.consecutive_failures = 0;
-                Ok(None)
-            }
+
+        // The `DecodedYUV` returned by `decode` borrows the codec, so
+        // nothing inside the match may take `&mut self` as a whole.
+        // Failures therefore surface as a plain message and the
+        // counter/latch bookkeeping happens once the borrow has ended.
+        let outcome: Result<Option<DecodedFrame>, String> = match self.decoder.decode(packet) {
+            // Decoder consumed the packet but has not yet assembled a
+            // full picture (e.g. SPS/PPS only, or the IDR slice is
+            // still missing). This is not an error — it counts as a
+            // success for the failure counter.
+            Ok(None) => Ok(None),
             Ok(Some(yuv)) => {
                 use openh264::formats::YUVSource;
 
                 let (w, h) = yuv.dimensions();
-                let buf_len = w
-                    .checked_mul(h)
-                    .and_then(|n| n.checked_mul(4))
-                    .ok_or_else(|| {
-                        VideoDecoderError::Decode(format!(
-                            "H264 decoded frame dimensions overflow: {w}x{h}"
-                        ))
-                    })?;
-                if self.rgba_scratch.len() != buf_len {
-                    self.rgba_scratch.resize(buf_len, 0);
+                // These come from the stream's SPS, which the server
+                // controls. `checked_mul` alone only stops the multiply
+                // wrapping — it still admits any allocation short of
+                // `usize::MAX` — so cap the frame the way the JPEG
+                // backends do before sizing the scratch buffer.
+                let cap = MAX_DECODED_VIDEO_DIMENSION as usize;
+                if w == 0 || h == 0 || w > cap || h > cap {
+                    Err(format!(
+                        "H264 implausible decoded dimensions {w}x{h} (cap {cap} per side)"
+                    ))
+                } else {
+                    // The cap already rules the overflow out; the
+                    // checked multiply is kept so the guard survives a
+                    // future change to the cap.
+                    match w.checked_mul(h).and_then(|n| n.checked_mul(4)) {
+                        None => Err(format!("H264 decoded frame dimensions overflow: {w}x{h}")),
+                        Some(buf_len) => {
+                            if self.rgba_scratch.len() != buf_len {
+                                self.rgba_scratch.resize(buf_len, 0);
+                            }
+                            yuv.write_rgba8(&mut self.rgba_scratch);
+                            Ok(Some(DecodedFrame {
+                                rgba: self.rgba_scratch.clone(),
+                                width: u32::try_from(w).unwrap_or(u32::MAX),
+                                height: u32::try_from(h).unwrap_or(u32::MAX),
+                            }))
+                        }
+                    }
                 }
-                yuv.write_rgba8(&mut self.rgba_scratch);
+            }
+            Err(e) => Err(e.to_string()),
+        };
+
+        match outcome {
+            Ok(frame) => {
                 self.consecutive_failures = 0;
-                Ok(Some(DecodedFrame {
-                    rgba: self.rgba_scratch.clone(),
-                    width: u32::try_from(w).unwrap_or(u32::MAX),
-                    height: u32::try_from(h).unwrap_or(u32::MAX),
-                }))
+                Ok(frame)
             }
-            Err(e) => {
-                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-                let msg = e.to_string();
-                if self.consecutive_failures == H264_WARN_AFTER_CONSECUTIVE_FAILURES {
-                    warn!(
-                        "H264 decode: {} consecutive failures; stream may be corrupted: {}",
-                        self.consecutive_failures, msg
-                    );
-                }
-                Err(VideoDecoderError::Decode(msg))
-            }
+            Err(msg) => Err(self.note_failure(msg)),
         }
     }
 
@@ -389,11 +509,13 @@ fn extract_dht_segments(jpeg: &[u8]) -> Vec<u8> {
             i += 2;
         } else if marker == 0xD9 || marker == 0xDA {
             break;
-        } else if i + 3 < jpeg.len() {
+        } else {
+            // Any other marker is a length-prefixed segment: skip it.
+            // The loop condition guarantees `jpeg[i + 2]` and
+            // `jpeg[i + 3]` are in bounds, and `seg_len` is at least 2,
+            // so `i` always advances.
             let seg_len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize + 2;
             i += seg_len;
-        } else {
-            break;
         }
     }
     dht
@@ -573,6 +695,109 @@ mod tests {
         assert!(dht_pos.is_some(), "DHT not found in output");
         let dht_end = dht_pos.unwrap() + dht.len();
         assert_eq!(&out[dht_end..], &jpeg[2..]);
+    }
+
+    // ------------------------------------------------------------------
+    // Zero-length packet handling (both backends)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mjpeg_zero_length_packet_returns_decode_error() {
+        let jpeg_dec: Arc<dyn JpegDecoder> = Arc::new(JpegDecoderRsDecoder::new());
+        let mut dec = MJpegVideoDecoder::new(jpeg_dec);
+        match dec.decode(&[]) {
+            Err(VideoDecoderError::Decode(msg)) => {
+                assert!(!msg.is_empty(), "decode error should carry a message");
+            }
+            Err(e) => panic!("expected a Decode error for an empty packet, got {e}"),
+            Ok(_) => panic!("an empty packet must not decode to a frame"),
+        }
+        assert!(
+            dec.cached_dht.is_none(),
+            "an empty packet carries no DHT to cache"
+        );
+    }
+
+    #[test]
+    fn h264_zero_length_packet_is_rejected_without_panic() {
+        let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
+        // openh264 may either report an error or simply consume the
+        // (empty) packet without producing a picture. Both are
+        // acceptable; producing a frame or panicking is not.
+        match dec.decode(&[]) {
+            Ok(None) => {}
+            Err(VideoDecoderError::Decode(msg)) => {
+                assert!(!msg.is_empty(), "decode error should carry a message");
+            }
+            Err(e) => panic!("expected a Decode error for an empty packet, got {e}"),
+            Ok(Some(_)) => panic!("an empty packet must not decode to a frame"),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // DHT cache poisoning (S1-10)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mjpeg_dht_from_failed_frame_is_not_cached() {
+        let jpeg_dec: Arc<dyn JpegDecoder> = Arc::new(JpegDecoderRsDecoder::new());
+        let mut dec = MJpegVideoDecoder::new(jpeg_dec);
+
+        // A frame carrying a DHT segment but no image data: the decode
+        // fails, so the tables it carried must not become the cache
+        // every later DHT-less frame is decoded against.
+        let mut frame = vec![0xFF, 0xD8]; // SOI
+        frame.extend_from_slice(&[0xFF, 0xC4, 0x00, 0x04, 0xAA, 0xBB]); // bogus DHT
+        frame.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        assert!(
+            !extract_dht_segments(&frame).is_empty(),
+            "fixture must actually carry a DHT segment"
+        );
+
+        assert!(
+            dec.decode(&frame).is_err(),
+            "a JPEG with no image data should fail to decode"
+        );
+        assert!(
+            dec.cached_dht.is_none(),
+            "a DHT from a frame that failed to decode must not be cached"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // H.264 terminal-failure latch (S1-6)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn h264_latches_terminal_after_threshold_failures() {
+        let mut dec = H264VideoDecoder::new().expect("H264VideoDecoder::new failed");
+
+        // Drive the policy directly rather than through the codec:
+        // whether a given garbage packet makes openh264 return `Err`
+        // or `Ok(None)` varies with the build, and `Ok(None)` resets
+        // the counter.
+        for _ in 0..H264_TERMINAL_CONSECUTIVE_FAILURES {
+            let _ = dec.note_failure("synthetic failure".to_string());
+        }
+        assert!(
+            dec.terminal,
+            "decoder should latch off after {H264_TERMINAL_CONSECUTIVE_FAILURES} failures"
+        );
+
+        match dec.decode(&[0x00, 0x00, 0x00, 0x01, 0x65, 0x88]) {
+            Err(VideoDecoderError::Decode(msg)) => {
+                assert!(
+                    msg.contains("disabled"),
+                    "latched decoder should report the terminal error, got {msg}"
+                );
+            }
+            Err(e) => panic!("expected the terminal Decode error, got {e}"),
+            Ok(_) => panic!("a latched decoder must reject every packet"),
+        }
+        assert_eq!(
+            dec.consecutive_failures, H264_TERMINAL_CONSECUTIVE_FAILURES,
+            "a latched decoder must not invoke the codec again"
+        );
     }
 }
 
