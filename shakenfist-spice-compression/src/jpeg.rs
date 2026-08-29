@@ -2048,13 +2048,18 @@ mod best_for_platform_linux_tests {
 ///
 /// These are the point of `validated_dimensions`,
 /// `DecodedJpeg::zeroed` / `from_rgba` and `is_jpeg_payload`
-/// being free of any `cfg` gate: the same allocation bound and
-/// the same SOI gate protect all four backends, and this module
-/// exercises them on the one platform where CI actually runs
-/// `cargo test`. Before the helpers existed, the two copies with
-/// the widest reach lived inside `#[cfg(target_os = "macos")]`
-/// and `#[cfg(target_os = "windows")]` bodies and no CI leg on
-/// any platform executed either.
+/// being free of any `cfg` gate: one allocation bound and one
+/// SOI gate protect all four backends, proved once here rather
+/// than separately per platform. Before the helpers existed the
+/// bound was three structurally identical copies, two of them
+/// inside `#[cfg(target_os = "macos")]` and
+/// `#[cfg(target_os = "windows")]` bodies — and a fourth backend
+/// had no bound at all. The platform copies were compiled and
+/// their tests were run, but only on the macOS and Windows legs,
+/// which run in the merge tier rather than per pull request; and
+/// no test on any platform fed the guard an oversized image to
+/// confirm it rejected one. Both are why this module is
+/// un-`cfg`'d and runs everywhere.
 #[cfg(test)]
 mod dimension_guard_tests {
     use super::*;
