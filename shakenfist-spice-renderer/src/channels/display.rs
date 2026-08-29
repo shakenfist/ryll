@@ -1443,30 +1443,20 @@ impl DisplayChannel {
                         dest_bottom
                     );
 
-                    // A re-CREATE on a live id replaces the entry.
-                    // Route it through the teardown path so the
-                    // outgoing stream's counters reach the
-                    // recently-destroyed ring and
-                    // `streams_destroyed_total` stays paired with
-                    // `streams_created_total`; dropping the old
-                    // `StreamState` silently would lose both, along
-                    // with the decoder it owns.
-                    let now = self.traffic.elapsed().as_secs_f64();
-                    if let Some(previous) = self.streams.remove(&stream_id) {
-                        warn!(
-                            "display: stream_create: id={} re-created while still \
-                             open — retiring the previous stream",
-                            stream_id
-                        );
-                        self.retire_stream(stream_id, &previous, now);
-                        self.streams_destroyed_total =
-                            self.streams_destroyed_total.saturating_add(1);
-                    }
-
                     // Cap concurrent streams. `stream_id` is
                     // server-chosen and each entry owns a decoder, so
                     // an uncapped map is a memory-exhaustion primitive.
-                    if self.streams.len() >= MAX_CONCURRENT_STREAMS {
+                    //
+                    // A re-CREATE on an id already held replaces that
+                    // entry rather than adding one, so it cannot grow
+                    // the map and is exempt. Checking before the
+                    // decoder is built matters: `video::for_stream`
+                    // allocates an openh264 instance costing
+                    // megabytes, and a server flooding CREATEs past
+                    // the cap must not be able to drive that
+                    // allocation once per message.
+                    let replacing_live_stream = self.streams.contains_key(&stream_id);
+                    if !replacing_live_stream && self.streams.len() >= MAX_CONCURRENT_STREAMS {
                         self.streams_rejected_total = self.streams_rejected_total.saturating_add(1);
                         // Warn on the first refusal only: a server that
                         // hits the cap once will usually keep hitting
@@ -1493,6 +1483,14 @@ impl DisplayChannel {
                     // If the codec is unsupported, log and skip the stream
                     // (preserving the pre-refactor behaviour where
                     // unsupported codecs were ignored).
+                    //
+                    // Bound *before* any teardown below. A re-CREATE
+                    // naming a codec this build cannot decode must
+                    // leave the working stream it names alone: retiring
+                    // first and discovering the codec second would
+                    // blank the promoted region for the rest of the
+                    // session, which is strictly worse than ignoring
+                    // the message.
                     let video_decoder =
                         match video::for_stream(codec_type, self.jpeg_decoder.clone()) {
                             Ok(dec) => dec,
@@ -1513,6 +1511,26 @@ impl DisplayChannel {
                                 return Ok(());
                             }
                         };
+
+                    // A re-CREATE on a live id replaces the entry.
+                    // Route it through the teardown path so the
+                    // outgoing stream's counters reach the
+                    // recently-destroyed ring and
+                    // `streams_destroyed_total` stays paired with
+                    // `streams_created_total`; dropping the old
+                    // `StreamState` silently would lose both, along
+                    // with the decoder it owns.
+                    let now = self.traffic.elapsed().as_secs_f64();
+                    if let Some(previous) = self.streams.remove(&stream_id) {
+                        warn!(
+                            "display: stream_create: id={} re-created while still \
+                             open — retiring the previous stream",
+                            stream_id
+                        );
+                        self.retire_stream(stream_id, &previous, now);
+                        self.streams_destroyed_total =
+                            self.streams_destroyed_total.saturating_add(1);
+                    }
 
                     self.streams.insert(
                         stream_id,
@@ -3889,5 +3907,297 @@ mod tests {
         // bytes; signedness is purely interpretation.
         assert_eq!(read_u32_le(&buf, 24) as i32, last_frame_delay);
         assert_eq!(read_u32_le(&buf, 28), audio_delay);
+    }
+
+    // -------------------------------------------------------------------------
+    // STREAM_CREATE bounds and ordering
+    //
+    // These drive `handle_message` directly rather than testing the
+    // constants, because the defects worth catching here are ordering
+    // defects: which of the cap check, the decoder construction and the
+    // teardown of a previous stream runs first decides whether a
+    // hostile CREATE can evict a working stream or force a megabyte
+    // allocation per message.
+    // -------------------------------------------------------------------------
+
+    /// A `TrafficSink` that records nothing.
+    ///
+    /// The channel calls into the sink on every message; these tests
+    /// are about `self.streams`, so the recording is noise. `elapsed`
+    /// still has to advance monotonically because `retire_stream`
+    /// stamps lifetimes with it.
+    struct NullTraffic {
+        started: std::time::Instant,
+    }
+
+    impl NullTraffic {
+        fn new() -> Self {
+            NullTraffic {
+                started: std::time::Instant::now(),
+            }
+        }
+    }
+
+    impl crate::traffic::TrafficSink for NullTraffic {
+        fn record_sent(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
+        fn record_received(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
+        fn elapsed(&self) -> std::time::Duration {
+            self.started.elapsed()
+        }
+    }
+
+    /// Everything a `DisplayChannel` under test needs kept alive
+    /// alongside it.
+    ///
+    /// The peer socket and the event receiver are both load-bearing
+    /// even though no test reads them: dropping the peer would make
+    /// any write fail, and dropping the receiver would send `emit`
+    /// down its shutdown path. Neither is what these tests are
+    /// exercising, so both are held rather than leaked.
+    struct TestChannelPeers {
+        _peer: tokio::net::TcpStream,
+        _events: tokio::sync::mpsc::Receiver<ChannelEvent>,
+    }
+
+    /// Build a `DisplayChannel` wired to a loopback socket.
+    async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to loopback listener");
+        let (server, _) = listener.accept().await.expect("accept loopback connection");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let events = EventSink::new(tx, Arc::new(tokio::sync::Notify::new()));
+
+        let channel = DisplayChannel::new(
+            0,
+            SpiceStream::Plain(client),
+            events,
+            None,
+            Arc::new(ByteCounter::new()),
+            Arc::new(NullTraffic::new()),
+            Arc::new(Mutex::new(DisplaySnapshot::default())),
+            DisplayChannel::new_shared_glz_dictionary(1024 * 1024),
+            LogConfig::default(),
+            Arc::new(MmClock::new()),
+            1024 * 1024,
+        );
+        (
+            channel,
+            TestChannelPeers {
+                _peer: server,
+                _events: rx,
+            },
+        )
+    }
+
+    /// Minimum-length `SpiceMsgDisplayStreamCreate` payload.
+    ///
+    /// The handler requires 50 bytes and reads `surface_id`,
+    /// `stream_id`, `codec_type` and the stream / dest rectangles out
+    /// of fixed offsets; everything else is padding here.
+    fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
+        let mut v = vec![0u8; 50];
+        v[0..4].copy_from_slice(&0u32.to_le_bytes()); // surface_id
+        v[4..8].copy_from_slice(&stream_id.to_le_bytes());
+        v[8] = 0; // flags
+        v[9] = codec_type;
+        v[18..22].copy_from_slice(&64u32.to_le_bytes()); // stream_width
+        v[22..26].copy_from_slice(&64u32.to_le_bytes()); // stream_height
+        v[34..38].copy_from_slice(&0u32.to_le_bytes()); // dest_top
+        v[38..42].copy_from_slice(&0u32.to_le_bytes()); // dest_left
+        v[42..46].copy_from_slice(&64u32.to_le_bytes()); // dest_bottom
+        v[46..50].copy_from_slice(&64u32.to_le_bytes()); // dest_right
+        v
+    }
+
+    /// Codec 2 is VP8: a real SPICE codec type that `video::for_stream`
+    /// does not build a decoder for, so it takes the UnsupportedCodec
+    /// arm without being obvious junk.
+    const CODEC_VP8_UNSUPPORTED: u8 = 2;
+
+    #[tokio::test]
+    async fn stream_create_past_the_cap_is_refused_and_counted() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        for stream_id in 0..MAX_CONCURRENT_STREAMS as u32 {
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload(stream_id, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+                )
+                .await
+                .expect("stream_create must not error");
+        }
+        assert_eq!(channel.streams.len(), MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "the cap is not reached yet"
+        );
+
+        // One past the cap, on a fresh id.
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(MAX_CONCURRENT_STREAMS as u32, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("a refused stream_create is not an error");
+
+        assert_eq!(
+            channel.streams.len(),
+            MAX_CONCURRENT_STREAMS,
+            "the map must not grow past the cap"
+        );
+        assert_eq!(channel.streams_rejected_total, 1);
+        assert_eq!(
+            channel.streams_created_total, MAX_CONCURRENT_STREAMS as u64,
+            "a refusal must not count as a creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_create_at_the_cap_is_not_refused() {
+        // A re-CREATE replaces an entry rather than adding one, so it
+        // cannot grow the map and must be exempt from the cap. Getting
+        // this wrong is silent: the server's stream simply stops
+        // updating once the cap is reached.
+        let (mut channel, _peer) = test_display_channel().await;
+
+        for stream_id in 0..MAX_CONCURRENT_STREAMS as u32 {
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload(stream_id, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+                )
+                .await
+                .expect("stream_create must not error");
+        }
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(0, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("re-create must not error");
+
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "a re-create is not a refusal"
+        );
+        assert_eq!(channel.streams.len(), MAX_CONCURRENT_STREAMS);
+        assert!(
+            channel.streams.contains_key(&0),
+            "the re-created id must be live"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_create_on_a_live_id_retires_the_previous_stream() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("re-create must not error");
+
+        assert_eq!(
+            channel.streams.len(),
+            1,
+            "the id must hold exactly one entry"
+        );
+        assert_eq!(
+            channel.streams_created_total, 2,
+            "both creates count; the replacement is a real stream"
+        );
+        assert_eq!(
+            channel.streams_destroyed_total, 1,
+            "destroyed_total must stay paired with created_total"
+        );
+        assert_eq!(
+            channel.recently_destroyed_streams.len(),
+            1,
+            "the outgoing stream's counters must reach the recently-destroyed ring \
+             rather than being dropped with its StreamState"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_create_with_an_unsupported_codec_leaves_the_live_stream_alone() {
+        // The ordering defect this pins: if the teardown runs before
+        // `video::for_stream`, a re-CREATE naming a codec this build
+        // cannot decode retires the working stream and then declines
+        // to install a replacement, blanking the promoted region for
+        // the rest of the session. Ignoring the message is strictly
+        // better.
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(3, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(3, CODEC_VP8_UNSUPPORTED),
+            )
+            .await
+            .expect("an unsupported codec is not an error");
+
+        let surviving = channel
+            .streams
+            .get(&3)
+            .expect("the working stream must survive a re-create it cannot honour");
+        assert_eq!(
+            surviving.codec_type, SPICE_VIDEO_CODEC_TYPE_MJPEG,
+            "the surviving stream must be the original, not a half-built replacement"
+        );
+        assert_eq!(
+            channel.streams_destroyed_total, 0,
+            "nothing was destroyed, so nothing may be counted as destroyed"
+        );
+        assert!(
+            channel.recently_destroyed_streams.is_empty(),
+            "an ignored re-create must not retire anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_codec_on_a_fresh_id_creates_nothing() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(1, CODEC_VP8_UNSUPPORTED),
+            )
+            .await
+            .expect("an unsupported codec is not an error");
+
+        assert!(channel.streams.is_empty());
+        assert_eq!(channel.streams_created_total, 0);
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "an unsupported codec is not a cap refusal; the counters mean different things"
+        );
     }
 }

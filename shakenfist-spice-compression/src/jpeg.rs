@@ -254,6 +254,13 @@ impl JpegDecoder for JpegDecoderRsDecoder {
                 // contract says RGB24 output is a whole number of
                 // pixels so the remainder is always empty — this
                 // simply declines to take that on trust.
+                //
+                // This is what fixes the workspace MSRV at 1.88
+                // (see `rust-version` in the root Cargo.toml).
+                // `chunks_exact(3)` would give the same guarantees
+                // on a far older toolchain, but clippy's
+                // `chunks_exact_to_as_chunks` lint rejects it and
+                // the workspace builds with `-D warnings`.
                 let (triples, _remainder) = pixels.as_chunks::<3>();
                 for chunk in triples {
                     out.push(chunk[0]);

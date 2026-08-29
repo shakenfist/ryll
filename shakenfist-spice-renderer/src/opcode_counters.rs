@@ -24,13 +24,14 @@
 //! ## Publication cost
 //!
 //! `publish_into` is called once per read batch *and* once per send,
-//! so it is on the hot path. Two things keep it cheap: the maps are
-//! bounded above (tens of entries, not tens of thousands), and each
-//! map is only re-cloned when a `record_*` call has actually changed
-//! it since the last publish — a send never touches the receive map,
-//! and an idle republish touches neither.
+//! so it is on the hot path. What keeps it cheap is the
+//! [`MAX_TRACKED_OPCODES`] bound: cloning a map of at most 64 `u16 ->
+//! u64` entries is not measurable against the rest of a snapshot
+//! publish. An earlier version also cached the last-published
+//! generation to skip an unchanged clone; that is gone, because it
+//! silently required each instance to publish into exactly one
+//! target and bought nothing once the maps were bounded.
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 
 use crate::snapshots::{
@@ -116,15 +117,6 @@ pub struct OpcodeCounters {
     send: BTreeMap<u16, u64>,
     last_unknown: Option<u16>,
     unknown_count: u64,
-    /// Bumped on every map-mutating `record_*` call. Compared against
-    /// the published generation so an unchanged map is not re-cloned.
-    recv_generation: u64,
-    send_generation: u64,
-    /// Generation last written into the snapshot. `None` until the
-    /// first publish, so a fresh channel always overwrites whatever a
-    /// previous channel instance left in a shared snapshot.
-    published_recv_generation: Cell<Option<u64>>,
-    published_send_generation: Cell<Option<u64>>,
 }
 
 impl OpcodeCounters {
@@ -141,10 +133,6 @@ impl OpcodeCounters {
             send: BTreeMap::new(),
             last_unknown: None,
             unknown_count: 0,
-            recv_generation: 0,
-            send_generation: 0,
-            published_recv_generation: Cell::new(None),
-            published_send_generation: Cell::new(None),
         }
     }
 
@@ -158,9 +146,7 @@ impl OpcodeCounters {
         if (self.recv_namer)(opcode) == UNKNOWN_OPCODE_NAME || !bump_bounded(&mut self.recv, opcode)
         {
             self.fold_unknown(opcode);
-            return;
         }
-        self.recv_generation = self.recv_generation.wrapping_add(1);
     }
 
     /// Count one sent message. Call from the channel's single send
@@ -175,9 +161,7 @@ impl OpcodeCounters {
             UNKNOWN_OPCODE_NAME,
             "client sent opcode {opcode} with no entry in its message_names table",
         );
-        if bump_bounded(&mut self.send, opcode) {
-            self.send_generation = self.send_generation.wrapping_add(1);
-        }
+        bump_bounded(&mut self.send, opcode);
     }
 
     /// Record an opcode that reached the handler's catch-all arm —
@@ -200,21 +184,19 @@ impl OpcodeCounters {
 
     /// Mirror the counters into a channel snapshot.
     ///
-    /// Each map is cloned only when a `record_*` call changed it since
-    /// the last publish; the two scalars are always written, being
-    /// free to copy.
+    /// Both maps are cloned unconditionally. An earlier version cached
+    /// the last-published generation to skip an unchanged clone, but
+    /// that made correctness depend on each `OpcodeCounters` only ever
+    /// publishing into one target — a second target (a web-mode
+    /// mirror, a test comparing two snapshots) would silently receive
+    /// a stale or empty map, and nothing in the type said so. Now that
+    /// both maps are bounded at [`MAX_TRACKED_OPCODES`], cloning a
+    /// 64-node `BTreeMap` is not measurable against the rest of a
+    /// snapshot publish, so the invariant is not worth carrying.
     pub fn publish_into<T: OpcodeSnapshotTarget + ?Sized>(&self, target: &mut T) {
         let fields = target.opcode_fields_mut();
-        if self.published_recv_generation.get() != Some(self.recv_generation) {
-            fields.recv.clone_from(&self.recv);
-            self.published_recv_generation
-                .set(Some(self.recv_generation));
-        }
-        if self.published_send_generation.get() != Some(self.send_generation) {
-            fields.send.clone_from(&self.send);
-            self.published_send_generation
-                .set(Some(self.send_generation));
-        }
+        fields.recv.clone_from(&self.recv);
+        fields.send.clone_from(&self.send);
         *fields.last_unknown = self.last_unknown;
         *fields.unknown_count = self.unknown_count;
     }
@@ -345,8 +327,8 @@ mod tests {
 
         c.record_recv(cursor_server::SET);
         c.publish_into(&mut snap);
-        // Second publish with nothing changed: the generation guard
-        // skips the clone, so the snapshot must still be correct.
+        // Second publish with nothing changed must leave the
+        // snapshot correct rather than clearing it.
         c.publish_into(&mut snap);
         assert_eq!(
             snap.messages_recv_by_opcode.get(&cursor_server::SET),
@@ -358,6 +340,34 @@ mod tests {
         assert_eq!(
             snap.messages_recv_by_opcode.get(&cursor_server::SET),
             Some(&2)
+        );
+    }
+
+    #[test]
+    fn publishing_into_two_targets_fills_both() {
+        // The regression this pins: an earlier `publish_into` cached
+        // the generation it had last published, so the *second*
+        // target of the same counters received an empty map. Nothing
+        // in the type enforced one-target-per-counters, so the next
+        // caller to add a mirror would have got silently wrong
+        // diagnostics.
+        let mut c = cursor_counters();
+        c.record_recv(cursor_server::SET);
+        c.record_recv(cursor_server::SET);
+
+        let mut first = CursorSnapshot::default();
+        let mut second = CursorSnapshot::default();
+        c.publish_into(&mut first);
+        c.publish_into(&mut second);
+
+        assert_eq!(
+            first.messages_recv_by_opcode, second.messages_recv_by_opcode,
+            "both publish targets must receive the same map"
+        );
+        assert_eq!(
+            second.messages_recv_by_opcode.get(&cursor_server::SET),
+            Some(&2),
+            "the second target must not receive an empty map"
         );
     }
 

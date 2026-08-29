@@ -725,7 +725,17 @@ pub struct RedirectedDevice {
     pub bytes_to_guest: u64,
     /// usbredir-protocol bytes received from the guest for this
     /// device since it was connected, counted after SPICEVMC
-    /// decompression. Same caveats as `bytes_to_guest`.
+    /// decompression. Reset per device attachment, so the same
+    /// "not comparable with the channel totals" caveat applies.
+    ///
+    /// Counted at the *stream* level rather than per parsed message:
+    /// every inbound SPICEVMC payload observed while a device is
+    /// attached is charged to it, which is not quite the mirror image
+    /// of `bytes_to_guest`. Bytes belonging to a message still being
+    /// reassembled, and bytes the usbredir parser later rejects, are
+    /// counted here but have no outbound equivalent. Both directions
+    /// do include usbredir control traffic (capability negotiation,
+    /// interface info) that arrives after the device is attached.
     pub bytes_from_guest: u64,
 }
 

@@ -133,6 +133,79 @@ const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
 /// the rest of the session.
 const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
 
+/// How many retiring auto-snapshot threads may be outstanding before
+/// a new session declines to spawn another.
+///
+/// Nothing joins these threads — every retire runs on the eframe UI
+/// thread — so this cap, not a join, is what bounds thread growth
+/// under a server repeating `SPICE_MSG_MAIN_INIT`. A retiring thread
+/// exits within one 500 ms poll unless it is inside a zip write, so
+/// four outstanding means the host is already far behind; refusing the
+/// spawn costs the new session its auto-snapshots (logged at warn)
+/// rather than letting threads accumulate.
+///
+/// `MIN_SESSION_RESPAWN_INTERVAL` makes reaching this cap unlikely in
+/// the first place; the two bounds are deliberately independent, since
+/// the rate limit is about how fast respawns are requested and this is
+/// about how fast the previous ones actually finish.
+const MAX_RETIRING_AUTO_SNAPSHOT_THREADS: usize = 4;
+
+/// Minimum interval between two accepted `SessionInitialized` events
+/// while already connected.
+///
+/// The session id is server-chosen, so an id-equality guard alone is
+/// defeated by alternating ids (1, 2, 1, 2, ...): every ~36-byte
+/// `SPICE_MSG_MAIN_INIT` would then drive a full retire-and-respawn.
+/// A genuine re-link without a visible disconnect is rare enough to
+/// tolerate a few seconds of delay, so rate-limiting independently of
+/// the id costs nothing legitimate and turns a per-message primitive
+/// into a per-window one.
+const MIN_SESSION_RESPAWN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// What `process_events` should do with an incoming
+/// `SessionInitialized`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionInitDecision {
+    /// A genuinely new session: announce it and respawn per-session
+    /// tasks.
+    Accept,
+    /// The session already in hand, re-announced.
+    IgnoreDuplicate,
+    /// A different session id, but too soon after the last accepted
+    /// one to be a real re-link.
+    IgnoreTooSoon,
+}
+
+/// Decide whether a `SessionInitialized(session_id)` should be acted
+/// on.
+///
+/// Split out from the event arm so the two guards can be tested
+/// without an eframe context: both exist to blunt a server-controlled
+/// primitive, and "the second guard is unreachable because the first
+/// already returned" is exactly the kind of mistake that is invisible
+/// at the call site.
+///
+/// `since_last_accepted` is `None` before the first acceptance.
+fn classify_session_initialized(
+    connected: bool,
+    current_session_id: Option<u32>,
+    session_id: u32,
+    since_last_accepted: Option<Duration>,
+) -> SessionInitDecision {
+    if !connected {
+        // Not connected: this is the event that establishes the
+        // session, so neither guard applies.
+        return SessionInitDecision::Accept;
+    }
+    if current_session_id == Some(session_id) {
+        return SessionInitDecision::IgnoreDuplicate;
+    }
+    match since_last_accepted {
+        Some(since) if since < MIN_SESSION_RESPAWN_INTERVAL => SessionInitDecision::IgnoreTooSoon,
+        _ => SessionInitDecision::Accept,
+    }
+}
+
 /// Single entry in the notification-snapshot store. Owns a
 /// captured `TrafficBuffers` (cheap thanks to its Arc-shared
 /// payloads).
@@ -879,12 +952,25 @@ pub struct RyllApp {
     /// the next 500 ms poll.
     auto_snapshot_cancel: Option<Arc<AtomicBool>>,
     /// Join handle for the auto-snapshot thread currently running,
-    /// if any. Retained so a respawn can *wait* for the outgoing
-    /// thread to exit rather than merely signalling it: signalling
-    /// alone lets threads accumulate whenever sessions arrive faster
-    /// than the ~500 ms retire poll, which a server repeating
-    /// SPICE_MSG_MAIN_INIT can arrange at will.
+    /// if any. Retained so a respawn can move it to
+    /// `auto_snapshot_retiring` and account for it there.
     auto_snapshot_thread: Option<std::thread::JoinHandle<()>>,
+    /// Threads asked to retire that have not been observed exiting.
+    ///
+    /// A retiring thread is never joined: every caller runs on the
+    /// eframe UI thread, and an outgoing loop that is already inside
+    /// `spawn_blocking` does not see the cancel flag until its
+    /// `BugReport::new` (documented as ~2 s of metric sampling) and
+    /// zip write finish — so a join would freeze the GUI for seconds
+    /// under exactly the trigger this bookkeeping exists to bound.
+    /// They are reaped non-blockingly with `is_finished` instead, and
+    /// [`MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] caps how many may be
+    /// outstanding, which is what actually bounds thread growth.
+    auto_snapshot_retiring: Vec<std::thread::JoinHandle<()>>,
+    /// When the most recent `SessionInitialized` was *accepted*.
+    /// Drives [`MIN_SESSION_RESPAWN_INTERVAL`]; see the guard in
+    /// `process_events`.
+    last_session_initialized_at: Option<Instant>,
     /// Whether the one-shot "Auto-snapshot mode enabled" startup
     /// notification has been pushed. Latched on the first spawn
     /// so per-reconnect respawns don't repeat the notification.
@@ -1257,6 +1343,8 @@ impl RyllApp {
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
             auto_snapshot_cancel: None,
             auto_snapshot_thread: None,
+            auto_snapshot_retiring: Vec::new(),
+            last_session_initialized_at: None,
             auto_snapshot_startup_notified: false,
             current_session_id: None,
             last_flap_notification_ts: None,
@@ -1274,7 +1362,8 @@ impl RyllApp {
         // The auto-snapshot task about to be replaced holds Arcs to
         // the `traffic` / `channel_snapshots` this function is about
         // to swap out, so its remaining zips would describe a session
-        // that no longer exists. Signal now; the respawn joins.
+        // that no longer exists. Signal now; the respawn moves the
+        // handle to the retiring set without waiting for it.
         self.signal_auto_snapshot_retire();
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
@@ -1446,34 +1535,55 @@ impl RyllApp {
     /// cancel flag was only raised by the *next* `SessionInitialized`,
     /// so a server that accepted one session and then refused every
     /// reconnect left the last task writing full-size zips of a frozen
-    /// pcap for as long as ryll stayed open. Deliberately does not
-    /// join: this runs on the egui UI thread and an in-flight zip
-    /// write can take seconds. The join happens at respawn instead,
-    /// where the flag raised here has usually already been acted on.
+    /// pcap for as long as ryll stayed open. Nothing anywhere joins
+    /// these threads — every caller runs on the egui UI thread and an
+    /// in-flight zip write can take seconds; `retire_auto_snapshot_task`
+    /// bounds them by counting instead.
     fn signal_auto_snapshot_retire(&self) {
         if let Some(cancel) = &self.auto_snapshot_cancel {
             cancel.store(true, Ordering::Relaxed);
         }
     }
 
-    /// Retire the running auto-snapshot task and wait for its thread
-    /// to exit.
+    /// Drop the handles of any retiring auto-snapshot threads that
+    /// have finished.
     ///
-    /// Called immediately before a respawn so at most one
-    /// auto-snapshot thread is ever alive: the loop notices the flag
-    /// at its next 500 ms poll, and a zip write already inside
-    /// `spawn_blocking` does not notice it at all until it finishes,
-    /// so signal-without-join would let threads pile up faster than
-    /// they retire. A no-op when the mode is disabled or nothing is
-    /// running.
-    fn retire_auto_snapshot_task(&mut self) {
+    /// `is_finished` never blocks, so this is safe to call from the
+    /// UI thread. Dropping a `JoinHandle` detaches rather than waits,
+    /// so the only thing reaping buys is an accurate count for
+    /// [`MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] — which is the point:
+    /// without it the cap would eventually refuse a respawn on the
+    /// strength of threads that exited long ago.
+    fn reap_auto_snapshot_threads(&mut self) {
+        self.auto_snapshot_retiring
+            .retain(|handle| !handle.is_finished());
+    }
+
+    /// Ask the running auto-snapshot task to retire and move its
+    /// handle to the retiring set, without waiting for it.
+    ///
+    /// Called immediately before a respawn. Returns `false` when too
+    /// many previous threads are still winding down, in which case the
+    /// caller must not spawn another: that cap is what bounds thread
+    /// growth now that nothing joins. A no-op returning `true` when
+    /// the mode is disabled or nothing is running.
+    fn retire_auto_snapshot_task(&mut self) -> bool {
         self.signal_auto_snapshot_retire();
         self.auto_snapshot_cancel = None;
+        self.reap_auto_snapshot_threads();
         if let Some(handle) = self.auto_snapshot_thread.take() {
-            if handle.join().is_err() {
-                warn!("app: auto-snapshot thread panicked; continuing without it");
-            }
+            self.auto_snapshot_retiring.push(handle);
         }
+        if self.auto_snapshot_retiring.len() > MAX_RETIRING_AUTO_SNAPSHOT_THREADS {
+            warn!(
+                "app: {} auto-snapshot threads are still retiring (cap {}); \
+                 not spawning another for this session",
+                self.auto_snapshot_retiring.len(),
+                MAX_RETIRING_AUTO_SNAPSHOT_THREADS,
+            );
+            return false;
+        }
+        true
     }
 
     /// Drive the `ReconnectState` machine in response to a critical
@@ -1621,20 +1731,35 @@ impl RyllApp {
                 ChannelEvent::SessionInitialized(session_id) => {
                     // Nothing on the wire obliges a server to send
                     // SPICE_MSG_MAIN_INIT exactly once, and the renderer
-                    // emits this event for every one it decodes. Re-running
-                    // the arm for the session we already hold would
-                    // re-announce the connection and respawn the
-                    // auto-snapshot task once per ~36-byte message, so drop
-                    // the duplicate here. A *different* session id is a
-                    // genuinely new session (the link was rebuilt without
-                    // this side seeing a disconnect) and falls through.
-                    if self.connected && self.current_session_id == Some(session_id) {
-                        debug!(
-                            "app: ignoring duplicate SessionInitialized for session {}",
-                            session_id
-                        );
-                        continue;
+                    // emits this event for every one it decodes. Acting on
+                    // every one would re-announce the connection and
+                    // respawn the auto-snapshot task per ~36-byte message.
+                    // See `classify_session_initialized` for why the
+                    // duplicate check alone is not enough.
+                    match classify_session_initialized(
+                        self.connected,
+                        self.current_session_id,
+                        session_id,
+                        self.last_session_initialized_at.map(|at| at.elapsed()),
+                    ) {
+                        SessionInitDecision::IgnoreDuplicate => {
+                            debug!(
+                                "app: ignoring duplicate SessionInitialized for session {}",
+                                session_id
+                            );
+                            continue;
+                        }
+                        SessionInitDecision::IgnoreTooSoon => {
+                            debug!(
+                                "app: ignoring SessionInitialized for session {} — under \
+                                 the {:?} minimum since the last accepted one",
+                                session_id, MIN_SESSION_RESPAWN_INTERVAL
+                            );
+                            continue;
+                        }
+                        SessionInitDecision::Accept => {}
                     }
+                    self.last_session_initialized_at = Some(Instant::now());
                     info!("app: session {} initialized", session_id);
                     self.current_session_id = Some(session_id);
                     self.connected = true;
@@ -1661,13 +1786,17 @@ impl RyllApp {
                     // task spawned for the previous session is holding stale
                     // Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
-                        // Retire *and join* before spawning, so at most one
-                        // auto-snapshot thread exists at any moment. In the
-                        // ordinary reconnect path the cancel flag was already
-                        // raised at disconnect, so the outgoing thread has had
-                        // the whole reconnect interval to wind down and this
-                        // join returns immediately.
-                        self.retire_auto_snapshot_task();
+                        // Retire the outgoing task before spawning, so at
+                        // most one auto-snapshot thread is *running* at any
+                        // moment. Nothing is joined — this is the UI thread
+                        // — so the retire can refuse when too many previous
+                        // threads are still winding down; honour that rather
+                        // than spawning anyway.
+                        if !self.retire_auto_snapshot_task() {
+                            // Nothing follows in this arm; the refusal
+                            // was already logged at warn.
+                            continue;
+                        }
                         let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
                         let cap = self.auto_snapshot_cap;
                         let byte_cap = crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_BYTE_CAP;
@@ -1713,10 +1842,9 @@ impl RyllApp {
                             // A runtime that will not build means an
                             // opt-in diagnostic feature does not start;
                             // it is not grounds to abort ryll. The
-                            // previous `.expect()` here panicked a thread
-                            // the UI thread later joins, taking the GUI
-                            // down with a feature nobody asked to be
-                            // fatal.
+                            // previous `.expect()` here panicked the
+                            // auto-snapshot thread, losing the mode for
+                            // the session without saying why.
                             let rt = match tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
@@ -5047,6 +5175,82 @@ fn default_arrow_cursor() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // SessionInitialized admission
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn the_first_session_is_always_accepted() {
+        assert_eq!(
+            classify_session_initialized(false, None, 1, None),
+            SessionInitDecision::Accept
+        );
+        // Also when a previous session left timestamps behind: the
+        // rate limit is about respawns while connected, and a
+        // reconnect after a visible disconnect must never be delayed.
+        assert_eq!(
+            classify_session_initialized(false, Some(9), 1, Some(Duration::from_millis(1))),
+            SessionInitDecision::Accept
+        );
+    }
+
+    #[test]
+    fn re_announcing_the_held_session_is_a_duplicate() {
+        assert_eq!(
+            classify_session_initialized(true, Some(4), 4, Some(Duration::from_secs(3600))),
+            SessionInitDecision::IgnoreDuplicate
+        );
+    }
+
+    #[test]
+    fn alternating_session_ids_are_rate_limited() {
+        // The defect this pins: with only an id-equality guard, a
+        // server alternating ids passes on every message and drives a
+        // retire-and-respawn per ~36-byte MAIN_INIT. Each call below
+        // names a different id from the one held, so the equality
+        // guard does not fire and the rate limit is the only thing
+        // standing between the server and a respawn.
+        for (held, incoming) in [(1u32, 2u32), (2, 1), (1, 2)] {
+            assert_eq!(
+                classify_session_initialized(
+                    true,
+                    Some(held),
+                    incoming,
+                    Some(Duration::from_millis(1))
+                ),
+                SessionInitDecision::IgnoreTooSoon,
+                "id {incoming} arriving 1 ms after the last accepted one must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_relink_after_the_window_is_accepted() {
+        // A real re-link without a visible disconnect is rare, but it
+        // must still work: the rate limit delays it, it does not
+        // block it.
+        assert_eq!(
+            classify_session_initialized(
+                true,
+                Some(1),
+                2,
+                Some(MIN_SESSION_RESPAWN_INTERVAL + Duration::from_millis(1))
+            ),
+            SessionInitDecision::Accept
+        );
+    }
+
+    #[test]
+    fn a_new_id_with_no_prior_acceptance_is_accepted() {
+        // `last_session_initialized_at` is None until the first
+        // acceptance; a missing timestamp must not be read as
+        // "zero elapsed" and refuse the event.
+        assert_eq!(
+            classify_session_initialized(true, Some(1), 2, None),
+            SessionInitDecision::Accept
+        );
+    }
 
     #[test]
     fn screenshot_paths_single() {

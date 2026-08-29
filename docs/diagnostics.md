@@ -359,6 +359,20 @@ RST), and embeds a per-channel diagnostics map so a
 maintainer can compare the dropped channel against the
 others' last-known traffic state.
 
+Two fields in that map are nullable, and the distinction
+matters when reading one. `client_keepalive_send_count`
+is `null` when the channel has no client-side keepalive
+mechanism at all, and `0` when it has one that never
+fired. Only the inputs channel implements one, so the
+other six report `null`; the main channel used to
+implement one and no longer does, and reporting a bare
+`0` for it would have claimed the mechanism ran and
+never fired — precisely the wrong answer for someone
+reading a main-channel disconnect report.
+`last_client_keepalive_send_ts_secs` is `null` both when
+no keepalive has been sent and when the channel has no
+mechanism.
+
 A 60 s cooldown bounds disk usage during a disconnect
 storm; the cooldown is updated even on write failure so
 a misconfigured output directory does not retry on every
@@ -428,13 +442,27 @@ Key design points:
   on `ChannelEvent::SessionInitialized`. `reconnect()` replaces
   the traffic and channel-snapshot Arcs wholesale, so each
   session gets its own task: the app raises the outgoing task's
-  cancel flag at disconnect and *joins* its thread before
-  spawning the replacement, which keeps the live thread count at
-  one no matter how often sessions are announced. A repeated
-  `SPICE_MSG_MAIN_INIT` for the session already in hand is
-  discarded as a duplicate rather than treated as a new session.
-  If the dedicated runtime cannot be built, the mode simply does
-  not start for that session and logs a warning.
+  cancel flag at disconnect and again before spawning the
+  replacement, so at most one auto-snapshot task is *running* at
+  a time. Nothing joins those threads. Every retire runs on the
+  egui UI thread, and a thread already inside a zip write does
+  not observe the cancel flag until it finishes, so a join would
+  freeze the GUI for seconds. Outgoing handles are held in a
+  retiring set instead, reaped non-blockingly with
+  `JoinHandle::is_finished`, and a session declines to spawn at
+  all once more than four are still winding down (logged at
+  `warn!`). If the dedicated runtime cannot be built, the mode
+  simply does not start for that session and logs a warning.
+- Two independent bounds keep a hostile server from driving
+  respawns. A repeated `SPICE_MSG_MAIN_INIT` naming the session
+  already in hand is discarded as a duplicate. Because the
+  session id is server-chosen, that check alone is defeated by
+  alternating ids, so a second guard ignores any
+  `SessionInitialized` arriving less than five seconds after the
+  last accepted one while still connected. A genuine re-link
+  without a visible disconnect is rare enough to tolerate the
+  delay; the cost to a hostile peer is one respawn per window
+  rather than one per 36-byte message.
 - A startup `NotifySeverity::Info` notification confirms the mode
   is active: `"Auto-snapshot mode enabled — every {N}s, max {cap}
   snapshots / {byte cap} MiB, saving to {path}"`.

@@ -45,7 +45,11 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     };
 
-    let row_bytes = width * bpp;
+    // All three of these are checked. `width` and `bpp` both reach
+    // here from the wire, and leaving one unchecked multiply among
+    // three checked ones invites the next reader to assume it was
+    // considered and rejected.
+    let row_bytes = width.checked_mul(bpp)?;
     let total_pixels = width.checked_mul(height)?;
     let rgba_size = total_pixels.checked_mul(4)?;
     let mut rgba = vec![0u8; rgba_size];
@@ -408,11 +412,10 @@ mod tests {
     // the two `checked_mul`s are the only thing between a hostile
     // header and a wrapped, undersized allocation.
     //
-    // Note the widths below stay at or under `usize::MAX / 4`: the
-    // `row_bytes = width * bpp` on the line above the guards is still
-    // an unchecked multiply, so a wider value panics there in a debug
-    // build before the guards are reached. Bounding that multiply is
-    // a separate change; this test covers the guards that exist.
+    // `row_bytes = width * bpp` is checked too, so a width that
+    // overflows it returns None rather than panicking in a debug
+    // build -- the widths below no longer have to stay under
+    // `usize::MAX / 4` to reach the guards.
     // ---------------------------------------------------------------
     #[test]
     fn decompress_spice_lz4_absurd_dimensions_returns_none() {
@@ -432,6 +435,12 @@ mod tests {
         assert!(
             decompress_spice_lz4(&data, usize::MAX / 4, 2).is_none(),
             "RGBA size overflow must return None"
+        );
+        // width * bpp overflows on its own, before either of the
+        // guards above is reached.
+        assert!(
+            decompress_spice_lz4(&data, usize::MAX, 1).is_none(),
+            "width * bpp overflow must return None, not panic"
         );
     }
 }

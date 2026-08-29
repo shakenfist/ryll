@@ -119,7 +119,11 @@ channel. It also carries two stream-safety counters:
 - A re-`STREAM_CREATE` on a stream id that is still open retires the
   previous stream through the normal teardown path, so it appears in
   `streams_recently_destroyed` and is counted in
-  `streams_destroyed_total`.
+  `streams_destroyed_total`. It is exempt from the cap, since
+  replacing an entry cannot grow the map, and the replacement
+  decoder is built *before* the teardown: a re-create naming a codec
+  this build cannot decode is ignored outright rather than
+  destroying the working stream and failing to replace it.
 
 `image_cache_ids` is the 64 most recently used cache keys, MRU
 first — not the full key set. The cache can hold millions of entries
