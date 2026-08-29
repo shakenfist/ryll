@@ -226,6 +226,20 @@ Both of these were learned the hard way and apply to all webrtc-rs work:
   a one-shot fact; bare `Notify` plus an explicit re-check for a
   recurring nudge.
 
+## The vendored sfui copy
+
+`ryll/src/web/assets/sfui/` is a verbatim copy of
+[sfui](https://github.com/shakenfist/sfui), the shared web UI
+design system. **Never edit it in place** — an in-place change
+is silently discarded the next time the copy is synced, and the
+daily fleet-wide `sfui-vendor` audit fails on the drift. Change
+sfui, merge there, then re-vendor with that repository's
+`tools/vendor.sh`. Most of the copy is deliberately unserved;
+`ryll/src/web/assets/style.css` is where this page's own styles
+go, and it overrides sfui by being unlayered rather than by
+`!important`. See
+[`docs/web-mode-internals.md`](docs/web-mode-internals.md).
+
 ## Cargo feature gating
 
 The `ryll` binary ships four features: `gui`, `audio` and `capture`

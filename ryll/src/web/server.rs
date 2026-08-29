@@ -273,6 +273,8 @@ pub fn build_router(state: Arc<WebState>) -> Router {
         .route("/", get(serve_index))
         .route("/static/app.js", get(serve_app_js))
         .route("/static/style.css", get(serve_style_css))
+        .route("/static/sfui/tokens.css", get(serve_sfui_tokens_css))
+        .route("/static/sfui/sf.css", get(serve_sfui_sf_css))
         .route("/offer", post(super::signalling::post_offer))
         .layer(middleware::from_fn_with_state(token_state, check_token))
         .with_state(state)
@@ -296,10 +298,26 @@ async fn serve_app_js() -> impl IntoResponse {
 }
 
 async fn serve_style_css() -> impl IntoResponse {
+    css(super::assets::STYLE_CSS)
+}
+
+async fn serve_sfui_tokens_css() -> impl IntoResponse {
+    css(super::assets::SFUI_TOKENS_CSS)
+}
+
+async fn serve_sfui_sf_css() -> impl IntoResponse {
+    css(super::assets::SFUI_SF_CSS)
+}
+
+/// Shared response shape for the stylesheets. Three routes
+/// serving three constants differ only in the constant, and a
+/// fourth is one `include_str!` away if a page element ever
+/// needs another piece of sfui.
+fn css(body: &'static str) -> impl IntoResponse {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
-        super::assets::STYLE_CSS,
+        body,
     )
 }
 
@@ -551,6 +569,14 @@ mod tests {
             "rendered HTML should embed token in style.css href"
         );
         assert!(
+            body.contains(&format!("/static/sfui/tokens.css?token={}", token)),
+            "rendered HTML should embed token in sfui tokens.css href"
+        );
+        assert!(
+            body.contains(&format!("/static/sfui/sf.css?token={}", token)),
+            "rendered HTML should embed token in sfui sf.css href"
+        );
+        assert!(
             !body.contains("{{TOKEN}}"),
             "placeholder should be substituted: {}",
             body
@@ -683,6 +709,87 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
         assert!(ct.to_str().unwrap().starts_with("text/css"));
+    }
+
+    /// The page opts in to sfui, and opting in is three things
+    /// that have to agree: the stylesheets in the right order
+    /// (tokens before sf.css, page styles after both), the
+    /// `sf-page` class that gates every sfui rule, and the
+    /// pinned dark theme that stands in for the theme boot
+    /// script this page does not serve. Each is a silent failure
+    /// if it regresses -- an unstyled page still renders.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn index_opts_in_to_sfui() {
+        let (router, token) = router();
+        let req = HttpRequest::builder()
+            .method(Method::GET)
+            .uri(format!("/?token={}", token))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&body_bytes).unwrap();
+
+        assert!(
+            body.contains("class=\"sf-page\""),
+            "body should carry sf-page, which gates every sfui rule"
+        );
+        assert!(
+            body.contains("data-theme=\"dark\""),
+            "page should pin the dark theme: it serves no theme \
+             boot script"
+        );
+
+        let tokens_at = body
+            .find("/static/sfui/tokens.css")
+            .expect("tokens.css should be linked");
+        let sf_at = body
+            .find("/static/sfui/sf.css")
+            .expect("sf.css should be linked");
+        let page_at = body
+            .find("/static/style.css")
+            .expect("page styles should be linked");
+        assert!(
+            tokens_at < sf_at && sf_at < page_at,
+            "stylesheet order must be tokens, sf.css, page styles: \
+             {} {} {}",
+            tokens_at,
+            sf_at,
+            page_at
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sfui_css_with_token_returns_css() {
+        for path in ["/static/sfui/tokens.css", "/static/sfui/sf.css"] {
+            let (router, token) = router();
+            let req = HttpRequest::builder()
+                .method(Method::GET)
+                .uri(format!("{}?token={}", path, token))
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{}", path);
+            let ct = resp.headers().get(header::CONTENT_TYPE).unwrap();
+            assert!(ct.to_str().unwrap().starts_with("text/css"), "{}", path);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sfui_css_without_token_returns_unauthorized() {
+        for path in ["/static/sfui/tokens.css", "/static/sfui/sf.css"] {
+            let (router, _token) = router();
+            let req = HttpRequest::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{}", path);
+        }
     }
 
     /// Verify that the SHUTDOWN_REQUESTED watcher inside

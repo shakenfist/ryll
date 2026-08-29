@@ -1,15 +1,27 @@
 <!DOCTYPE html>
-<html lang="en">
+<!-- data-theme is stamped statically rather than by sfui's
+     sf-theme.js. The theme boot script exists to resolve an
+     "auto" preference and offer a light/dark toggle, and this
+     page wants neither: it is a video viewer, the area around a
+     letterboxed guest is page background, and a light chrome
+     around it reads as a bug rather than a preference. Pinning
+     dark also means no cookie, no toggle component and no
+     render-blocking script in front of the stream. The dark
+     palette is tokens.css's :root default, so the attribute is
+     documentation as much as instruction. -->
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <title>ryll — SPICE → browser</title>
+  <link rel="stylesheet" href="/static/sfui/tokens.css?token={{TOKEN}}">
+  <link rel="stylesheet" href="/static/sfui/sf.css?token={{TOKEN}}">
   <link rel="stylesheet" href="/static/style.css?token={{TOKEN}}">
 </head>
-<body>
+<body class="sf-page">
   <div id="status">Connecting…</div>
-  <button id="enable-audio" hidden>🔊 Click to enable audio</button>
-  <button id="reconnect-btn" style="display:none">Click to reconnect</button>
-  <div id="no-video" hidden>
+  <button id="enable-audio" class="sf-btn" hidden>🔊 Click to enable audio</button>
+  <button id="reconnect-btn" class="sf-btn sf-btn--primary sf-btn--lg" style="display:none">Click to reconnect</button>
+  <div id="no-video" class="sf-banner sf-banner--error" hidden>
     <h1>No video: this browser offered no H.264</h1>
     <p>ryll streams H.264 and nothing else, and this browser did not
        offer it, so there is no video codec in common and nothing to
