@@ -1,4 +1,25 @@
-body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-serif; }
+/* Page-level styles for the browser shell, layered on top of
+   sfui. sfui supplies the palette (tokens.css), the page
+   defaults and the .sf-btn / .sf-banner primitives (sf.css);
+   everything here is the part sfui has no opinion about --
+   where the chrome sits over the video, and how it stays
+   legible against arbitrary video content.
+
+   Nothing in this file is in a cascade layer, and sf.css is
+   entirely inside the `sfui` layer, so every rule here beats
+   its sfui counterpart with no !important and no specificity
+   contest. That is sfui's documented override mechanism, not a
+   trick, but it does mean overriding one property of a
+   primitive can strand a related one -- see #reconnect-btn:hover
+   below. */
+
+/* sfui's page padding assumes a document; this page is a
+   bleed-to-edge video surface. The knob is the sanctioned way
+   to say so (page-styles.md, "Non-color custom properties"). */
+:root {
+    --sf-page-pad: 0;
+}
+
 /* Page chrome sits above the video.
 
    Observed, not derived: on Chrome both #status and #enable-audio
@@ -14,15 +35,69 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
    because browsers will not autoplay audio unprompted. Anything
    added here that the user has to see or press needs a z-index too.
 
-   Deliberately two declarations rather than a layout change: the
-   letterbox-versus-scale question is #308's, and the wider UI is
-   headed for sfui (#293). Neither should have to land before a
-   button is visible. */
-#status { position: absolute; top: 0.5rem; left: 0.5rem; padding: 0.25rem 0.5rem; background: rgba(0,0,0,0.5); border-radius: 4px; font-size: 0.85rem; z-index: 20; }
-#enable-audio { position: absolute; z-index: 20; top: 0.5rem; right: 0.5rem; padding: 0.4rem 0.8rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 0.85rem; cursor: pointer; }
-#enable-audio:hover { background: rgba(255, 255, 255, 0.25); }
-#enable-audio[hidden] { display: none; }
-#video { display: block; width: 100vw; height: 100vh; object-fit: contain; }
+   The letterbox-versus-scale question is #308's and is still
+   open. */
+
+/* Not .sf-badge, though a small state pill is what this looks
+   like: badges are uppercased 0.72rem state *words*, and this
+   element carries sentences ("Reconnecting in 4s (attempt 2)…",
+   "Server: 503 Service Unavailable"). A page-level pill built
+   from the tokens is the honest answer. */
+#status {
+    position: absolute;
+    top: 0.5rem;
+    left: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    background: color-mix(in srgb, var(--sf-surface) 80%, transparent);
+    border: 1px solid var(--sf-border);
+    border-radius: var(--sf-radius-sm);
+    color: var(--sf-text);
+    font-size: 0.85rem;
+    z-index: 20;
+}
+
+/* Placement, and a backdrop. .sf-btn is transparent-filled
+   because a dashboard button has an opaque page behind it; here
+   the backdrop is whatever the guest happens to be displaying,
+   and an unfilled control disappears over a light desktop. */
+#enable-audio,
+#reconnect-btn {
+    position: absolute;
+    z-index: 20;
+    background: color-mix(in srgb, var(--sf-surface) 85%, transparent);
+}
+
+#enable-audio {
+    top: 0.5rem;
+    right: 0.5rem;
+}
+
+#enable-audio[hidden] {
+    display: none;
+}
+
+#reconnect-btn {
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+/* Restores .sf-btn--primary:hover, which the backdrop rule above
+   would otherwise strand: the primary button's hover state is a
+   filled accent, and filling it is exactly the property this
+   page overrides. */
+#reconnect-btn:hover {
+    background: var(--sf-accent);
+    color: var(--sf-bg);
+}
+
+#video {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    object-fit: contain;
+}
+
 /* SPICE cursor overlay rendered above the <video> element. The
    server forwards CursorShape (PNG-encoded, base64'd) and
    CursorPosition (normalised) over the control DC; app.js
@@ -35,9 +110,10 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
    hardware cursor, so the pointer is never in the video stream,
    and a server that sends no shape at all (which happens) would
    leave the viewer with no pointer of any kind. */
-#video.spice-cursor { cursor: none; }
-#reconnect-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 0.6rem 1.2rem; background: rgba(255, 255, 255, 0.15); color: #fff; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 4px; font-family: inherit; font-size: 1rem; cursor: pointer; z-index: 20; }
-#reconnect-btn:hover { background: rgba(255, 255, 255, 0.25); }
+#video.spice-cursor {
+    cursor: none;
+}
+
 /* Shown when the server answers the browser's hello with
    `no-video-codec`. Deliberately a panel over the video rather than
    a line in #status: the failure it describes leaves every other
@@ -49,12 +125,74 @@ body { margin: 0; background: #000; color: #fff; font-family: system-ui, sans-se
    mouse still works, and a 32rem box centred on the viewport would
    otherwise swallow every click and move landing in the middle of
    the screen -- the listeners are bound to the <video> underneath.
-   Nothing in here is interactive; the <code> spans are decorative. */
-#no-video { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); max-width: 32rem; padding: 1.25rem 1.5rem; background: rgba(0, 0, 0, 0.85); border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 6px; font-size: 0.9rem; line-height: 1.5; z-index: 15; pointer-events: none; }
-#no-video h1 { margin: 0 0 0.75rem; font-size: 1.05rem; }
-#no-video p { margin: 0 0 0.6rem; }
-#no-video p:last-child { margin-bottom: 0; }
-#no-video code { background: rgba(255, 255, 255, 0.12); padding: 0.05rem 0.25rem; border-radius: 3px; }
-#no-video[hidden] { display: none; }
-#cursor { position: absolute; pointer-events: none; image-rendering: pixelated; z-index: 10; }
-#cursor[hidden] { display: none; }
+   Nothing in here is interactive; the <code> spans are decorative.
+
+   Two background layers rather than one: .sf-banner--error's tint
+   is 15% red on transparent, which over a page background is a
+   wash and over live video is nothing at all. Restating the tint
+   over a near-opaque page background keeps the sfui appearance and
+   makes the text readable against whatever is behind it.
+
+   Longhands, not the `background` shorthand: a bare color is only
+   legal in the shorthand's final layer, so writing these as two
+   comma-separated color-mix() values is a parse error and the
+   whole declaration is dropped -- which renders as a fully
+   transparent panel with unreadable body text over a light guest
+   desktop, and as something almost plausible over a dark one. */
+#no-video {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    max-width: 32rem;
+    margin-bottom: 0;
+    padding: 1.25rem 1.5rem;
+    background-color: color-mix(in srgb, var(--sf-bg) 94%, transparent);
+    background-image: linear-gradient(
+        color-mix(in srgb, var(--sf-red) 15%, transparent),
+        color-mix(in srgb, var(--sf-red) 15%, transparent)
+    );
+    line-height: 1.5;
+    z-index: 15;
+    pointer-events: none;
+}
+
+#no-video h1 {
+    margin: 0 0 0.75rem;
+    font-size: 1.05rem;
+}
+
+/* The banner modifier colors all of its text with its token,
+   which suits a one-line notice. This one is two paragraphs of
+   explanation, so the heading keeps the error color and the body
+   reverts to page text. */
+#no-video p {
+    margin: 0 0 0.6rem;
+    color: var(--sf-text);
+}
+
+#no-video p:last-child {
+    margin-bottom: 0;
+}
+
+#no-video code {
+    background: color-mix(in srgb, var(--sf-text) 12%, transparent);
+    padding: 0.05rem 0.25rem;
+    border-radius: var(--sf-radius-sm);
+    font-family: var(--sf-font-mono);
+}
+
+#no-video[hidden] {
+    display: none;
+}
+
+#cursor {
+    position: absolute;
+    pointer-events: none;
+    image-rendering: pixelated;
+    z-index: 10;
+}
+
+#cursor[hidden] {
+    display: none;
+}
