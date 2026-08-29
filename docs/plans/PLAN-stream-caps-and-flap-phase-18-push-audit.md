@@ -606,8 +606,8 @@ the already-fixed rows are.
 | Q2-9 | Three duplicate TODOs; `bytes_to_guest`/`bytes_from_guest` always zero in the payload | Low | CONFIRMED | moved | `snapshots.rs:690`, `:695` |
 | T-1 | 137 new `assert!(json.contains(…))` substring assertions; exactly one converted to a typed assertion | Low | CONFIRMED | still-present | `bugreport.rs`, 190 now vs 53 at base |
 | T-2 | No test exercises `MAX_DECODED_JPEG_DIMENSION` | Advisory | CONFIRMED | still-present | no test references the constant |
-| T-3 | The dimension cap is inline in `cfg`-gated bodies with zero CI coverage on any platform CI runs | **Medium** | CONFIRMED, severity up | still-present | `jpeg.rs:333`, `:657` |
-| T-4 | Wave 1's green run never compiled the macOS/Windows tests; that CI matrix never runs `cargo test` | Info | CONFIRMED | still-present | `ci.yml:465-479` |
+| T-3 | The dimension cap is inline in `cfg`-gated bodies, duplicated per platform | Low | **PARTLY REFUTED** — the "zero CI coverage" half is false | still-present (duplication only) | `jpeg.rs:333`, `:657` |
+| T-4 | "The macOS/Windows CI matrix never runs `cargo test`" | — | **REFUTED** | not a defect | `ci.yml:532-533` |
 | T-5 | No zero-length-packet test through the `VideoDecoder` wrapper | Advisory | CONFIRMED | still-present | `video.rs:953` |
 | T-6 | No cascading-eviction or churn test for `byte_bounded_lru` | Advisory | CONFIRMED | still-present | `byte_bounded_lru.rs:290` |
 | T-7 | lz4 overflow guards untested | Advisory | CONFIRMED | still-present | `lz4.rs:388` |
@@ -652,12 +652,40 @@ toolchain, which `docs/development.md:62-69`'s `apt-get` list
 also omits. The 2c agent's blanket "all accuracy checks passed"
 did not catch this.
 
-**T-3 went up, not down.** `MAX_DECODED_JPEG_DIMENSION` is an
+**T-3 and T-4 were wrong, and the management session
+repeated them before checking.** Recorded here rather than
+quietly deleted, because the failure mode is the one this
+whole phase exists to guard against — a confident finding
+that nobody verified.
+
+The claim was that `.github/workflows/ci.yml` runs only
+`cargo build` plus a web smoke on macOS and Windows, so the
+platform-gated decoder tests never execute anywhere. In fact
+`ci.yml:532-533` carries an unguarded
+`cargo test --workspace ${{ matrix.features }}` step that
+predates this plan (`a488b39`) and runs on every matrix
+entry. `imageio_tests` and `wic_tests` are gated only on
+`target_os`, not on any feature, so both compile and run on
+their legs. The triage agent read the matrix *definition* at
+lines 465-479 and inferred the steps list from it without
+reading down to line 532; the management session relayed
+that twice without checking.
+
+What survives is narrower and real: those legs run in the
+merge tier (`merge_group` / `workflow_dispatch`), not per
+pull request, so platform coverage arrives at merge time;
+and **T-2** is true — no test anywhere fed the guard an
+oversized image. The platform-independent helper is still
+worth having, for the duplication and for T-2, but not for
+the reason the audit gave.
+
+**T-3's severity as originally recorded.** `MAX_DECODED_JPEG_DIMENSION` is an
 allocation bound against hostile input, and on two of three
 platforms it is enforced by code that no CI job compiles, let
 alone runs. Factoring the check into a platform-independent
-helper fixes T-3, Q1-1 and S1-2 in one change — the
-highest-leverage item in this audit.
+helper fixes Q1-1 and S1-2 in one change, and gives T-2
+somewhere to live. It is still the highest-leverage item in
+this audit; the CI justification for it was not real.
 
 ### Step 18f — the derivation recorded
 

@@ -1141,14 +1141,17 @@ outlive the fix:
    apart for the same job disagreed about whether to
    constrain the container, and the permissive one was the
    only backend macOS ever selected.
-2. **`T-3` / `T-4`, a CI gap the audit surfaced by
-   accident.** The `MAX_DECODED_JPEG_DIMENSION` allocation
-   bound is enforced inline in `cfg(target_os)`-gated
-   bodies on macOS and Windows, and
-   `.github/workflows/ci.yml` runs `cargo build` plus a web
-   smoke on those platforms — never `cargo test`. An
-   allocation guard against hostile input had no test
-   coverage on two of three platforms.
+2. **`T-3` / `T-4`, which the audit got wrong and which
+   are recorded because of it.** The audit reported that
+   `.github/workflows/ci.yml` never runs `cargo test` on
+   macOS or Windows, so the `cfg`-gated dimension guards had
+   no coverage anywhere. That is false: `ci.yml:532-533` runs
+   `cargo test --workspace` on every matrix entry and has
+   since `a488b39`. The finding came from reading the matrix
+   definition and inferring the steps. The true residual is
+   `T-2` — no test fed the guard an oversized image — and
+   the fact that those legs run in the merge tier rather
+   than per pull request.
 3. **`D-2`, which inverted on inspection.**
    `docs/development-macos.md` claimed the openh264 crate
    "downloads a pre-built library at build time". True of
