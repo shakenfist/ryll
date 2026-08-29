@@ -352,10 +352,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development-macos.md",
       "author": "mikal"
     },
