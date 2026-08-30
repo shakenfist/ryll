@@ -61,14 +61,6 @@
       "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
       "date": "2026-08-18"
     },
-    "docs/channel-diagnostics-audit.md": {
-      "sha": "af5122d3ed94da3797d9a73ddc01ab78de538fcc",
-      "date": "2026-08-03"
-    },
-    "docs/development-macos.md": {
-      "sha": "d43e790e3b9bf444c055626bdd4b8eca2c6a7850",
-      "date": "2026-08-17"
-    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
@@ -99,14 +91,6 @@
     },
     "docs/session-lifecycle.md": {
       "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
-      "date": "2026-08-17"
-    },
-    "docs/spice-protocol.md": {
-      "sha": "8c8f41105dfd43a3c380c9738dae330f0e13e3e0",
-      "date": "2026-08-18"
-    },
-    "docs/troubleshooting.md": {
-      "sha": "8a2b8df92316d61d504d5c9705c530d3e946b507",
       "date": "2026-08-17"
     },
     "ryll/build.rs": {
@@ -143,10 +127,6 @@
     },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
-      "date": "2026-07-10"
-    },
-    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
-      "sha": "9949d37a339dccb6939ed53149b2c10810c47986",
       "date": "2026-07-10"
     },
     "shakenfist-spice-compression/src/lib.rs": {

@@ -36,10 +36,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/usb/mod.rs",
       "author": "mikal"
     },
@@ -312,10 +308,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
       "path": "tools/review-tracking.sh",
       "author": "mikal"
     },
@@ -348,10 +340,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/releasing.md",
       "author": "mikal"
     },
@@ -372,15 +360,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/macos-metrics-verification.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/spice-protocol.md",
       "author": "mikal"
     },
     {
