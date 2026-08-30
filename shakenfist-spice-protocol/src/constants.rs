@@ -171,6 +171,31 @@ pub mod capabilities {
         | DISPLAY_CODEC_H264
         | DISPLAY_PREF_VIDEO_CODEC_TYPE;
 
+    /// Single source of truth mapping each known display-channel
+    /// capability bit *mask* to its symbolic name, for the traffic
+    /// viewer (see `logging::message_names::display_cap_name`).
+    ///
+    /// This table, not a second hand-written match arm elsewhere, is
+    /// what `display_cap_name` consumes. Entries reference the named
+    /// `DISPLAY_*` constants above rather than repeating bit numbers,
+    /// so a bit position can never drift out of sync between the two.
+    /// A capability added above but forgotten here is caught by
+    /// `logging::tests::display_cap_name_covers_default_display`,
+    /// which fails if any bit set in `DEFAULT_DISPLAY` has no entry.
+    pub const DISPLAY_CAP_NAMES: &[(u32, &str)] = &[
+        (DISPLAY_SIZED_STREAM, "sized_stream"),
+        (DISPLAY_MONITORS_CONFIG, "monitors_config"),
+        (DISPLAY_COMPOSITE, "composite"),
+        (DISPLAY_A8_SURFACE, "a8_surface"),
+        (DISPLAY_STREAM_REPORT, "stream_report"),
+        (DISPLAY_LZ4_COMPRESSION, "lz4_compression"),
+        (DISPLAY_PREF_COMPRESSION, "pref_compression"),
+        (DISPLAY_MULTI_CODEC, "multi_codec"),
+        (DISPLAY_CODEC_MJPEG, "codec_mjpeg"),
+        (DISPLAY_CODEC_H264, "codec_h264"),
+        (DISPLAY_PREF_VIDEO_CODEC_TYPE, "pref_video_codec_type"),
+    ];
+
     // SpiceVMC channel capabilities (SPICE_SPICEVMC_CAP_*)
     pub const SPICEVMC_LZ4: u32 = 1 << 0;
 

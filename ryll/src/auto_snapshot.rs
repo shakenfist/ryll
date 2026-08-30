@@ -4,7 +4,8 @@
 /// complete `BugReport` every N seconds into a rolling
 /// `<bug-report-dir>/auto-snapshots/` subdirectory. The rolling cap is
 /// enforced by pruning the oldest zips once the count exceeds
-/// `--auto-snapshot-cap` (default 20).
+/// `--auto-snapshot-cap` (default 20) or the directory exceeds
+/// `DEFAULT_AUTO_SNAPSHOT_BYTE_CAP`, whichever binds first.
 ///
 /// The task runs on its own tokio runtime in a dedicated std::thread so
 /// the GUI thread is never blocked. All data it needs is Arc'd — the
@@ -30,6 +31,18 @@ use shakenfist_spice_protocol::NotifySeverity;
 
 /// Default rolling cap on the number of auto-snapshot zips kept on disk.
 pub const DEFAULT_AUTO_SNAPSHOT_CAP: usize = 20;
+
+/// Default rolling cap on the total bytes of auto-snapshot zips kept on
+/// disk, in bytes.
+///
+/// A count-only cap does not bound disk use: each zip embeds
+/// `traffic.pcap` merged from all six traffic rings, stored with
+/// `CompressionMethod::Stored`, so on a busy session one snapshot
+/// approaches the 50 MiB ring budget and 20 of them are ~1 GB. 512 MiB
+/// bounds the busy case at roughly ten full-size snapshots while
+/// leaving the count cap the binding constraint in the far more common
+/// quiet session, whose zips are single-digit MiB.
+pub const DEFAULT_AUTO_SNAPSHOT_BYTE_CAP: u64 = 512 * 1024 * 1024;
 
 /// Cool-down between failure notifications so a persistent error (e.g.
 /// disk full) does not spam the operator notification panel.
@@ -61,6 +74,10 @@ pub struct AutoSnapshotState {
     pub output_dir: PathBuf,
     pub interval: Duration,
     pub cap: usize,
+    /// Byte budget for `output_dir`, enforced alongside `cap` on every
+    /// prune. See `DEFAULT_AUTO_SNAPSHOT_BYTE_CAP` for why a count cap
+    /// alone is not enough.
+    pub byte_cap: u64,
     /// Shutdown signal. Polled between snapshot ticks; when set to
     /// `true`, the loop exits cleanly at the next interval boundary
     /// (or sooner — see `wait_with_cancel`). Set by `RyllApp` on
@@ -118,26 +135,38 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     (y as u64, m, d)
 }
 
-/// Prune the oldest auto-snapshot zips in `dir` to keep at most `cap`
-/// files. Zips are sorted lexicographically by filename; by construction
+/// Prune the oldest auto-snapshot zips in `dir` until at most `cap`
+/// files remain and their combined size is at most `byte_cap` bytes.
+///
+/// Both budgets are enforced because neither alone bounds the
+/// directory: a count cap says nothing about size (see
+/// `DEFAULT_AUTO_SNAPSHOT_BYTE_CAP`), and a byte cap alone would let a
+/// quiet session accumulate an unbounded number of tiny zips. Whichever
+/// binds first decides how many files go.
+///
+/// Zips are sorted lexicographically by filename; by construction
 /// the filename embeds a UTC timestamp so lex order equals chronological
 /// order.
 ///
 /// Returns the number of files deleted.
 ///
 /// Errors from `std::fs::remove_file` are logged at `warn` level but do
-/// not abort the prune — we delete as many as we can.
-pub fn prune_to_cap(dir: &std::path::Path, cap: usize) -> usize {
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir) {
+/// not abort the prune — we delete as many as we can, and the next tick
+/// retries whatever is still over budget.
+pub fn prune_to_cap(dir: &std::path::Path, cap: usize, byte_cap: u64) -> usize {
+    // (path, size in bytes). A file that disappears between read_dir
+    // and its metadata call (operator tidying up, a second ryll on the
+    // same directory) is dropped rather than counted at zero.
+    let mut files: Vec<(PathBuf, u64)> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
                     .map(|n| n.starts_with("ryll-auto-snapshot-") && n.ends_with(".zip"))
                     .unwrap_or(false)
             })
+            .filter_map(|e| e.metadata().ok().map(|m| (e.path(), m.len())))
             .collect(),
         Err(e) => {
             warn!("auto-snapshot: cannot read output dir for pruning: {}", e);
@@ -149,16 +178,22 @@ pub fn prune_to_cap(dir: &std::path::Path, cap: usize) -> usize {
     // leading component of the filename).
     files.sort();
 
-    if files.len() <= cap {
-        return 0;
+    // Walk oldest-first, accruing the deletion set until what would
+    // remain satisfies both budgets.
+    let mut remaining_count = files.len();
+    let mut remaining_bytes: u64 = files.iter().map(|(_, len)| *len).sum();
+    let mut to_delete = 0usize;
+    while to_delete < files.len() && (remaining_count > cap || remaining_bytes > byte_cap) {
+        remaining_count -= 1;
+        remaining_bytes = remaining_bytes.saturating_sub(files[to_delete].1);
+        to_delete += 1;
     }
 
-    let excess = files.len() - cap;
     let mut deleted = 0usize;
-    for path in files.iter().take(excess) {
+    for (path, len) in files.iter().take(to_delete) {
         match std::fs::remove_file(path) {
             Ok(()) => {
-                debug!("auto-snapshot: pruned {}", path.display());
+                debug!("auto-snapshot: pruned {} ({} bytes)", path.display(), len);
                 deleted += 1;
             }
             Err(e) => {
@@ -169,24 +204,6 @@ pub fn prune_to_cap(dir: &std::path::Path, cap: usize) -> usize {
     deleted
 }
 
-/// Run the auto-snapshot interval loop.
-///
-/// This function is async and is intended to be called from a
-/// `tokio::spawn`ed task within a dedicated std::thread. It loops until
-/// the tokio runtime shuts down.
-///
-/// Each tick:
-///   1. Assemble a `BugReport` via `BugReport::new` (blocks ~2 s on a
-///      `spawn_blocking` metrics sample — the tokio runtime stays
-///      responsive because the sampling happens off the async executor).
-///   2. Write the zip into `state.output_dir` with the auto-snapshot
-///      filename scheme.
-///   3. Prune the directory to `state.cap`.
-///   4. Bump `auto_snapshots_saved` / `auto_snapshots_pruned` in
-///      `AppSnapshot`.
-///
-/// On write failure: `warn!` always; push a `NotifySeverity::Warn`
-/// notification at most once per `FAILURE_NOTIFY_COOLDOWN`.
 /// Yield until `cancel` becomes `true`. Polls every 500 ms so a
 /// retire signal is acted on quickly even when `interval` is much
 /// longer (the default auto-snapshot cadence is 30 s but operators
@@ -197,8 +214,33 @@ async fn wait_for_cancel(cancel: &AtomicBool) {
     }
 }
 
+/// Run the auto-snapshot interval loop.
+///
+/// This function is async and is intended to be called from a
+/// `tokio::spawn`ed task within a dedicated std::thread. It loops until
+/// `state.cancel` is set or the tokio runtime shuts down.
+///
+/// Each tick:
+///   1. Assemble a `BugReport` via `BugReport::new` (blocks ~2 s on a
+///      `spawn_blocking` metrics sample — the tokio runtime stays
+///      responsive because the sampling happens off the async executor).
+///   2. Write the zip into `state.output_dir` with the auto-snapshot
+///      filename scheme.
+///   3. Prune the directory to `state.cap` files / `state.byte_cap` bytes.
+///   4. Bump `auto_snapshots_saved` / `auto_snapshots_pruned` in
+///      `AppSnapshot`.
+///
+/// On write failure: `warn!` always; push a `NotifySeverity::Warn`
+/// notification at most once per `FAILURE_NOTIFY_COOLDOWN`.
 pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
     let mut interval = tokio::time::interval(state.interval);
+    // Delay, not the default Burst: a tick that takes longer than
+    // `state.interval` (a multi-hundred-MiB zip on slow storage) would
+    // otherwise leave the loop running snapshots back to back with zero
+    // idle, turning a cadence into a spin. Delay re-bases the schedule
+    // from the moment the slow tick finished, so the operator always
+    // gets at least `state.interval` of quiet between writes.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Skip the first immediate tick so the operator gets the first
     // snapshot after a full interval (they just saw the startup
     // notification and the mode is freshly armed).
@@ -237,6 +279,7 @@ pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
         let port = state.target_port;
         let output_dir = state.output_dir.clone();
         let cap = state.cap;
+        let byte_cap = state.byte_cap;
         let filename_clone = filename.clone();
 
         // Assemble and write inside spawn_blocking so the 2-second
@@ -289,7 +332,16 @@ pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
         debug!("auto-snapshot: wrote {}", zip_path.display());
 
         // Prune to cap, then update counters in AppSnapshot.
-        let pruned = prune_to_cap(&state.output_dir, cap);
+        //
+        // This is blocking filesystem work (one read_dir, a stat per
+        // zip, up to N remove_file) running directly on the async
+        // executor rather than in spawn_blocking, which the module
+        // discipline above otherwise calls for. Deliberate: this
+        // runtime is dedicated to the auto-snapshot loop and its only
+        // other resident is the 500 ms cancel poll, so a stall here
+        // delays nothing but the retire latency, by well under one
+        // poll interval for a directory of at most `cap` files.
+        let pruned = prune_to_cap(&state.output_dir, cap, byte_cap);
         if let Ok(mut snap) = state.app_snapshot.lock() {
             snap.auto_snapshots_saved = snap.auto_snapshots_saved.saturating_add(1);
             snap.auto_snapshots_pruned = snap.auto_snapshots_pruned.saturating_add(pruned as u64);
@@ -357,10 +409,20 @@ mod tests {
 
     // ── prune_to_cap ────────────────────────────────────────
 
+    /// Byte cap large enough never to bind, for the tests that
+    /// exercise the count cap in isolation.
+    const NO_BYTE_LIMIT: u64 = u64::MAX;
+
     fn write_fake_zip(dir: &std::path::Path, name: &str) {
+        write_fake_zip_sized(dir, name, 4);
+    }
+
+    /// Write a placeholder zip of exactly `bytes` bytes so the
+    /// byte-budget arithmetic can be asserted against known sizes.
+    fn write_fake_zip_sized(dir: &std::path::Path, name: &str, bytes: usize) {
         let path = dir.join(name);
         let mut f = std::fs::File::create(path).unwrap();
-        f.write_all(b"fake").unwrap();
+        f.write_all(&vec![b'x'; bytes]).unwrap();
     }
 
     #[test]
@@ -375,7 +437,7 @@ mod tests {
             write_fake_zip(dir, &name);
         }
 
-        let deleted = prune_to_cap(dir, 20);
+        let deleted = prune_to_cap(dir, 20, NO_BYTE_LIMIT);
         assert_eq!(deleted, 5, "expected 5 pruned, got {}", deleted);
 
         // The 5 oldest (seconds 00..04) should be gone.
@@ -400,7 +462,7 @@ mod tests {
             write_fake_zip(dir, &name);
         }
 
-        let deleted = prune_to_cap(dir, 20);
+        let deleted = prune_to_cap(dir, 20, NO_BYTE_LIMIT);
         assert_eq!(deleted, 0);
     }
 
@@ -418,11 +480,85 @@ mod tests {
         }
 
         // Cap of 3: 5 matching → 2 deleted.
-        let deleted = prune_to_cap(dir, 3);
+        let deleted = prune_to_cap(dir, 3, NO_BYTE_LIMIT);
         assert_eq!(deleted, 2);
         // Non-matching files must still exist.
         assert!(dir.join("other-file.zip").exists());
         assert!(dir.join("ryll-bugreport-something.zip").exists());
+    }
+
+    #[test]
+    fn prune_to_cap_enforces_byte_budget_under_count_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Ten 100-byte zips = 1000 bytes total, well under a count
+        // cap of 20 but over a 450-byte budget. Keeping the newest
+        // four (400 bytes) is the first state that fits, so the six
+        // oldest must go.
+        for i in 0..10u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            write_fake_zip_sized(dir, &name, 100);
+        }
+
+        let deleted = prune_to_cap(dir, 20, 450);
+        assert_eq!(deleted, 6, "expected 6 pruned, got {}", deleted);
+        for i in 0..6u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            assert!(!dir.join(&name).exists(), "should have pruned {}", name);
+        }
+        for i in 6..10u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            assert!(dir.join(&name).exists(), "should have kept {}", name);
+        }
+    }
+
+    #[test]
+    fn prune_to_cap_applies_whichever_budget_binds_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // Five 100-byte zips. The count cap of 3 alone would delete
+        // two; the 250-byte budget alone would delete three. The
+        // stricter of the two wins.
+        for i in 0..5u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            write_fake_zip_sized(dir, &name, 100);
+        }
+
+        let deleted = prune_to_cap(dir, 3, 250);
+        assert_eq!(deleted, 3, "expected 3 pruned, got {}", deleted);
+    }
+
+    #[test]
+    fn prune_to_cap_no_op_when_under_both_budgets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        for i in 0..3u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            write_fake_zip_sized(dir, &name, 100);
+        }
+
+        assert_eq!(prune_to_cap(dir, 20, 1000), 0);
+    }
+
+    #[test]
+    fn prune_to_cap_byte_budget_ignores_non_matching_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        // A large unrelated file must not count against the budget
+        // and must not be deleted: the directory is the operator's
+        // bug-report dir, not ours exclusively.
+        write_fake_zip_sized(dir, "unrelated-blob.zip", 10_000);
+        for i in 0..3u32 {
+            let name = format!("ryll-auto-snapshot-2026-05-18T00-00-{:02}Z-T+0.0s.zip", i);
+            write_fake_zip_sized(dir, &name, 100);
+        }
+
+        assert_eq!(prune_to_cap(dir, 20, 500), 0);
+        assert!(dir.join("unrelated-blob.zip").exists());
     }
 
     // ── retire-and-respawn helper ───────────────────────────

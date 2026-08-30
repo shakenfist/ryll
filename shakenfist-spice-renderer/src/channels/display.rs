@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::image_cache::BoundedImageCache;
 use crate::mm_clock::MmClock;
+use crate::opcode_counters::OpcodeCounters;
 use crate::snapshots::{DecodeResult, DisplaySnapshot, StreamSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
@@ -86,6 +87,62 @@ struct StreamState {
 /// Maximum number of recent decode results to keep in the snapshot.
 const MAX_RECENT_DECODES: usize = 20;
 
+/// Maximum number of concurrently-open server video streams.
+///
+/// `stream_id` is a server-chosen `u32`, so without a cap a server can
+/// mint streams until the client runs out of memory. Each open stream
+/// now owns a `Box<dyn VideoDecoder>`, and an H.264 decoder is an
+/// openh264 instance costing megabytes, so the cost per surplus stream
+/// is no longer the cached DHT it used to be.
+///
+/// spice-gtk's practical ceiling is single digits — one stream per
+/// promoted video region, and a server that promotes more than a
+/// handful at once is misbehaving. 16 leaves generous headroom over
+/// anything legitimate while bounding worst-case decoder memory at
+/// tens of megabytes rather than gigabytes.
+const MAX_CONCURRENT_STREAMS: usize = 16;
+
+/// Number of image-cache keys published into `DisplaySnapshot`.
+///
+/// The cache can hold millions of entries and the snapshot is
+/// republished on every send, so materialising and sorting every key
+/// was per-send work proportional to cache size, under the snapshot
+/// mutex. The 64 most recently used keys answer the question
+/// the field exists for ("what is this cache holding, and is it
+/// churning?"); `image_cache_entries` carries the true total.
+const MAX_SNAPSHOT_IMAGE_CACHE_IDS: usize = 64;
+
+/// Minimum interval between snapshot publishes on the *send* path.
+///
+/// `update_snapshot` rebuilds several bounded rings and clones the
+/// per-stream state, and a server can drive one send per inbound
+/// 18-byte `STREAM_DATA` via the `STREAM_REPORT` trigger. Reads still
+/// publish unthrottled, so a bug report is never more than one read
+/// batch stale; this only collapses bursts of send-side republishes.
+const SNAPSHOT_SEND_PUBLISH_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
+/// Substituted for a `STREAM_ACTIVATE_REPORT` `max_window_size` of
+/// zero. Zero makes the `num_frames >= max_window_size` trigger
+/// always true (`report_num_frames` is already >= 1 when the
+/// predicate runs), so a server could force a STREAM_REPORT marshal,
+/// a socket flush and a snapshot publish for every inbound
+/// `STREAM_DATA`. 5 is spice-server's own default.
+const STREAM_REPORT_DEFAULT_WINDOW_SIZE: u32 = 5;
+
+/// Clamp range for a `STREAM_ACTIVATE_REPORT` `timeout_ms`.
+///
+/// The floor keeps a server from requesting a report per frame; at
+/// 60 fps a 100 ms window is ~6 frames, comparable to the default
+/// window size of 5. The ceiling keeps the value inside `i32`, which
+/// the trigger predicate compares against: unclamped, any value from
+/// `0x8000_0000` up casts to a negative `i32` and makes the elapsed
+/// check unconditionally true. A server wanting reports less often
+/// than once a minute is served just as well by the window-size
+/// trigger.
+const STREAM_REPORT_MIN_TIMEOUT_MS: u32 = 100;
+const STREAM_REPORT_MAX_TIMEOUT_MS: u32 = 60_000;
+
 /// Maximum number of recently-destroyed streams retained for
 /// post-mortem diagnostics. Streams flap fast enough on a misbehaving
 /// spice-server (observed: stream every ~15 s with ~2 s lifetime)
@@ -103,6 +160,14 @@ const STREAM_REPORT_DROP_SEQ_LEN_LIMIT: u32 = 3;
 /// free function so each OR branch is unit-testable in
 /// isolation. Mirrors spice-gtk's check at
 /// channel-display.c:1559-1561.
+///
+/// `max_window_size` and `timeout_ms` are server-supplied and are
+/// clamped where `STREAM_ACTIVATE_REPORT` is parsed, not here: callers
+/// must pass a `max_window_size` of at least 1 (zero makes the first
+/// branch unconditionally true) and a `timeout_ms` of at most
+/// `i32::MAX` (larger values cast negative and make the second branch
+/// unconditionally true). See `STREAM_REPORT_DEFAULT_WINDOW_SIZE` and
+/// `STREAM_REPORT_MAX_TIMEOUT_MS`.
 fn stream_report_should_send(
     num_frames: u32,
     max_window_size: u32,
@@ -113,6 +178,27 @@ fn stream_report_should_send(
     num_frames >= max_window_size
         || elapsed_since_window_start >= timeout_ms as i32
         || drops_seq_len >= STREAM_REPORT_DROP_SEQ_LEN_LIMIT
+}
+
+/// Clamp a server-supplied `STREAM_ACTIVATE_REPORT` trigger pair into
+/// the range `stream_report_should_send` can safely use. Returns
+/// `(max_window_size, timeout_ms)`.
+///
+/// Both values arrive raw from a 16-byte server payload and both feed
+/// the send predicate, where an out-of-range value makes a branch
+/// unconditionally true and lets the server force a STREAM_REPORT
+/// marshal, a socket flush and a snapshot publish for every inbound
+/// 18-byte STREAM_DATA. See the constants above for each bound.
+fn clamp_stream_report_params(max_window_size: u32, timeout_ms: u32) -> (u32, u32) {
+    let window = if max_window_size == 0 {
+        STREAM_REPORT_DEFAULT_WINDOW_SIZE
+    } else {
+        max_window_size
+    };
+    (
+        window,
+        timeout_ms.clamp(STREAM_REPORT_MIN_TIMEOUT_MS, STREAM_REPORT_MAX_TIMEOUT_MS),
+    )
 }
 
 /// Maximum number of consecutive ACK-send intervals retained in
@@ -611,6 +697,17 @@ pub struct DisplayChannel {
     /// server since session start. Mirrored into
     /// `DisplaySnapshot::stream_reports_sent_total`.
     stream_reports_sent_total: u64,
+    /// Cumulative count of `STREAM_CREATE` messages refused by
+    /// `MAX_CONCURRENT_STREAMS`. Mirrored into
+    /// `DisplaySnapshot::streams_rejected_total`.
+    streams_rejected_total: u64,
+    /// Bounded per-opcode message counters; flushed to the
+    /// snapshot by `update_snapshot`. See `OpcodeCounters`.
+    opcodes: OpcodeCounters,
+    /// When the send path last published the snapshot. Drives the
+    /// `SNAPSHOT_SEND_PUBLISH_MIN_INTERVAL` throttle; `None` until
+    /// the first send.
+    last_send_snapshot_publish: Option<Instant>,
     /// Bounded ring of recently-destroyed `StreamState`s captured
     /// at teardown so per-stream counters survive `STREAM_DESTROY`.
     /// Without this, a bug report filed between flap cycles loses
@@ -718,6 +815,12 @@ impl DisplayChannel {
             streams_destroyed_total: 0,
             stream_data_orphan_count: 0,
             stream_reports_sent_total: 0,
+            streams_rejected_total: 0,
+            opcodes: OpcodeCounters::new(
+                message_names::display_server,
+                message_names::display_client,
+            ),
+            last_send_snapshot_publish: None,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
             mjpeg_recent_durations: VecDeque::new(),
@@ -1028,6 +1131,10 @@ impl DisplayChannel {
             );
         }
 
+        // Count before dispatch so known and unknown opcodes are
+        // counted uniformly.
+        self.opcodes.record_recv(msg_type);
+
         match msg_type {
             display_server::SURFACE_CREATE => {
                 let surface = SurfaceCreate::read(payload)?;
@@ -1336,10 +1443,54 @@ impl DisplayChannel {
                         dest_bottom
                     );
 
+                    // Cap concurrent streams. `stream_id` is
+                    // server-chosen and each entry owns a decoder, so
+                    // an uncapped map is a memory-exhaustion primitive.
+                    //
+                    // A re-CREATE on an id already held replaces that
+                    // entry rather than adding one, so it cannot grow
+                    // the map and is exempt. Checking before the
+                    // decoder is built matters: `video::for_stream`
+                    // allocates an openh264 instance costing
+                    // megabytes, and a server flooding CREATEs past
+                    // the cap must not be able to drive that
+                    // allocation once per message.
+                    let replacing_live_stream = self.streams.contains_key(&stream_id);
+                    if !replacing_live_stream && self.streams.len() >= MAX_CONCURRENT_STREAMS {
+                        self.streams_rejected_total = self.streams_rejected_total.saturating_add(1);
+                        // Warn on the first refusal only: a server that
+                        // hits the cap once will usually keep hitting
+                        // it, and the counter carries the rest.
+                        if self.streams_rejected_total == 1 {
+                            warn!(
+                                "display: stream_create: id={} refused, {} streams already \
+                                 open (cap {}); further refusals logged at debug",
+                                stream_id,
+                                self.streams.len(),
+                                MAX_CONCURRENT_STREAMS,
+                            );
+                        } else {
+                            debug!(
+                                "display: stream_create: id={} refused (cap {}); \
+                                 rejected_total={}",
+                                stream_id, MAX_CONCURRENT_STREAMS, self.streams_rejected_total,
+                            );
+                        }
+                        return Ok(());
+                    }
+
                     // Select the video decoder for this stream's codec.
                     // If the codec is unsupported, log and skip the stream
                     // (preserving the pre-refactor behaviour where
                     // unsupported codecs were ignored).
+                    //
+                    // Bound *before* any teardown below. A re-CREATE
+                    // naming a codec this build cannot decode must
+                    // leave the working stream it names alone: retiring
+                    // first and discovering the codec second would
+                    // blank the promoted region for the rest of the
+                    // session, which is strictly worse than ignoring
+                    // the message.
                     let video_decoder =
                         match video::for_stream(codec_type, self.jpeg_decoder.clone()) {
                             Ok(dec) => dec,
@@ -1361,6 +1512,26 @@ impl DisplayChannel {
                             }
                         };
 
+                    // A re-CREATE on a live id replaces the entry.
+                    // Route it through the teardown path so the
+                    // outgoing stream's counters reach the
+                    // recently-destroyed ring and
+                    // `streams_destroyed_total` stays paired with
+                    // `streams_created_total`; dropping the old
+                    // `StreamState` silently would lose both, along
+                    // with the decoder it owns.
+                    let now = self.traffic.elapsed().as_secs_f64();
+                    if let Some(previous) = self.streams.remove(&stream_id) {
+                        warn!(
+                            "display: stream_create: id={} re-created while still \
+                             open — retiring the previous stream",
+                            stream_id
+                        );
+                        self.retire_stream(stream_id, &previous, now);
+                        self.streams_destroyed_total =
+                            self.streams_destroyed_total.saturating_add(1);
+                    }
+
                     self.streams.insert(
                         stream_id,
                         StreamState {
@@ -1373,7 +1544,7 @@ impl DisplayChannel {
                             dest_bottom,
                             dest_right,
                             video_decoder,
-                            created_at_secs: self.traffic.elapsed().as_secs_f64(),
+                            created_at_secs: now,
                             frames_received: 0,
                             frames_decoded_ok: 0,
                             frames_decode_failed: 0,
@@ -1606,14 +1777,27 @@ impl DisplayChannel {
                             stream.frames_decode_failed =
                                 stream.frames_decode_failed.saturating_add(1);
                         }
-                        Err(VideoDecoderError::UnsupportedCodec(_)) => {
-                            // Cannot happen: `for_stream` only constructs
-                            // a decoder for supported codecs; STREAM_CREATE
-                            // skips unsupported ones, so this stream would
-                            // not exist.
-                            unreachable!(
-                                "video_decoder set at STREAM_CREATE only for supported codecs"
+                        Err(VideoDecoderError::UnsupportedCodec(codec)) => {
+                            // Should not happen: `for_stream` only
+                            // constructs a decoder for supported codecs
+                            // and STREAM_CREATE skips the rest, so no
+                            // stream should exist whose decoder can
+                            // return this. Treat it as a decode failure
+                            // rather than a panic — this is a
+                            // server-message handler, and the
+                            // convention that makes it impossible lives
+                            // 200 lines away in another function.
+                            warn_once!(
+                                "display:decode_failure:stream_data:unsupported_codec",
+                                "display: stream decoder reported an unsupported codec; \
+                                 treating the frame as a decode failure"
                             );
+                            debug!(
+                                "display: stream {} decoder reported unsupported codec {}",
+                                stream_id, codec
+                            );
+                            stream.frames_decode_failed =
+                                stream.frames_decode_failed.saturating_add(1);
                         }
                     }
                 } else {
@@ -1686,8 +1870,18 @@ impl DisplayChannel {
                 }
                 let stream_id = read_u32_le(payload, 0);
                 let unique_id = read_u32_le(payload, 4);
-                let max_window_size = read_u32_le(payload, 8);
-                let timeout_ms = read_u32_le(payload, 12);
+                let raw_max_window_size = read_u32_le(payload, 8);
+                let raw_timeout_ms = read_u32_le(payload, 12);
+
+                let (max_window_size, timeout_ms) =
+                    clamp_stream_report_params(raw_max_window_size, raw_timeout_ms);
+                if max_window_size != raw_max_window_size || timeout_ms != raw_timeout_ms {
+                    warn!(
+                        "display: stream_activate_report: id={} clamped window {}→{} \
+                         timeout_ms {}→{}",
+                        stream_id, raw_max_window_size, max_window_size, raw_timeout_ms, timeout_ms
+                    );
+                }
 
                 if let Some(stream) = self.streams.get_mut(&stream_id) {
                     info!(
@@ -1717,6 +1911,7 @@ impl DisplayChannel {
             _ => {
                 // Unknown opcode — log hex once per msg_type, silent on repeat.
                 logging::log_unknown_once("display", msg_type, payload);
+                self.opcodes.note_unknown(msg_type);
             }
         }
 
@@ -2707,11 +2902,16 @@ impl DisplayChannel {
         // GLZ dictionary has its own parallel snapshot fields.
         snap.image_cache_entries = self.image_cache.len();
         snap.image_cache_bytes = self.image_cache.bytes();
-        snap.image_cache_ids = {
-            let mut ids: Vec<u64> = self.image_cache.keys().copied().collect();
-            ids.sort_unstable();
-            ids
-        };
+        // MRU-first and truncated: `keys()` already yields MRU→LRU,
+        // so this is O(MAX_SNAPSHOT_IMAGE_CACHE_IDS) rather than
+        // O(entries) plus a sort on every publish. See
+        // `MAX_SNAPSHOT_IMAGE_CACHE_IDS`.
+        snap.image_cache_ids = self
+            .image_cache
+            .keys()
+            .take(MAX_SNAPSHOT_IMAGE_CACHE_IDS)
+            .copied()
+            .collect();
         snap.image_cache_evictions_total = self.image_cache.evictions_total();
         snap.image_cache_evicted_bytes_total = self.image_cache.evicted_bytes_total();
         snap.image_cache_cap_bytes = self.image_cache.cap_bytes() as u64;
@@ -2758,6 +2958,7 @@ impl DisplayChannel {
             .collect();
         snap.streams_created_total = self.streams_created_total;
         snap.streams_destroyed_total = self.streams_destroyed_total;
+        snap.streams_rejected_total = self.streams_rejected_total;
         snap.stream_data_orphan_count = self.stream_data_orphan_count;
         snap.streams_recently_destroyed = self.recently_destroyed_streams.clone();
         snap.stream_reports_sent_total = self.stream_reports_sent_total;
@@ -2789,6 +2990,25 @@ impl DisplayChannel {
         // having to read the pcap.
         snap.pref_compression_sent = self.pref_compression_sent;
         snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
+
+        self.opcodes.publish_into(&mut *snap);
+    }
+
+    /// Publish the snapshot from the send path, at most once per
+    /// `SNAPSHOT_SEND_PUBLISH_MIN_INTERVAL`.
+    ///
+    /// The read loop calls `update_snapshot` directly and is not
+    /// throttled, so this only collapses server-driven bursts of
+    /// sends (`STREAM_REPORT` in particular) into one publish.
+    fn update_snapshot_throttled(&mut self) {
+        let now = Instant::now();
+        let due = self
+            .last_send_snapshot_publish
+            .is_none_or(|last| now.duration_since(last) >= SNAPSHOT_SEND_PUBLISH_MIN_INTERVAL);
+        if due {
+            self.last_send_snapshot_publish = Some(now);
+            self.update_snapshot();
+        }
     }
 
     /// Send a STREAM_REPORT for `stream_id`. Marshals the 32-byte
@@ -2878,8 +3098,9 @@ impl DisplayChannel {
         }
         self.traffic
             .record_sent("display", msg_type, msg_name, data);
+        self.opcodes.record_send(msg_type);
         let result = self.send(data).await;
-        self.update_snapshot();
+        self.update_snapshot_throttled();
         result
     }
 
@@ -3604,6 +3825,49 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // clamp_stream_report_params tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clamp_leaves_sane_activate_report_values_alone() {
+        assert_eq!(clamp_stream_report_params(5, 1000), (5, 1000));
+    }
+
+    #[test]
+    fn clamp_replaces_a_zero_window_with_the_server_default() {
+        // Zero makes `num_frames >= max_window_size` true on the very
+        // first frame, since report_num_frames is already >= 1 when
+        // the predicate runs.
+        let (window, _) = clamp_stream_report_params(0, 1000);
+        assert_eq!(window, STREAM_REPORT_DEFAULT_WINDOW_SIZE);
+        assert!(!stream_report_should_send(1, window, 0, 1000, 0));
+    }
+
+    #[test]
+    fn clamp_keeps_timeout_inside_i32() {
+        // Unclamped, anything from 0x8000_0000 up casts to a negative
+        // i32 in the predicate and makes the elapsed check always true.
+        for raw in [0x8000_0000u32, 0xFFFF_FFFF, u32::MAX / 2 + 1] {
+            let (_, timeout_ms) = clamp_stream_report_params(5, raw);
+            assert_eq!(timeout_ms, STREAM_REPORT_MAX_TIMEOUT_MS);
+            assert!(timeout_ms as i32 > 0, "clamped timeout must stay positive");
+            assert!(!stream_report_should_send(1, 5, 0, timeout_ms, 0));
+        }
+    }
+
+    #[test]
+    fn clamp_raises_a_too_small_timeout_to_the_floor() {
+        assert_eq!(
+            clamp_stream_report_params(5, 0),
+            (5, STREAM_REPORT_MIN_TIMEOUT_MS)
+        );
+        assert_eq!(
+            clamp_stream_report_params(5, 1),
+            (5, STREAM_REPORT_MIN_TIMEOUT_MS)
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // STREAM_REPORT wire-format round-trip
     // -------------------------------------------------------------------------
 
@@ -3643,5 +3907,297 @@ mod tests {
         // bytes; signedness is purely interpretation.
         assert_eq!(read_u32_le(&buf, 24) as i32, last_frame_delay);
         assert_eq!(read_u32_le(&buf, 28), audio_delay);
+    }
+
+    // -------------------------------------------------------------------------
+    // STREAM_CREATE bounds and ordering
+    //
+    // These drive `handle_message` directly rather than testing the
+    // constants, because the defects worth catching here are ordering
+    // defects: which of the cap check, the decoder construction and the
+    // teardown of a previous stream runs first decides whether a
+    // hostile CREATE can evict a working stream or force a megabyte
+    // allocation per message.
+    // -------------------------------------------------------------------------
+
+    /// A `TrafficSink` that records nothing.
+    ///
+    /// The channel calls into the sink on every message; these tests
+    /// are about `self.streams`, so the recording is noise. `elapsed`
+    /// still has to advance monotonically because `retire_stream`
+    /// stamps lifetimes with it.
+    struct NullTraffic {
+        started: std::time::Instant,
+    }
+
+    impl NullTraffic {
+        fn new() -> Self {
+            NullTraffic {
+                started: std::time::Instant::now(),
+            }
+        }
+    }
+
+    impl crate::traffic::TrafficSink for NullTraffic {
+        fn record_sent(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
+        fn record_received(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
+        fn elapsed(&self) -> std::time::Duration {
+            self.started.elapsed()
+        }
+    }
+
+    /// Everything a `DisplayChannel` under test needs kept alive
+    /// alongside it.
+    ///
+    /// The peer socket and the event receiver are both load-bearing
+    /// even though no test reads them: dropping the peer would make
+    /// any write fail, and dropping the receiver would send `emit`
+    /// down its shutdown path. Neither is what these tests are
+    /// exercising, so both are held rather than leaked.
+    struct TestChannelPeers {
+        _peer: tokio::net::TcpStream,
+        _events: tokio::sync::mpsc::Receiver<ChannelEvent>,
+    }
+
+    /// Build a `DisplayChannel` wired to a loopback socket.
+    async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to loopback listener");
+        let (server, _) = listener.accept().await.expect("accept loopback connection");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(256);
+        let events = EventSink::new(tx, Arc::new(tokio::sync::Notify::new()));
+
+        let channel = DisplayChannel::new(
+            0,
+            SpiceStream::Plain(client),
+            events,
+            None,
+            Arc::new(ByteCounter::new()),
+            Arc::new(NullTraffic::new()),
+            Arc::new(Mutex::new(DisplaySnapshot::default())),
+            DisplayChannel::new_shared_glz_dictionary(1024 * 1024),
+            LogConfig::default(),
+            Arc::new(MmClock::new()),
+            1024 * 1024,
+        );
+        (
+            channel,
+            TestChannelPeers {
+                _peer: server,
+                _events: rx,
+            },
+        )
+    }
+
+    /// Minimum-length `SpiceMsgDisplayStreamCreate` payload.
+    ///
+    /// The handler requires 50 bytes and reads `surface_id`,
+    /// `stream_id`, `codec_type` and the stream / dest rectangles out
+    /// of fixed offsets; everything else is padding here.
+    fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
+        let mut v = vec![0u8; 50];
+        v[0..4].copy_from_slice(&0u32.to_le_bytes()); // surface_id
+        v[4..8].copy_from_slice(&stream_id.to_le_bytes());
+        v[8] = 0; // flags
+        v[9] = codec_type;
+        v[18..22].copy_from_slice(&64u32.to_le_bytes()); // stream_width
+        v[22..26].copy_from_slice(&64u32.to_le_bytes()); // stream_height
+        v[34..38].copy_from_slice(&0u32.to_le_bytes()); // dest_top
+        v[38..42].copy_from_slice(&0u32.to_le_bytes()); // dest_left
+        v[42..46].copy_from_slice(&64u32.to_le_bytes()); // dest_bottom
+        v[46..50].copy_from_slice(&64u32.to_le_bytes()); // dest_right
+        v
+    }
+
+    /// Codec 2 is VP8: a real SPICE codec type that `video::for_stream`
+    /// does not build a decoder for, so it takes the UnsupportedCodec
+    /// arm without being obvious junk.
+    const CODEC_VP8_UNSUPPORTED: u8 = 2;
+
+    #[tokio::test]
+    async fn stream_create_past_the_cap_is_refused_and_counted() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        for stream_id in 0..MAX_CONCURRENT_STREAMS as u32 {
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload(stream_id, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+                )
+                .await
+                .expect("stream_create must not error");
+        }
+        assert_eq!(channel.streams.len(), MAX_CONCURRENT_STREAMS);
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "the cap is not reached yet"
+        );
+
+        // One past the cap, on a fresh id.
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(MAX_CONCURRENT_STREAMS as u32, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("a refused stream_create is not an error");
+
+        assert_eq!(
+            channel.streams.len(),
+            MAX_CONCURRENT_STREAMS,
+            "the map must not grow past the cap"
+        );
+        assert_eq!(channel.streams_rejected_total, 1);
+        assert_eq!(
+            channel.streams_created_total, MAX_CONCURRENT_STREAMS as u64,
+            "a refusal must not count as a creation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_re_create_at_the_cap_is_not_refused() {
+        // A re-CREATE replaces an entry rather than adding one, so it
+        // cannot grow the map and must be exempt from the cap. Getting
+        // this wrong is silent: the server's stream simply stops
+        // updating once the cap is reached.
+        let (mut channel, _peer) = test_display_channel().await;
+
+        for stream_id in 0..MAX_CONCURRENT_STREAMS as u32 {
+            channel
+                .handle_message(
+                    display_server::STREAM_CREATE,
+                    &stream_create_payload(stream_id, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+                )
+                .await
+                .expect("stream_create must not error");
+        }
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(0, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("re-create must not error");
+
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "a re-create is not a refusal"
+        );
+        assert_eq!(channel.streams.len(), MAX_CONCURRENT_STREAMS);
+        assert!(
+            channel.streams.contains_key(&0),
+            "the re-created id must be live"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_create_on_a_live_id_retires_the_previous_stream() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("re-create must not error");
+
+        assert_eq!(
+            channel.streams.len(),
+            1,
+            "the id must hold exactly one entry"
+        );
+        assert_eq!(
+            channel.streams_created_total, 2,
+            "both creates count; the replacement is a real stream"
+        );
+        assert_eq!(
+            channel.streams_destroyed_total, 1,
+            "destroyed_total must stay paired with created_total"
+        );
+        assert_eq!(
+            channel.recently_destroyed_streams.len(),
+            1,
+            "the outgoing stream's counters must reach the recently-destroyed ring \
+             rather than being dropped with its StreamState"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_create_with_an_unsupported_codec_leaves_the_live_stream_alone() {
+        // The ordering defect this pins: if the teardown runs before
+        // `video::for_stream`, a re-CREATE naming a codec this build
+        // cannot decode retires the working stream and then declines
+        // to install a replacement, blanking the promoted region for
+        // the rest of the session. Ignoring the message is strictly
+        // better.
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(3, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(3, CODEC_VP8_UNSUPPORTED),
+            )
+            .await
+            .expect("an unsupported codec is not an error");
+
+        let surviving = channel
+            .streams
+            .get(&3)
+            .expect("the working stream must survive a re-create it cannot honour");
+        assert_eq!(
+            surviving.codec_type, SPICE_VIDEO_CODEC_TYPE_MJPEG,
+            "the surviving stream must be the original, not a half-built replacement"
+        );
+        assert_eq!(
+            channel.streams_destroyed_total, 0,
+            "nothing was destroyed, so nothing may be counted as destroyed"
+        );
+        assert!(
+            channel.recently_destroyed_streams.is_empty(),
+            "an ignored re-create must not retire anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_codec_on_a_fresh_id_creates_nothing() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(1, CODEC_VP8_UNSUPPORTED),
+            )
+            .await
+            .expect("an unsupported codec is not an error");
+
+        assert!(channel.streams.is_empty());
+        assert_eq!(channel.streams_created_total, 0);
+        assert_eq!(
+            channel.streams_rejected_total, 0,
+            "an unsupported codec is not a cap refusal; the counters mean different things"
+        );
     }
 }

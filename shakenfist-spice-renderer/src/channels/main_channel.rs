@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::mm_clock::MmClock;
+use crate::opcode_counters::OpcodeCounters;
 use crate::snapshots::MainSnapshot;
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
@@ -173,6 +174,18 @@ const STUCK_AGENT_THRESHOLD: std::time::Duration = std::time::Duration::from_sec
 /// a sustained stall.
 const STUCK_AGENT_NOTIFY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Ceiling for `outstanding_agent_request_count`.
+///
+/// A guest agent that never replies leaves the count climbing one per
+/// `VDAGENT_PROBE_INTERVAL` for as long as the session lasts, and the
+/// exact number stops carrying information long before it stops
+/// growing: past this point "the agent is not replying, and has not
+/// for a long time" is the whole message, and the stall duration in
+/// the same notification says how long. 99 probes at 30 s apart is
+/// just under 50 minutes, and keeps both the notification text and the
+/// bug-report field a readable two digits.
+const MAX_OUTSTANDING_AGENT_REQUESTS: u32 = 99;
+
 pub struct MainChannel {
     stream: SpiceStream,
     events: EventSink,
@@ -223,16 +236,9 @@ pub struct MainChannel {
     /// Count of pcap-capture packets rejected by the writer task's
     /// queue. Mirrored into `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
-    /// Per-opcode receive counts; flushed to snapshot by
-    /// `update_snapshot`.
-    messages_recv_by_opcode: std::collections::BTreeMap<u16, u64>,
-    /// Per-opcode send counts; flushed to snapshot by
-    /// `update_snapshot`.
-    messages_send_by_opcode: std::collections::BTreeMap<u16, u64>,
-    /// Most recent unrecognised receive opcode.
-    last_unknown_opcode: Option<u16>,
-    /// Count of unrecognised receive opcodes.
-    unknown_opcode_count: u64,
+    /// Bounded per-opcode message counters; flushed to the
+    /// snapshot by `update_snapshot`. See `OpcodeCounters`.
+    opcodes: OpcodeCounters,
     /// Shared mm_time clock — writer side. Updated from
     /// `MAIN_INIT::multi_media_time` and from
     /// `MULTI_MEDIA_TIME` messages. The display channel reads
@@ -336,10 +342,7 @@ impl MainChannel {
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
             capture_dropped_count: 0,
-            messages_recv_by_opcode: std::collections::BTreeMap::new(),
-            messages_send_by_opcode: std::collections::BTreeMap::new(),
-            last_unknown_opcode: None,
-            unknown_opcode_count: 0,
+            opcodes: OpcodeCounters::new(message_names::main_server, message_names::main_client),
             mm_clock,
             agent_request_send_ts: HashMap::new(),
             agent_request_count: 0,
@@ -650,6 +653,15 @@ impl MainChannel {
                                     sent_at.elapsed().as_secs_f64();
                                 let count = self.outstanding_agent_request_count;
                                 let noun = if count == 1 { "request" } else { "requests" };
+                                // The count saturates at
+                                // MAX_OUTSTANDING_AGENT_REQUESTS; say so
+                                // rather than reporting the ceiling as if
+                                // it were an exact tally.
+                                let at_least = if count >= MAX_OUTSTANDING_AGENT_REQUESTS {
+                                    "at least "
+                                } else {
+                                    ""
+                                };
                                 // "last send was Xs ago" rather than "last
                                 // probe sent Xs ago" — outstanding may
                                 // include requests older than the most
@@ -659,8 +671,8 @@ impl MainChannel {
                                 // unanswered one.
                                 let message = format!(
                                     "Guest agent is not replying — last send was {:.1}s ago, \
-                                     {} {} outstanding",
-                                    elapsed_secs, count, noun
+                                     {}{} {} outstanding",
+                                    elapsed_secs, at_least, count, noun
                                 );
                                 let entry = NotificationEntry::new(
                                     NotifySeverity::Warn,
@@ -746,9 +758,11 @@ impl MainChannel {
             );
         }
 
-        // Increment per-opcode recv counter before dispatch so
-        // both known and unknown opcodes are counted uniformly.
-        *self.messages_recv_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Count before dispatch so both known and unknown opcodes
+        // reach the counters. Opcodes with no protocol name fold into
+        // the unknown-opcode fields rather than growing the map; see
+        // `OpcodeCounters`.
+        self.opcodes.record_recv(msg_type);
 
         match msg_type {
             main_server::INIT => {
@@ -1093,8 +1107,7 @@ impl MainChannel {
             unknown => {
                 // Unknown opcode — log hex once per msg_type, silent on repeat.
                 logging::log_unknown_once("main", unknown, payload);
-                self.unknown_opcode_count += 1;
-                self.last_unknown_opcode = Some(unknown);
+                self.opcodes.note_unknown(unknown);
             }
         }
 
@@ -1123,10 +1136,7 @@ impl MainChannel {
         snap.mm_time_now = self.mm_clock.now();
         snap.mm_time_set_count = self.mm_clock.set_count();
         snap.last_mm_time_set_ts_secs = self.mm_clock.last_set_ts_secs();
-        snap.messages_recv_by_opcode = self.messages_recv_by_opcode.clone();
-        snap.messages_send_by_opcode = self.messages_send_by_opcode.clone();
-        snap.last_unknown_opcode = self.last_unknown_opcode;
-        snap.unknown_opcode_count = self.unknown_opcode_count;
+        self.opcodes.publish_into(&mut *snap);
         snap.agent_request_count = self.agent_request_count;
         snap.agent_reply_count = self.agent_reply_count;
         snap.agent_reply_error_count = self.agent_reply_error_count;
@@ -1335,8 +1345,10 @@ impl MainChannel {
         if REPLY_ELIGIBLE_AGENT_REQUEST_TYPES.contains(&ty) {
             self.agent_request_send_ts.insert(ty, Instant::now());
             self.agent_request_count = self.agent_request_count.saturating_add(1);
-            self.outstanding_agent_request_count =
-                self.outstanding_agent_request_count.saturating_add(1);
+            self.outstanding_agent_request_count = self
+                .outstanding_agent_request_count
+                .saturating_add(1)
+                .min(MAX_OUTSTANDING_AGENT_REQUESTS);
         }
 
         Ok(true)
@@ -1460,7 +1472,7 @@ impl MainChannel {
                     // NOT send (server bug, or our map was cleared on
                     // agent disconnect) would otherwise mask a real
                     // stuck-agent symptom by dropping the outstanding
-                    // count to zero. Per PR #105 review item 2.
+                    // count to zero.
                     if let Some(sent) = self.agent_request_send_ts.remove(&reply_type) {
                         let lag_us = sent.elapsed().as_micros().try_into().unwrap_or(u32::MAX);
                         self.last_agent_reply_lag_us = Some(lag_us);
@@ -1590,8 +1602,8 @@ impl MainChannel {
             logging::log_message("sent", "main", msg_type, msg_name, payload_size);
         }
         self.traffic.record_sent("main", msg_type, msg_name, data);
-        // Increment per-opcode send counter here — single send path.
-        *self.messages_send_by_opcode.entry(msg_type).or_insert(0) += 1;
+        // Single send path, so this is the only send-count site.
+        self.opcodes.record_send(msg_type);
         let result = self.send(data).await;
         self.update_snapshot();
         result

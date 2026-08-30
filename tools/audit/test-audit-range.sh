@@ -259,6 +259,45 @@ out="$(
 assert_contains "pathspec listing includes matching files" "rs:[base.rs,phase.rs," "$out"
 assert_contains "pathspec listing excludes non-matching files" "txt:[]" "$out"
 
+# --- the tree listing (audit_range_tree_files) --------------------------
+# wave1.sh's log_message check runs through this: unlike the
+# diff-filtered listing above, it lists everything tracked under a
+# pathspec *at AUDIT_HEAD*, whether or not the range touched it -- what
+# a check scanning a directory's current state, not a diff, needs so it
+# stops falling back to the live working tree.
+out="$(
+    cd "$REPO" || exit 99
+    # shellcheck disable=SC2030,SC2031
+    export AUDIT_BASE=develop AUDIT_HEAD="$PHASE_SHA"
+    # shellcheck source=/dev/null
+    . "$HELPER"
+    audit_range_init >/dev/null
+    echo "root:[$(audit_range_tree_files . | tr '\n' ',')]"
+    echo "missing:[$(audit_range_tree_files nosuchdir | tr '\n' ',')]"
+)"
+assert_contains "tree listing includes a file present at the head" "root:[phase.rs" "$out"
+assert_not_contains "tree listing omits a file deleted before the head" "base.rs" "$out"
+assert_contains "tree listing of a pathspec absent at the head is empty" "missing:[]" "$out"
+
+# An unusable range (an unborn HEAD, the same NOTE case covered above)
+# leaves the tree listing empty too, exactly like the other range
+# functions -- a fresh, isolated repo rather than mutating $REPO.
+T2="$(mktemp -d)"
+git -C "$T2" init -q -b develop
+git -C "$T2" config user.email audit@example.com
+git -C "$T2" config user.name 'Audit Test'
+out="$(
+    cd "$T2" || exit 99
+    # shellcheck source=/dev/null
+    . "$HELPER"
+    audit_range_init >/dev/null 2>&1
+    echo "usable:${AUDIT_RANGE_USABLE:-}"
+    echo "tree:[$(audit_range_tree_files . | tr '\n' ',')]"
+)"
+rm -rf "$T2"
+assert_not_contains "the unusable-range fixture is indeed unusable" "usable:1" "$out"
+assert_contains "tree listing is empty when the range is unusable" "tree:[]" "$out"
+
 # --- the closing summary, which is where the callers' behaviour lives --
 # wave1.sh exits on this return code and wave2-mechanical.sh discards
 # it, so the difference between the two scripts is decided here.

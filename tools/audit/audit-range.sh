@@ -5,6 +5,10 @@
 #   audit_range_init        resolve and validate AUDIT_BASE/AUDIT_HEAD
 #   audit_range_files       every file changed in the range
 #   audit_range_files_matching PATHSPEC...  the same, filtered
+#   audit_range_tree_files PATHSPEC   every *tracked* file under a path
+#                          *at the audit head* -- not a diff, the whole
+#                          tree, for checks that scan a directory's
+#                          current state rather than what changed in it
 #   audit_range_show FILE   that file's content *at the audit head*
 #   audit_range_closing_summary PRINTER   end-of-run range verdict
 #
@@ -111,6 +115,26 @@ audit_range_files() {
 audit_range_files_matching() {
     [[ -n "$AUDIT_RANGE_USABLE" ]] || return 0
     git -c core.quotePath=false diff "$AUDIT_RANGE" --name-only -- "$@"
+}
+
+# Every tracked file under a pathspec, as of AUDIT_HEAD -- not a diff:
+# the whole tree at that one commit, changed in the range or not.
+# For a check that scans a directory's current state (a style
+# convention, say) rather than what a diff touched, so it reads
+# AUDIT_HEAD content the same way the diff-scoped checks above do,
+# instead of a check like that falling back to `find`/`grep -r` over
+# the live working tree and quietly answering a different question
+# whenever AUDIT_HEAD isn't what's checked out (a master plan's
+# closing audit -- see PUSH-AUDIT.md, "Two ways this runbook is
+# invoked").
+#
+# Empty when the range is unusable, exactly like audit_range_files:
+# a caller distinguishing "the pathspec doesn't exist at AUDIT_HEAD"
+# from "the range can't be resolved at all" needs
+# AUDIT_RANGE_USABLE itself, the same as every other function here.
+audit_range_tree_files() {
+    [[ -n "$AUDIT_RANGE_USABLE" ]] || return 0
+    git -c core.quotePath=false ls-tree -r --name-only "$AUDIT_HEAD" -- "$1"
 }
 
 # One file's content at the audit head.  Deliberately *not* the working

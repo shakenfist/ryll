@@ -331,6 +331,33 @@ pub mod message_names {
         }
     }
 
+    /// Server message types 1..=7, which every SPICE channel shares.
+    ///
+    /// `SPICE_MSG_BASE_LAST` is 7 and channel-specific server messages
+    /// start at 101, so these seven names are correct on any channel.
+    /// The per-channel `*_server` tables below name only the three a
+    /// client normally sees (`set_ack`, `ping`, `notify`); without this
+    /// fallback the other four resolve to "unknown", which matters
+    /// because `OpcodeCounters` gives a per-opcode map entry only to
+    /// named opcodes. `SPICE_MSG_DISCONNECTING` arriving on display is
+    /// exactly the message a disconnect bug report needs to name, so
+    /// folding it into the unknown-opcode counter loses the answer.
+    ///
+    /// The set is fixed and small, so the counter maps stay bounded.
+    /// Mirrors [`common_client`] for the client direction.
+    fn common_server(msg_type: u16) -> Option<&'static str> {
+        match msg_type {
+            main_server::MIGRATE => Some("migrate"),
+            main_server::MIGRATE_DATA => Some("migrate_data"),
+            main_server::SET_ACK => Some("set_ack"),
+            main_server::PING => Some("ping"),
+            main_server::WAIT_FOR_CHANNELS => Some("wait_for_channels"),
+            main_server::DISCONNECTING => Some("disconnecting"),
+            main_server::NOTIFY => Some("notify"),
+            _ => None,
+        }
+    }
+
     pub fn main_server(msg_type: u16) -> &'static str {
         match msg_type {
             main_server::MIGRATE => "migrate",
@@ -358,7 +385,7 @@ pub mod message_names {
             main_server::MIGRATE_BEGIN_SEAMLESS => "migrate_begin_seamless",
             main_server::MIGRATE_DST_SEAMLESS_ACK => "migrate_dst_seamless_ack",
             main_server::MIGRATE_DST_SEAMLESS_NACK => "migrate_dst_seamless_nack",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -425,7 +452,7 @@ pub mod message_names {
             display_server::SET_ACK => "set_ack",
             display_server::PING => "ping",
             display_server::NOTIFY => "notify",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -450,7 +477,7 @@ pub mod message_names {
             inputs_server::SET_ACK => "set_ack",
             inputs_server::PING => "ping",
             inputs_server::NOTIFY => "notify",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -483,7 +510,7 @@ pub mod message_names {
             cursor_server::SET_ACK => "set_ack",
             cursor_server::PING => "ping",
             cursor_server::NOTIFY => "notify",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -504,7 +531,7 @@ pub mod message_names {
             playback_server::SET_ACK => "set_ack",
             playback_server::PING => "ping",
             playback_server::NOTIFY => "notify",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -520,7 +547,7 @@ pub mod message_names {
             spicevmc_server::SET_ACK => "set_ack",
             spicevmc_server::PING => "ping",
             spicevmc_server::NOTIFY => "notify",
-            _ => "unknown",
+            _ => common_server(msg_type).unwrap_or("unknown"),
         }
     }
 
@@ -540,6 +567,12 @@ pub mod message_names {
     /// Used by the traffic viewer to annotate capability
     /// bitmask values with symbolic names.
     ///
+    /// Looks up `capabilities::DISPLAY_CAP_NAMES`, the single
+    /// source of truth for this mapping, rather than duplicating
+    /// it in a match arm here. See that table's doc comment for
+    /// why: a match arm here can silently omit a bit that a new
+    /// `DISPLAY_*` constant adds, with no compiler or test error.
+    ///
     /// # Example
     ///
     /// ```
@@ -550,18 +583,11 @@ pub mod message_names {
     /// );
     /// ```
     pub fn display_cap_name(bit: u8) -> Option<&'static str> {
-        match bit {
-            0 => Some("sized_stream"),
-            1 => Some("monitors_config"),
-            2 => Some("composite"),
-            3 => Some("a8_surface"),
-            4 => Some("stream_report"),
-            5 => Some("lz4_compression"),
-            8 => Some("multi_codec"),
-            9 => Some("codec_mjpeg"),
-            11 => Some("codec_h264"),
-            _ => None,
-        }
+        let mask = 1u32.checked_shl(bit as u32)?;
+        capabilities::DISPLAY_CAP_NAMES
+            .iter()
+            .find(|(cap, _)| *cap == mask)
+            .map(|(_, name)| *name)
     }
 }
 
@@ -891,5 +917,90 @@ mod tests {
             0,
             "DEFAULT_DISPLAY must include DISPLAY_CODEC_H264"
         );
+    }
+
+    // The durable guard for Q2-6: every capability the client actually
+    // advertises in DEFAULT_DISPLAY must have a name, independent of
+    // which bits happen to be allocated today. Unlike a test that pins
+    // specific bit numbers (which passes as soon as those bits are
+    // named and says nothing about the next one), this walks every set
+    // bit in DEFAULT_DISPLAY and fails if any of them resolves to
+    // `None` -- so a future `DISPLAY_*` constant added to
+    // capabilities::DEFAULT_DISPLAY without a matching entry in
+    // capabilities::DISPLAY_CAP_NAMES breaks the build immediately,
+    // rather than shipping a traffic viewer that silently drops one of
+    // the client's own advertised capabilities.
+    #[test]
+    fn display_cap_name_covers_default_display() {
+        use crate::constants::capabilities;
+        let mut unnamed = Vec::new();
+        for bit in 0..32u8 {
+            let mask = 1u32 << bit;
+            if capabilities::DEFAULT_DISPLAY & mask != 0
+                && message_names::display_cap_name(bit).is_none()
+            {
+                unnamed.push(bit);
+            }
+        }
+        assert!(
+            unnamed.is_empty(),
+            "DEFAULT_DISPLAY sets bit(s) {unnamed:?} with no entry in \
+             capabilities::DISPLAY_CAP_NAMES -- the traffic viewer would \
+             render these as unlabelled bits"
+        );
+    }
+
+    // Every SPICE channel shares server message types 1..=7
+    // (`SPICE_MSG_BASE_LAST` is 7 and channel-specific server messages
+    // start at 101). Table-driven over every server namer rather than
+    // spot-checking one, because the failure this guards against is a
+    // *new* channel's namer being written without the fallback: such a
+    // namer resolves `disconnecting` to "unknown", and `OpcodeCounters`
+    // only gives a per-opcode map entry to named opcodes, so the
+    // messages a disconnect report most needs would silently collapse
+    // into the unknown-opcode counter.
+    #[test]
+    fn every_server_namer_names_the_common_message_types() {
+        /// A channel's server-message namer, paired with its name for
+        /// the failure message.
+        type NamedNamer = (&'static str, fn(u16) -> &'static str);
+
+        let namers: &[NamedNamer] = &[
+            ("main_server", message_names::main_server),
+            ("display_server", message_names::display_server),
+            ("inputs_server", message_names::inputs_server),
+            ("cursor_server", message_names::cursor_server),
+            ("playback_server", message_names::playback_server),
+            ("spicevmc_server", message_names::spicevmc_server),
+        ];
+        let expected: &[(u16, &str)] = &[
+            (1, "migrate"),
+            (2, "migrate_data"),
+            (3, "set_ack"),
+            (4, "ping"),
+            (5, "wait_for_channels"),
+            (6, "disconnecting"),
+            (7, "notify"),
+        ];
+
+        for (channel, namer) in namers {
+            for (msg_type, name) in expected {
+                assert_eq!(
+                    namer(*msg_type),
+                    *name,
+                    "{channel} must name common server message {msg_type}"
+                );
+            }
+        }
+    }
+
+    // The fallback must not swallow genuinely unknown opcodes: an
+    // opcode outside 1..=7 and outside the channel's own table still
+    // has to report "unknown" so `OpcodeCounters` folds it into the
+    // bounded unknown counters rather than growing the map.
+    #[test]
+    fn unknown_server_opcodes_are_still_unknown() {
+        assert_eq!(message_names::display_server(9999), "unknown");
+        assert_eq!(message_names::cursor_server(9999), "unknown");
     }
 }

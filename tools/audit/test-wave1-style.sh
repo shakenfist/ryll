@@ -9,9 +9,13 @@
 # fact been broken for months before anyone noticed.
 #
 # Covers filter-println-hits.py and the two functions in
-# wave1-checks.sh.  Pure text processing against fixtures in a
-# scratch directory; runs in about a second and needs no Docker,
-# unlike the rest of wave 1.
+# wave1-checks.sh, plus (see "the log_message check reads AUDIT_HEAD,
+# not the working tree" below) the wave1.sh wiring that feeds
+# audit-range.sh's output into unguarded_log_messages -- that wiring
+# is what W-2 fixed, so it is pinned here rather than left to whoever
+# next edits wave1.sh to notice it drifted back to `grep -r`.  Pure
+# text processing against fixtures in a scratch directory; runs in
+# about a second and needs no Docker, unlike the rest of wave 1.
 #
 # Usage: tools/audit/test-wave1-style.sh
 # Exit code: 0 all assertions held, 1 otherwise.
@@ -22,6 +26,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FILTER="$SCRIPT_DIR/filter-println-hits.py"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/wave1-checks.sh"
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/audit-range.sh"
+
+# git exports GIT_DIR, GIT_INDEX_FILE and friends to the hooks it runs,
+# and pre-commit runs this script as one.  Left set, the scratch repo
+# built below for the AUDIT_HEAD-vs-working-tree test operates on the
+# real repository instead.  See test-audit-range.sh for the same
+# guard, in more detail.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+      GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX \
+      GIT_NAMESPACE GIT_CEILING_DIRECTORIES
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 
 FAILURES=0
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -266,6 +282,93 @@ assert_not_contains "a guarded log_message is not flagged" "wrapped.rs" "$out"
 
 # The convention this keys on is log_config.verbose.  When it changes
 # again, the assertion above fails rather than the check going quiet.
+
+# --- the log_message check reads AUDIT_HEAD, not the working tree -----
+# W-2: this check used to `grep -r` the checked-out channels directory
+# directly, while wave1.sh's long-line check next to it read content
+# at AUDIT_HEAD -- so the two range-scoped checks in the same script
+# disagreed about what "the audit range" meant.  This pins the fix by
+# replicating wave1.sh's actual wiring (audit_range_tree_files +
+# audit_range_show feeding unguarded_log_messages, not a bare `grep -r`
+# on the checkout) against a scratch repo where the working tree has
+# been edited *after* the commit that stands in for AUDIT_HEAD, in
+# both directions -- if this ever regresses to reading the checkout,
+# one assertion or the other flips.
+GIT_REPO="$(mktemp -d)"
+git -C "$GIT_REPO" init -q -b develop
+git -C "$GIT_REPO" config user.email audit@example.com
+git -C "$GIT_REPO" config user.name 'Audit Test'
+
+# A base commit distinct from the fixture commit below: AUDIT_BASE and
+# AUDIT_HEAD naming the same commit is an empty diff, which
+# audit_range_init treats as operator error (exit 6) once either bound
+# is explicit -- see test-audit-range.sh's "explicit empty range"
+# case. AUDIT_BASE is pinned to this SHA rather than 'develop' so the
+# range stays non-empty regardless of what 'develop' points to.
+echo placeholder > "$GIT_REPO/README"
+git -C "$GIT_REPO" add -A
+git -C "$GIT_REPO" commit -qm base \
+    || { red "FAIL: test setup: could not commit the base fixture"; exit 1; }
+AUDIT_BASE_SHA="$(git -C "$GIT_REPO" rev-parse HEAD)"
+
+mkdir -p "$GIT_REPO/shakenfist-spice-renderer/src/channels"
+
+# Committed unguarded, then guarded on disk afterwards: still flagged
+# only if the check reads the commit.
+cat > "$GIT_REPO/shakenfist-spice-renderer/src/channels/flagged.rs" <<'RS'
+fn handle(&self) {
+    let msg = build();
+    logging::log_message(&msg);
+}
+RS
+# Committed guarded, then made bare on disk afterwards: still clean
+# only if the check reads the commit.
+cat > "$GIT_REPO/shakenfist-spice-renderer/src/channels/clean.rs" <<'RS'
+fn handle(&self) {
+    if self.log_config.verbose {
+        logging::log_message(&msg);
+    }
+}
+RS
+git -C "$GIT_REPO" add -A
+git -C "$GIT_REPO" commit -qm 'audit head' \
+    || { red "FAIL: test setup: could not commit the AUDIT_HEAD fixture"; exit 1; }
+AUDIT_HEAD_SHA="$(git -C "$GIT_REPO" rev-parse HEAD)"
+
+cat > "$GIT_REPO/shakenfist-spice-renderer/src/channels/flagged.rs" <<'RS'
+fn handle(&self) {
+    if self.log_config.verbose {
+        logging::log_message(&msg);
+    }
+}
+RS
+cat > "$GIT_REPO/shakenfist-spice-renderer/src/channels/clean.rs" <<'RS'
+fn handle(&self) {
+    let msg = build();
+    logging::log_message(&msg);
+}
+RS
+
+out="$(
+    cd "$GIT_REPO" || exit 99
+    # shellcheck disable=SC2030,SC2031
+    export AUDIT_BASE="$AUDIT_BASE_SHA" AUDIT_HEAD="$AUDIT_HEAD_SHA"
+    audit_range_init >/dev/null
+    dir=shakenfist-spice-renderer/src/channels
+    snapshot="$(mktemp -d)"
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        mkdir -p "$snapshot/$(dirname "$f")"
+        audit_range_show "$f" > "$snapshot/$f"
+    done < <(audit_range_tree_files "$dir")
+    unguarded_log_messages "$snapshot/$dir" | sed "s#^$snapshot/##"
+    rm -rf "$snapshot"
+)"
+rm -rf "$GIT_REPO"
+assert_contains "a call unguarded at the head is flagged despite being fixed on disk" \
+    "flagged.rs" "$out"
+assert_not_contains "a call guarded at the head is not flagged despite going bare on disk" \
+    "clean.rs" "$out"
 
 echo
 if [[ $FAILURES -eq 0 ]]; then

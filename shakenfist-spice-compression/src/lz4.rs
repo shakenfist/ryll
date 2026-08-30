@@ -8,6 +8,13 @@ use tracing::{debug, warn};
 use crate::DecompressedImage;
 
 /// Decompress a SPICE LZ4 image.
+///
+/// All or nothing: any row that cannot be decoded — a truncated
+/// payload, a row whose declared compressed size runs past the end
+/// of the buffer, an LZ4 error, or an unimplemented pixel format —
+/// fails the whole image and returns `None`. Returning the partial
+/// image instead would hand the caller attacker-chosen pixels with
+/// black filler for the rest and no way to tell that had happened.
 pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<DecompressedImage> {
     if data.len() < 2 || width == 0 || height == 0 {
         warn!("display: LZ4 data too short or zero dimensions");
@@ -38,7 +45,11 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     };
 
-    let row_bytes = width * bpp;
+    // All three of these are checked. `width` and `bpp` both reach
+    // here from the wire, and leaving one unchecked multiply among
+    // three checked ones invites the next reader to assume it was
+    // considered and rejected.
+    let row_bytes = width.checked_mul(bpp)?;
     let total_pixels = width.checked_mul(height)?;
     let rgba_size = total_pixels.checked_mul(4)?;
     let mut rgba = vec![0u8; rgba_size];
@@ -47,7 +58,7 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
     for row in 0..height {
         if offset + 4 > data.len() {
             warn!("display: LZ4 truncated at row {}/{}", row, height);
-            break;
+            return None;
         }
 
         let enc_size = u32::from_be_bytes([
@@ -65,14 +76,14 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
                 enc_size,
                 data.len() - offset
             );
-            break;
+            return None;
         }
 
         let row_data = match lz4_flex::decompress(&data[offset..offset + enc_size], row_bytes) {
             Ok(d) => d,
             Err(e) => {
                 warn!("display: LZ4 row {} decompression failed: {}", row, e);
-                break;
+                return None;
             }
         };
         offset += enc_size;
@@ -111,7 +122,7 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
             _ => {
                 // 16-bit: skip for now
                 warn!("display: LZ4 16-bit format not implemented");
-                break;
+                return None;
             }
         }
     }
@@ -327,57 +338,54 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Test 7: truncated input — asserting CURRENT behaviour
+    // Test 7: truncated input is rejected outright
     //
-    // The decoder breaks the row loop at lz4.rs:61-68 when
-    // `offset + enc_size > data.len()`, then falls through to
-    // `Some(DecompressedImage::new(...))` at line 119.  That means
-    // truncation mid-row returns Some with the incomplete rows
-    // zeroed out, not None.
-    //
-    // This test asserts that current behaviour.  If this is later
-    // determined to be a bug and the decoder is changed to return
-    // None on truncation, this test will need updating.
+    // The decoder used to `break` out of the row loop and still
+    // return `Some`, leaving the undecoded rows as the zeros the
+    // buffer was allocated with. That silently painted a partial,
+    // server-chosen image with black filler and gave the caller no
+    // way to notice. Truncation now fails the whole image so the
+    // caller can drop the frame.
     // ---------------------------------------------------------------
     #[test]
-    fn decompress_spice_lz4_truncated_returns_partial_image() {
+    fn decompress_spice_lz4_truncated_returns_none() {
         // Two rows, 1 pixel wide, format 4 (BGRX).
         // Row 0: red.  Row 1: green.
         let rows = vec![vec![0u8, 0, 255, 0], vec![0u8, 255, 0, 0]];
         let mut data = encode_spice_lz4(true, 4, 1, &rows);
 
-        // Truncate the last byte of row 1's compressed payload.
-        // After row 0 is decoded and consumed, the decoder reads the
-        // 4-byte enc_size for row 1 correctly but then discovers
-        // `offset + enc_size > data.len()` and breaks the loop.
-        // This exercises the guard at lz4.rs:61-68 which `break`s the
-        // loop, leaving row 1 as all-zero (the rgba vec is zeroed on
-        // allocation).
+        // Truncate the last byte of row 1's compressed payload. Row 0
+        // decodes, then the decoder reads row 1's 4-byte enc_size and
+        // finds `offset + enc_size > data.len()`.
         //
         // data layout:
         //   [top_down, fmt, sz0[4], comp_row0..., sz1[4], comp_row1...]
         let truncate_to = data.len() - 1;
         data.truncate(truncate_to);
 
-        // The decoder must still return Some (not None).
-        let result = decompress_spice_lz4(&data, 1, 2);
         assert!(
-            result.is_some(),
-            "truncated input should return Some (partial image), not None"
+            decompress_spice_lz4(&data, 1, 2).is_none(),
+            "a truncated payload must be rejected, not returned as a partial image"
         );
-        let img = result.unwrap();
+    }
 
-        // Row 0 (first row decoded successfully) should be red.
-        assert_eq!(
-            img.pixels[0..4],
-            [255, 0, 0, 255],
-            "first row should be correctly decoded even on truncation"
-        );
-        // Row 1 was never decoded; the rgba buffer was zeroed on allocation.
-        assert_eq!(
-            img.pixels[4..8],
-            [0, 0, 0, 0],
-            "second row should be all-zero when truncated mid-row"
+    // ---------------------------------------------------------------
+    // Test 7b: truncation before a row header is also rejected
+    // ---------------------------------------------------------------
+    #[test]
+    fn decompress_spice_lz4_truncated_row_header_returns_none() {
+        let rows = vec![vec![0u8, 0, 255, 0], vec![0u8, 255, 0, 0]];
+        let mut data = encode_spice_lz4(true, 4, 1, &rows);
+
+        // Cut two bytes into row 1's 4-byte size field, so the decoder
+        // hits the `offset + 4 > data.len()` guard rather than the
+        // enc_size one.
+        let row1_size_field_start = data.len() - (4 + lz4_flex::compress(&rows[1]).len());
+        data.truncate(row1_size_field_start + 2);
+
+        assert!(
+            decompress_spice_lz4(&data, 1, 2).is_none(),
+            "a payload truncated inside a row header must be rejected"
         );
     }
 
@@ -394,6 +402,45 @@ mod tests {
         assert!(
             decompress_spice_lz4(&[], 10, 0).is_none(),
             "zero height should return None"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test 9: absurd dimensions hit the checked_mul guards
+    //
+    // width and height reach the decoder straight off the wire, so
+    // the two `checked_mul`s are the only thing between a hostile
+    // header and a wrapped, undersized allocation.
+    //
+    // `row_bytes = width * bpp` is checked too, so a width that
+    // overflows it returns None rather than panicking in a debug
+    // build -- the widths below no longer have to stay under
+    // `usize::MAX / 4` to reach the guards.
+    // ---------------------------------------------------------------
+    #[test]
+    fn decompress_spice_lz4_absurd_dimensions_returns_none() {
+        // Just the two header bytes: top_down + format 4 (BGRX). The
+        // dimension guards fire before any row data is needed.
+        let data = vec![1u8, 4];
+
+        assert!(
+            decompress_spice_lz4(&data, usize::MAX / 4, 8).is_none(),
+            "width * height overflow must return None"
+        );
+        assert!(
+            decompress_spice_lz4(&data, 2, usize::MAX).is_none(),
+            "overflow driven by an absurd height must return None"
+        );
+        // width * height fits; the 4-bytes-per-pixel RGBA size does not.
+        assert!(
+            decompress_spice_lz4(&data, usize::MAX / 4, 2).is_none(),
+            "RGBA size overflow must return None"
+        );
+        // width * bpp overflows on its own, before either of the
+        // guards above is reached.
+        assert!(
+            decompress_spice_lz4(&data, usize::MAX, 1).is_none(),
+            "width * bpp overflow must return None, not panic"
         );
     }
 }

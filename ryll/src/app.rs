@@ -133,6 +133,79 @@ const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
 /// the rest of the session.
 const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
 
+/// How many retiring auto-snapshot threads may be outstanding before
+/// a new session declines to spawn another.
+///
+/// Nothing joins these threads — every retire runs on the eframe UI
+/// thread — so this cap, not a join, is what bounds thread growth
+/// under a server repeating `SPICE_MSG_MAIN_INIT`. A retiring thread
+/// exits within one 500 ms poll unless it is inside a zip write, so
+/// four outstanding means the host is already far behind; refusing the
+/// spawn costs the new session its auto-snapshots (logged at warn)
+/// rather than letting threads accumulate.
+///
+/// `MIN_SESSION_RESPAWN_INTERVAL` makes reaching this cap unlikely in
+/// the first place; the two bounds are deliberately independent, since
+/// the rate limit is about how fast respawns are requested and this is
+/// about how fast the previous ones actually finish.
+const MAX_RETIRING_AUTO_SNAPSHOT_THREADS: usize = 4;
+
+/// Minimum interval between two accepted `SessionInitialized` events
+/// while already connected.
+///
+/// The session id is server-chosen, so an id-equality guard alone is
+/// defeated by alternating ids (1, 2, 1, 2, ...): every ~36-byte
+/// `SPICE_MSG_MAIN_INIT` would then drive a full retire-and-respawn.
+/// A genuine re-link without a visible disconnect is rare enough to
+/// tolerate a few seconds of delay, so rate-limiting independently of
+/// the id costs nothing legitimate and turns a per-message primitive
+/// into a per-window one.
+const MIN_SESSION_RESPAWN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// What `process_events` should do with an incoming
+/// `SessionInitialized`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionInitDecision {
+    /// A genuinely new session: announce it and respawn per-session
+    /// tasks.
+    Accept,
+    /// The session already in hand, re-announced.
+    IgnoreDuplicate,
+    /// A different session id, but too soon after the last accepted
+    /// one to be a real re-link.
+    IgnoreTooSoon,
+}
+
+/// Decide whether a `SessionInitialized(session_id)` should be acted
+/// on.
+///
+/// Split out from the event arm so the two guards can be tested
+/// without an eframe context: both exist to blunt a server-controlled
+/// primitive, and "the second guard is unreachable because the first
+/// already returned" is exactly the kind of mistake that is invisible
+/// at the call site.
+///
+/// `since_last_accepted` is `None` before the first acceptance.
+fn classify_session_initialized(
+    connected: bool,
+    current_session_id: Option<u32>,
+    session_id: u32,
+    since_last_accepted: Option<Duration>,
+) -> SessionInitDecision {
+    if !connected {
+        // Not connected: this is the event that establishes the
+        // session, so neither guard applies.
+        return SessionInitDecision::Accept;
+    }
+    if current_session_id == Some(session_id) {
+        return SessionInitDecision::IgnoreDuplicate;
+    }
+    match since_last_accepted {
+        Some(since) if since < MIN_SESSION_RESPAWN_INTERVAL => SessionInitDecision::IgnoreTooSoon,
+        _ => SessionInitDecision::Accept,
+    }
+}
+
 /// Single entry in the notification-snapshot store. Owns a
 /// captured `TrafficBuffers` (cheap thanks to its Arc-shared
 /// payloads).
@@ -878,10 +951,36 @@ pub struct RyllApp {
     /// and respawn. Setting to `true` causes the loop to exit at
     /// the next 500 ms poll.
     auto_snapshot_cancel: Option<Arc<AtomicBool>>,
+    /// Join handle for the auto-snapshot thread currently running,
+    /// if any. Retained so a respawn can move it to
+    /// `auto_snapshot_retiring` and account for it there.
+    auto_snapshot_thread: Option<std::thread::JoinHandle<()>>,
+    /// Threads asked to retire that have not been observed exiting.
+    ///
+    /// A retiring thread is never joined: every caller runs on the
+    /// eframe UI thread, and an outgoing loop that is already inside
+    /// `spawn_blocking` does not see the cancel flag until its
+    /// `BugReport::new` (documented as ~2 s of metric sampling) and
+    /// zip write finish — so a join would freeze the GUI for seconds
+    /// under exactly the trigger this bookkeeping exists to bound.
+    /// They are reaped non-blockingly with `is_finished` instead, and
+    /// [`MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] caps how many may be
+    /// outstanding, which is what actually bounds thread growth.
+    auto_snapshot_retiring: Vec<std::thread::JoinHandle<()>>,
+    /// When the most recent `SessionInitialized` was *accepted*.
+    /// Drives [`MIN_SESSION_RESPAWN_INTERVAL`]; see the guard in
+    /// `process_events`.
+    last_session_initialized_at: Option<Instant>,
     /// Whether the one-shot "Auto-snapshot mode enabled" startup
     /// notification has been pushed. Latched on the first spawn
     /// so per-reconnect respawns don't repeat the notification.
     auto_snapshot_startup_notified: bool,
+
+    /// Session id from the most recent `SessionInitialized`, or
+    /// `None` before the first session. Lets `process_events` tell a
+    /// repeated `SPICE_MSG_MAIN_INIT` for the session we already hold
+    /// (a duplicate, to be dropped) from a genuinely new one.
+    current_session_id: Option<u32>,
 
     /// Most recent time the streaming-flap notification fired. Used by
     /// `streaming_state::classify` to enforce the 60 s cool-down between
@@ -1243,7 +1342,11 @@ impl RyllApp {
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
             auto_snapshot_cancel: None,
+            auto_snapshot_thread: None,
+            auto_snapshot_retiring: Vec::new(),
+            last_session_initialized_at: None,
             auto_snapshot_startup_notified: false,
+            current_session_id: None,
             last_flap_notification_ts: None,
         }
     }
@@ -1256,6 +1359,12 @@ impl RyllApp {
         if let Some(prev) = self.connection_cancel.take() {
             prev.store(true, Ordering::Relaxed);
         }
+        // The auto-snapshot task about to be replaced holds Arcs to
+        // the `traffic` / `channel_snapshots` this function is about
+        // to swap out, so its remaining zips would describe a session
+        // that no longer exists. Signal now; the respawn moves the
+        // handle to the retiring set without waiting for it.
+        self.signal_auto_snapshot_retire();
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -1419,6 +1528,64 @@ impl RyllApp {
         self.reconnect();
     }
 
+    /// Ask the running auto-snapshot task to retire, without waiting
+    /// for it.
+    ///
+    /// Called on every critical disconnect. Until this existed the
+    /// cancel flag was only raised by the *next* `SessionInitialized`,
+    /// so a server that accepted one session and then refused every
+    /// reconnect left the last task writing full-size zips of a frozen
+    /// pcap for as long as ryll stayed open. Nothing anywhere joins
+    /// these threads — every caller runs on the egui UI thread and an
+    /// in-flight zip write can take seconds; `retire_auto_snapshot_task`
+    /// bounds them by counting instead.
+    fn signal_auto_snapshot_retire(&self) {
+        if let Some(cancel) = &self.auto_snapshot_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Drop the handles of any retiring auto-snapshot threads that
+    /// have finished.
+    ///
+    /// `is_finished` never blocks, so this is safe to call from the
+    /// UI thread. Dropping a `JoinHandle` detaches rather than waits,
+    /// so the only thing reaping buys is an accurate count for
+    /// [`MAX_RETIRING_AUTO_SNAPSHOT_THREADS`] — which is the point:
+    /// without it the cap would eventually refuse a respawn on the
+    /// strength of threads that exited long ago.
+    fn reap_auto_snapshot_threads(&mut self) {
+        self.auto_snapshot_retiring
+            .retain(|handle| !handle.is_finished());
+    }
+
+    /// Ask the running auto-snapshot task to retire and move its
+    /// handle to the retiring set, without waiting for it.
+    ///
+    /// Called immediately before a respawn. Returns `false` when too
+    /// many previous threads are still winding down, in which case the
+    /// caller must not spawn another: that cap is what bounds thread
+    /// growth now that nothing joins. A no-op returning `true` when
+    /// the mode is disabled or nothing is running.
+    fn retire_auto_snapshot_task(&mut self) -> bool {
+        self.signal_auto_snapshot_retire();
+        self.auto_snapshot_cancel = None;
+        self.reap_auto_snapshot_threads();
+        if let Some(handle) = self.auto_snapshot_thread.take() {
+            self.auto_snapshot_retiring.push(handle);
+        }
+        if self.auto_snapshot_retiring.len() > MAX_RETIRING_AUTO_SNAPSHOT_THREADS {
+            warn!(
+                "app: {} auto-snapshot threads are still retiring (cap {}); \
+                 not spawning another for this session",
+                self.auto_snapshot_retiring.len(),
+                MAX_RETIRING_AUTO_SNAPSHOT_THREADS,
+            );
+            return false;
+        }
+        true
+    }
+
     /// Drive the `ReconnectState` machine in response to a critical
     /// disconnect (Main/Display/Inputs going down, or any
     /// `ChannelEvent::Error`). Callers are responsible for writing
@@ -1442,8 +1609,10 @@ impl RyllApp {
 
         // Even if the state machine ignores the event, the
         // connection itself has gone — clear surfaces / cursor so
-        // the next paint shows a clean canvas.
+        // the next paint shows a clean canvas, and tell the
+        // auto-snapshot task to stop capturing a dead session.
         self.connected = false;
+        self.signal_auto_snapshot_retire();
         self.surfaces.clear();
         self.cursor_image = None;
         self.cursor_texture = None;
@@ -1560,7 +1729,39 @@ impl RyllApp {
             }
             match event {
                 ChannelEvent::SessionInitialized(session_id) => {
+                    // Nothing on the wire obliges a server to send
+                    // SPICE_MSG_MAIN_INIT exactly once, and the renderer
+                    // emits this event for every one it decodes. Acting on
+                    // every one would re-announce the connection and
+                    // respawn the auto-snapshot task per ~36-byte message.
+                    // See `classify_session_initialized` for why the
+                    // duplicate check alone is not enough.
+                    match classify_session_initialized(
+                        self.connected,
+                        self.current_session_id,
+                        session_id,
+                        self.last_session_initialized_at.map(|at| at.elapsed()),
+                    ) {
+                        SessionInitDecision::IgnoreDuplicate => {
+                            debug!(
+                                "app: ignoring duplicate SessionInitialized for session {}",
+                                session_id
+                            );
+                            continue;
+                        }
+                        SessionInitDecision::IgnoreTooSoon => {
+                            debug!(
+                                "app: ignoring SessionInitialized for session {} — under \
+                                 the {:?} minimum since the last accepted one",
+                                session_id, MIN_SESSION_RESPAWN_INTERVAL
+                            );
+                            continue;
+                        }
+                        SessionInitDecision::Accept => {}
+                    }
+                    self.last_session_initialized_at = Some(Instant::now());
                     info!("app: session {} initialized", session_id);
+                    self.current_session_id = Some(session_id);
                     self.connected = true;
                     // A fresh successful link clears any pending
                     // reconnect state. Whether this resulted from
@@ -1583,19 +1784,30 @@ impl RyllApp {
                     // per session: `reconnect()` replaces `self.traffic` and
                     // `self.channel_snapshots` with fresh instances, so any
                     // task spawned for the previous session is holding stale
-                    // Arcs. Signal it to retire (it will exit within ~500 ms),
-                    // then spawn a fresh task with the current Arcs.
+                    // Arcs.
                     if let Some(interval_secs) = self.auto_snapshot_interval {
-                        if let Some(prev_cancel) = self.auto_snapshot_cancel.take() {
-                            prev_cancel.store(true, Ordering::Relaxed);
+                        // Retire the outgoing task before spawning, so at
+                        // most one auto-snapshot thread is *running* at any
+                        // moment. Nothing is joined — this is the UI thread
+                        // — so the retire can refuse when too many previous
+                        // threads are still winding down; honour that rather
+                        // than spawning anyway.
+                        if !self.retire_auto_snapshot_task() {
+                            // Nothing follows in this arm; the refusal
+                            // was already logged at warn.
+                            continue;
                         }
                         let output_dir = self.manual_bug_report_dir().join("auto-snapshots");
                         let cap = self.auto_snapshot_cap;
+                        let byte_cap = crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_BYTE_CAP;
                         let cancel = Arc::new(AtomicBool::new(false));
                         self.auto_snapshot_cancel = Some(cancel.clone());
 
                         // One-shot startup notification — fire only on
                         // the first session so reconnects don't spam.
+                        // Both budgets are quoted: the count alone tells
+                        // the operator nothing about how much disk the
+                        // mode is authorised to use.
                         if !self.auto_snapshot_startup_notified {
                             self.auto_snapshot_startup_notified = true;
                             self.push_notification(
@@ -1603,10 +1815,11 @@ impl RyllApp {
                                 NotificationSource::Internal,
                                 format!(
                                     "Auto-snapshot mode enabled \
-                                     — every {}s, max {} snapshots, \
+                                     — every {}s, max {} snapshots / {} MiB, \
                                      saving to {}",
                                     interval_secs,
                                     cap,
+                                    byte_cap / (1024 * 1024),
                                     output_dir.display(),
                                 ),
                             );
@@ -1622,15 +1835,33 @@ impl RyllApp {
                             output_dir,
                             interval: Duration::from_secs(interval_secs),
                             cap,
+                            byte_cap,
                             cancel,
                         };
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Builder::new_current_thread()
+                        let handle = std::thread::spawn(move || {
+                            // A runtime that will not build means an
+                            // opt-in diagnostic feature does not start;
+                            // it is not grounds to abort ryll. The
+                            // previous `.expect()` here panicked the
+                            // auto-snapshot thread, losing the mode for
+                            // the session without saying why.
+                            let rt = match tokio::runtime::Builder::new_current_thread()
                                 .enable_all()
                                 .build()
-                                .expect("auto-snapshot: failed to build tokio runtime");
+                            {
+                                Ok(rt) => rt,
+                                Err(e) => {
+                                    warn!(
+                                        "auto-snapshot: cannot build tokio runtime, mode \
+                                         inactive for this session: {}",
+                                        e
+                                    );
+                                    return;
+                                }
+                            };
                             rt.block_on(crate::auto_snapshot::run_auto_snapshot_loop(state));
                         });
+                        self.auto_snapshot_thread = Some(handle);
                     }
                 }
 
@@ -3195,19 +3426,25 @@ impl eframe::App for RyllApp {
         // The result drives the status-bar indicator below; a fired
         // notification (Flapping + cool-down elapsed) is pushed before we
         // render so the bell can pick it up on the same frame.
-        let (streaming_state, streams_active_for_tooltip) = {
+        let streaming_state = {
             let snap = self
                 .channel_snapshots
                 .display
                 .lock()
                 .expect("lock poisoned");
+            // `classify` borrows the snapshot; nothing is copied out of
+            // it here. The per-stream detail the tooltip wants is read
+            // back under the lock inside `on_hover_ui` below, on the
+            // frames the pointer is actually over the indicator —
+            // cloning `streams_active` (two heap Strings per stream)
+            // every frame to serve a tooltip almost nobody is looking
+            // at was pure waste on the UI thread.
             let (state, notif) = streaming_state::classify(
                 &snap,
                 Instant::now(),
                 self.traffic.session_start(),
                 self.last_flap_notification_ts,
             );
-            let active = snap.streams_active.clone();
             drop(snap);
             if let Some(notification) = notif {
                 self.last_flap_notification_ts = Some(Instant::now());
@@ -3217,7 +3454,7 @@ impl eframe::App for RyllApp {
                     notification.message,
                 );
             }
-            (state, active)
+            state
         };
 
         // egui 0.35: `TopBottomPanel`/`SidePanel` were unified into
@@ -3331,68 +3568,69 @@ impl eframe::App for RyllApp {
                         // renders as a tofu box in egui's monochrome font; ▶
                         // keeps the visual cue (something "playing") without
                         // the font problem.
-                        let (icon_colour, tooltip_lines): (egui::Color32, Vec<String>) =
-                            match &streaming_state {
-                                StreamingState::Off => (
-                                    egui::Color32::from_rgb(120, 120, 120),
-                                    vec!["No streams active".to_string()],
-                                ),
-                                StreamingState::Active => {
-                                    let mut lines =
-                                        Vec::with_capacity(streams_active_for_tooltip.len() + 1);
-                                    lines.push(format!(
-                                        "{} active stream{}",
-                                        streams_active_for_tooltip.len(),
-                                        if streams_active_for_tooltip.len() == 1 {
-                                            ""
-                                        } else {
-                                            "s"
-                                        },
-                                    ));
-                                    let now_secs = self.traffic.elapsed().as_secs_f64();
-                                    for s in &streams_active_for_tooltip {
-                                        let codec = match s.codec_type {
-                                            1 => "MJPEG".to_string(),
-                                            2 => "VP8".to_string(),
-                                            3 => "H264".to_string(),
-                                            4 => "VP9".to_string(),
-                                            5 => "H265".to_string(),
-                                            other => format!("codec{}", other),
-                                        };
-                                        let lifetime = (now_secs - s.created_at_secs).max(0.0);
-                                        lines.push(format!(
-                                            "codec={} {}x{} frames={} lifetime={:.0}s",
-                                            codec,
-                                            s.stream_width,
-                                            s.stream_height,
-                                            s.frames_decoded_ok,
-                                            lifetime,
-                                        ));
-                                    }
-                                    (egui::Color32::from_rgb(60, 180, 60), lines)
-                                }
-                                StreamingState::RecentlyDestroyed { secs_since } => (
-                                    egui::Color32::from_rgb(220, 160, 60),
-                                    vec![format!("Last stream destroyed {:.1}s ago", secs_since)],
-                                ),
-                                StreamingState::Flapping {
-                                    destroys_in_window,
-                                    window_secs,
-                                    mean_lifetime_secs,
-                                } => (
-                                    egui::Color32::from_rgb(220, 60, 60),
-                                    vec![format!(
-                                        "Streams flapping: {} destroys in {:.0} s, \
-                                         mean lifetime {:.1} s",
-                                        destroys_in_window, window_secs, mean_lifetime_secs,
-                                    )],
-                                ),
-                            };
+                        let icon_colour = match &streaming_state {
+                            StreamingState::Off => egui::Color32::from_rgb(120, 120, 120),
+                            StreamingState::Active => egui::Color32::from_rgb(60, 180, 60),
+                            StreamingState::RecentlyDestroyed { .. } => {
+                                egui::Color32::from_rgb(220, 160, 60)
+                            }
+                            StreamingState::Flapping { .. } => egui::Color32::from_rgb(220, 60, 60),
+                        };
                         let icon_text = egui::RichText::new("\u{25B6}").color(icon_colour);
                         let icon_resp = ui.label(icon_text);
-                        icon_resp.on_hover_ui(|ui| {
-                            for line in &tooltip_lines {
-                                ui.label(line);
+                        // Every string below is built inside the hover
+                        // closure, which egui only runs on the frames the
+                        // tooltip is actually shown.
+                        icon_resp.on_hover_ui(|ui| match &streaming_state {
+                            StreamingState::Off => {
+                                ui.label("No streams active");
+                            }
+                            StreamingState::Active => {
+                                let snap = self
+                                    .channel_snapshots
+                                    .display
+                                    .lock()
+                                    .expect("lock poisoned");
+                                let active = &snap.streams_active;
+                                ui.label(format!(
+                                    "{} active stream{}",
+                                    active.len(),
+                                    if active.len() == 1 { "" } else { "s" },
+                                ));
+                                let now_secs = self.traffic.elapsed().as_secs_f64();
+                                for s in active {
+                                    let codec = match s.codec_type {
+                                        1 => "MJPEG".to_string(),
+                                        2 => "VP8".to_string(),
+                                        3 => "H264".to_string(),
+                                        4 => "VP9".to_string(),
+                                        5 => "H265".to_string(),
+                                        other => format!("codec{}", other),
+                                    };
+                                    let lifetime = (now_secs - s.created_at_secs).max(0.0);
+                                    ui.label(format!(
+                                        "codec={} {}x{} frames={} lifetime={:.0}s",
+                                        codec,
+                                        s.stream_width,
+                                        s.stream_height,
+                                        s.frames_decoded_ok,
+                                        lifetime,
+                                    ));
+                                }
+                            }
+                            StreamingState::RecentlyDestroyed { secs_since } => {
+                                ui.label(format!("Last stream destroyed {:.1}s ago", secs_since));
+                            }
+                            StreamingState::Flapping {
+                                destroys_in_window,
+                                window_secs,
+                                mean_lifetime_secs,
+                            } => {
+                                ui.label(format!(
+                                    "Streams flapping: {} destroys in {:.0} s, \
+                                     mean lifetime {:.1} s",
+                                    destroys_in_window, window_secs, mean_lifetime_secs,
+                                ));
                             }
                         });
 
@@ -4937,6 +5175,82 @@ fn default_arrow_cursor() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // SessionInitialized admission
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn the_first_session_is_always_accepted() {
+        assert_eq!(
+            classify_session_initialized(false, None, 1, None),
+            SessionInitDecision::Accept
+        );
+        // Also when a previous session left timestamps behind: the
+        // rate limit is about respawns while connected, and a
+        // reconnect after a visible disconnect must never be delayed.
+        assert_eq!(
+            classify_session_initialized(false, Some(9), 1, Some(Duration::from_millis(1))),
+            SessionInitDecision::Accept
+        );
+    }
+
+    #[test]
+    fn re_announcing_the_held_session_is_a_duplicate() {
+        assert_eq!(
+            classify_session_initialized(true, Some(4), 4, Some(Duration::from_secs(3600))),
+            SessionInitDecision::IgnoreDuplicate
+        );
+    }
+
+    #[test]
+    fn alternating_session_ids_are_rate_limited() {
+        // The defect this pins: with only an id-equality guard, a
+        // server alternating ids passes on every message and drives a
+        // retire-and-respawn per ~36-byte MAIN_INIT. Each call below
+        // names a different id from the one held, so the equality
+        // guard does not fire and the rate limit is the only thing
+        // standing between the server and a respawn.
+        for (held, incoming) in [(1u32, 2u32), (2, 1), (1, 2)] {
+            assert_eq!(
+                classify_session_initialized(
+                    true,
+                    Some(held),
+                    incoming,
+                    Some(Duration::from_millis(1))
+                ),
+                SessionInitDecision::IgnoreTooSoon,
+                "id {incoming} arriving 1 ms after the last accepted one must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_relink_after_the_window_is_accepted() {
+        // A real re-link without a visible disconnect is rare, but it
+        // must still work: the rate limit delays it, it does not
+        // block it.
+        assert_eq!(
+            classify_session_initialized(
+                true,
+                Some(1),
+                2,
+                Some(MIN_SESSION_RESPAWN_INTERVAL + Duration::from_millis(1))
+            ),
+            SessionInitDecision::Accept
+        );
+    }
+
+    #[test]
+    fn a_new_id_with_no_prior_acceptance_is_accepted() {
+        // `last_session_initialized_at` is None until the first
+        // acceptance; a missing timestamp must not be read as
+        // "zero elapsed" and refuse the event.
+        assert_eq!(
+            classify_session_initialized(true, Some(1), 2, None),
+            SessionInitDecision::Accept
+        );
+    }
 
     #[test]
     fn screenshot_paths_single() {
