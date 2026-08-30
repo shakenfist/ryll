@@ -184,10 +184,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/assets.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/display_gui.rs",
       "author": "mikal"
     },

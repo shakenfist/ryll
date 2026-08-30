@@ -125,10 +125,6 @@
       "sha": "3c9cfb5286bd15ebbf735f7f95b2f58745978e58",
       "date": "2026-07-26"
     },
-    "ryll/src/web/assets.rs": {
-      "sha": "c2543638db787927d711673e33b0729d9374cc8c",
-      "date": "2026-07-26"
-    },
     "ryll/src/web/cursor.rs": {
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
