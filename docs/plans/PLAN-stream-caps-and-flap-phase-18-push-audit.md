@@ -748,3 +748,16 @@ STREAM_CREATE reordering is **not** verified against a real
 server; its evidence is the five unit tests, one of which was
 confirmed to fail against the previous ordering. Giving a test
 guest a video workload is the follow-up that would close this.
+
+### Closeout: 2026-08-30
+
+PR #333 merged as `00219c0`. That was the last unmet item in
+the Definition of done — the master plan's phase 18 row now
+reads **Complete** with a `Merged` entry, and every other
+done-criterion was already satisfied when the PR landed.
+
+The master plan's own status in `docs/plans/index.md` stays
+**In progress**, which is correct: five operator smokes (3H,
+5C, 6F, 9E, 11C) and three parked video phases (13, 16, 17)
+outlive this audit. None of them is agent-actionable, so the
+plan's remaining work is operator-side from here.
