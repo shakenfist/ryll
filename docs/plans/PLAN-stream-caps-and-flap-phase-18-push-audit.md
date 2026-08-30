@@ -695,3 +695,56 @@ both for phase 11 (11A and 11B landed separately), and keeps
 the em dash for the parked 13, 16 and 17. A paragraph below the
 table records the range derivation and the five foreign commits
 inside it.
+
+### Step 18g — the review round on PR #333
+
+The fixes branch was opened as
+[PR #333](https://github.com/shakenfist/ryll/pull/333). The
+automated reviewer raised six fix items and four suggestions;
+all ten were addressed. The plan commits, originally on a
+separate `stream-caps-and-flap-phase-18-push-audit` branch with
+no PR, were cherry-picked onto the fixes branch afterwards so
+the audit's record and the code it describes review together —
+splitting them was a mistake, and `CLAUDE.md` says as much.
+
+Four of the review's findings were defects this audit missed,
+which is worth recording plainly: the audit bounded what a
+server could make a channel hold, and then left a re-`STREAM_CREATE`
+able to destroy a live stream (item 4), a duplicate-session guard
+defeated by alternating server-chosen ids (item 2), a `join()` on
+the egui UI thread (item 1), and a diagnostics regression where
+common server opcodes stopped getting their own map entries
+(item 3). Bounding a structure and bounding the *path* that
+mutates it are different jobs, and wave 2's per-file ownership
+split made the second harder to see.
+
+Two of the review's suggestions did not survive checking, and
+the accurate fix was taken instead:
+
+- **`as_chunks` → `chunks_exact`** was proposed to avoid an
+  undeclared MSRV bump. Clippy's `chunks_exact_to_as_chunks`
+  lint forbids it and the workspace builds with `-D warnings`,
+  so the reviewer's own alternative was taken: `rust-version
+  = "1.88"` is now declared at the workspace root and inherited
+  by all six crates. The floor was real and undeclared; it now
+  fails with cargo's MSRV error rather than in a packaging lane.
+- **Hoisting `video::for_stream` above the teardown** would
+  have fixed item 4 while letting a flood of `STREAM_CREATE`s
+  past the cap drive an openh264 allocation per message. The
+  order is instead cap check → decoder → teardown → insert,
+  with the cap exempting ids already held.
+
+The `bytes_from_guest` asymmetry (item 10) was also narrower
+than reported — both directions count control traffic once a
+device is attached — so the docstring was corrected rather than
+the counting.
+
+Two QEMU runs (`make test-qemu`, `make test-qemu-desktop`)
+exercised the changed auto-snapshot machinery under a saturated
+display channel (2123 decodes, 13.8 MB in 90 s, six auto-snapshot
+zips on exact cadence, no UI stall). Neither guest promotes a
+video region, so `streams_created_total` stayed 0 and the
+STREAM_CREATE reordering is **not** verified against a real
+server; its evidence is the five unit tests, one of which was
+confirmed to fail against the previous ordering. Giving a test
+guest a video workload is the follow-up that would close this.
