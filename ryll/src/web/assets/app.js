@@ -1,12 +1,12 @@
 // ryll web frontend client.
 //
 // Reads the per-launch token from window.location.search,
-// constructs an RTCPeerConnection, opens a "control-seed"
-// data channel BEFORE generating the offer (required so the
-// SDP carries an m=application section that the server
-// bridge can answer with its control DC), drives the SDP
-// exchange via POST /offer, and attaches the incoming video
-// track to the <video> element.
+// constructs an RTCPeerConnection, opens the out-of-band
+// "control" data channel BEFORE generating the offer
+// (required so the SDP carries an m=application section that
+// the server bridge can answer with its control DC), drives
+// the SDP exchange via POST /offer, and attaches the incoming
+// video track to the <video> element.
 //
 // Input handling:
 //   * KeyboardEvent.code → AT scancode table (ported from
@@ -583,10 +583,25 @@
         pc = new RTCPeerConnection();
 
         // A data channel must exist on the offer side before
-        // createOffer() so the SDP carries an
-        // m=application section. The server bridge's control DC is
-        // answered against this seed channel.
-        dc = pc.createDataChannel('control-seed', { ordered: true });
+        // createOffer() so the SDP carries an m=application section.
+        //
+        // Negotiated out-of-band on a fixed stream id: the server
+        // creates its own end on the same id (CONTROL_DC_STREAM_ID in
+        // shakenfist-spice-webrtc/src/bridge.rs) and neither side
+        // announces the channel in band, so both address the same SCTP
+        // stream by construction and no `ondatachannel` is needed.
+        //
+        // In-band would leave the two ends on *different* streams —
+        // RFC 8832 section 6 gives the DTLS client even ids and the
+        // server odd ones — so each side would see the other's channel
+        // as a separate arrival and would have to adopt it. Pinning the
+        // id removes that whole question, and with it any dependence on
+        // which end won the DTLS role negotiation.
+        dc = pc.createDataChannel('control', {
+            ordered: true,
+            negotiated: true,
+            id: 0,
+        });
 
         dc.onopen = () => {
             console.log('[ryll] data channel open');

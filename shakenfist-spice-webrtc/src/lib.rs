@@ -22,7 +22,7 @@ mod sticky;
 #[cfg(any(test, feature = "test-support"))]
 pub use bind_addrs::{bind_addrs_for_tests, bind_policy_for_tests};
 pub use bind_addrs::{host_udp_bind_addrs, BindSelector, UdpBindPolicy};
-pub use bridge::{WebrtcBridge, WebrtcBridgeConfig};
+pub use bridge::{WebrtcBridge, WebrtcBridgeConfig, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
 pub use sticky::StickySignal;
 
 /// Client-side peer connection for tests that drive the browser half

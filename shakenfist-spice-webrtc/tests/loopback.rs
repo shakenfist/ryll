@@ -122,19 +122,18 @@ async fn loopback_video_audio_datachannel() {
     // ── Client-side control echo ────────────────────────────────
     //
     // The echo runs on the client's *own* seed datachannel, not on
-    // one delivered by `on_data_channel`. On webrtc-rs 0.20 those are
-    // the same SCTP stream: a channel created before the DTLS role is
-    // known always gets stream id 1, both peers do that, and a peer's
-    // DCEP open for an id already in the local map is not announced —
-    // so `on_data_channel` never fires here. See
-    // `TestPeer::seed_data_channel` for the full mechanism and the
-    // source citations.
+    // one delivered by `on_data_channel`. Both ends create their end
+    // of the control channel out-of-band on the same fixed stream id
+    // (`CONTROL_DC_STREAM_ID`), so the seed channel *is* the bridge's
+    // control channel: no DCEP open is sent for it and
+    // `on_data_channel` never fires here. See
+    // `TestPeer::seed_data_channel`.
     //
     // This is also how the real browser client behaves:
-    // `ryll/src/web/assets/app.js` creates one `control-seed` channel,
-    // hangs `onmessage` off it, and registers no `ondatachannel`
-    // handler at all. So the echo below exercises the production data
-    // path rather than a test-only one.
+    // `ryll/src/web/assets/app.js` creates one negotiated `control`
+    // channel on that same id, hangs `onmessage` off it, and registers
+    // no `ondatachannel` handler at all. So the echo below exercises
+    // the production data path rather than a test-only one.
     //
     // Polling only starts here, after `build()` returned — which on
     // 0.20 is safe in a way a callback registration would not be:

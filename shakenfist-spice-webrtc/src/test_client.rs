@@ -45,7 +45,7 @@ use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8,
 };
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
-use webrtc::data_channel::DataChannel;
+use webrtc::data_channel::{DataChannel, RTCDataChannelInit};
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::{
     register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
@@ -55,7 +55,7 @@ use webrtc::peer_connection::{
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 use crate::bind_addrs::bind_addrs_for_tests;
-use crate::bridge::register_h264;
+use crate::bridge::{register_h264, CONTROL_DC_STREAM_ID};
 use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
@@ -125,16 +125,25 @@ impl TestPeerBuilder {
         Self::default()
     }
 
-    /// Create a datachannel with this label before the offer is
-    /// generated, so the SDP carries an `m=application` section.
+    /// Create the client's end of the control datachannel before the
+    /// offer is generated, so the SDP carries an `m=application`
+    /// section.
     ///
     /// This matters more than it looks. You can only answer what was
     /// offered: without an `m=application` section in the offer, the
-    /// bridge's control datachannel cannot be negotiated, the SCTP
-    /// association never opens, and the bridge's `on_data_channel`
-    /// never fires on either side. Tests that exchange control
-    /// messages — or that just need the handshake to complete — need
-    /// this. Found the hard way.
+    /// bridge's control datachannel cannot be negotiated and the SCTP
+    /// association never opens. Tests that exchange control messages —
+    /// or that just need the handshake to complete — need this. Found
+    /// the hard way.
+    ///
+    /// The channel is created out-of-band on
+    /// [`CONTROL_DC_STREAM_ID`], exactly as `app.js` does, so it *is*
+    /// the bridge's control channel rather than a second one that
+    /// happens to sit alongside it: what the bridge's `send_control`
+    /// writes arrives here, and what is written here arrives at the
+    /// bridge's `control_rx`. `label` is local-only — an out-of-band
+    /// channel sends no DCEP open, so the peer never sees it — and
+    /// serves to name the channel in logs.
     pub fn seed_data_channel(mut self, label: &str) -> Self {
         self.seed_data_channel = Some(label.to_owned());
         self
@@ -160,13 +169,12 @@ impl TestPeerBuilder {
     /// `Arc<dyn DataChannel>` and must poll it for messages — 0.20 has
     /// no `on_message` callback.
     ///
-    /// No test currently uses this, and that is not an oversight: on
-    /// 0.20 a peer that created its own datachannel before negotiation
-    /// never sees an `on_data_channel` for the other end's, because
-    /// both land on the same SCTP stream id. See
+    /// No test currently uses this, and that is not an oversight: the
+    /// control channel is negotiated out-of-band, so it is never
+    /// announced in band and never arrives this way. See
     /// [`TestPeer::seed_data_channel`], which is where a test wanting
     /// the remote peer's control messages should look. The hook stays
-    /// because a channel created *after* negotiation does still arrive
+    /// because an in-band channel the peer opens does still arrive
     /// this way.
     pub fn on_data_channel_hook(mut self, f: OnDataChannelHook) -> Self {
         self.on_data_channel = Some(f);
@@ -327,7 +335,18 @@ impl TestPeerBuilder {
         // module's tests, so the two orderings were interchangeable
         // and the majority spelling wins.
         let seed_dc = match self.seed_data_channel {
-            Some(label) => Some(pc.create_data_channel(&label, None).await?),
+            Some(label) => Some(
+                pc.create_data_channel(
+                    &label,
+                    Some(RTCDataChannelInit {
+                        ordered: true,
+                        max_retransmits: None,
+                        negotiated: Some(CONTROL_DC_STREAM_ID),
+                        ..Default::default()
+                    }),
+                )
+                .await?,
+            ),
             None => None,
         };
 

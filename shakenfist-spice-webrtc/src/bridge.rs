@@ -81,6 +81,35 @@ const H264_PAYLOAD_TYPE: u8 = 102;
 /// from inside webrtc-rs, with nothing arriving at the far end.
 const PAYLOAD_TYPE_NONE: u8 = 0x80;
 
+/// Label of the control datachannel. Cosmetic on the wire — an
+/// out-of-band channel is never announced, so the peer never learns
+/// this string — but it is what `RTCDataChannel::label()` reports and
+/// what the logs and `webrtc-internals` show, so both ends use it.
+pub const CONTROL_DC_LABEL: &str = "control";
+
+/// SCTP stream id the control datachannel occupies, agreed out of band
+/// by both ends.
+///
+/// The control channel is negotiated out-of-band (W3C `negotiated:
+/// true` / `id: 0`, RFC 8832 §6 "externally negotiated"): each side
+/// creates its own end on this fixed stream, no DCEP open is sent, and
+/// no `ondatachannel` fires. Both ends therefore address the same
+/// stream by construction.
+///
+/// The alternative — each side opening an in-band channel and picking
+/// up the other's through `on_data_channel` — is what this replaces,
+/// and it made the pairing depend on stream-id assignment. RFC 8832 §6
+/// ties in-band ids to the DTLS role (even for the client, odd for the
+/// server), so an in-band channel opened by each side is *two*
+/// channels on two streams, and each end must remember to adopt the
+/// remote's. Nothing about "the control channel" should depend on
+/// which end won the DTLS role negotiation, so it no longer does.
+///
+/// Must match `ryll/src/web/assets/app.js`, which passes the same id.
+/// The value is otherwise arbitrary: parity is a DCEP concern and does
+/// not constrain an externally negotiated stream.
+pub const CONTROL_DC_STREAM_ID: u16 = 0;
+
 /// The media stream both tracks belong to. Surfaces in the answer SDP
 /// as the `msid` / `mslabel` value, so it is observable to the browser
 /// and must not drift.
@@ -411,25 +440,18 @@ impl PeerConnectionEventHandler for BridgeHandler {
         self.0.on_ice_gathering_state_change(state).await;
     }
 
-    /// A datachannel opened by the remote peer.
+    /// A datachannel opened by the remote peer, in band.
     ///
-    /// This fires less often than it reads like it should. webrtc-rs
-    /// 0.20 assigns a datachannel's SCTP stream id when the channel is
-    /// created, from the DTLS role
-    /// (`rtc-0.20.2/src/peer_connection/internal.rs:936-954`) — and
-    /// before the handshake there is no role, so every channel created
-    /// ahead of negotiation lands on stream 1. Our control DC is one of
-    /// those and so is the browser's `control-seed`
-    /// (`ryll/src/web/assets/app.js`), which makes them the same
-    /// stream: the peer's channel is already in our id map when its
-    /// DCEP open arrives, so the driver does not announce it
-    /// (`webrtc-0.20.2/src/peer_connection/driver.rs:84-101`) and the
-    /// remote's messages surface on *our* control channel instead,
-    /// pumped as `local-dc`.
+    /// This fires less often than it reads like it should. The control
+    /// channel is negotiated out-of-band on a fixed stream id
+    /// ([`CONTROL_DC_STREAM_ID`]) by both ends, and an out-of-band
+    /// channel sends no DCEP open, so it never arrives this way — the
+    /// peer's control messages surface on *our* control channel
+    /// instead, pumped as `local-dc`.
     ///
-    /// What is left for this path is a channel the peer opens *after*
-    /// negotiation, where the ids no longer collide. Keeping it costs
-    /// one small handler; dropping it would silently discard those.
+    /// What is left for this path is a channel the peer opens in band,
+    /// which nothing in ryll's own client does. Keeping it costs one
+    /// small handler; dropping it would silently discard those.
     ///
     /// Spawns a pump rather than polling inline: this method is awaited
     /// in the driver event loop, so looping on `poll()` here would wedge
@@ -733,12 +755,12 @@ impl WebrtcBridge {
         //
         // Two sources fan in here:
         //   1. This bridge's own `control_dc` (created below) — used
-        //      for `send_control`, and in practice also where the
-        //      remote peer's messages arrive, because its channel and
-        //      ours share an SCTP stream id (see
-        //      `BridgeHandler::on_data_channel`).
-        //   2. A DC the remote peer opens after negotiation, delivered
-        //      through `on_data_channel`.
+        //      for `send_control`, and also where the remote peer's
+        //      messages arrive, because the peer creates its end of
+        //      the same out-of-band channel on `CONTROL_DC_STREAM_ID`
+        //      (see `BridgeHandler::on_data_channel`).
+        //   2. A DC the remote peer opens in band, delivered through
+        //      `on_data_channel`.
         let (incoming_tx, incoming_rx) = mpsc::channel::<Vec<u8>>(64);
 
         let state = Arc::new(Mutex::new(RTCPeerConnectionState::New));
@@ -1387,7 +1409,7 @@ async fn attach_tracks_and_control_dc(
     // cursor overlay.
     let control_dc = pc
         .create_data_channel(
-            "control",
+            CONTROL_DC_LABEL,
             // `ordered` is a plain `bool` in 0.20 (it was an
             // `Option<bool>`), and its `Default` is `true` rather
             // than the derived `false`. Stated explicitly anyway:
@@ -1396,6 +1418,9 @@ async fn attach_tracks_and_control_dc(
             Some(RTCDataChannelInit {
                 ordered: true,
                 max_retransmits: None,
+                // Out-of-band negotiation on a fixed stream id. See
+                // `CONTROL_DC_STREAM_ID`.
+                negotiated: Some(CONTROL_DC_STREAM_ID),
                 ..Default::default()
             }),
         )
