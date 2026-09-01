@@ -7,7 +7,7 @@
 # runner is scarce, and doing the permission check, the reaction and the
 # refusal reply on one would hold a claude-code runner for every comment
 # containing the phrase -- including comments from people with no write
-# access at all. pr-address-comments.yml splits for the same reason.
+# access at all.
 #
 # The trigger handling is pr-bot-trigger rather than inline shell. An
 # earlier version of this file open-coded it, and the copy drifted: it
@@ -31,9 +31,9 @@ jobs:
   trigger-re-review:
     name: "Trigger re-review"
     # Only run on PR comments (not issue comments), and never on a
-    # comment the bot itself posted: pr-address-comments.yml quotes
-    # model-generated summaries back into the pull request, and a
-    # summary that mentions a trigger phrase would re-fire the lane.
+    # comment the bot itself posted: an automation that quotes a
+    # model-generated summary back into the pull request would re-fire
+    # this lane whenever the summary mentioned the trigger phrase.
     # contains() does not care that the phrase is inside a quote.
     if: |
       github.event.issue.pull_request &&
@@ -102,7 +102,6 @@ jobs:
       # write-scoped token in .git/config of exactly that tree.
       # review-pr-with-claude authenticates gh from GH_TOKEN and never
       # pushes, so it does not need the git credential helper.
-      # pr-address-comments.yml has always done this; this file did not.
       - name: Checkout the pull request
         uses: actions/checkout@v7
         with:
