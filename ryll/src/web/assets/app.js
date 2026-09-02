@@ -78,6 +78,33 @@
     const RECONNECT_BACKOFFS_MS = [1000, 2000, 4000, 8000, 16000];
     let reconnectAttempt = 0;
 
+    // ---------------------------------------------------------------
+    // Hello handshake state.
+    //
+    // The hello has to be retried, because the first thing written
+    // after `onopen` can be dropped by the far end. `onopen` reports
+    // *this* end's readiness, not the server's: webrtc-rs creates its
+    // side of the channel separately and has no `data_channel` to
+    // hand a message to until the SCTP connected procedure has
+    // dialled it. A message arriving in that window is refused with
+    // `ErrDataChannelNotExisted` and discarded — not buffered, not
+    // NACKed, and invisible from here, which is why the retry cannot
+    // be driven by anything but the reply.
+    //
+    // Losing the hello is worse than losing an input event, which the
+    // next one replaces. Nothing re-sends it, so the server never
+    // replies, the viewer keeps the default mouse mode below for the
+    // rest of the session, and a viewer that negotiated no video is
+    // never told why the picture is missing. Hence: keep asking until
+    // the server answers. `hello` is idempotent server-side — it
+    // reads the current mode and replies — so a duplicate that
+    // crosses a reply in flight costs one extra `mouse-mode`.
+    //
+    // See ryll#347.
+    const HELLO_BACKOFFS_MS = [200, 400, 800, 1600, 3200];
+    let helloAttempt = 0;
+    let helloTimer = null;
+
     // Module-level pc / dc references updated by connect().
     let pc = null;
     let dc = null;
@@ -277,6 +304,19 @@
     };
 
     // ---------------------------------------------------------------
+    // Stops the hello retry loop. Module scope because both the
+    // reply handler and the teardown path reach it from out here;
+    // `sendHello` itself lives inside connect(), where the viewport
+    // it re-sends is in scope.
+    // ---------------------------------------------------------------
+    const cancelHello = () => {
+        if (helloTimer !== null) {
+            clearTimeout(helloTimer);
+            helloTimer = null;
+        }
+    };
+
+    // ---------------------------------------------------------------
     // Keyboard listeners — bound on `document` because the
     // <video> element doesn't naturally have keyboard focus.
     // We preventDefault on every recognised key so browser
@@ -452,6 +492,7 @@
     // so the next connect() builds a fresh RTCPeerConnection.
     // ---------------------------------------------------------------
     function resetPeerConnection() {
+        cancelHello();
         if (pc) {
             try { pc.close(); } catch (e) { /* ignore */ }
             pc = null;
@@ -522,6 +563,11 @@
                 }
                 break;
             case 'mouse-mode':
+                // The server only sends this in reply to a hello, or
+                // when the mode changes mid-session. Either way it
+                // proves the hello landed and the answer is here, so
+                // stop asking.
+                cancelHello();
                 mouseMode = msg.mode;
                 console.log('[ryll] mouse mode:', mouseMode === MOUSE_MODE_SERVER
                     ? 'server (relative)' : 'client (absolute)');
@@ -588,25 +634,45 @@
         // answered against this seed channel.
         dc = pc.createDataChannel('control-seed', { ordered: true });
 
+        // Deliver binary messages as ArrayBuffer, not Blob.
+        //
+        // The server writes control messages as bytes
+        // (`send_control(&[u8])`), so everything arriving here is a
+        // binary frame. `binaryType` defaults to "blob" per the W3C
+        // spec, and `TextDecoder.decode` cannot take a Blob — it
+        // throws, onmessage catches, and the message is dropped with
+        // a console warning nobody reads. Chromium happens to default
+        // this to "arraybuffer" and so has always worked; Firefox
+        // follows the spec, which meant *every* control message the
+        // server sent was discarded: no mouse mode, no cursor shape
+        // or position, no no-video notice, for the life of every
+        // Firefox session. Setting it explicitly is what makes the
+        // two browsers agree. See ryll#348.
+        dc.binaryType = 'arraybuffer';
+
         dc.onopen = () => {
             console.log('[ryll] data channel open');
             // Ask for the mouse mode. The server cannot push it
             // unprompted: it learns the mode from SPICE session-init,
             // seconds before this page loaded, and send_control drops
-            // anything written before this channel opened. This
-            // message is the server's proof that it is open.
-            sendCtrl({ type: 'hello' });
-            // The other half of the race in sendViewport(): if the
-            // peer connection reached `connected` before SCTP
-            // opened this channel, that attempt found nothing to
-            // send on and this one is the one that lands.
-            // sendViewport is declared later in this same scope but
-            // is only ever called from a callback, long after
-            // connect() has returned.
-            sendViewport();
+            // anything written before this channel opened.
+            //
+            // This also carries the first viewport — the other half
+            // of the race in sendViewport(): if the peer connection
+            // reached `connected` before SCTP opened this channel,
+            // that attempt found nothing to send on and this one is
+            // the one that lands. sendViewport is declared later in
+            // this same scope but is only ever called from a
+            // callback, long after connect() has returned.
+            //
+            // A fresh channel gets a fresh budget of attempts.
+            cancelHello();
+            helloAttempt = 0;
+            sendHello();
         };
         dc.onclose = () => {
             console.log('[ryll] data channel closed');
+            cancelHello();
         };
         dc.onmessage = (event) => {
             let msg;
@@ -677,6 +743,44 @@
             }
             viewportSent = true;
             console.log('[ryll] viewport sent:', w, 'x', h);
+        };
+
+        // ---------------------------------------------------------------
+        // Send the hello and arm the next retry. See HELLO_BACKOFFS_MS
+        // for why this is a loop rather than a single send.
+        //
+        // Declared here rather than at module scope because it clears
+        // `viewportSent`, which is deliberately per-connect(): the
+        // first viewport was written in the same breath as the first
+        // hello and is lost in the same window, so it has to ride
+        // along with every attempt rather than stay latched from a
+        // send that went nowhere. The channel is ordered and
+        // reliable, so the burst carrying the hello that lands
+        // carries the viewport too.
+        // ---------------------------------------------------------------
+        const sendHello = () => {
+            helloTimer = null;
+            if (helloAttempt > 0) {
+                console.log('[ryll] hello retry', helloAttempt);
+            }
+            if (!sendCtrl({ type: 'hello' })) {
+                // The channel went away underneath us. onclose has
+                // already cancelled anything pending; do not re-arm.
+                return;
+            }
+            viewportSent = false;
+            sendViewport();
+            if (helloAttempt >= HELLO_BACKOFFS_MS.length) {
+                // Out of attempts. The session still works — this
+                // only means the mouse mode may be wrong and the
+                // no-video notice missing — so it is a warning, not
+                // a status change the viewer has to act on.
+                console.warn('[ryll] server never answered hello; ' +
+                    'keeping default mouse mode');
+                return;
+            }
+            const delay = HELLO_BACKOFFS_MS[helloAttempt++];
+            helloTimer = setTimeout(sendHello, delay);
         };
 
         pc.onconnectionstatechange = () => {
