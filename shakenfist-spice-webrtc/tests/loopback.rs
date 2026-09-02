@@ -74,7 +74,7 @@ async fn loopback_video_audio_datachannel() {
     let audio_count = Arc::new(AtomicUsize::new(0));
 
     let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         .on_track_hook({
             let video_count = video_count.clone();
             let audio_count = audio_count.clone();
@@ -122,19 +122,18 @@ async fn loopback_video_audio_datachannel() {
     // ── Client-side control echo ────────────────────────────────
     //
     // The echo runs on the client's *own* seed datachannel, not on
-    // one delivered by `on_data_channel`. On webrtc-rs 0.20 those are
-    // the same SCTP stream: a channel created before the DTLS role is
-    // known always gets stream id 1, both peers do that, and a peer's
-    // DCEP open for an id already in the local map is not announced —
-    // so `on_data_channel` never fires here. See
-    // `TestPeer::seed_data_channel` for the full mechanism and the
-    // source citations.
+    // one delivered by `on_data_channel`. Both ends create their end
+    // of the control channel out-of-band on the same fixed stream id
+    // (`CONTROL_DC_STREAM_ID`), so the seed channel *is* the bridge's
+    // control channel: no DCEP open is sent for it and
+    // `on_data_channel` never fires here. See
+    // `TestPeer::seed_data_channel`.
     //
     // This is also how the real browser client behaves:
-    // `ryll/src/web/assets/app.js` creates one `control-seed` channel,
-    // hangs `onmessage` off it, and registers no `ondatachannel`
-    // handler at all. So the echo below exercises the production data
-    // path rather than a test-only one.
+    // `ryll/src/web/assets/app.js` creates one negotiated `control`
+    // channel on that same id, hangs `onmessage` off it, and registers
+    // no `ondatachannel` handler at all. So the echo below exercises
+    // the production data path rather than a test-only one.
     //
     // Polling only starts here, after `build()` returned — which on
     // 0.20 is safe in a way a callback registration would not be:
@@ -277,7 +276,7 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
         // The seed channel is still required: without an m=application
         // section in the offer the SCTP association never opens and the
         // handshake stalls. See the test above.
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         .offer_only_h264_fmtp(
             "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
             126,
@@ -395,7 +394,7 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
     let audio_count = Arc::new(AtomicUsize::new(0));
 
     let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         // Firefox's payload numbers for VP8 and Opus.
         .offer_no_h264(120, 109)
         .on_track_hook({

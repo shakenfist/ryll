@@ -45,7 +45,7 @@ use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_H264, MIME_TYPE_OPUS, MIME_TYPE_VP8,
 };
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
-use webrtc::data_channel::DataChannel;
+use webrtc::data_channel::{DataChannel, RTCDataChannelInit};
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::{
     register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
@@ -55,7 +55,7 @@ use webrtc::peer_connection::{
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 use crate::bind_addrs::bind_addrs_for_tests;
-use crate::bridge::register_h264;
+use crate::bridge::{register_h264, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
 use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
@@ -94,7 +94,7 @@ pub type OnDataChannelHook = Box<
 /// datachannel.
 #[derive(Default)]
 pub struct TestPeerBuilder {
-    seed_data_channel: Option<String>,
+    seed_data_channel: bool,
     on_track: Option<OnTrackHook>,
     on_data_channel: Option<OnDataChannelHook>,
     narrow_codecs: Option<NarrowCodecs>,
@@ -125,18 +125,32 @@ impl TestPeerBuilder {
         Self::default()
     }
 
-    /// Create a datachannel with this label before the offer is
-    /// generated, so the SDP carries an `m=application` section.
+    /// Create the client's end of the control datachannel before the
+    /// offer is generated, so the SDP carries an `m=application`
+    /// section.
     ///
     /// This matters more than it looks. You can only answer what was
     /// offered: without an `m=application` section in the offer, the
-    /// bridge's control datachannel cannot be negotiated, the SCTP
-    /// association never opens, and the bridge's `on_data_channel`
-    /// never fires on either side. Tests that exchange control
-    /// messages — or that just need the handshake to complete — need
-    /// this. Found the hard way.
-    pub fn seed_data_channel(mut self, label: &str) -> Self {
-        self.seed_data_channel = Some(label.to_owned());
+    /// bridge's control datachannel cannot be negotiated and the SCTP
+    /// association never opens. Tests that exchange control messages —
+    /// or that just need the handshake to complete — need this. Found
+    /// the hard way.
+    ///
+    /// The channel is created out-of-band on
+    /// [`CONTROL_DC_STREAM_ID`], exactly as `app.js` does, so it *is*
+    /// the bridge's control channel rather than a second one that
+    /// happens to sit alongside it: what the bridge's `send_control`
+    /// writes arrives here, and what is written here arrives at the
+    /// bridge's `control_rx`.
+    ///
+    /// There is no label argument. The label is local-only — an
+    /// out-of-band channel sends no DCEP open, so the peer never sees
+    /// it — but it is what the logs and `webrtc-internals` name the
+    /// channel, and since this *is* the control channel there is no
+    /// call site with a reason to call it anything other than
+    /// [`CONTROL_DC_LABEL`].
+    pub fn seed_data_channel(mut self) -> Self {
+        self.seed_data_channel = true;
         self
     }
 
@@ -160,13 +174,12 @@ impl TestPeerBuilder {
     /// `Arc<dyn DataChannel>` and must poll it for messages — 0.20 has
     /// no `on_message` callback.
     ///
-    /// No test currently uses this, and that is not an oversight: on
-    /// 0.20 a peer that created its own datachannel before negotiation
-    /// never sees an `on_data_channel` for the other end's, because
-    /// both land on the same SCTP stream id. See
+    /// No test currently uses this, and that is not an oversight: the
+    /// control channel is negotiated out-of-band, so it is never
+    /// announced in band and never arrives this way. See
     /// [`TestPeer::seed_data_channel`], which is where a test wanting
     /// the remote peer's control messages should look. The hook stays
-    /// because a channel created *after* negotiation does still arrive
+    /// because an in-band channel the peer opens does still arrive
     /// this way.
     pub fn on_data_channel_hook(mut self, f: OnDataChannelHook) -> Self {
         self.on_data_channel = Some(f);
@@ -326,9 +339,21 @@ impl TestPeerBuilder {
         // ordering that produces is asserted identical in this
         // module's tests, so the two orderings were interchangeable
         // and the majority spelling wins.
-        let seed_dc = match self.seed_data_channel {
-            Some(label) => Some(pc.create_data_channel(&label, None).await?),
-            None => None,
+        let seed_dc = if self.seed_data_channel {
+            Some(
+                pc.create_data_channel(
+                    CONTROL_DC_LABEL,
+                    Some(RTCDataChannelInit {
+                        ordered: true,
+                        max_retransmits: None,
+                        negotiated: Some(CONTROL_DC_STREAM_ID),
+                        ..Default::default()
+                    }),
+                )
+                .await?,
+            )
+        } else {
+            None
         };
 
         Ok(TestPeer {
@@ -435,9 +460,10 @@ pub struct TestPeer {
     pc: Arc<dyn PeerConnection>,
     /// The seed datachannel, if [`TestPeerBuilder::seed_data_channel`]
     /// asked for one. Held so it outlives the offer that needed it,
-    /// and exposed by [`Self::seed_data_channel`] because on 0.20 it
-    /// is also where the *remote* peer's control messages arrive; see
-    /// that accessor's docs.
+    /// and exposed by [`Self::seed_data_channel`] because it is also
+    /// where the *remote* peer's control messages arrive — both ends
+    /// create their own end of the same out-of-band stream, so there
+    /// is only ever the one channel; see that accessor's docs.
     seed_dc: Option<Arc<dyn DataChannel>>,
     /// Latest state seen by the state-change callback. See the
     /// comment where it is registered for why this is shadowed
@@ -476,26 +502,23 @@ impl TestPeer {
     /// it to reach the remote peer. That is not obvious, and it is
     /// worth understanding before writing a test against it.
     ///
-    /// webrtc-rs 0.20 assigns a datachannel's SCTP stream id at
-    /// creation time from the DTLS role
-    /// (`rtc-0.20.2/src/peer_connection/internal.rs:936-954`), and
-    /// before the handshake there is no role yet, so every channel
-    /// created ahead of negotiation lands on stream 1. Both ends of an
-    /// exchange do exactly that — this peer's seed channel and the
-    /// bridge's control channel are the same stream — so each side's
-    /// channel is already present in its own id map when the peer's
-    /// DCEP open arrives, and
-    /// [`PeerConnectionEventHandler::on_data_channel`] is never
-    /// announced for it
-    /// (`webrtc-0.20.2/src/peer_connection/driver.rs:84-101`).
+    /// This channel and the bridge's control channel are one channel,
+    /// not two. Both ends create their own end out of band on
+    /// [`CONTROL_DC_STREAM_ID`], so neither announces it and neither
+    /// has to discover the other's: no DCEP open is sent, and
+    /// [`PeerConnectionEventHandler::on_data_channel`] never fires for
+    /// it. Whatever the bridge's `send_control` writes surfaces here,
+    /// and whatever is written here surfaces on the bridge's
+    /// `control_rx`.
     ///
     /// This is what the browser sees too: `ryll/src/web/assets/app.js`
-    /// creates one `control-seed` channel, registers `onmessage` on it,
-    /// and has no `ondatachannel` handler at all. Polling the seed
-    /// channel is therefore the *more* faithful test of production, not
-    /// a workaround. [`TestPeerBuilder::on_data_channel_hook`] remains
-    /// for a genuinely new remote channel — one created after
-    /// negotiation, when the ids no longer collide.
+    /// creates one out-of-band `control` channel on the same id,
+    /// registers `onmessage` on it, and has no `ondatachannel` handler
+    /// at all. Polling the seed channel is therefore the *more*
+    /// faithful test of production, not a workaround.
+    /// [`TestPeerBuilder::on_data_channel_hook`] remains for a channel
+    /// the peer opens *in band*, which is the only kind that still
+    /// arrives as an event.
     pub fn seed_data_channel(&self) -> Option<&Arc<dyn DataChannel>> {
         self.seed_dc.as_ref()
     }
@@ -677,7 +700,7 @@ mod tests {
         // Transceivers first, then the datachannel — what the builder
         // does.
         let transceivers_first = TestPeer::builder()
-            .seed_data_channel("seed")
+            .seed_data_channel()
             .build()
             .await
             .expect("transceivers-first peer");

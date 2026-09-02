@@ -672,6 +672,35 @@ mod tests {
             "app.js should create a data channel before the offer: \
              missing"
         );
+        // The control channel is negotiated out of band, so the label
+        // and stream id here are the only thing pairing app.js with
+        // the bridge. A drift is silent: no DCEP open is exchanged, so
+        // a mismatched id still brings the association up and still
+        // fires `onopen`, and every keystroke, pointer event and the
+        // hello handshake go nowhere while the UI reads "Connected".
+        // These assertions are what turns that into a test failure.
+        assert!(
+            body.contains(&format!(
+                "createDataChannel('{}'",
+                shakenfist_spice_webrtc::CONTROL_DC_LABEL
+            )),
+            "app.js should label the control channel '{}': missing",
+            shakenfist_spice_webrtc::CONTROL_DC_LABEL
+        );
+        assert!(
+            body.contains("negotiated: true"),
+            "app.js should negotiate the control channel out of band: \
+             missing"
+        );
+        assert!(
+            body.contains(&format!(
+                "id: {},",
+                shakenfist_spice_webrtc::CONTROL_DC_STREAM_ID
+            )),
+            "app.js should pin the control channel to SCTP stream {}: \
+             missing",
+            shakenfist_spice_webrtc::CONTROL_DC_STREAM_ID
+        );
         assert!(
             body.contains("recvonly"),
             "app.js should request recvonly transceivers: missing"

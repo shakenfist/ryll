@@ -31,6 +31,18 @@ test-support = []
 # crate's tests and the server-side reaper walk straight into. Declared
 # as a floor rather than `=0.20.2` so patch updates still flow. See
 # docs/plans/PLAN-webrtc-0.20-upgrade.md.
+#
+# Still 0.20.2 even though docs/web-mode-internals.md describes
+# pre-0.20.4 stream-id assignment as broken: what 0.20.4 fixed is the
+# id picked for an *in-band* channel created before the DTLS role is
+# known, and the control channel no longer takes that path. Checked
+# rather than assumed — 0.20.2 and 0.20.3 both overwrite the
+# generated id with an explicit `negotiated` one
+# (`rtc-0.20.2/src/peer_connection/mod.rs:1888`) and pass the flag to
+# `DataChannel::dial`, which suppresses the DCEP open
+# (`rtc-0.20.2/src/data_channel/internal.rs:83`). Pinning the stream
+# id is what makes the floor a non-issue here, so there is nothing to
+# raise it for.
 webrtc = "0.20.2"
 
 # The sans-io core `webrtc` is built on. A direct dependency because
