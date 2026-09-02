@@ -74,7 +74,7 @@ async fn loopback_video_audio_datachannel() {
     let audio_count = Arc::new(AtomicUsize::new(0));
 
     let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         .on_track_hook({
             let video_count = video_count.clone();
             let audio_count = audio_count.clone();
@@ -276,7 +276,7 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
         // The seed channel is still required: without an m=application
         // section in the offer the SCTP association never opens and the
         // handshake stalls. See the test above.
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         .offer_only_h264_fmtp(
             "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
             126,
@@ -394,7 +394,7 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
     let audio_count = Arc::new(AtomicUsize::new(0));
 
     let client = TestPeer::builder()
-        .seed_data_channel("client-seed")
+        .seed_data_channel()
         // Firefox's payload numbers for VP8 and Opus.
         .offer_no_h264(120, 109)
         .on_track_hook({

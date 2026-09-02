@@ -2612,7 +2612,7 @@ mod tests {
                 .expect("bridge");
 
             let client = TestPeer::builder()
-                .seed_data_channel("client-seed")
+                .seed_data_channel()
                 .build()
                 .await
                 .expect("client peer");
@@ -2748,7 +2748,7 @@ mod tests {
         };
 
         let client = TestPeer::builder()
-            .seed_data_channel("client-seed")
+            .seed_data_channel()
             .build()
             .await
             .expect("client peer");
@@ -2842,7 +2842,7 @@ mod tests {
             .expect("bridge");
 
         let client = TestPeer::builder()
-            .seed_data_channel("client-seed")
+            .seed_data_channel()
             .build()
             .await
             .expect("client peer");
