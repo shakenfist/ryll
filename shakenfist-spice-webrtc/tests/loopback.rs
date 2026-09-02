@@ -14,6 +14,10 @@
 //! * >= 5 audio RTP packets received within ~3 seconds.
 //! * Round-trip on the control DC: server sends "ping", the client
 //!   replies "pong", server's `control_rx` delivers it.
+//! * `on_data_channel` never fires on the client. That is the
+//!   observable signature of out-of-band negotiation — neither end
+//!   announces the control channel in band — and it is what tells
+//!   the reader *why* the ping/pong above failed when it does.
 //!
 //! The tests below it narrow the client's codec set: one offers a
 //! reduced-but-workable set and still expects media, the other offers
@@ -24,7 +28,7 @@
 //! No browser involved; SDP exchange is direct between the two
 //! peers. ICE uses host-only candidates (empty `ice_servers`).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,11 +36,27 @@ use bytes::BytesMut;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use shakenfist_spice_renderer::{EncoderControl, EncoderTask, H264Encoder, SyntheticFrameSource};
 use tokio::sync::mpsc;
-use webrtc::data_channel::DataChannelEvent;
+use webrtc::data_channel::{DataChannel, DataChannelEvent};
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
 use shakenfist_spice_webrtc::test_client::TestPeer;
 use shakenfist_spice_webrtc::{WebrtcBridge, WebrtcBridgeConfig};
+
+/// Appended to a control-channel failure message when the client saw
+/// an in-band datachannel announcement.
+///
+/// Out-of-band negotiation sends no DCEP open, so `on_data_channel`
+/// firing means the pairing fell back to in band and the two ends are
+/// on different streams. That is a specific, actionable cause for what
+/// otherwise reads as an unexplained timeout.
+fn in_band_hint(in_band_channel: &AtomicBool) -> &'static str {
+    if in_band_channel.load(Ordering::Relaxed) {
+        " -- and on_data_channel fired, so the control channel was announced in band \
+         rather than negotiated out of band, putting the two ends on different streams"
+    } else {
+        ""
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn loopback_video_audio_datachannel() {
@@ -73,8 +93,49 @@ async fn loopback_video_audio_datachannel() {
     let video_count = Arc::new(AtomicUsize::new(0));
     let audio_count = Arc::new(AtomicUsize::new(0));
 
+    // Set if `on_data_channel` ever fires; asserted still false at the
+    // end. See the hook below.
+    let in_band_channel = Arc::new(AtomicBool::new(false));
+
     let client = TestPeer::builder()
-        .seed_data_channel()
+        .seed_control_channel()
+        .on_data_channel_hook({
+            // This is a *diagnostic*, not the detection, and the
+            // distinction is worth stating because it is easy to
+            // mistake for a stronger guard than it is.
+            //
+            // The detection is the ping/pong below. A webrtc-rs
+            // regression that stopped honouring `negotiated` puts the
+            // two ends on different streams -- RFC 8832 section 6
+            // gives the DTLS client even ids and the server odd ones
+            // -- and the pong never arrives. Verified by mutation:
+            // dropping `negotiated` from both `attach_tracks_and_
+            // control_dc` and `TestPeerBuilder::build` fails this test
+            // on the pong timeout.
+            //
+            // What it fails *with*, though, is "pong did not arrive in
+            // time", which says nothing about why. The stream id
+            // cannot be asserted directly -- `webrtc`'s `DataChannel`
+            // trait exposes `id()`, an internal handle, and never
+            // gained the `stream_id()` that `rtc::RTCDataChannel` has
+            // -- but an in-band channel does announce itself with a
+            // DCEP open, and that announcement arrives here. So the
+            // flag turns an opaque timeout into a named cause, and is
+            // asserted on its own account at the end for the case
+            // where a channel is announced in band and the round-trip
+            // somehow survives it.
+            let in_band_channel = in_band_channel.clone();
+            Box::new(move |dc: Arc<dyn DataChannel>| {
+                let in_band_channel = in_band_channel.clone();
+                Box::pin(async move {
+                    in_band_channel.store(true, Ordering::Relaxed);
+                    eprintln!(
+                        "loopback: unexpected in-band datachannel {:?}",
+                        dc.label().await
+                    );
+                })
+            })
+        })
         .on_track_hook({
             let video_count = video_count.clone();
             let audio_count = audio_count.clone();
@@ -121,13 +182,14 @@ async fn loopback_video_audio_datachannel() {
 
     // ── Client-side control echo ────────────────────────────────
     //
-    // The echo runs on the client's *own* seed datachannel, not on
-    // one delivered by `on_data_channel`. Both ends create their end
-    // of the control channel out-of-band on the same fixed stream id
-    // (`CONTROL_DC_STREAM_ID`), so the seed channel *is* the bridge's
-    // control channel: no DCEP open is sent for it and
-    // `on_data_channel` never fires here. See
-    // `TestPeer::seed_data_channel`.
+    // The echo runs on the client's *own* control channel — the one
+    // `seed_control_channel()` created — not on one delivered by
+    // `on_data_channel`. Both ends create their end out of band on
+    // the same fixed stream id (`CONTROL_DC_STREAM_ID`), so the two
+    // are one channel: no DCEP open is sent for it and
+    // `on_data_channel` never fires here — which the hook installed
+    // above turns into an assertion rather than a claim. See
+    // `TestPeer::control_channel`.
     //
     // This is also how the real browser client behaves:
     // `ryll/src/web/assets/app.js` creates one negotiated `control`
@@ -140,8 +202,8 @@ async fn loopback_video_audio_datachannel() {
     // events queue in the channel's buffer until something polls them,
     // so nothing is lost by attaching late.
     let client_dc = client
-        .seed_data_channel()
-        .expect("seed datachannel requested above")
+        .control_channel()
+        .expect("control channel requested above")
         .clone();
     let _echo = tokio::spawn(async move {
         while let Some(event) = client_dc.poll().await {
@@ -206,17 +268,25 @@ async fn loopback_video_audio_datachannel() {
             Ok(()) => break,
             Err(e) => {
                 if std::time::Instant::now() >= send_deadline {
-                    panic!("server failed to send ping within 5s; last error: {}", e);
+                    panic!(
+                        "server failed to send ping within 5s; last error: {}{}",
+                        e,
+                        in_band_hint(&in_band_channel)
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
     }
 
-    let pong = tokio::time::timeout(Duration::from_secs(3), server_rx.recv())
-        .await
-        .expect("pong did not arrive in time")
-        .expect("server rx closed");
+    let pong = match tokio::time::timeout(Duration::from_secs(3), server_rx.recv()).await {
+        Ok(Some(pong)) => pong,
+        Ok(None) => panic!("server rx closed{}", in_band_hint(&in_band_channel)),
+        Err(_) => panic!(
+            "pong did not arrive in time{}",
+            in_band_hint(&in_band_channel)
+        ),
+    };
     assert_eq!(pong, b"pong", "expected pong reply");
 
     // ── Let video and audio flow for ~3 seconds ─────────────────
@@ -237,6 +307,19 @@ async fn loopback_video_audio_datachannel() {
     );
     assert!(v >= 10, "expected >=10 video packets, got {}", v);
     assert!(a >= 5, "expected >=5 audio packets, got {}", a);
+
+    // Both ends negotiate the control channel out of band, so nothing
+    // should have announced itself in band -- even in the case where
+    // the round-trip above succeeded anyway. Checked here rather than
+    // earlier because the ping/pong proves the SCTP association is up
+    // and carrying the channel, which is what makes "no DCEP open
+    // arrived" mean "none was sent" rather than "not yet".
+    assert!(
+        !in_band_channel.load(Ordering::Relaxed),
+        "on_data_channel fired: the control channel was announced in \
+         band, so it is not the out-of-band channel this test claims \
+         to exercise"
+    );
 
     // ── Cleanup ─────────────────────────────────────────────────
     server.close().await.expect("server close");
@@ -276,7 +359,7 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
         // The seed channel is still required: without an m=application
         // section in the offer the SCTP association never opens and the
         // handshake stalls. See the test above.
-        .seed_data_channel()
+        .seed_control_channel()
         .offer_only_h264_fmtp(
             "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
             126,
@@ -394,7 +477,7 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
     let audio_count = Arc::new(AtomicUsize::new(0));
 
     let client = TestPeer::builder()
-        .seed_data_channel()
+        .seed_control_channel()
         // Firefox's payload numbers for VP8 and Opus.
         .offer_no_h264(120, 109)
         .on_track_hook({

@@ -61,6 +61,18 @@ degraded GitHub rendering (a literal `!!!` paragraph above an
 indented code block) is knowingly accepted. Do not "fix" them back
 to blockquotes or ASCII art.
 
+Do not quote dependency versions in `docs/`. A version copied out of
+a manifest goes stale at the next bump and then reads as a claim that
+the older version is still supported; the manifests are the only
+place it is true. Name the crate and say what it is for. Where a
+version *floor* is load-bearing rather than incidental, record the
+floor and its reason as a comment in the `Cargo.toml` that declares
+it, and have the prose point there. A release number in a worked
+example (`X.Y.Z`, or the `0.2.0` in
+[`docs/releasing.md`](docs/releasing.md)) is not a pin and is fine.
+Saying which upstream release changed a behaviour is a historical
+fact, not a pin, and is also fine.
+
 ## Protocol reference sources
 
 When working on SPICE protocol implementation details, these

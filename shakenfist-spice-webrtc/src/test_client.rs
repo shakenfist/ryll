@@ -94,7 +94,7 @@ pub type OnDataChannelHook = Box<
 /// datachannel.
 #[derive(Default)]
 pub struct TestPeerBuilder {
-    seed_data_channel: bool,
+    seed_control_channel: bool,
     on_track: Option<OnTrackHook>,
     on_data_channel: Option<OnDataChannelHook>,
     narrow_codecs: Option<NarrowCodecs>,
@@ -143,14 +143,16 @@ impl TestPeerBuilder {
     /// writes arrives here, and what is written here arrives at the
     /// bridge's `control_rx`.
     ///
-    /// There is no label argument. The label is local-only — an
-    /// out-of-band channel sends no DCEP open, so the peer never sees
-    /// it — but it is what the logs and `webrtc-internals` name the
-    /// channel, and since this *is* the control channel there is no
-    /// call site with a reason to call it anything other than
-    /// [`CONTROL_DC_LABEL`].
-    pub fn seed_data_channel(mut self) -> Self {
-        self.seed_data_channel = true;
+    /// There is nothing to choose here, which is why this takes no
+    /// arguments. The stream id is fixed by
+    /// [`CONTROL_DC_STREAM_ID`] and the label is
+    /// [`crate::CONTROL_DC_LABEL`] — local-only, since an out-of-band
+    /// channel sends no DCEP open and the peer never sees the string,
+    /// so it serves only to name the channel in this end's logs. A
+    /// test wanting a genuinely separate channel wants a different
+    /// builder method, because it also needs a different stream id.
+    pub fn seed_control_channel(mut self) -> Self {
+        self.seed_control_channel = true;
         self
     }
 
@@ -174,13 +176,15 @@ impl TestPeerBuilder {
     /// `Arc<dyn DataChannel>` and must poll it for messages — 0.20 has
     /// no `on_message` callback.
     ///
-    /// No test currently uses this, and that is not an oversight: the
-    /// control channel is negotiated out-of-band, so it is never
-    /// announced in band and never arrives this way. See
-    /// [`TestPeer::seed_data_channel`], which is where a test wanting
-    /// the remote peer's control messages should look. The hook stays
-    /// because an in-band channel the peer opens does still arrive
-    /// this way.
+    /// `loopback_video_audio_datachannel` installs this hook as a
+    /// *negative* assertion: the control channel is negotiated out of
+    /// band, so it is never announced in band, no DCEP open is sent,
+    /// and the hook must never fire. If it does, the pairing fell back
+    /// to in band and the two ends are on different streams. A test
+    /// wanting the remote peer's control messages should not look here
+    /// — see [`TestPeer::control_channel`]. The hook is otherwise
+    /// still the way a genuinely in-band channel, opened by the peer,
+    /// arrives.
     pub fn on_data_channel_hook(mut self, f: OnDataChannelHook) -> Self {
         self.on_data_channel = Some(f);
         self
@@ -339,7 +343,7 @@ impl TestPeerBuilder {
         // ordering that produces is asserted identical in this
         // module's tests, so the two orderings were interchangeable
         // and the majority spelling wins.
-        let seed_dc = if self.seed_data_channel {
+        let control_dc = if self.seed_control_channel {
             Some(
                 pc.create_data_channel(
                     CONTROL_DC_LABEL,
@@ -358,7 +362,7 @@ impl TestPeerBuilder {
 
         Ok(TestPeer {
             pc,
-            seed_dc,
+            control_dc,
             state,
             gathered,
         })
@@ -458,13 +462,13 @@ impl PeerConnectionEventHandler for TestPeerEvents {
 /// The client half of a bridge exchange. See the module docs.
 pub struct TestPeer {
     pc: Arc<dyn PeerConnection>,
-    /// The seed datachannel, if [`TestPeerBuilder::seed_data_channel`]
-    /// asked for one. Held so it outlives the offer that needed it,
-    /// and exposed by [`Self::seed_data_channel`] because it is also
-    /// where the *remote* peer's control messages arrive — both ends
-    /// create their own end of the same out-of-band stream, so there
-    /// is only ever the one channel; see that accessor's docs.
-    seed_dc: Option<Arc<dyn DataChannel>>,
+    /// The control datachannel, if
+    /// [`TestPeerBuilder::seed_control_channel`] asked for one. Held
+    /// so it outlives the offer that needed it, and exposed by
+    /// [`Self::control_channel`] because it *is* the bridge's control
+    /// channel, so it is also where the remote peer's control messages
+    /// arrive; see that accessor's docs.
+    control_dc: Option<Arc<dyn DataChannel>>,
     /// Latest state seen by the state-change callback. See the
     /// comment where it is registered for why this is shadowed
     /// rather than read from the peer connection.
@@ -496,31 +500,29 @@ impl TestPeer {
         &self.pc
     }
 
-    /// The seed datachannel, if one was requested.
+    /// The control datachannel, if one was requested.
     ///
     /// Poll this to receive what the *remote* peer sends, and send on
     /// it to reach the remote peer. That is not obvious, and it is
     /// worth understanding before writing a test against it.
     ///
-    /// This channel and the bridge's control channel are one channel,
-    /// not two. Both ends create their own end out of band on
-    /// [`CONTROL_DC_STREAM_ID`], so neither announces it and neither
-    /// has to discover the other's: no DCEP open is sent, and
+    /// The channel is created out of band on
+    /// [`CONTROL_DC_STREAM_ID`], and the bridge creates its own end on
+    /// that same stream. Neither end announces the channel in band, so
+    /// no DCEP open is exchanged and
     /// [`PeerConnectionEventHandler::on_data_channel`] never fires for
-    /// it. Whatever the bridge's `send_control` writes surfaces here,
-    /// and whatever is written here surfaces on the bridge's
-    /// `control_rx`.
+    /// it. The two ends are one channel by construction: what the
+    /// bridge's `send_control` writes arrives here.
     ///
     /// This is what the browser sees too: `ryll/src/web/assets/app.js`
-    /// creates one out-of-band `control` channel on the same id,
+    /// creates one negotiated `control` channel on the same id,
     /// registers `onmessage` on it, and has no `ondatachannel` handler
-    /// at all. Polling the seed channel is therefore the *more*
+    /// at all. Polling this channel is therefore the *more*
     /// faithful test of production, not a workaround.
     /// [`TestPeerBuilder::on_data_channel_hook`] remains for a channel
-    /// the peer opens *in band*, which is the only kind that still
-    /// arrives as an event.
-    pub fn seed_data_channel(&self) -> Option<&Arc<dyn DataChannel>> {
-        self.seed_dc.as_ref()
+    /// a peer opens *in band*, which nothing in ryll does today.
+    pub fn control_channel(&self) -> Option<&Arc<dyn DataChannel>> {
+        self.control_dc.as_ref()
     }
 
     /// Create an offer and set it as the local description, without
@@ -696,11 +698,11 @@ mod tests {
     /// the builder needs to preserve each call site's original
     /// sequence rather than normalising it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn seed_dc_ordering_does_not_change_m_line_order() {
+    async fn seed_channel_ordering_does_not_change_m_line_order() {
         // Transceivers first, then the datachannel — what the builder
         // does.
         let transceivers_first = TestPeer::builder()
-            .seed_data_channel()
+            .seed_control_channel()
             .build()
             .await
             .expect("transceivers-first peer");

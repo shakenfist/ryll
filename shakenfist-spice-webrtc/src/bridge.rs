@@ -105,9 +105,44 @@ pub const CONTROL_DC_LABEL: &str = "control";
 /// remote's. Nothing about "the control channel" should depend on
 /// which end won the DTLS role negotiation, so it no longer does.
 ///
-/// Must match `ryll/src/web/assets/app.js`, which passes the same id.
-/// The value is otherwise arbitrary: parity is a DCEP concern and does
-/// not constrain an externally negotiated stream.
+/// Must match `ryll/src/web/assets/app.js`, which passes the same id;
+/// `ryll::web::server`'s `app_js_pins_control_channel_pairing` asserts
+/// that it still does.
+///
+/// The RFC 8832 §6 parity rule does not constrain the choice — parity
+/// is how *in-band* ids are allocated, and an externally negotiated
+/// stream is not allocated that way. What does constrain it is
+/// collision: an out-of-band id must not be one that in-band
+/// allocation would later hand out, and 0 is exactly the id the DTLS
+/// client gives its first in-band channel.
+///
+/// The bridge *is* the DTLS client. The browser offers
+/// `a=setup:actpass`, and webrtc-rs, answering, picks `active` —
+/// asserted by `bridge_answers_as_dtls_client`, because that half of
+/// the argument is upstream's behaviour rather than ours. So the
+/// hazard is not remote: the next `create_data_channel` added to this
+/// crate — a second control channel, file transfer, clipboard — is
+/// allocated stream 0 in band and lands on top of this one. Nothing
+/// opens a channel in band today, so 0 is safe; anything that starts
+/// to must move this constant first, and `app.js`'s `id:` with it.
+///
+/// The Rust tests are symmetric — both ends request this id — so a
+/// webrtc-rs regression that ignored the request would move both
+/// together and could stay green while stranding the browser, which
+/// honours `id: 0` regardless. Nothing can assert the id itself:
+/// `webrtc`'s `DataChannel` trait exposes `id()`, an internal handle,
+/// and never gained the `stream_id()` accessor that
+/// `rtc::RTCDataChannel` has. Two things stand in for that. The
+/// version floor on `webrtc` and `rtc` in Cargo.toml, documented
+/// there as a correctness contract rather than a routine pin — the
+/// floor is the first release to honour
+/// `RTCDataChannelInit::negotiated`, so do not lower it. And
+/// `loopback_video_audio_datachannel`, which catches it behaviourally
+/// — a stack that ignored `negotiated` puts the two ends on different
+/// streams and the ping/pong never completes. That test also watches
+/// `on_data_channel`, since an in-band channel announces itself with
+/// a DCEP open, so its failure names the cause rather than just
+/// timing out.
 pub const CONTROL_DC_STREAM_ID: u16 = 0;
 
 /// The media stream both tracks belong to. Surfaces in the answer SDP
@@ -2350,6 +2385,45 @@ mod tests {
         bridge.close().await.expect("bridge close");
     }
 
+    /// `CONTROL_DC_STREAM_ID` is 0 because the bridge is the DTLS
+    /// client: RFC 8832 §6 gives the DTLS client the even in-band
+    /// ids, so 0 is only ever handed out by *our* side, and this
+    /// crate opens nothing in band. That premise is a property of
+    /// the answer, not of our code — the browser offers
+    /// `a=setup:actpass` and webrtc-rs picks a role. If it ever
+    /// answered `passive` the browser would become the DTLS client,
+    /// its own in-band allocation would start at 0, and the first
+    /// in-band channel any browser code added would land on top of
+    /// the control channel. Both Rust ends would move together, so
+    /// the version floor and `loopback_video_audio_datachannel`
+    /// would both stay green through it. This is the check that
+    /// would not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_answers_as_dtls_client() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+            .await
+            .expect("bridge");
+
+        // As above: the answer is inspected, not handshaked, so no
+        // seed channel and no gathering wait.
+        let client = TestPeer::builder().build().await.expect("client peer");
+        let offer_sdp = client.create_offer().await.expect("offer");
+        let answer_sdp = bridge.accept_offer(offer_sdp).await.expect("accept_offer");
+
+        assert!(
+            answer_sdp.to_ascii_lowercase().contains("a=setup:active"),
+            "bridge should answer a=setup:active and so be the DTLS \
+             client; CONTROL_DC_STREAM_ID ({}) is only collision-free \
+             while the even in-band ids are ours to allocate:\n{}",
+            CONTROL_DC_STREAM_ID,
+            answer_sdp
+        );
+
+        client.close().await.expect("client close");
+        bridge.close().await.expect("bridge close");
+    }
+
     /// Smoke test: drive the video pump end-to-end against a real
     /// `H264Encoder` + `EncoderTask` fed by `SyntheticFrameSource`.
     /// We don't need a peer connection — `TrackLocalStaticRTP::write_rtp`
@@ -2612,7 +2686,7 @@ mod tests {
                 .expect("bridge");
 
             let client = TestPeer::builder()
-                .seed_data_channel()
+                .seed_control_channel()
                 .build()
                 .await
                 .expect("client peer");
@@ -2748,7 +2822,7 @@ mod tests {
         };
 
         let client = TestPeer::builder()
-            .seed_data_channel()
+            .seed_control_channel()
             .build()
             .await
             .expect("client peer");
@@ -2842,7 +2916,7 @@ mod tests {
             .expect("bridge");
 
         let client = TestPeer::builder()
-            .seed_data_channel()
+            .seed_control_channel()
             .build()
             .await
             .expect("client peer");
