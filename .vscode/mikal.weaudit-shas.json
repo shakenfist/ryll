@@ -21,14 +21,6 @@
       "sha": "faaea0d0597f8160dcb804a068f90383777f8525",
       "date": "2026-08-24"
     },
-    ".github/workflows/pr-address-comments.yml": {
-      "sha": "a6a11da6e24aebba1c7a802f68e9e185dde2eaaa",
-      "date": "2026-08-05"
-    },
-    ".github/workflows/pr-re-review.yml": {
-      "sha": "e905bbe211189632248bcfa616701330b41320d0",
-      "date": "2026-08-24"
-    },
     ".github/workflows/pr-retest.yml": {
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
@@ -289,10 +281,6 @@
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
     },
-    "tools/address-comments-with-claude.sh": {
-      "sha": "a9aec18507a5185098434f7fd5676510b06f79b3",
-      "date": "2026-08-02"
-    },
     "tools/build-ryll-wheel-in-container.sh": {
       "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
       "date": "2026-07-26"
@@ -323,10 +311,6 @@
     },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
-      "date": "2026-07-26"
-    },
-    "tools/render-review.py": {
-      "sha": "7a1b41fb41c9947bbedfed0faee4b3de28ee29db",
       "date": "2026-07-26"
     },
     "tools/review-tracking.sh": {

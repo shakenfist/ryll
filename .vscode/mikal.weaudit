@@ -216,10 +216,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/render-review.py",
-      "author": "mikal"
-    },
-    {
       "path": "tools/run-shellcheck.sh",
       "author": "mikal"
     },
@@ -288,10 +284,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/address-comments-with-claude.sh",
-      "author": "mikal"
-    },
-    {
       "path": "scripts/replay_draw_copy.py",
       "author": "mikal"
     },
@@ -317,10 +309,6 @@
     },
     {
       "path": ".github/workflows/export-repo-config.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/pr-address-comments.yml",
       "author": "mikal"
     },
     {
@@ -409,10 +397,6 @@
     },
     {
       "path": ".github/workflows/manual-build.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/pr-re-review.yml",
       "author": "mikal"
     },
     {
