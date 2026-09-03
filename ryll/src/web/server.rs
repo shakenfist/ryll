@@ -724,6 +724,55 @@ mod tests {
             "app.js should reference the reconnect button id: \
              missing"
         );
+        // The server writes control messages as bytes, and
+        // `binaryType` defaults to "blob", which `TextDecoder` cannot
+        // decode. Without this line Firefox discards every control
+        // message the server sends (ryll#348); Chromium's non-standard
+        // "arraybuffer" default hid it.
+        assert!(
+            body.contains("binaryType = 'arraybuffer'"),
+            "app.js should set the control channel binaryType to \
+             arraybuffer: missing"
+        );
+        // Hello handshake assertions (ryll#347). The first message
+        // after `onopen` can be dropped by webrtc-rs before the SCTP
+        // connected procedure dials the server's end of the channel,
+        // and nothing on the wire says so. A hello that is sent once
+        // and lost costs the viewer the mouse mode and the no-video
+        // notice for the whole session, so it has to be retried until
+        // the reply arrives.
+        assert!(
+            body.contains("sendHello"),
+            "app.js should drive the hello through sendHello() so it \
+             can be retried: missing"
+        );
+        assert!(
+            body.contains("HELLO_BACKOFFS_MS"),
+            "app.js should retry the hello on a backoff schedule: \
+             missing"
+        );
+        assert!(
+            body.contains("cancelHello"),
+            "app.js should stop retrying the hello once answered: \
+             missing"
+        );
+        // The reply is the only thing that ends the retries, so the
+        // cancel has to sit in the `mouse-mode` arm specifically --
+        // a cancel that only ran on close would retry for the life
+        // of the connection.
+        let mouse_mode_arm = body
+            .split("case 'mouse-mode':")
+            .nth(1)
+            .expect("app.js should handle the mouse-mode control message");
+        assert!(
+            mouse_mode_arm
+                .split("break;")
+                .next()
+                .expect("mouse-mode arm should end in a break")
+                .contains("cancelHello()"),
+            "app.js should cancel the hello retry when the server's \
+             mouse-mode reply arrives: missing from that arm"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
