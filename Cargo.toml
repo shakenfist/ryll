@@ -24,3 +24,17 @@ rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["Michael Still <mikal@stillhq.com>"]
 repository = "https://github.com/shakenfist/ryll"
+
+# Debug builds keep line tables but drop full DWARF variable info. The default
+# `debug = true` links complete debuginfo into every artifact, which put this
+# workspace's debug binaries at 625-757MB each. Cargo never garbage collects
+# superseded dependency-fingerprint hashes, so a checkout accumulates one such
+# copy per distinct build: four ryll checkouts on the dev box reached 51GB of
+# target/ that way, six stale `ryll-<hash>` binaries deep in one of them.
+#
+# Line tables still give file:line in panics, `RUST_BACKTRACE=1` and tracing
+# spans, which is what we actually read. If you need to inspect variables in
+# gdb or lldb, build that session with `RUSTFLAGS="-C debuginfo=2"` rather than
+# committing a change here. `profile.test` inherits this.
+[profile.dev]
+debug = "line-tables-only"
