@@ -508,7 +508,7 @@ mod tests {
         // `register_h264_is_redundant_with_default_codecs` in
         // shakenfist-spice-webrtc.
         let client = TestPeer::builder()
-            .seed_data_channel()
+            .seed_control_channel()
             .build()
             .await
             .expect("client peer");
@@ -598,7 +598,7 @@ mod tests {
         let router = build_router(state.clone());
 
         let client = TestPeer::builder()
-            .seed_data_channel()
+            .seed_control_channel()
             .build()
             .await
             .expect("client peer");

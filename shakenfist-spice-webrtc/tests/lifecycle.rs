@@ -44,7 +44,7 @@ async fn pc_close_signals_dead() {
     // Without it the SCTP association never opens and the handshake
     // stalls — see the loopback test for the full rationale.
     let client = TestPeer::builder()
-        .seed_data_channel()
+        .seed_control_channel()
         .build()
         .await
         .expect("client peer");

@@ -25,25 +25,20 @@ test-support = []
 # the sans-io `rtc` core below: a peer connection is built through
 # `PeerConnectionBuilder`, events arrive through one
 # `PeerConnectionEventHandler`, and datachannels and remote tracks are
-# polled rather than given callbacks. 0.20.2 specifically, not "0.20":
-# 0.20.0 has a driver hot-loop on a non-advancing timeout and 0.20.1
-# still schedules ICE checks in terminal states, both of which this
-# crate's tests and the server-side reaper walk straight into. Declared
-# as a floor rather than `=0.20.2` so patch updates still flow. See
-# docs/plans/PLAN-webrtc-0.20-upgrade.md.
-#
-# Still 0.20.2 even though docs/web-mode-internals.md describes
-# pre-0.20.4 stream-id assignment as broken: what 0.20.4 fixed is the
-# id picked for an *in-band* channel created before the DTLS role is
-# known, and the control channel no longer takes that path. Checked
-# rather than assumed — 0.20.2 and 0.20.3 both overwrite the
-# generated id with an explicit `negotiated` one
-# (`rtc-0.20.2/src/peer_connection/mod.rs:1888`) and pass the flag to
-# `DataChannel::dial`, which suppresses the DCEP open
-# (`rtc-0.20.2/src/data_channel/internal.rs:83`). Pinning the stream
-# id is what makes the floor a non-issue here, so there is nothing to
-# raise it for.
-webrtc = "0.20.2"
+# polled rather than given callbacks. 0.20.4 specifically, not "0.20":
+# 0.20.0 has a driver hot-loop on a non-advancing timeout, 0.20.1 still
+# schedules ICE checks in terminal states — both of which this crate's
+# tests and the server-side reaper walk straight into — and 0.20.4 is
+# the first release that honours `RTCDataChannelInit::negotiated`.
+# Before it, every datachannel created ahead of the DTLS handshake
+# landed on stream 1 regardless of the requested id, which puts the
+# bridge's control channel on a different SCTP stream from the
+# browser's and drops every control message in silence. The floor is
+# the only thing enforcing that, so it is a correctness contract, not a
+# lockfile detail: see `CONTROL_DC_STREAM_ID` in src/bridge.rs.
+# Declared as a floor rather than `=0.20.4` so patch updates still
+# flow. See docs/plans/PLAN-webrtc-0.20-upgrade.md.
+webrtc = "0.20.4"
 
 # The sans-io core `webrtc` is built on. A direct dependency because
 # `webrtc` deliberately does not re-export it, yet its types appear in
@@ -54,8 +49,9 @@ webrtc = "0.20.2"
 # version here guarantees by construction that the `Packet` we build is
 # the type `write_rtp` expects — the alignment-by-hand that issue #215
 # was about. Replaces the standalone `rtp` crate, an abandoned line
-# ending at 0.17.2 (Decision 2).
-rtc = "0.20.2"
+# ending at 0.17.2 (Decision 2). Tracks `webrtc`'s floor, including the
+# 0.20.4 datachannel fix described above.
+rtc = "0.20.4"
 
 # `webrtc::peer_connection::PeerConnectionEventHandler` is declared with
 # `#[async_trait::async_trait]`, and `webrtc` does not re-export the

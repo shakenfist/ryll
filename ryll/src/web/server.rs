@@ -489,6 +489,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{header, Method, Request as HttpRequest, StatusCode};
+    use shakenfist_spice_webrtc::{CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
     use tower::ServiceExt; // for `oneshot`
 
     fn router() -> (Router, String) {
@@ -649,8 +650,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn app_js_reads_token_from_url() {
+    /// Fetch `/static/app.js` from a freshly built router and return
+    /// its body. Shared by the tests below, which each assert about a
+    /// different property of the same served asset.
+    async fn fetch_app_js() -> String {
         let (router, token) = router();
         let req = HttpRequest::builder()
             .method(Method::GET)
@@ -662,7 +665,12 @@ mod tests {
         let body_bytes = axum::body::to_bytes(resp.into_body(), 256 * 1024)
             .await
             .unwrap();
-        let body = std::str::from_utf8(&body_bytes).unwrap();
+        std::str::from_utf8(&body_bytes).unwrap().to_owned()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_js_reads_token_from_url() {
+        let body = fetch_app_js().await;
         assert!(
             body.contains("URLSearchParams"),
             "app.js should read the token via URLSearchParams: missing"
@@ -671,35 +679,6 @@ mod tests {
             body.contains("createDataChannel"),
             "app.js should create a data channel before the offer: \
              missing"
-        );
-        // The control channel is negotiated out of band, so the label
-        // and stream id here are the only thing pairing app.js with
-        // the bridge. A drift is silent: no DCEP open is exchanged, so
-        // a mismatched id still brings the association up and still
-        // fires `onopen`, and every keystroke, pointer event and the
-        // hello handshake go nowhere while the UI reads "Connected".
-        // These assertions are what turns that into a test failure.
-        assert!(
-            body.contains(&format!(
-                "createDataChannel('{}'",
-                shakenfist_spice_webrtc::CONTROL_DC_LABEL
-            )),
-            "app.js should label the control channel '{}': missing",
-            shakenfist_spice_webrtc::CONTROL_DC_LABEL
-        );
-        assert!(
-            body.contains("negotiated: true"),
-            "app.js should negotiate the control channel out of band: \
-             missing"
-        );
-        assert!(
-            body.contains(&format!(
-                "id: {},",
-                shakenfist_spice_webrtc::CONTROL_DC_STREAM_ID
-            )),
-            "app.js should pin the control channel to SCTP stream {}: \
-             missing",
-            shakenfist_spice_webrtc::CONTROL_DC_STREAM_ID
         );
         assert!(
             body.contains("recvonly"),
@@ -772,6 +751,166 @@ mod tests {
                 .contains("cancelHello()"),
             "app.js should cancel the hello retry when the server's \
              mouse-mode reply arrives: missing from that arm"
+        );
+    }
+
+    /// The control channel is negotiated out of band, so the two ends
+    /// are paired by a stream id agreed in two languages and enforced
+    /// by neither. Every Rust test uses CONTROL_DC_STREAM_ID on *both*
+    /// ends, so a JS-side drift is invisible to all of them, and in
+    /// production it reappears as exactly the silent one-directional
+    /// failure this arrangement exists to prevent. This test is the
+    /// only thing standing between a JS edit and that failure; it is
+    /// cited by name in docs/web-mode-internals.md.
+    ///
+    /// Assert against the constants, never a literal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn app_js_pins_control_channel_pairing() {
+        let body = fetch_app_js().await;
+
+        // Normalise away everything a JS formatter is free to change,
+        // so that a failure here means the pairing contract broke and
+        // not that app.js was reflowed. A false failure whose message
+        // talks about the control channel costs this test the
+        // credibility it needs.
+        //
+        // Comments go first, so that a commented-out `negotiated:
+        // true` cannot satisfy an assertion below. Both kinds: `/* */`
+        // matters more than `//` does, because it is the one that can
+        // make this test lie. A block-commented copy of the call left
+        // above a live replacement would be the copy `split_once`
+        // found, and every assertion would then pass against dead
+        // code. Then *all* whitespace, not merely runs of it: that
+        // covers wrapping, indentation, the options collapsed onto one
+        // line, and `id : 0` alike. Then quote style, since `'control'`
+        // and `"control"` are the same string.
+        //
+        // Both strippers are naive: a `//` or a `/*` inside a string
+        // literal is cut as though it opened a comment, and because
+        // blocks are stripped first, a `/*` inside a *line* comment
+        // opens one too. That is deliberate. app.js has none of those
+        // today, and every one of them over-strips -- it loses real
+        // source, so the pattern below goes missing and an assertion
+        // *fails*. Neither naivety can make this test pass when it
+        // should not, which is the only direction that matters.
+        //
+        // The patterns below are therefore written without spaces, and
+        // the source quoted in a failure message is squashed.
+        let mut without_blocks = String::with_capacity(body.len());
+        let mut rest = body.as_str();
+        while let Some((before, after)) = rest.split_once("/*") {
+            without_blocks.push_str(before);
+            // An unterminated `/*` swallows the rest of the file,
+            // which fails the `createDataChannel` lookup below.
+            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
+        }
+        without_blocks.push_str(rest);
+        let js: String = without_blocks
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace('"', "'");
+
+        // Scoped to the createDataChannel call rather than the whole
+        // file: `negotiated: true` or `id: 0` loose in app.js would
+        // satisfy a bare `contains` while the channel itself said
+        // something else. The options object holds no nested braces,
+        // so its first `}` ends it.
+        //
+        // One call, not the first of several: `split_once` silently
+        // picks the earliest, so a second `createDataChannel('control'
+        // ...)` added later would be pinned by nobody while this test
+        // stayed green on the older one.
+        let open = format!("createDataChannel('{}',{{", CONTROL_DC_LABEL);
+        assert_eq!(
+            js.matches(&open).count(),
+            1,
+            "app.js should open the control channel exactly once with \
+             `{}` (CONTROL_DC_LABEL = {}); the assertions below pin \
+             only the first",
+            open,
+            CONTROL_DC_LABEL
+        );
+        let (call, after) = js
+            .split_once(&open)
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "app.js should open the control channel with \
+                     `{}` (CONTROL_DC_LABEL = {}): missing",
+                    open, CONTROL_DC_LABEL
+                )
+            });
+        // `call` is the option list with the whitespace gone, so its
+        // fields are exactly what splitting on `,` yields (a trailing
+        // comma just adds an empty one). Match a whole field rather
+        // than a substring: `contains("id:1")` is satisfied by
+        // `id: 10`, and a stale JS id that merely shares a prefix with
+        // a moved CONTROL_DC_STREAM_ID is precisely the silent
+        // one-directional break this test exists to catch.
+        let field = |want: &str| call.split(',').any(|f| f == want);
+        assert!(
+            field("negotiated:true"),
+            "app.js should negotiate the control channel out of band \
+             (negotiated: true), got: {}",
+            call
+        );
+        assert!(
+            field(&format!("id:{}", CONTROL_DC_STREAM_ID)),
+            "app.js should pin the control channel to \
+             CONTROL_DC_STREAM_ID ({}), got: {}",
+            CONTROL_DC_STREAM_ID,
+            call
+        );
+        // Out of band, each end configures reliability and ordering
+        // for itself. In band, DCEP carried them and the two ends
+        // agreed by protocol; now nothing makes them match but this.
+        // The bridge asks for `ordered: true, max_retransmits: None`,
+        // so app.js must too -- input events reordered between the
+        // browser and the guest would be a silent, hard-to-attribute
+        // failure of exactly the kind this test exists to catch.
+        assert!(
+            field("ordered:true"),
+            "app.js should keep the control channel ordered \
+             (ordered: true), matching the bridge, got: {}",
+            call
+        );
+        // `max_retransmits: None` is the other half of that contract,
+        // and its JS spelling is an *absent* option: either
+        // `maxRetransmits` or `maxPacketLifeTime` present at all makes
+        // the browser-to-server direction partially reliable, so input
+        // events would be dropped rather than merely reordered.
+        assert!(
+            !call.contains("maxRetransmits") && !call.contains("maxPacketLifeTime"),
+            "app.js should leave the control channel fully reliable, \
+             matching the bridge's max_retransmits: None -- neither \
+             maxRetransmits nor maxPacketLifeTime, got: {}",
+            call
+        );
+
+        // send_control writes binary frames and app.js decodes them
+        // synchronously, so the channel has to deliver ArrayBuffers.
+        // The W3C default is 'blob'; Chromium's non-standard
+        // 'arraybuffer' default means dropping this line still passes
+        // in Chromium and drops every server-to-browser message in
+        // Firefox, which is precisely the failure no test can see.
+        //
+        // Scoped to the region between the createDataChannel call and
+        // the handlers hung off the channel, for the same reason the
+        // options above are scoped to the call: over the whole file
+        // this matches a comment quoting the line, or the same
+        // assignment on a different channel entirely.
+        let setup = after
+            .split_once("dc.onopen")
+            .map_or(after, |(before_handlers, _)| before_handlers);
+        assert!(
+            setup.contains("dc.binaryType='arraybuffer'"),
+            "app.js should set the control channel binaryType to \
+             arraybuffer (dc.binaryType = 'arraybuffer') before \
+             hanging handlers off it, got: {}",
+            setup
         );
     }
 
