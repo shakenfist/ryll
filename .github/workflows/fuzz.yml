@@ -1,0 +1,202 @@
+# Nightly cargo-fuzz build-and-smoke run.
+#
+# This workflow's merge_group trigger was removed from ci.yml's merge
+# tier: four `l`-sized self-hosted runners requested at the moment a
+# merge group forms is the largest single ask ryll makes of a fleet
+# whose `l` pool is six workers wide across every repo, and when that
+# pool is starved the merge queue does not merely run slowly, it hits
+# the 360-minute `check_response_timeout_minutes` wall and evicts the
+# PR. That happened three times in eight days (shakenfist/ryll#329);
+# on the third the fuzz jobs waited 6h05m for a runner, passed, and
+# reported success twenty minutes after the queue had already given up
+# on the PR.
+#
+# What remains here is the nightly cron against develop, following the
+# same shape as supply-chain.yml: the check still runs, it just no
+# longer sits on the critical path to landing a change. The trade is
+# deliberate — a fuzz target that stops building is now caught within a
+# day rather than before merge. That is an acceptable trade for this
+# particular job because it is a build-and-doesn't-panic gate rather
+# than a real fuzz campaign (long-running coverage-guided fuzzing is
+# tracked in shakenfist/ryll#135), and because nothing else in the
+# merge tier depends on its result.
+#
+# Nobody watches a scheduled workflow, so a nightly failure has to
+# reach a human by some route other than a red check standing between
+# someone and their merge. GitHub's only notification for a failed
+# scheduled run is an email to whoever pushed last, which at 12:00 UTC
+# is nobody's inbox in particular. So the `report` job below files an
+# issue per failing target, and that -- not the colour of this run --
+# is the notification. This is the requirement the fleet-wide
+# criterion exists to enforce; see shakenfist/development's
+# docs/audits/fuzz-nightly-reporting.md, generalized from instar's
+# coverage-fuzz.yml.
+#
+# The fuzz crate is its own detached workspace (see
+# shakenfist-spice-protocol/fuzz/Cargo.toml's `[workspace]` table) so
+# it needs its own toolchain/cache/dependency install, independent of
+# ci.yml's `lint` and `build` jobs.
+
+name: Fuzz
+
+on:
+  schedule:
+    # Daily at 12:00 UTC. Deliberately outside the window where the
+    # merge queue is busiest (roughly 19:00-04:00 UTC), and clear of
+    # supply-chain.yml's Monday 09:00 slot, so the four `l` runners
+    # this asks for are not competing with a merge group for them.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    timeout-minutes: 90
+    # One job rather than a matrix leg per target. Every leg of the
+    # matrix this replaced spent 255 of its 340 seconds on
+    # `ensure-cache fuzz-devcontainer` -- the same image build, four
+    # times, on four separate runners, ahead of 78 seconds of work that
+    # actually differed. Sharing it costs wall-clock the nightly does
+    # not need (roughly 570s serial against 340s parallel) and returns
+    # the thing that is actually scarce, which is `l` runners.
+    #
+    # github.ref is a stable key here: a scheduled run and a
+    # workflow_dispatch on develop both report refs/heads/develop, so a
+    # manual run supersedes an in-flight nightly rather than queueing
+    # behind it.
+    concurrency:
+      group: ${{ github.workflow }}-fuzz-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # Must stay directly after checkout; see the action for why. Its
+      # own key prefix: the fuzz targets compile with the network up and
+      # the cache writable, so what this job saves must never become the
+      # read-only input to an isolated build.
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key-prefix: fuzz-cargo-cache
+
+      # First, because it is what builds the fuzz devcontainer every
+      # later step reuses. The fuzz crate is a detached workspace, so
+      # ci.yml's lint job `cargo fmt --all --check` does not reach it.
+      - name: Check fuzz formatting
+        run: make fuzz-fmt-check
+
+      # The target list is read from the workspace rather than written
+      # here: a new fuzz target should be fuzzed by the nightly because
+      # it exists, not because somebody remembered to add it to a
+      # workflow.
+      #
+      # Deliberately exits 0 whatever the targets do, recording each
+      # verdict as a marker file. Two later steps depend on having run:
+      # the artifact upload, which is how a log reaches a human when
+      # issue filing is the thing that broke, and the report job, which
+      # cannot file an issue about a step that aborted the job before
+      # writing its log. The loop continues past a failure for the same
+      # reason `fail-fast: false` was set on the matrix.
+      - name: Build and smoke-run the fuzz targets
+        run: |
+          mkdir -p fuzz-logs
+          shopt -s nullglob
+          TARGETS=()
+          for SRC in shakenfist-spice-protocol/fuzz/fuzz_targets/*.rs; do
+            TARGETS+=("$(basename "${SRC}" .rs)")
+          done
+
+          if [ "${#TARGETS[@]}" -eq 0 ]; then
+            echo "::error::no fuzz targets found"
+            exit 1
+          fi
+          echo "Fuzzing: ${TARGETS[*]}"
+
+          for TARGET in "${TARGETS[@]}"; do
+            if { make "fuzz-build-${TARGET}" && make "fuzz-smoke-${TARGET}" ; } \
+                > "fuzz-logs/${TARGET}.log" 2>&1; then
+              echo "${TARGET} built and smoke-ran cleanly"
+            else
+              echo "::warning::${TARGET} failed; see the log tail below"
+              tail -40 "fuzz-logs/${TARGET}.log"
+              touch "fuzz-logs/${TARGET}.failed"
+            fi
+          done
+
+      - name: Upload fuzz logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-logs
+          path: fuzz-logs/
+          retention-days: 30
+
+      # Last, so the job is red for a human scanning the Actions tab,
+      # but only after the logs have been uploaded for the report job to
+      # read. The report job runs on needs.fuzz.result, so this is what
+      # tells it there is something to report.
+      - name: Fail if any target failed
+        run: |
+          shopt -s nullglob
+          FAILED=(fuzz-logs/*.failed)
+          if [ "${#FAILED[@]}" -ne 0 ]; then
+            echo "::error::${#FAILED[@]} fuzz target(s) failed"
+            exit 1
+          fi
+
+  # Filing runs on the static runner because that is where the rest of
+  # this repository's `gh` calls run (release.yml's version-mismatch
+  # issue); the debian-12-docker image is not known to carry the CLI.
+  report:
+    name: Report fuzz failures
+    needs: [fuzz]
+    if: always() && needs.fuzz.result != 'success' && needs.fuzz.result != 'cancelled'
+    runs-on: [self-hosted, static]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: fuzz-logs
+          path: fuzz-logs
+
+      # A failure to report must not stop the loop: the other targets
+      # still have to be reported. Failures are counted and turned into
+      # a job failure at the end, so a nightly that could not tell
+      # anyone about a broken target is never silently green.
+      - name: File an issue per failing target
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          shopt -s nullglob
+          FAILURES=0
+          REPORT_FAILURES=0
+          for MARKER in fuzz-logs/*.failed; do
+            TARGET=$(basename "${MARKER}" .failed)
+            FAILURES=$((FAILURES + 1))
+            if ! tools/report-fuzz-failure.sh \
+                "${TARGET}" "fuzz-logs/${TARGET}.log"; then
+              echo "::warning::could not file an issue for ${TARGET}"
+              REPORT_FAILURES=$((REPORT_FAILURES + 1))
+            fi
+          done
+
+          {
+            echo "### Nightly fuzz"
+            echo ""
+            echo "- targets that failed: ${FAILURES}"
+            echo "- could not be reported: ${REPORT_FAILURES}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${REPORT_FAILURES}" -ne 0 ]; then
+            echo "::error::${REPORT_FAILURES} failure(s) could not be reported"
+            exit 1
+          fi

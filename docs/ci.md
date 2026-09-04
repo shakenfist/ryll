@@ -47,7 +47,6 @@ The **merge tier** runs on `merge_group` and gates `Can merge`:
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
-| `Fuzz (×4)` | self-hosted `l` | Build and smoke-run each `cargo-fuzz` target |
 | `Build (Linux aarch64)` | `ubuntu-24.04-arm` | Build, test, `--web` smokes, `.deb`, `.rpm` |
 | `Build (macOS aarch64)` | `macos-latest` | Build, test, tarball |
 | `Build (Windows x86_64)` | `windows-latest` | Build, test, zip (`--no-default-features`) |
@@ -56,6 +55,9 @@ The **merge tier** runs on `merge_group` and gates `Can merge`:
 In practice the smoke tier finishes in about ten minutes, paced
 by the Linux build, and the merge tier in about fifteen, paced
 by the Windows x86_64 build.
+
+Fuzzing is not a tier. It runs nightly from `fuzz.yml`; see
+[the nightly fuzz lane](#the-nightly-fuzz-lane) below.
 
 `workflow_dispatch` deliberately runs **both** tiers, which is
 what makes `@shakenfist-bot please retest` a full retest.
@@ -73,6 +75,84 @@ without an MSVC toolchain, because `cargo check` still runs
 build scripts and `aws-lc-sys` compiles vendored BoringSSL C for
 the target. See
 [PLAN-two-stage-ci.md](plans/PLAN-two-stage-ci.md).
+
+## The nightly fuzz lane
+
+`.github/workflows/fuzz.yml` builds and smoke-runs every
+`cargo-fuzz` target in `shakenfist-spice-protocol/fuzz` at
+12:00 UTC daily, and on `workflow_dispatch`. It is not part of
+either tier and gates nothing. The targets are read from
+`fuzz_targets/` rather than listed in the workflow, so a new one
+is fuzzed because it exists rather than because somebody
+remembered to add it.
+
+It is one job, not a matrix leg per target. Every leg of the
+matrix it replaced spent 255 of its 340 seconds on `ensure-cache
+fuzz-devcontainer` — the same image build, four times, on four
+separate runners, ahead of 78 seconds of work that actually
+differed. Sharing it trades wall-clock the nightly does not need
+(roughly 570s serial against 340s parallel) for the thing that
+is actually scarce, which is `l` runners.
+
+It used to be the merge tier's other half, running on
+`merge_group` beside the cross-platform builds. That asked the
+shared `l` pool for four runners at the moment a merge group
+formed — the largest single request ryll makes of a pool six
+workers wide across every repository — and when the pool was
+starved the queue did not merely run slowly. GitHub's
+`check_response_timeout_minutes` caps at 360, it is a wall clock
+from when the merge group forms, and it does not distinguish a
+job that is running slowly from one that has not been given a
+runner. Three times in eight days
+([#329](https://github.com/shakenfist/ryll/issues/329)) the fuzz
+jobs waited out the full six hours and the pull request was
+evicted from the queue. On the third occasion they got runners
+and passed twenty minutes *after* the eviction, so the merge
+group's run was entirely green and the PR had silently failed to
+merge.
+
+The trade is deliberate: a fuzz target that stops building is
+now caught within a day rather than before the change lands.
+That is acceptable here because this is a build-and-doesn't-panic
+gate rather than a real fuzz campaign — long-running
+coverage-guided fuzzing is [#135](https://github.com/shakenfist/ryll/issues/135) —
+and because nothing else in the merge tier depended on its result.
+
+### Failures are issues, not a red workflow
+
+Nobody reads a scheduled workflow's result. A failing pull
+request check stands between someone and their merge; a failing
+nightly is a mark on the Actions tab, and GitHub's only
+notification for it is an email to whoever pushed last, which at
+12:00 UTC is nobody's inbox in particular.
+
+So the `report` job files a GitHub issue per failing target,
+through `tools/report-fuzz-failure.sh`, and *that* is the
+notification. Four details in the arrangement are load-bearing:
+
+- The fuzzing step exits 0 whatever the target does, recording
+  the verdict as a marker file. A step that aborted the job would
+  take the log upload and the report job with it.
+- The log is uploaded before anything fails, because when issue
+  filing is the thing that broke, the artifact is how the failure
+  reaches a human.
+- Reporting runs on the static runner, where the rest of this
+  repository's `gh` calls run — `release.yml`'s version-mismatch
+  issue is the precedent. The `debian-12-docker` image is not
+  known to carry the CLI.
+- A failure to report is counted rather than thrown, and fails
+  the job at the end. One target nobody could file about must not
+  stop the rest being filed.
+
+Recurrences comment on the open issue for that target rather
+than filing a duplicate: a target that stops compiling stays
+broken until someone fixes it, and without dedup the nightly
+would file one issue per target per night.
+
+This shape is the fleet-wide standard, generalized from instar's
+`coverage-fuzz.yml`; the criterion is
+[fuzz-nightly-reporting](https://github.com/shakenfist/development/blob/main/docs/audits/fuzz-nightly-reporting.md)
+in shakenfist/development.
 
 ## The three gates
 
@@ -369,8 +449,8 @@ build-script dropper (reported as rustsec/advisory-db#3161; no
 into a loud build failure rather than a silent compromise.
 
 Three targets still compile with the network up, and both of the
-lanes they serve are real: `fuzz` runs on every merge-group entry
-and `publish-crates` on every release.
+lanes they serve are real: `fuzz` runs nightly and
+`publish-crates` on every release.
 
 - `fuzz-build-%` and `fuzz-smoke-%` build the detached fuzz
   workspace (see `shakenfist-spice-protocol/fuzz/Cargo.toml`'s

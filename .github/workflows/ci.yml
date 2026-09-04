@@ -2,12 +2,15 @@ name: CI
 
 # CI runs in two tiers. The smoke tier (lint, build-linux, and the
 # supply-chain scanners) runs on pull_request and gates the "Can
-# enqueue" status check. The merge tier (fuzz and the GitHub-hosted
-# build matrix) runs on merge_group and gates "Can merge", so the
-# expensive cross-platform jobs only run against the exact commit that
-# is about to land. workflow_dispatch deliberately runs both tiers, so
+# enqueue" status check. The merge tier (the GitHub-hosted build
+# matrix) runs on merge_group and gates "Can merge", so the expensive
+# cross-platform jobs only run against the exact commit that is about
+# to land. workflow_dispatch deliberately runs both tiers, so
 # pr-retest.yml's `gh workflow run ci.yml` stays a full retest and the
-# merge tier can be exercised on a branch.
+# merge tier can be exercised on a branch. The cargo-fuzz matrix is
+# not a tier of this workflow at all any more -- it runs nightly from
+# fuzz.yml, which is also where `gh workflow run fuzz.yml` exercises
+# it on demand.
 #
 # Changes that cannot affect the build -- documentation under docs/,
 # weaudit annotations and the rendered REVIEWS.md -- are skipped by the
@@ -373,75 +376,16 @@ jobs:
       - name: Lint agent context
         run: pre-commit run skillsaw --all-files
 
-  # Merge tier: the two jobs below run on merge_group (and on
-  # workflow_dispatch) and gate "Can merge". They are the expensive
-  # ones, so they run against the commit that is actually landing
-  # rather than on every push to a PR.
-
-  # Builds the cargo-fuzz targets in shakenfist-spice-protocol/fuzz and
-  # smoke-runs each for a few seconds. This is a build-and-doesn't-panic
-  # gate, not a real fuzz campaign -- long-running coverage-guided fuzzing
-  # is tracked separately in shakenfist/ryll#135. The fuzz crate is its own
-  # detached workspace (see fuzz/Cargo.toml's `[workspace]` table) so it
-  # needs its own toolchain/cache/dependency install, independent of the
-  # `lint` and `build` jobs above.
-  fuzz:
-    name: Fuzz (${{ matrix.target }})
-    runs-on: [self-hosted, vm, debian-12-docker, l]
-    timeout-minutes: 90
-    needs: [check_paths]
-    if: >-
-      (github.event_name == 'merge_group'
-       || github.event_name == 'workflow_dispatch')
-      && needs.check_paths.outputs.code_changed != 'false'
-    # github.ref is the right key on every event except merge_group,
-    # where it is the per-attempt queue branch
-    # gh-readonly-queue/develop/pr-<N>-<SHA> and GitHub mints a fresh
-    # SHA every time it rebuilds the group -- which it does on every
-    # push to develop. Keyed on that, every rebuild lands in a group of
-    # its own, cancel-in-progress never matches, and superseded merge
-    # groups run to completion holding runners the whole fleet shares.
-    # See shakenfist/kerbside#284 and shakenfist/development
-    # audits/merge-group-cancellation.md.
-    #
-    # Cancelling is safe because this queue is serial
-    # (max_entries_to_build: 1), so any other in-flight merge_group run
-    # is by definition superseded and its queue branch already
-    # abandoned. The merge_group- prefix keeps a queue run from sharing
-    # a group with a workflow_dispatch run on develop, whose github.ref
-    # is the same string.
-    concurrency:
-      group: >-
-        ${{ github.workflow }}-fuzz-${{ matrix.target }}-${{
-        github.event_name == 'merge_group'
-        && format('merge_group-{0}', github.event.merge_group.base_ref)
-        || github.ref }}
-      cancel-in-progress: true
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [fuzz_link_mess_parse, fuzz_link_reply_parse, fuzz_decrypt_password, fuzz_parse_host_subject]
-    steps:
-      - uses: actions/checkout@v7
-
-      # Must stay directly after checkout; see the action for why. Its
-      # own key prefix: the fuzz targets compile with the network up and
-      # the cache writable, so what this job saves must never become the
-      # read-only input to an isolated build.
-      - uses: ./.github/actions/cargo-cache
-        with:
-          key-prefix: fuzz-cargo-cache
-
-      # The fuzz crate is a detached workspace, so the lint job's
-      # `cargo fmt --all --check` does not reach it. Format-check it here.
-      - name: Check fuzz formatting
-        run: make fuzz-fmt-check
-
-      - name: Build fuzz target
-        run: make fuzz-build-${{ matrix.target }}
-
-      - name: Smoke-run fuzz target
-        run: make fuzz-smoke-${{ matrix.target }}
+  # Merge tier: the job below runs on merge_group (and on
+  # workflow_dispatch) and gates "Can merge". It is the expensive one,
+  # so it runs against the commit that is actually landing rather than
+  # on every push to a PR.
+  #
+  # The cargo-fuzz matrix used to live here too. It moved to a nightly
+  # cron in fuzz.yml because asking the shared `l` pool for four
+  # runners at merge-group time was evicting PRs from the queue on the
+  # 360-minute check timeout -- see that workflow's header and
+  # shakenfist/ryll#329.
 
   # These platforms stay on GitHub-hosted runners: we own no macOS,
   # Windows, or aarch64 Linux hardware, and this is a public
@@ -671,7 +615,6 @@ jobs:
     name: "Can merge"
     needs:
       - check_paths
-      - fuzz
       - build
     if: always() && github.event_name == 'merge_group'
     permissions:
