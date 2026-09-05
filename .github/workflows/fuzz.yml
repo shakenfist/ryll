@@ -133,17 +133,42 @@ jobs:
       # reason `fail-fast: false` was set on the matrix.
       - name: Build and smoke-run the fuzz targets
         run: |
+          MANIFEST=shakenfist-spice-protocol/fuzz/Cargo.toml
+
           mapfile -t TARGETS < <(
             awk '/^\[\[bin\]\]/ { in_bin = 1; next }
                  /^\[/          { in_bin = 0 }
                  in_bin && $1 == "name" { gsub(/"/, "", $3); print $3 }' \
-              shakenfist-spice-protocol/fuzz/Cargo.toml
+              "${MANIFEST}"
           )
 
           if [ "${#TARGETS[@]}" -eq 0 ]; then
             echo "::error::no fuzz targets found"
             exit 1
           fi
+
+          # The awk above is not a TOML parser. It wants `[[bin]]` at
+          # column 0 and `name` and `"..."` as separate fields, and
+          # TOML permits valid spellings that breaks on -- `name="x"`
+          # without the spaces is the practical one, and cargo fuzz
+          # accepts it. A target quietly falling out of the nightly is
+          # the exact silent failure this lane exists to prevent, and
+          # the zero-target guard above only catches losing *every*
+          # target. So count the tables independently and insist the
+          # two agree; a mismatch means the manifest grew a spelling
+          # this extraction cannot see, which is a workflow bug to fix
+          # rather than a nightly to quietly under-run.
+          #
+          # The count tolerates leading whitespace that the awk pattern
+          # does not, deliberately: a guard blind in the same places as
+          # the thing it guards would agree with it and say nothing.
+          TABLES=$(grep -cE '^[[:space:]]*\[\[bin\]\]' "${MANIFEST}")
+          if [ "${#TARGETS[@]}" -ne "${TABLES}" ]; then
+            echo "::error::${MANIFEST} has ${TABLES} [[bin]] table(s) but" \
+              "only ${#TARGETS[@]} name(s) parsed: ${TARGETS[*]}"
+            exit 1
+          fi
+
           echo "Fuzzing: ${TARGETS[*]}"
 
           for TARGET in "${TARGETS[@]}"; do
@@ -228,16 +253,34 @@ jobs:
             fi
           done
 
-          # No markers, but this job only runs when the fuzz job did
-          # not succeed -- so it failed before the target loop, in the
-          # devcontainer build, the format check, the cargo cache or
-          # checkout. Without this branch the loop above would run
-          # zero times, report "targets that failed: 0" and exit 0,
-          # leaving a red nightly that told nobody anything: exactly
-          # the hole this lane was built to close.
+          # No markers, and two quite different things produce that.
+          # The fuzz job may have failed before the target loop -- in
+          # the devcontainer build, the format check, the cargo cache
+          # or checkout -- or the artifact may simply not have arrived,
+          # because the download above is continue-on-error and the
+          # upload can be cut short by the job's timeout-minutes.
+          # Without this branch the loop above would run zero times,
+          # report "targets that failed: 0" and exit 0, leaving a red
+          # nightly that told nobody anything: exactly the hole this
+          # lane was built to close.
+          #
+          # run-info.txt tells the two apart. The fuzz job writes it
+          # before the first step that can fail, so its presence means
+          # the artifact round-tripped and the job really did die
+          # before any target; its absence means the logs never got
+          # here and the fuzz job's own failure is still unread. The
+          # two modes carry different titles, so a run of missing
+          # artifacts cannot dedup on top of a genuine early failure
+          # and bury it.
           if [ "${FAILURES}" -eq 0 ]; then
-            echo "::warning::no target markers; the run failed earlier"
-            if ! tools/report-fuzz-failure.sh --run-failure; then
+            if [ -f fuzz-logs/run-info.txt ]; then
+              echo "::warning::no target markers; the run failed earlier"
+              REPORT_MODE=--run-failure
+            else
+              echo "::warning::no fuzz-logs artifact; nothing to read"
+              REPORT_MODE=--no-artifact
+            fi
+            if ! tools/report-fuzz-failure.sh "${REPORT_MODE}"; then
               echo "::warning::could not file an issue for the run"
               REPORT_FAILURES=$((REPORT_FAILURES + 1))
             fi
@@ -248,7 +291,11 @@ jobs:
             echo ""
             echo "- targets that failed: ${FAILURES}"
             if [ "${FAILURES}" -eq 0 ]; then
-              echo "- the run failed before reaching any target"
+              if [ -f fuzz-logs/run-info.txt ]; then
+                echo "- the run failed before reaching any target"
+              else
+                echo "- the fuzz-logs artifact did not arrive"
+              fi
             fi
             echo "- could not be reported: ${REPORT_FAILURES}"
           } >> "$GITHUB_STEP_SUMMARY"

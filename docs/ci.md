@@ -39,7 +39,7 @@ enqueue` status check:
 | `cargo audit` | self-hosted `s` | RustSec advisory check |
 | `cargo deny` | self-hosted `s` | Licence, ban, and advisory policy (`deny.toml`) |
 | `gitleaks` | self-hosted `s` | Secret scanning over full history |
-| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh` |
+| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh` and `tools/test-report-fuzz-failure.sh` |
 | `bidi and zero-width` | self-hosted `s` | `tools/check-bidi.sh` |
 | `skillsaw` | self-hosted `s` | `pre-commit run skillsaw` over the agent context |
 
@@ -89,6 +89,17 @@ glob over `fuzz_targets/`, because it is what `cargo fuzz build
 <name>` itself resolves against: a glob would pick up a helper
 module dropped in the directory, and would miss a `[[bin]]` whose
 `path` points elsewhere.
+
+The extraction is an `awk` pattern, not a TOML parser, so it can
+be shown valid TOML it does not understand — `name="x"` without
+the spaces is the practical one, and `cargo fuzz` accepts it. A
+target quietly falling out of the nightly is the same silence the
+rest of this lane is built to close, and the zero-target guard
+only catches losing *every* target, so the step counts `[[bin]]`
+tables independently and fails if that count and the number of
+names parsed disagree. The count deliberately tolerates leading
+whitespace the parser does not: a guard blind in the same places
+as the thing it guards would agree with it and say nothing.
 
 It is one job, not a matrix leg per target. Every leg of the
 matrix it replaced spent 255 of its 340 seconds on `ensure-cache
@@ -162,11 +173,20 @@ notification. Six details in the arrangement are load-bearing:
   artifact is a hard error that would take the report job — and
   with it the whole notification — down with the fuzz job.
 - The report job files an issue when there are *no* markers at
-  all, via `report-fuzz-failure.sh --run-failure`. It only runs
-  when the fuzz job did not succeed, so zero markers means the
-  run failed before it reached the targets. Without that branch
-  the per-target loop would run zero times and the report job
-  would exit 0, which is the same silence in a different place.
+  all. It only runs when the fuzz job did not succeed, so zero
+  markers is always a failure worth hearing about; without that
+  branch the per-target loop would run zero times and the report
+  job would exit 0, which is the same silence in a different
+  place. Two quite different things produce zero markers, and
+  `fuzz-logs/run-info.txt` — written before the first step that
+  can fail — tells them apart. Present, the artifact
+  round-tripped and the job really did die before any target:
+  `--run-failure`. Absent, the logs never arrived at all and the
+  fuzz job's own failure is still unread: `--no-artifact`. They
+  are separate modes because they are different bugs with
+  different first moves, and because they carry separate titles a
+  spell of missing artifacts cannot dedup on top of a genuine
+  early failure and bury it.
 - Reporting runs on the static runner, where the rest of this
   repository's `gh` calls run — `release.yml`'s version-mismatch
   issue is the precedent. The `debian-12-docker` image is not
@@ -187,11 +207,23 @@ The reporter is the only channel this lane has, so its failure
 mode is silence — and silence is invisible until a fuzz target
 happens to break. `tools/test-report-fuzz-failure.sh` pins its
 behaviour against that: the excerpt bounds, the UTF-8 and NUL
-scrubbing, the markdown fence, the `--run-failure` body and the
-argument contract, all through `--dry-run` so it needs no network
-and no `GH_TOKEN`. It runs in pre-commit and in `ci.yml`'s
-`shellcheck` job, beside the audit-range test that exists for the
-same reason.
+scrubbing, the markdown fence, the `--run-failure` and
+`--no-artifact` bodies, and the argument contract, all through
+`--dry-run` so it needs no network and no `GH_TOKEN`.
+
+Dedup is covered too, and that part cannot go through `--dry-run`
+— a dry run returns before the reporter talks to GitHub at all,
+which would leave the search qualifier, the `--json` field set
+and the jq exact-title match untested. Those are the pieces a
+`gh` or API change breaks *quietly*: a lookup that starts
+returning nothing does not error, it just files a fresh issue
+every night, which reads as noise rather than as the reporter
+being broken. So the reporter takes its `gh` command from `$GH`
+and the test stubs it, driving the recurrence, first-failure,
+near-miss-title and broken-lookup paths against canned responses.
+
+It runs in pre-commit and in `ci.yml`'s `shellcheck` job, beside
+the audit-range test that exists for the same reason.
 
 This shape is the fleet-wide standard, generalized from instar's
 `coverage-fuzz.yml`; the criterion is
