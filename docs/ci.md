@@ -81,10 +81,14 @@ the target. See
 `.github/workflows/fuzz.yml` builds and smoke-runs every
 `cargo-fuzz` target in `shakenfist-spice-protocol/fuzz` at
 12:00 UTC daily, and on `workflow_dispatch`. It is not part of
-either tier and gates nothing. The targets are read from
-`fuzz_targets/` rather than listed in the workflow, so a new one
-is fuzzed because it exists rather than because somebody
-remembered to add it.
+either tier and gates nothing. The targets are read from the
+`[[bin]]` tables in `fuzz/Cargo.toml` rather than listed in the
+workflow, so a new one is fuzzed because it exists rather than
+because somebody remembered to add it. That manifest and not a
+glob over `fuzz_targets/`, because it is what `cargo fuzz build
+<name>` itself resolves against: a glob would pick up a helper
+module dropped in the directory, and would miss a `[[bin]]` whose
+`path` points elsewhere.
 
 It is one job, not a matrix leg per target. Every leg of the
 matrix it replaced spent 255 of its 340 seconds on `ensure-cache
@@ -111,6 +115,20 @@ and passed twenty minutes *after* the eviction, so the merge
 group's run was entirely green and the PR had silently failed to
 merge.
 
+The fuzz crate's format check came along with them, and it is
+worth saying why it did not stay behind in the smoke tier
+instead. The fuzz crate is a detached workspace, so `cargo fmt
+--all --check` in the `lint` job does not reach it, and a format
+check is otherwise exactly the sort of cheap, deliver-it-early
+job the smoke tier is for. It is not cheap here: `make
+fuzz-fmt-check` depends on `ensure-cache fuzz-devcontainer`,
+which is 255 of the 340 seconds a fuzz leg used to take, and it
+needs an `l` runner to do it. Paying that on every push to every
+pull request would spend more of the scarce pool than moving the
+fuzz jobs off the merge queue gives back, so formatting drift in
+`shakenfist-spice-protocol/fuzz` is caught by the nightly along
+with everything else.
+
 The trade is deliberate: a fuzz target that stops building is
 now caught within a day rather than before the change lands.
 That is acceptable here because this is a build-and-doesn't-panic
@@ -128,7 +146,7 @@ notification for it is an email to whoever pushed last, which at
 
 So the `report` job files a GitHub issue per failing target,
 through `tools/report-fuzz-failure.sh`, and *that* is the
-notification. Four details in the arrangement are load-bearing:
+notification. Six details in the arrangement are load-bearing:
 
 - The fuzzing step exits 0 whatever the target does, recording
   the verdict as a marker file. A step that aborted the job would
@@ -136,6 +154,19 @@ notification. Four details in the arrangement are load-bearing:
 - The log is uploaded before anything fails, because when issue
   filing is the thing that broke, the artifact is how the failure
   reaches a human.
+- `fuzz-logs/` is created in a step of its own, before the first
+  step that can fail, and the report job's `download-artifact` is
+  `continue-on-error`. A job that died in the devcontainer build
+  or the format check writes no marker and no log; an upload of
+  an empty path creates no artifact, and a download of a missing
+  artifact is a hard error that would take the report job — and
+  with it the whole notification — down with the fuzz job.
+- The report job files an issue when there are *no* markers at
+  all, via `report-fuzz-failure.sh --run-failure`. It only runs
+  when the fuzz job did not succeed, so zero markers means the
+  run failed before it reached the targets. Without that branch
+  the per-target loop would run zero times and the report job
+  would exit 0, which is the same silence in a different place.
 - Reporting runs on the static runner, where the rest of this
   repository's `gh` calls run — `release.yml`'s version-mismatch
   issue is the precedent. The `debian-12-docker` image is not
@@ -147,7 +178,20 @@ notification. Four details in the arrangement are load-bearing:
 Recurrences comment on the open issue for that target rather
 than filing a duplicate: a target that stops compiling stays
 broken until someone fixes it, and without dedup the nightly
-would file one issue per target per night.
+would file one issue per target per night. The dedup lookup
+matches on issue title alone and deliberately not on the `bug`
+label the reporter applies, because a label stripped during
+triage would silently switch dedup back off.
+
+The reporter is the only channel this lane has, so its failure
+mode is silence — and silence is invisible until a fuzz target
+happens to break. `tools/test-report-fuzz-failure.sh` pins its
+behaviour against that: the excerpt bounds, the UTF-8 and NUL
+scrubbing, the markdown fence, the `--run-failure` body and the
+argument contract, all through `--dry-run` so it needs no network
+and no `GH_TOKEN`. It runs in pre-commit and in `ci.yml`'s
+`shellcheck` job, beside the audit-range test that exists for the
+same reason.
 
 This shape is the fleet-wide standard, generalized from instar's
 `coverage-fuzz.yml`; the criterion is
@@ -349,6 +393,7 @@ consistency audit.
 | `release.yml` | Build and publish release artifacts |
 | `codeql-analysis.yml` | CodeQL security scanning |
 | `supply-chain.yml` | Weekly advisory drift against develop (cargo-audit, cargo-deny); the PR-time scanners live in `ci.yml` |
+| `fuzz.yml` | Nightly `cargo-fuzz` build and smoke run against develop; failures filed as issues |
 | `renovate.yml` | Automated dependency updates (hourly) |
 | `export-repo-config.yml` | Daily repository configuration export |
 | `pr-re-review.yml` | Bot-triggered PR re-review (`@shakenfist-bot please re-review`) |

@@ -82,16 +82,47 @@ jobs:
         with:
           key-prefix: fuzz-cargo-cache
 
-      # First, because it is what builds the fuzz devcontainer every
-      # later step reuses. The fuzz crate is a detached workspace, so
-      # ci.yml's lint job `cargo fmt --all --check` does not reach it.
+      # Before the first step that can fail, so the artifact the
+      # report job downloads always exists. A job that dies in the
+      # devcontainer build or `make fuzz-fmt-check` never reaches the
+      # loop below and so writes no marker and no log; upload-artifact
+      # on an empty path creates no artifact at all, and
+      # download-artifact on a missing artifact is a hard error, which
+      # would take out the report job and with it the only
+      # notification this lane has.
+      - name: Prepare the log directory
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p fuzz-logs
+          printf 'run: %s\ncommit: %s\n' "${RUN_URL}" "${GITHUB_SHA}" \
+            > fuzz-logs/run-info.txt
+
+      # First of the real steps, because it is what builds the fuzz
+      # devcontainer every later step reuses. The fuzz crate is a
+      # detached workspace, so ci.yml's lint job `cargo fmt --all
+      # --check` does not reach it.
+      #
+      # It stays here rather than in ci.yml's smoke tier -- where a
+      # format check would otherwise belong, since it is cheap and its
+      # findings are best delivered before merge -- because it is not
+      # cheap here. `make fuzz-fmt-check` depends on
+      # `ensure-cache fuzz-devcontainer`, which is 255 of the 340
+      # seconds a fuzz leg used to take, and it needs an `l` runner to
+      # do it. Putting that on every push to every PR spends more of
+      # the scarce pool than this whole change gives back.
       - name: Check fuzz formatting
         run: make fuzz-fmt-check
 
       # The target list is read from the workspace rather than written
       # here: a new fuzz target should be fuzzed by the nightly because
       # it exists, not because somebody remembered to add it to a
-      # workflow.
+      # workflow. The `[[bin]]` tables in fuzz/Cargo.toml are the
+      # source rather than a glob over fuzz_targets/, because that
+      # manifest is what `cargo fuzz build <name>` itself resolves
+      # against: a glob would pick up a helper module dropped in the
+      # directory and would miss a `[[bin]]` whose path points
+      # elsewhere.
       #
       # Deliberately exits 0 whatever the targets do, recording each
       # verdict as a marker file. Two later steps depend on having run:
@@ -102,12 +133,12 @@ jobs:
       # reason `fail-fast: false` was set on the matrix.
       - name: Build and smoke-run the fuzz targets
         run: |
-          mkdir -p fuzz-logs
-          shopt -s nullglob
-          TARGETS=()
-          for SRC in shakenfist-spice-protocol/fuzz/fuzz_targets/*.rs; do
-            TARGETS+=("$(basename "${SRC}" .rs)")
-          done
+          mapfile -t TARGETS < <(
+            awk '/^\[\[bin\]\]/ { in_bin = 1; next }
+                 /^\[/          { in_bin = 0 }
+                 in_bin && $1 == "name" { gsub(/"/, "", $3); print $3 }' \
+              shakenfist-spice-protocol/fuzz/Cargo.toml
+          )
 
           if [ "${#TARGETS[@]}" -eq 0 ]; then
             echo "::error::no fuzz targets found"
@@ -162,7 +193,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Tolerant of a missing artifact rather than fatal. The fuzz job
+      # creates fuzz-logs/ before anything that can fail, so normally
+      # there is one; but a job that died in checkout never got that
+      # far, and this job exists precisely to speak for a fuzz job that
+      # could not speak for itself. The zero-marker branch below is
+      # what turns "no artifact" into a filed issue rather than a
+      # green report job.
       - uses: actions/download-artifact@v8
+        continue-on-error: true
         with:
           name: fuzz-logs
           path: fuzz-logs
@@ -189,10 +228,28 @@ jobs:
             fi
           done
 
+          # No markers, but this job only runs when the fuzz job did
+          # not succeed -- so it failed before the target loop, in the
+          # devcontainer build, the format check, the cargo cache or
+          # checkout. Without this branch the loop above would run
+          # zero times, report "targets that failed: 0" and exit 0,
+          # leaving a red nightly that told nobody anything: exactly
+          # the hole this lane was built to close.
+          if [ "${FAILURES}" -eq 0 ]; then
+            echo "::warning::no target markers; the run failed earlier"
+            if ! tools/report-fuzz-failure.sh --run-failure; then
+              echo "::warning::could not file an issue for the run"
+              REPORT_FAILURES=$((REPORT_FAILURES + 1))
+            fi
+          fi
+
           {
             echo "### Nightly fuzz"
             echo ""
             echo "- targets that failed: ${FAILURES}"
+            if [ "${FAILURES}" -eq 0 ]; then
+              echo "- the run failed before reaching any target"
+            fi
             echo "- could not be reported: ${REPORT_FAILURES}"
           } >> "$GITHUB_STEP_SUMMARY"
 

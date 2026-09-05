@@ -311,6 +311,13 @@ jobs:
       - name: Test the audit range helper
         run: ./tools/audit/test-audit-range.sh
 
+      # And the nightly fuzz reporter, for the same reason: it is the
+      # only notification fuzz.yml has, and a reporter that has
+      # stopped working looks exactly like a nightly with nothing to
+      # report. --dry-run only, so no network and no GH_TOKEN.
+      - name: Test the nightly fuzz reporter
+        run: ./tools/test-report-fuzz-failure.sh
+
   bidi-check:
     name: bidi and zero-width
     runs-on: [self-hosted, vm, debian-12, s]
