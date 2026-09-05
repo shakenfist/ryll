@@ -45,6 +45,17 @@ repos:
         pass_filenames: false
         files: ^tools/audit/
 
+      # Same argument as the audit range above: the nightly fuzz
+      # reporter is the only notification that lane has, so if it
+      # breaks the breakage is silent until a fuzz target happens to
+      # fail. --dry-run only; no network, no gh, no GH_TOKEN.
+      - id: fuzz-reporter-test
+        name: nightly fuzz reporter smoke test
+        entry: ./tools/test-report-fuzz-failure.sh
+        language: script
+        pass_filenames: false
+        files: ^tools/(test-)?report-fuzz-failure
+
   - repo: local
     hooks:
       - id: bidi-check
