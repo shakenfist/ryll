@@ -39,7 +39,7 @@ enqueue` status check:
 | `cargo audit` | self-hosted `s` | RustSec advisory check |
 | `cargo deny` | self-hosted `s` | Licence, ban, and advisory policy (`deny.toml`) |
 | `gitleaks` | self-hosted `s` | Secret scanning over full history |
-| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh` and `tools/test-report-fuzz-failure.sh` |
+| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh`, `tools/test-report-fuzz-failure.sh` and `tools/test-fuzz-targets.sh` |
 | `bidi and zero-width` | self-hosted `s` | `tools/check-bidi.sh` |
 | `skillsaw` | self-hosted `s` | `pre-commit run skillsaw` over the agent context |
 
@@ -90,16 +90,29 @@ glob over `fuzz_targets/`, because it is what `cargo fuzz build
 module dropped in the directory, and would miss a `[[bin]]` whose
 `path` points elsewhere.
 
+The extraction lives in `tools/fuzz-targets.sh` rather than
+inline in the workflow. It decides which targets get fuzzed at
+all, which makes its failure mode silence — a target it drops is
+never built, never fails, and so is never reported — and nothing
+in this repository lints or tests a workflow `run:` block, since
+`tools/run-shellcheck.sh` globs `scripts/` and `tools/` and no
+job invokes `actionlint`. As a script it gets both, the second
+through `tools/test-fuzz-targets.sh`.
+
 The extraction is an `awk` pattern, not a TOML parser, so it can
 be shown valid TOML it does not understand — `name="x"` without
-the spaces is the practical one, and `cargo fuzz` accepts it. A
-target quietly falling out of the nightly is the same silence the
-rest of this lane is built to close, and the zero-target guard
-only catches losing *every* target, so the step counts `[[bin]]`
-tables independently and fails if that count and the number of
-names parsed disagree. The count deliberately tolerates leading
-whitespace the parser does not: a guard blind in the same places
-as the thing it guards would agree with it and say nothing.
+the spaces is the practical one, and `cargo fuzz` accepts it. The
+zero-target guard only catches losing *every* target, so the
+script counts `[[bin]]` tables independently and fails if that
+count and the number of names parsed disagree. The count
+deliberately tolerates leading whitespace the parser does not: a
+guard blind in the same places as the thing it guards would agree
+with it and say nothing. The name is taken as the whole remainder
+of its line rather than as `awk`'s third field, so a name
+containing a space arrives whole and is rejected by the
+`[A-Za-z0-9_-]` check; reading the third field would hand back
+its first word, which looks like a clean shorter name, agrees
+with the table count, and fuzzes a target that does not exist.
 
 It is one job, not a matrix leg per target. Every leg of the
 matrix it replaced spent 255 of its 340 seconds on `ensure-cache
@@ -140,6 +153,25 @@ fuzz jobs off the merge queue gives back, so formatting drift in
 `shakenfist-spice-protocol/fuzz` is caught by the nightly along
 with everything else.
 
+Within the nightly the format check is tolerant rather than
+fatal, and reports as its own issue through the reporter's
+`--fmt-failure` mode. Formatting drift here is both the most
+likely non-target failure in this lane and the least urgent one,
+and a check that aborted the job would mean a target that had
+genuinely stopped compiling stayed invisible for as long as the
+format nit went unfixed — inverting the priority the lane exists
+to serve. Its marker lives in `fuzz-logs/fmt/` so the
+`fuzz-logs/*.failed` glob the report job walks cannot mistake it
+for a target.
+
+The `fuzz-devcontainer` build is the one thing that does abort
+the job, in a step of its own ahead of both. Everything below it
+needs that image, so a broken build is not a per-target failure:
+letting it through would fail every target and file an issue
+about each of them for one problem. Failing early leaves no
+markers at all, which the report job reads as a run that died
+before the targets and files exactly one issue about.
+
 The trade is deliberate: a fuzz target that stops building is
 now caught within a day rather than before the change lands.
 That is acceptable here because this is a build-and-doesn't-panic
@@ -161,7 +193,12 @@ notification. Six details in the arrangement are load-bearing:
 
 - The fuzzing step exits 0 whatever the target does, recording
   the verdict as a marker file. A step that aborted the job would
-  take the log upload and the report job with it.
+  take the log upload and the report job with it. The markers
+  carry text rather than being `touch`ed empty: a zero-byte
+  file's survival through `upload-artifact` and back is an
+  assumption, and a marker that went missing would read to the
+  report job as a run that died before the targets — an actively
+  wrong diagnosis, filed under the wrong title.
 - The log is uploaded before anything fails, because when issue
   filing is the thing that broke, the artifact is how the failure
   reaches a human.
@@ -182,11 +219,13 @@ notification. Six details in the arrangement are load-bearing:
   can fail — tells them apart. Present, the artifact
   round-tripped and the job really did die before any target:
   `--run-failure`. Absent, the logs never arrived at all and the
-  fuzz job's own failure is still unread: `--no-artifact`. They
-  are separate modes because they are different bugs with
-  different first moves, and because they carry separate titles a
-  spell of missing artifacts cannot dedup on top of a genuine
-  early failure and bury it.
+  fuzz job's own failure is still unread: `--no-artifact`. A
+  format-check marker suppresses this branch entirely, because a
+  run where only the formatting broke did reach the targets and
+  calling it an early death would be wrong. The modes are
+  separate because they are different bugs with different first
+  moves, and because they carry separate titles none of them can
+  dedup on top of another and bury it.
 - Reporting runs on the static runner, where the rest of this
   repository's `gh` calls run — `release.yml`'s version-mismatch
   issue is the precedent. The `debian-12-docker` image is not
@@ -207,9 +246,10 @@ The reporter is the only channel this lane has, so its failure
 mode is silence — and silence is invisible until a fuzz target
 happens to break. `tools/test-report-fuzz-failure.sh` pins its
 behaviour against that: the excerpt bounds, the UTF-8 and NUL
-scrubbing, the markdown fence, the `--run-failure` and
-`--no-artifact` bodies, and the argument contract, all through
-`--dry-run` so it needs no network and no `GH_TOKEN`.
+scrubbing, the markdown fence, the `--run-failure`,
+`--no-artifact` and `--fmt-failure` bodies, and the argument
+contract, all through `--dry-run` so it needs no network and no
+`GH_TOKEN`.
 
 Dedup is covered too, and that part cannot go through `--dry-run`
 — a dry run returns before the reporter talks to GitHub at all,
@@ -223,7 +263,17 @@ and the test stubs it, driving the recurrence, first-failure,
 near-miss-title and broken-lookup paths against canned responses.
 
 It runs in pre-commit and in `ci.yml`'s `shellcheck` job, beside
-the audit-range test that exists for the same reason.
+the audit-range test and `tools/test-fuzz-targets.sh`, which
+exist for the same reason.
+
+Two of its assertions depend on tools the test does not itself
+need — `iconv` for the UTF-8 scrub, `jq` for the dedup lookup —
+and skip when they are absent. That is right in pre-commit, where
+a missing tool must not block an unrelated commit, and wrong in
+CI, where an image change that dropped `jq` would quietly delete
+the most valuable coverage in the file and leave the check green.
+So `ci.yml` sets `FUZZ_REPORTER_TEST_STRICT=1` and the skips
+become failures there.
 
 This shape is the fleet-wide standard, generalized from instar's
 `coverage-fuzz.yml`; the criterion is
@@ -539,10 +589,10 @@ lanes they serve are real: `fuzz` runs nightly and
   part of its verify step and genuinely needs the network to
   upload. This one cannot be isolated.
 
-(`fuzz-fmt-check` also runs networked, but it only runs `cargo
-fmt --check` and compiles nothing. So do `deb`, `rpm` and the
-`web-smoke` targets, which repackage or run the binary `release`
-already produced.)
+(`fuzz-fmt-check` and `fuzz-fmt` also run networked, but they
+only run `cargo fmt` and compile nothing. So do `deb`, `rpm` and
+the `web-smoke` targets, which repackage or run the binary
+`release` already produced.)
 
 Outside the Makefile entirely: release's `build-ryll-wheels` job
 runs `tools/build-ryll-wheel.sh`, which builds ryll with maturin

@@ -84,8 +84,8 @@ jobs:
 
       # Before the first step that can fail, so the artifact the
       # report job downloads always exists. A job that dies in the
-      # devcontainer build or `make fuzz-fmt-check` never reaches the
-      # loop below and so writes no marker and no log; upload-artifact
+      # cargo cache or the devcontainer build never reaches the loop
+      # below and so writes no marker and no log; upload-artifact
       # on an empty path creates no artifact at all, and
       # download-artifact on a missing artifact is a hard error, which
       # would take out the report job and with it the only
@@ -98,10 +98,18 @@ jobs:
           printf 'run: %s\ncommit: %s\n' "${RUN_URL}" "${GITHUB_SHA}" \
             > fuzz-logs/run-info.txt
 
-      # First of the real steps, because it is what builds the fuzz
-      # devcontainer every later step reuses. The fuzz crate is a
-      # detached workspace, so ci.yml's lint job `cargo fmt --all
-      # --check` does not reach it.
+      # Fatal, and first, deliberately. Everything below needs this
+      # image, so a broken devcontainer build is not something to
+      # report per-target: it would fail every target and file an issue
+      # about each of them for one problem. Failing here leaves no
+      # markers, which the report job reads as "the run died before the
+      # targets" and files exactly one issue about.
+      - name: Build the fuzz devcontainer
+        run: make ensure-cache fuzz-devcontainer
+
+      # The fuzz crate is a detached workspace, so ci.yml's lint job
+      # `cargo fmt --all --check` does not reach it and this is the only
+      # thing that checks its formatting.
       #
       # It stays here rather than in ci.yml's smoke tier -- where a
       # format check would otherwise belong, since it is cheap and its
@@ -111,18 +119,35 @@ jobs:
       # seconds a fuzz leg used to take, and it needs an `l` runner to
       # do it. Putting that on every push to every PR spends more of
       # the scarce pool than this whole change gives back.
+      #
+      # Tolerant rather than fatal, and reported as its own issue.
+      # Formatting drift here is the most likely non-target failure in
+      # this lane and the least urgent one, and an abort would mean a
+      # target that had genuinely stopped compiling stayed invisible
+      # for as long as the format nit went unfixed -- inverting the
+      # priority this lane exists to serve. The marker lives in its own
+      # subdirectory so it cannot be mistaken for a target by the
+      # `fuzz-logs/*.failed` glob the report job walks.
       - name: Check fuzz formatting
-        run: make fuzz-fmt-check
+        run: |
+          mkdir -p fuzz-logs/fmt
+          if make fuzz-fmt-check > fuzz-logs/fmt/check.log 2>&1; then
+            echo "the fuzz workspace is formatted"
+          else
+            STATUS=$?
+            echo "::warning::make fuzz-fmt-check failed; see the log tail below"
+            tail -40 fuzz-logs/fmt/check.log
+            printf 'make fuzz-fmt-check failed (exit %s)\n' "${STATUS}" \
+              > fuzz-logs/fmt/check.failed
+          fi
 
-      # The target list is read from the workspace rather than written
-      # here: a new fuzz target should be fuzzed by the nightly because
-      # it exists, not because somebody remembered to add it to a
-      # workflow. The `[[bin]]` tables in fuzz/Cargo.toml are the
-      # source rather than a glob over fuzz_targets/, because that
-      # manifest is what `cargo fuzz build <name>` itself resolves
-      # against: a glob would pick up a helper module dropped in the
-      # directory and would miss a `[[bin]]` whose path points
-      # elsewhere.
+      # The target list comes from tools/fuzz-targets.sh rather than
+      # from a literal here: a new fuzz target should be fuzzed by the
+      # nightly because it exists, not because somebody remembered to
+      # add it to a workflow. It is a script rather than inline shell
+      # because it decides which targets run at all -- a silent failure
+      # mode -- and nothing lints or tests a workflow `run:` block.
+      # See tools/test-fuzz-targets.sh.
       #
       # Deliberately exits 0 whatever the targets do, recording each
       # verdict as a marker file. Two later steps depend on having run:
@@ -135,39 +160,15 @@ jobs:
         run: |
           MANIFEST=shakenfist-spice-protocol/fuzz/Cargo.toml
 
-          mapfile -t TARGETS < <(
-            awk '/^\[\[bin\]\]/ { in_bin = 1; next }
-                 /^\[/          { in_bin = 0 }
-                 in_bin && $1 == "name" { gsub(/"/, "", $3); print $3 }' \
-              "${MANIFEST}"
-          )
-
-          if [ "${#TARGETS[@]}" -eq 0 ]; then
-            echo "::error::no fuzz targets found"
+          # A command substitution rather than `mapfile` from a process
+          # substitution: mapfile would succeed with an empty array when
+          # the extractor failed, which is the under-run this lane must
+          # never do quietly.
+          if ! TARGET_LIST="$(tools/fuzz-targets.sh "${MANIFEST}")"; then
+            echo "::error::could not determine the fuzz target list"
             exit 1
           fi
-
-          # The awk above is not a TOML parser. It wants `[[bin]]` at
-          # column 0 and `name` and `"..."` as separate fields, and
-          # TOML permits valid spellings that breaks on -- `name="x"`
-          # without the spaces is the practical one, and cargo fuzz
-          # accepts it. A target quietly falling out of the nightly is
-          # the exact silent failure this lane exists to prevent, and
-          # the zero-target guard above only catches losing *every*
-          # target. So count the tables independently and insist the
-          # two agree; a mismatch means the manifest grew a spelling
-          # this extraction cannot see, which is a workflow bug to fix
-          # rather than a nightly to quietly under-run.
-          #
-          # The count tolerates leading whitespace that the awk pattern
-          # does not, deliberately: a guard blind in the same places as
-          # the thing it guards would agree with it and say nothing.
-          TABLES=$(grep -cE '^[[:space:]]*\[\[bin\]\]' "${MANIFEST}")
-          if [ "${#TARGETS[@]}" -ne "${TABLES}" ]; then
-            echo "::error::${MANIFEST} has ${TABLES} [[bin]] table(s) but" \
-              "only ${#TARGETS[@]} name(s) parsed: ${TARGETS[*]}"
-            exit 1
-          fi
+          mapfile -t TARGETS <<< "${TARGET_LIST}"
 
           echo "Fuzzing: ${TARGETS[*]}"
 
@@ -176,9 +177,16 @@ jobs:
                 > "fuzz-logs/${TARGET}.log" 2>&1; then
               echo "${TARGET} built and smoke-ran cleanly"
             else
+              STATUS=$?
               echo "::warning::${TARGET} failed; see the log tail below"
               tail -40 "fuzz-logs/${TARGET}.log"
-              touch "fuzz-logs/${TARGET}.failed"
+              # Content rather than `touch`: a zero-byte file's survival
+              # through upload-artifact and back is an assumption, and a
+              # marker that went missing would read to the report job as
+              # "the run died before the targets" -- an actively wrong
+              # diagnosis filed under the wrong title.
+              printf 'fuzz-build/fuzz-smoke %s failed (exit %s)\n' \
+                "${TARGET}" "${STATUS}" > "fuzz-logs/${TARGET}.failed"
             fi
           done
 
@@ -193,13 +201,20 @@ jobs:
       # Last, so the job is red for a human scanning the Actions tab,
       # but only after the logs have been uploaded for the report job to
       # read. The report job runs on needs.fuzz.result, so this is what
-      # tells it there is something to report.
-      - name: Fail if any target failed
+      # tells it there is something to report -- including the format
+      # check, which is tolerant above precisely so it reaches here
+      # rather than aborting the targets.
+      - name: Fail if any target or the format check failed
         run: |
           shopt -s nullglob
           FAILED=(fuzz-logs/*.failed)
           if [ "${#FAILED[@]}" -ne 0 ]; then
             echo "::error::${#FAILED[@]} fuzz target(s) failed"
+          fi
+          if [ -f fuzz-logs/fmt/check.failed ]; then
+            echo "::error::the fuzz workspace is misformatted"
+          fi
+          if [ "${#FAILED[@]}" -ne 0 ] || [ -f fuzz-logs/fmt/check.failed ]; then
             exit 1
           fi
 
@@ -253,10 +268,27 @@ jobs:
             fi
           done
 
-          # No markers, and two quite different things produce that.
-          # The fuzz job may have failed before the target loop -- in
-          # the devcontainer build, the format check, the cargo cache
-          # or checkout -- or the artifact may simply not have arrived,
+          # The format check is not a target and must not be reported as
+          # one: it lives in its own subdirectory, so the glob above did
+          # not see it, and it gets its own mode and its own issue title.
+          # It also does not count towards FAILURES, because a run where
+          # only the formatting broke did reach the targets -- calling
+          # that "failed before reaching the targets" below would be an
+          # actively wrong diagnosis.
+          FMT_FAILED=0
+          if [ -f fuzz-logs/fmt/check.failed ]; then
+            FMT_FAILED=1
+            if ! tools/report-fuzz-failure.sh \
+                --fmt-failure fuzz-logs/fmt/check.log; then
+              echo "::warning::could not file an issue for the format check"
+              REPORT_FAILURES=$((REPORT_FAILURES + 1))
+            fi
+          fi
+
+          # No markers of either kind, and two quite different things
+          # produce that. The fuzz job may have failed before the target
+          # loop -- in checkout, the cargo cache or the devcontainer
+          # build -- or the artifact may simply not have arrived,
           # because the download above is continue-on-error and the
           # upload can be cut short by the job's timeout-minutes.
           # Without this branch the loop above would run zero times,
@@ -272,7 +304,7 @@ jobs:
           # two modes carry different titles, so a run of missing
           # artifacts cannot dedup on top of a genuine early failure
           # and bury it.
-          if [ "${FAILURES}" -eq 0 ]; then
+          if [ "${FAILURES}" -eq 0 ] && [ "${FMT_FAILED}" -eq 0 ]; then
             if [ -f fuzz-logs/run-info.txt ]; then
               echo "::warning::no target markers; the run failed earlier"
               REPORT_MODE=--run-failure
@@ -290,7 +322,10 @@ jobs:
             echo "### Nightly fuzz"
             echo ""
             echo "- targets that failed: ${FAILURES}"
-            if [ "${FAILURES}" -eq 0 ]; then
+            if [ "${FMT_FAILED}" -eq 1 ]; then
+              echo "- the fuzz workspace is misformatted"
+            fi
+            if [ "${FAILURES}" -eq 0 ] && [ "${FMT_FAILED}" -eq 0 ]; then
               if [ -f fuzz-logs/run-info.txt ]; then
                 echo "- the run failed before reaching any target"
               else

@@ -56,6 +56,17 @@ repos:
         pass_filenames: false
         files: ^tools/(test-)?report-fuzz-failure
 
+      # And the target list the same lane fuzzes. A target this drops
+      # is never built, never fails and so is never reported -- the
+      # same silence, one step earlier in the pipeline. No Docker and
+      # no cargo; it reads manifest fixtures.
+      - id: fuzz-targets-test
+        name: nightly fuzz target list smoke test
+        entry: ./tools/test-fuzz-targets.sh
+        language: script
+        pass_filenames: false
+        files: ^(tools/(test-)?fuzz-targets|shakenfist-spice-protocol/fuzz/Cargo\.toml)
+
   - repo: local
     hooks:
       - id: bidi-check

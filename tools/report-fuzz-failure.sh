@@ -28,22 +28,32 @@
 #   tools/report-fuzz-failure.sh TARGET LOG_FILE [--dry-run]
 #   tools/report-fuzz-failure.sh --run-failure [--dry-run]
 #   tools/report-fuzz-failure.sh --no-artifact [--dry-run]
+#   tools/report-fuzz-failure.sh --fmt-failure LOG_FILE [--dry-run]
 #
 # The second form is for a run that died before the target loop --
-# checkout, the cargo cache, the fuzz devcontainer build, or
-# `make fuzz-fmt-check`. There is no target to name and no per-target
-# log to excerpt, but the run still has to reach a human, so it files
-# one issue about the run itself.
+# checkout, the cargo cache, or the fuzz devcontainer build. There is
+# no target to name and no per-target log to excerpt, but the run still
+# has to reach a human, so it files one issue about the run itself.
 #
 # The third form is for the case where the report job could not read
-# the fuzz job's logs at all. These two are separate modes rather than
-# one because they are different bugs with different first moves, and
-# an issue that names the wrong one sends a human to the wrong place:
-# "the fuzz job died early" is a build problem in this repository,
-# while "the artifact never arrived" is a problem with the upload,
-# download or retention of the artifact itself. They also carry
-# different titles, so a spell of missing artifacts cannot dedup on
-# top of a genuine early failure and hide it.
+# the fuzz job's logs at all.
+#
+# The fourth is for `make fuzz-fmt-check`. It gets its own mode because
+# it is the one failure in this lane that must not stand between the
+# targets and their report: formatting drift in the detached fuzz
+# workspace is the most likely non-target failure here and the least
+# urgent, and while it went unfixed it would hide every target that had
+# genuinely stopped compiling, night after night. The fuzz job now
+# records it and carries on, and this files it as its own issue.
+#
+# These are separate modes rather than one because they are different
+# bugs with different first moves, and an issue that names the wrong
+# one sends a human to the wrong place: "the fuzz job died early" is a
+# build problem in this repository, "the artifact never arrived" is a
+# problem with the upload, download or retention of the artifact
+# itself, and "the fuzz workspace needs formatting" is a one-line fix.
+# They also carry different titles, so one cannot dedup on top of
+# another and hide it.
 #
 # Inputs (environment):
 #   GH_TOKEN     (required unless --dry-run) for `gh`.
@@ -56,6 +66,7 @@ usage() {
     echo "usage: $0 TARGET LOG_FILE [--dry-run]" >&2
     echo "       $0 --run-failure [--dry-run]" >&2
     echo "       $0 --no-artifact [--dry-run]" >&2
+    echo "       $0 --fmt-failure LOG_FILE [--dry-run]" >&2
     exit 2
 }
 
@@ -77,6 +88,7 @@ while [ $# -gt 0 ]; do
         --dry-run) DRY_RUN=1 ;;
         --run-failure) MODE=run-failure; RUN_MODES=$((RUN_MODES + 1)) ;;
         --no-artifact) MODE=no-artifact; RUN_MODES=$((RUN_MODES + 1)) ;;
+        --fmt-failure) MODE=fmt-failure; RUN_MODES=$((RUN_MODES + 1)) ;;
         -*) usage ;;
         *) POSITIONAL+=("$1") ;;
     esac
@@ -91,9 +103,18 @@ fi
 
 TARGET=""
 LOG_FILE=""
-if [ "${MODE}" != target ]; then
-    # Neither run-level mode names a target or reads a log: the
-    # evidence is the run log, which is not a file this script can see.
+if [ "${MODE}" = fmt-failure ]; then
+    # Names no target -- the fuzz workspace as a whole is misformatted
+    # -- but does have a log worth excerpting, because `cargo fmt
+    # --check` prints the diff it wants and that diff is the whole fix.
+    if [ "${#POSITIONAL[@]}" -ne 1 ]; then
+        usage
+    fi
+    LOG_FILE="${POSITIONAL[0]}"
+elif [ "${MODE}" != target ]; then
+    # Neither of the other run-level modes names a target or reads a
+    # log: the evidence is the run log, which is not a file this script
+    # can see.
     if [ "${#POSITIONAL[@]}" -ne 0 ]; then
         usage
     fi
@@ -125,7 +146,7 @@ EXCERPT_FILE="$(mktemp)"
 BODY_FILE="$(mktemp)"
 trap 'rm -f "${EXCERPT_FILE}" "${BODY_FILE}"' EXIT
 
-if [ "${MODE}" = target ]; then
+if [ -n "${LOG_FILE}" ]; then
     if [ -f "${LOG_FILE}" ]; then
         cut -b "1-${MAX_LINE_BYTES}" "${LOG_FILE}" 2>/dev/null \
             | tail -n 40 \
@@ -133,8 +154,8 @@ if [ "${MODE}" = target ]; then
             | tr -d '\000' \
             | "${SCRUB[@]}" 2>/dev/null > "${EXCERPT_FILE}" || true
     else
-        echo "::warning::${LOG_FILE} not found; reporting ${TARGET}" \
-            "without a log excerpt" >&2
+        echo "::warning::${LOG_FILE} not found; reporting" \
+            "${TARGET:-the format check} without a log excerpt" >&2
     fi
 fi
 
@@ -158,6 +179,7 @@ fi
 case "${MODE}" in
     run-failure) TITLE="Nightly fuzz run failed before reaching the targets" ;;
     no-artifact) TITLE="Nightly fuzz run produced no log artifact" ;;
+    fmt-failure) TITLE="Nightly fuzz: the fuzz workspace is misformatted" ;;
     *)           TITLE="Nightly fuzz failure: ${TARGET}" ;;
 esac
 
@@ -172,12 +194,33 @@ case "${MODE}" in
             printf 'The nightly fuzz run failed before it built any fuzz '
             printf 'target, so there is no per-target issue to file. The '
             printf 'failure is in the run itself -- checkout, the cargo '
-            printf 'cache, the `fuzz-devcontainer` build, or `make '
-            printf 'fuzz-fmt-check`.\n\n'
+            printf 'cache, or the `fuzz-devcontainer` build.\n\n'
             printf 'Run: %s\n\n' "${WORKFLOW_URL:-unknown}"
             printf 'Start from the run log. The `fuzz-logs` artifact holds '
             printf 'only the run marker in this case, because no target '
             printf 'ever wrote one.\n\n'
+            printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
+            printf 'from .github/workflows/fuzz.yml.\n'
+        } > "${BODY_FILE}"
+        ;;
+    fmt-failure)
+        {
+            printf '`make fuzz-fmt-check` failed: the detached fuzz '
+            printf 'workspace at `shakenfist-spice-protocol/fuzz` is not '
+            printf 'formatted. ci.yml cannot catch this: its '
+            printf '`cargo fmt --all --check` does not reach across the '
+            printf '`[workspace]` boundary, so the nightly is the only '
+            printf 'thing that checks it.\n\n'
+            printf 'Run: %s\n\n' "${WORKFLOW_URL:-unknown}"
+            printf 'Fix locally with:\n\n'
+            printf '```\nmake fuzz-fmt\n```\n\n'
+            printf 'The targets themselves still built and smoke-ran in '
+            printf 'this run, or have their own issues: this one is only '
+            printf 'about formatting.\n\n'
+            printf 'Diff:\n\n'
+            printf '%s\n' "${FENCE}"
+            cat "${EXCERPT_FILE}"
+            printf '\n%s\n\n' "${FENCE}"
             printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
             printf 'from .github/workflows/fuzz.yml.\n'
         } > "${BODY_FILE}"

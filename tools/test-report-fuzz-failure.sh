@@ -26,6 +26,28 @@ FAILURES=0
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 
+# Two assertions below depend on tools this test does not itself need --
+# iconv for the UTF-8 scrub, jq for the dedup lookup -- and skipping them
+# is right on a developer's machine, where this runs from a pre-commit
+# hook and must not block an unrelated commit. It is wrong in CI: an
+# image change that dropped jq would silently remove the most valuable
+# coverage in this file while the check stayed green, which is the same
+# silent-coverage-loss failure the fuzz lane itself is built to close.
+# So ci.yml sets FUZZ_REPORTER_TEST_STRICT=1 and a missing tool fails.
+STRICT="${FUZZ_REPORTER_TEST_STRICT:-}"
+
+# Skip, or fail if we are being strict about it. Returns 0 when the
+# caller should go on to skip the block.
+skip_or_fail() {
+    local what="$1"
+    if [ -n "$STRICT" ]; then
+        red "FAIL: $what (FUZZ_REPORTER_TEST_STRICT is set)"
+        FAILURES=$((FAILURES + 1))
+    else
+        green "skip: $what"
+    fi
+}
+
 OUT=""
 STATUS=0
 
@@ -163,9 +185,9 @@ assert_contains "after" "the readable part of a binary log survives"
 # behaving as documented -- and because this test runs from a
 # pre-commit hook, that would block an unrelated commit on a machine
 # without iconv. Debian carries it in libc-bin, so CI always takes the
-# first branch; a minimal container or a stripped macOS may not. The
-# NUL assertion above stays unconditional, since `tr -d` needs no
-# iconv.
+# first branch; a minimal container or a stripped macOS may not. Only
+# the UTF-8 scrub is conditional: NUL stripping is not asserted at all,
+# for the reason above.
 if command -v iconv >/dev/null 2>&1; then
     if printf '%s' "$OUT" | grep -q $'\xff'; then
         red "FAIL: an invalid UTF-8 byte reached the body"
@@ -174,7 +196,7 @@ if command -v iconv >/dev/null 2>&1; then
         green "ok: invalid UTF-8 is scrubbed from the body"
     fi
 else
-    green "skip: no iconv, scrubbing degrades to cat by design"
+    skip_or_fail "no iconv, so the UTF-8 scrub cannot be asserted"
 fi
 
 echo
@@ -207,6 +229,37 @@ assert_absent "failed before reaching the targets" \
     "--no-artifact does not claim the run died before the targets"
 
 echo
+echo "== --fmt-failure =="
+printf 'Diff in /workspace/x/parse.rs:12:\n-    let x=1;\n+    let x = 1;\n' \
+    > "$WORK/fmt.log"
+WORKFLOW_URL="https://example.invalid/run/4" \
+    run_reporter --fmt-failure "$WORK/fmt.log" --dry-run
+assert_status 0 "--fmt-failure reports"
+assert_contains "the fuzz workspace is misformatted" \
+    "--fmt-failure has its own title"
+assert_contains "https://example.invalid/run/4" \
+    "--fmt-failure records the run URL"
+# Unlike the other two run-level modes it does excerpt a log, because
+# `cargo fmt --check` prints the diff it wants and that diff is the fix.
+assert_contains "let x = 1;" "--fmt-failure excerpts the format diff"
+assert_contains "make fuzz-fmt" "--fmt-failure names the fixing target"
+assert_absent "make fuzz-build-" \
+    "--fmt-failure names no per-target reproduce command"
+# Each of the three run-level modes must keep its own title: a shared
+# one would dedup them onto each other and bury the rarer diagnosis.
+assert_absent "failed before reaching the targets" \
+    "--fmt-failure does not claim the run died before the targets"
+assert_absent "no log artifact" \
+    "--fmt-failure does not claim the artifact went missing"
+
+# A format check whose log did not survive still has to file: the title
+# and the run URL are the load-bearing parts.
+run_reporter --fmt-failure "$WORK/does-not-exist.log" --dry-run
+assert_status 0 "--fmt-failure survives a missing log"
+assert_contains "the fuzz workspace is misformatted" \
+    "--fmt-failure still files without a log excerpt"
+
+echo
 echo "== dedup and recurrence, against a stubbed gh =="
 # Everything above runs through --dry-run, which returns before the
 # reporter talks to GitHub at all. That leaves its two most fragile
@@ -233,7 +286,7 @@ chmod +x "$GH_STUB"
 # skip rather than fail where it is absent, on the same reasoning as
 # the iconv branch above.
 if ! command -v jq >/dev/null 2>&1; then
-    green "skip: no jq, the dedup lookup cannot be exercised"
+    skip_or_fail "no jq, so the dedup lookup cannot be exercised"
 else
     run_stubbed_reporter() {
         local list_json="$1"; shift
@@ -309,6 +362,13 @@ else
         --no-artifact
     assert_status 0 "--no-artifact dedups too"
     assert_called "issue comment 9" "--no-artifact comments on its own issue"
+
+    printf 'diff\n' > "$WORK/fmt-dedup.log"
+    run_stubbed_reporter \
+        '[{"number":11,"title":"Nightly fuzz: the fuzz workspace is misformatted"}]' \
+        --fmt-failure "$WORK/fmt-dedup.log"
+    assert_status 0 "--fmt-failure dedups too"
+    assert_called "issue comment 11" "--fmt-failure comments on its own issue"
 fi
 
 echo
@@ -323,8 +383,14 @@ run_reporter --run-failure a b --dry-run
 assert_status 2 "--run-failure with positionals is a usage error"
 run_reporter --no-artifact a b --dry-run
 assert_status 2 "--no-artifact with positionals is a usage error"
+run_reporter --fmt-failure --dry-run
+assert_status 2 "--fmt-failure with no log is a usage error"
+run_reporter --fmt-failure a b --dry-run
+assert_status 2 "--fmt-failure with two positionals is a usage error"
 run_reporter --run-failure --no-artifact --dry-run
-assert_status 2 "the two run-level modes together are a usage error"
+assert_status 2 "two run-level modes together are a usage error"
+run_reporter --fmt-failure --run-failure x --dry-run
+assert_status 2 "--fmt-failure with another run-level mode is a usage error"
 run_reporter --no-such-flag a b
 assert_status 2 "an unknown flag is a usage error"
 

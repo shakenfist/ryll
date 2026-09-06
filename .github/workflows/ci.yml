@@ -315,8 +315,23 @@ jobs:
       # only notification fuzz.yml has, and a reporter that has
       # stopped working looks exactly like a nightly with nothing to
       # report. --dry-run only, so no network and no GH_TOKEN.
+      #
+      # STRICT turns the test's two tool-dependent skips (iconv for the
+      # UTF-8 scrub, jq for the dedup lookup) into failures. They skip
+      # on a developer's machine so a pre-commit hook cannot block an
+      # unrelated commit; here they must not, or an image change that
+      # dropped jq would quietly delete the most valuable coverage in
+      # the file and leave the check green.
       - name: Test the nightly fuzz reporter
+        env:
+          FUZZ_REPORTER_TEST_STRICT: '1'
         run: ./tools/test-report-fuzz-failure.sh
+
+      # And the target list it reports on: a target silently dropped
+      # from the nightly is never built, never fails, and so is never
+      # reported.
+      - name: Test the nightly fuzz target list
+        run: ./tools/test-fuzz-targets.sh
 
   bidi-check:
     name: bidi and zero-width
