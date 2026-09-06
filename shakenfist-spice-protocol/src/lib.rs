@@ -88,11 +88,18 @@ pub struct ConnectionConfig {
     pub port: u16,
     pub tls_port: Option<u16>,
     pub password: Option<String>,
-    /// PEM-encoded CA certificate for TLS. When present,
-    /// hostname verification is relaxed (SPICE servers
+    /// PEM-encoded CA certificate for TLS. When present it
+    /// is the *only* trust anchor for the connection: the
+    /// public CA roots are not consulted, because a `ca=`
+    /// field asserts a private PKI and nothing outside it
+    /// should be able to answer for the backend. Hostname
+    /// verification is relaxed in that case (SPICE servers
     /// commonly use self-signed certs without SAN
     /// extensions); pin `host_subject` to verify the
-    /// server's identity instead.
+    /// server's identity instead. When absent, the public
+    /// roots apply, and hostname verification is enforced
+    /// as usual unless `host_subject` is pinned — a pin
+    /// substitutes for it either way.
     pub ca_cert: Option<String>,
     /// Expected certificate subject, e.g.
     /// `C=US,O=Acme,CN=hv1`. When set, the TLS handshake
@@ -100,7 +107,8 @@ pub struct ConnectionConfig {
     /// subject matches it under spice-common's rules (see
     /// the [`host_subject`] module) — subject pinning
     /// substitutes for hostname verification, exactly as
-    /// spice-gtk treats `cert-subject`. A malformed value
+    /// spice-gtk treats `cert-subject`, and does so whether
+    /// or not a `ca_cert` is also configured. A malformed value
     /// fails [`SpiceClient::new`] rather than silently
     /// downgrading to an unpinned connection. `None`
     /// preserves the relaxed behaviour described on
