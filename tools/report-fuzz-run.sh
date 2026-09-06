@@ -105,7 +105,9 @@ fi
 # succeed, and both file a run-level issue.
 #
 # The loop did not complete: no targets-ran.txt. The job died before
-# the target step (checkout, the cargo cache, the devcontainer build),
+# the target step (the cargo cache, the devcontainer build, or
+# checkout -- though checkout is ahead of the run marker, so that one
+# arrives as --no-artifact below),
 # the target step aborted on a manifest tools/fuzz-targets.sh would
 # not read, or the loop was cut short part way through. Note that this
 # is checked whatever else was found -- a format-check failure on the
@@ -127,12 +129,13 @@ elif [ "${FAILURES}" -eq 0 ] && [ "${FMT_FAILED}" -eq 0 ]; then
 fi
 
 # run-info.txt tells apart "the job failed and we can see its logs"
-# from "the logs never got here". The fuzz job writes it before the
-# first step that can fail, so its presence means the artifact
-# round-tripped; its absence means the download was empty and the fuzz
-# job's own failure is still unread. The two carry different issue
-# titles, so a spell of missing artifacts cannot dedup on top of a
-# genuine run failure and bury it.
+# from "the logs never got here". The fuzz job writes it immediately
+# after checkout, ahead of everything else that can fail, so its
+# presence means the artifact round-tripped; its absence means either
+# the download was empty or checkout itself failed, and in both cases
+# the fuzz job's own failure is still unread. The two carry different
+# issue titles, so a spell of missing artifacts cannot dedup on top of
+# a genuine run failure and bury it.
 RUN_MODE=""
 if [ "${RUN_LEVEL}" -eq 1 ]; then
     if [ -f "${LOG_DIR}/run-info.txt" ]; then

@@ -102,6 +102,11 @@ assert_contains "make fuzz-build-fuzz_link_mess_parse" \
     "the reproduce commands name the target"
 assert_contains "error[E0432]: unresolved import" \
     "the log tail reaches the body"
+# The reproducer pointer interpolates the target into a path. It is the
+# one %s in this body that is not adjacent to its printf argument in
+# the source, which is exactly how it came out as `artifacts//` once.
+assert_contains "artifacts/fuzz_link_mess_parse/" \
+    "the reproducer pointer names the target's artifact directory"
 
 echo
 echo "== WORKFLOW_URL unset =="
@@ -301,10 +306,15 @@ echo "== dedup and recurrence, against a stubbed gh =="
 GH_STUB="$WORK/fake-gh"
 cat > "$GH_STUB" <<'STUB'
 #!/bin/bash
-# Records its argv and answers `issue list` from $GH_LIST_JSON.
+# Records its argv and answers `issue list` from $GH_LIST_JSON. A
+# non-zero $GH_LIST_STATUS makes the lookup itself fail, which the
+# reporter has to tell apart from a lookup that succeeded and found
+# nothing: both leave it with no issue number, but only one of them
+# means the reporter is broken.
 printf '%s\n' "$*" >> "$GH_CALLS"
 if [ "${1:-}" = issue ] && [ "${2:-}" = list ]; then
     cat "$GH_LIST_JSON"
+    exit "${GH_LIST_STATUS:-0}"
 fi
 exit 0
 STUB
@@ -323,6 +333,7 @@ else
         : > "$WORK/gh-calls"
         GH="$GH_STUB" GH_CALLS="$WORK/gh-calls" \
             GH_LIST_JSON="$WORK/gh-list.json" \
+            GH_LIST_STATUS="${GH_LIST_STATUS:-0}" \
             run_reporter "$@"
         CALLS="$(cat "$WORK/gh-calls")"
     }
@@ -379,10 +390,34 @@ else
 
     # A lookup that returns junk must fall through to filing rather
     # than dying: a duplicate issue is a far smaller problem than a
-    # failure nobody hears about.
+    # failure nobody hears about. It must also *say* so. Falling
+    # through silently makes a permanently broken lookup look exactly
+    # like a run of genuine first failures -- one fresh issue a night,
+    # which reads as ordinary nightly noise -- and that is the whole
+    # reason this file stubs `gh` at all.
     run_stubbed_reporter 'not json at all' fuzz_junk "$WORK/normal.log"
     assert_status 0 "a broken lookup is not fatal"
     assert_called "issue create" "a broken lookup still files the failure"
+    assert_contains "::warning::" "a broken lookup warns rather than passing silently"
+    assert_contains "jq could not read" "the warning names what went wrong"
+
+    # The other half of the same silence: `gh` itself failing (rate
+    # limit, auth, an API change) rather than returning something
+    # unparseable. It produces the same empty answer as a genuine
+    # first failure, so only the warning tells them apart.
+    GH_LIST_STATUS=1 run_stubbed_reporter '' fuzz_ghfail "$WORK/normal.log"
+    assert_status 0 "a failing gh lookup is not fatal"
+    assert_called "issue create" "a failing gh lookup still files the failure"
+    assert_contains "::warning::" "a failing gh lookup warns"
+    assert_contains "dedup lookup failed" "the warning names the lookup"
+
+    # A hit must not warn: a warning on the ordinary path would train
+    # the reader to ignore the one that matters.
+    run_stubbed_reporter \
+        '[{"number":13,"title":"Nightly fuzz failure: fuzz_quiet"}]' \
+        fuzz_quiet "$WORK/normal.log"
+    assert_status 0 "a working lookup reports"
+    assert_absent "::warning::" "a working lookup warns about nothing"
 
     # The run-level modes go through the same lookup, keyed on their
     # own titles.

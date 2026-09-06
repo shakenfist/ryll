@@ -147,7 +147,8 @@ fi
 
 EXCERPT_FILE="$(mktemp)"
 BODY_FILE="$(mktemp)"
-trap 'rm -f "${EXCERPT_FILE}" "${BODY_FILE}"' EXIT
+LOOKUP_FILE="$(mktemp)"
+trap 'rm -f "${EXCERPT_FILE}" "${BODY_FILE}" "${LOOKUP_FILE}"' EXIT
 
 if [ -n "${LOG_FILE}" ]; then
     if [ -f "${LOG_FILE}" ]; then
@@ -224,7 +225,10 @@ case "${MODE}" in
             printf 'aborts the target step before any target is built;\n'
             printf -- '- the `fuzz-devcontainer` build, which is fatal by '
             printf 'design because every target needs the image;\n'
-            printf -- '- checkout or the cargo cache, both ahead of it;\n'
+            printf -- '- the cargo cache restore, ahead of it. Checkout '
+            printf 'sits ahead of the run marker rather than behind it, '
+            printf 'so a failure there files the "no log artifact" '
+            printf 'issue instead of this one;\n'
             printf -- '- the target loop was cut short part way through, '
             printf 'most plausibly by the job hitting its '
             printf '`timeout-minutes`;\n'
@@ -267,16 +271,21 @@ case "${MODE}" in
             printf 'arrive, so there is no way to tell from here which '
             printf 'targets failed or why.\n\n'
             printf 'Run: %s\n\n' "${WORKFLOW_URL:-unknown}"
-            printf 'This is a problem with the artifact rather than with '
-            printf 'the fuzz targets: the fuzz job writes '
-            printf '`fuzz-logs/run-info.txt` before the first step that '
-            printf 'can fail, so an artifact with no run marker in it is '
-            printf 'one that never uploaded, never downloaded, or was '
-            printf 'truncated in between. Check the upload and download '
-            printf 'steps, and whether the job was cut short by its '
+            printf 'The fuzz job writes `fuzz-logs/run-info.txt` '
+            printf 'immediately after `actions/checkout` and ahead of '
+            printf 'everything else that can fail, so an artifact with '
+            printf 'no run marker in it means one of two things:\n\n'
+            printf -- '- the job failed in checkout itself, which is the '
+            printf 'only step ahead of the marker;\n'
+            printf -- '- or the artifact never round-tripped: it never '
+            printf 'uploaded, never downloaded, or was truncated in '
+            printf 'between.\n\n'
+            printf 'Start from the run log: it names the step that '
+            printf 'failed, which is what tells those apart. If checkout '
+            printf 'is not it, check the upload and download steps, and '
+            printf 'whether the job was cut short by its '
             printf '`timeout-minutes` before the `if: always()` upload '
             printf 'could run.\n\n'
-            printf 'Start from the run log.\n\n'
             footer
         } > "${BODY_FILE}"
         ;;
@@ -288,6 +297,13 @@ case "${MODE}" in
             printf 'Reproduce locally with:\n\n'
             printf '```\nmake fuzz-build-%s\nmake fuzz-smoke-%s\n```\n\n' \
                 "${TARGET}" "${TARGET}"
+            printf 'If it panicked rather than failed to compile, '
+            printf 'libFuzzer wrote the input that did it, and the run '
+            printf 'carries it in the `fuzz-logs` artifact under '
+            printf '`artifacts/%s/`.' "${TARGET}"
+            printf ' The tail below usually repeats it as a base64 '
+            printf 'line, but that is a fallback rather than a '
+            printf 'guarantee.\n\n'
             printf 'Log tail:\n\n'
             printf '%s\n' "${FENCE}"
             cat "${EXCERPT_FILE}"
@@ -312,15 +328,35 @@ fi
 # The lookup matches on title alone and not on the label filed below,
 # deliberately: a label someone strips during triage would silently
 # turn dedup off and start a nightly issue-per-night again.
+#
+# The lookup and the jq that reads it are separate steps, each with its
+# status checked, so that a lookup which *failed* can be told from one
+# that legitimately found nothing. Both end with an empty EXISTING and
+# both fall through to filing, which is the right fallback either way
+# -- but a permanently broken lookup then files a fresh issue every
+# night, and a nightly issue per target is indistinguishable from
+# ordinary nightly noise. The warning is the only thing that makes it
+# visible, and this is the one remaining silence in a lane whose whole
+# subject is silence.
 echo "dedup lookup: ${TITLE}"
-EXISTING="$("${GH}" issue list \
-    --state open \
-    --search "in:title \"${TITLE}\"" \
-    --json number,title \
-    --limit 50 2>/dev/null \
-    | jq -r --arg title "${TITLE}" \
+EXISTING=""
+if ! command -v jq >/dev/null 2>&1; then
+    echo "::warning::jq is not installed, so the dedup lookup cannot" \
+        "run; this may file a duplicate issue"
+elif ! "${GH}" issue list \
+        --state open \
+        --search "in:title \"${TITLE}\"" \
+        --json number,title \
+        --limit 50 > "${LOOKUP_FILE}" 2>/dev/null; then
+    echo "::warning::the dedup lookup failed (gh issue list); this may" \
+        "file a duplicate issue"
+elif ! EXISTING="$(jq -r --arg title "${TITLE}" \
         'map(select(.title == $title)) | .[0].number // empty' \
-    2>/dev/null || true)"
+        "${LOOKUP_FILE}" 2>/dev/null)"; then
+    echo "::warning::the dedup lookup returned something jq could not" \
+        "read; this may file a duplicate issue"
+    EXISTING=""
+fi
 
 if [ -n "${EXISTING}" ]; then
     echo "already tracked by issue #${EXISTING}; commenting"

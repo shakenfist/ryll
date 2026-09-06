@@ -61,6 +61,10 @@ Fuzzing is not a tier. It runs nightly from `fuzz.yml`; see
 
 `workflow_dispatch` deliberately runs **both** tiers, which is
 what makes `@shakenfist-bot please retest` a full retest.
+Fuzzing is not included in that: a retest runs both tiers and
+the fuzz lane is neither, so a retest neither builds nor
+format-checks the fuzz workspace. Exercise that with
+`gh workflow run fuzz.yml`.
 
 ### The Windows cross-check is a proxy
 
@@ -184,6 +188,38 @@ about each of them for one problem. Failing early leaves no
 markers at all, which the report job reads as a run that died
 before the targets and files exactly one issue about.
 
+A smoke run that panics leaves the input that produced it in
+`shakenfist-spice-protocol/fuzz/artifacts/<target>/`, and a step
+before the upload copies that into `fuzz-logs/artifacts/` so it
+travels with the logs. The 40-line tail in the issue body
+usually carries libFuzzer's base64 line, but that is a fallback
+rather than a guarantee, and a crash found a day later against
+develop is worth more to reproduce than one that was in front of
+a human immediately. The copy is deliberate rather than a second
+`path:` on the upload step: a second path moves the artifact's
+root up to the workspace, which would nest `fuzz-logs/` a
+directory deeper than `tools/report-fuzz-run.sh` walks and turn
+every failing night into a `--no-artifact` issue.
+
+The job's `timeout-minutes: 90` covers every target end to end.
+It was previously per matrix leg, i.e. per target. Four targets
+finish inside ten minutes so there is a great deal of headroom,
+but the work is serial now and `tools/fuzz-targets.sh` exists
+precisely so the target count can grow without anyone editing
+the workflow, so the budget is worth revisiting when it does.
+A timeout truncates the loop, and the targets never reached
+write no marker and are indistinguishable from passing ones;
+only `targets-ran.txt`'s absence catches that, as a single
+run-level issue that cannot name them.
+
+The `report` job runs only on `develop`. `workflow_dispatch` is
+the documented way to exercise this lane on demand, and without
+that guard a dispatch from a scratch branch would file genuine
+`bug`-labelled issues — which the real nightly would then dedup
+onto, commenting on somebody's test issue instead of filing its
+own. A branch dispatch still runs the fuzz job and still uploads
+its logs; it just does not file.
+
 The trade is deliberate: a fuzz target that stops building is
 now caught within a day rather than before the change lands.
 That is acceptable here because this is a build-and-doesn't-panic
@@ -224,13 +260,20 @@ Six details in the arrangement are load-bearing:
 - The log is uploaded before anything fails, because when issue
   filing is the thing that broke, the artifact is how the failure
   reaches a human.
-- `fuzz-logs/` is created in a step of its own, before the first
-  step that can fail, and the report job's `download-artifact` is
+- `fuzz-logs/` is created in a step of its own, immediately
+  after `actions/checkout` and ahead of everything else that can
+  fail, and the report job's `download-artifact` is
   `continue-on-error`. A job that died in the devcontainer build
   or the format check writes no marker and no log; an upload of
   an empty path creates no artifact, and a download of a missing
   artifact is a hard error that would take the report job — and
-  with it the whole notification — down with the fuzz job.
+  with it the whole notification — down with the fuzz job. The
+  step sits *ahead* of the cargo cache rather than after it
+  because the two run-level modes below exist to be told apart:
+  behind the cache restore, a cache failure wrote no run marker
+  and so filed `--no-artifact`, whose body sends the reader to
+  the upload and download steps — the wrong first move for a job
+  that never got as far as having anything to upload.
 - The target step writes `fuzz-logs/targets-ran.txt` *after* the
   loop, and the walk keys its run-level branch on that file's
   absence. A passing target writes no marker, so an empty marker
@@ -249,10 +292,12 @@ Six details in the arrangement are load-bearing:
   about — the run died before the loop, the loop was cut short,
   or something after it (the artifact upload, say) broke. Which
   of those gets said depends on `fuzz-logs/run-info.txt`, written
-  before the first step that can fail. Present, the artifact
-  round-tripped and the failure really is in the run:
-  `--run-failure`. Absent, the logs never arrived at all and the
-  fuzz job's own failure is still unread: `--no-artifact`. The
+  immediately after checkout. Present, the artifact round-tripped
+  and the failure really is in the run: `--run-failure`. Absent,
+  either checkout itself failed — it is the one step ahead of the
+  marker, and the `--no-artifact` body names it first — or the
+  logs never arrived at all; both leave the fuzz job's own
+  failure unread, so both are `--no-artifact`. The
   modes are separate because they are different bugs with
   different first moves, and because they carry separate titles
   none of them can dedup on top of another and bury it.
@@ -270,6 +315,17 @@ would file one issue per target per night. The dedup lookup
 matches on issue title alone and deliberately not on the `bug`
 label the reporter applies, because a label stripped during
 triage would silently switch dedup back off.
+
+A lookup that fails falls through to filing — a duplicate issue
+is a much smaller problem than a failure nobody hears about —
+but it says so first. The `gh issue list` call and the `jq` that
+reads it are separate steps with their statuses checked, and a
+missing `jq`, a non-zero `gh`, or output `jq` cannot parse each
+emit a `::warning::` before falling through. Without that,
+a permanently broken lookup and a genuine first failure produce
+the same empty answer, and the nightly quietly refiles the same
+issue every night — which reads as ordinary nightly noise rather
+than as the reporter being broken.
 
 Because dedup keys on an *open* issue, closing one is part of
 the fix. An issue left open after the target is repaired turns
@@ -297,10 +353,12 @@ which would leave the search qualifier, the `--json` field set
 and the jq exact-title match untested. Those are the pieces a
 `gh` or API change breaks *quietly*: a lookup that starts
 returning nothing does not error, it just files a fresh issue
-every night, which reads as noise rather than as the reporter
-being broken. So the reporter takes its `gh` command from `$GH`
+every night. So the reporter takes its `gh` command from `$GH`
 and the test stubs it, driving the recurrence, first-failure,
-near-miss-title and broken-lookup paths against canned responses.
+near-miss-title, unparseable-response and failing-`gh` paths
+against canned responses — the last two also asserting the
+warning, which is the only thing separating a broken lookup from
+a first failure.
 
 It runs in pre-commit and in `ci.yml`'s `shellcheck` job, beside
 the audit-range test, `tools/test-report-fuzz-run.sh` and

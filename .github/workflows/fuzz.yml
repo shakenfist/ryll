@@ -58,6 +58,16 @@ jobs:
   fuzz:
     name: Fuzz
     runs-on: [self-hosted, vm, debian-12-docker, l]
+    # Covers every target end to end, not one target: the matrix this
+    # replaced had a leg per target and this budget was per leg. Four
+    # targets at roughly 255s of shared devcontainer build plus 78s
+    # each finish inside ten minutes, so there is a lot of headroom --
+    # but the work is serial now and tools/fuzz-targets.sh exists so
+    # the target count grows without anyone editing this file, so the
+    # budget is worth revisiting when it does. A timeout truncates the
+    # loop, and the targets never reached write no marker; only
+    # targets-ran.txt's absence catches that, as one run-level issue
+    # that cannot name them.
     timeout-minutes: 90
     # One job rather than a matrix leg per target. Every leg of the
     # matrix this replaced spent 255 of its 340 seconds on
@@ -77,22 +87,23 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Must stay directly after checkout; see the action for why. Its
-      # own key prefix: the fuzz targets compile with the network up and
-      # the cache writable, so what this job saves must never become the
-      # read-only input to an isolated build.
-      - uses: ./.github/actions/cargo-cache
-        with:
-          key-prefix: fuzz-cargo-cache
-
-      # Before the first step that can fail, so the artifact the
-      # report job downloads always exists. A job that dies in the
-      # cargo cache or the devcontainer build never reaches the loop
-      # below and so writes no marker and no log; upload-artifact
-      # on an empty path creates no artifact at all, and
-      # download-artifact on a missing artifact is a hard error, which
-      # would take out the report job and with it the only
-      # notification this lane has.
+      # Ahead of every step that can fail except checkout, so the
+      # artifact the report job downloads always exists. A job that
+      # dies later -- in the cargo cache, the devcontainer build, the
+      # format check -- never reaches the target loop and so writes no
+      # marker and no log; upload-artifact on an empty path creates no
+      # artifact at all, and download-artifact on a missing artifact is
+      # a hard error, which would take out the report job and with it
+      # the only notification this lane has.
+      #
+      # It sits ahead of the cargo cache rather than behind it because
+      # the two run-level issue bodies exist to be told apart. With the
+      # marker behind the cache restore, a cache failure wrote no
+      # marker and so filed `--no-artifact`, whose body sends the
+      # reader to the upload and download steps -- exactly the wrong
+      # first move for a job that never got as far as producing
+      # anything to upload. Checkout is now the only step ahead of the
+      # marker, and it is what `--no-artifact` names first.
       - name: Prepare the log directory
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -100,6 +111,19 @@ jobs:
           mkdir -p fuzz-logs
           printf 'run: %s\ncommit: %s\n' "${RUN_URL}" "${GITHUB_SHA}" \
             > fuzz-logs/run-info.txt
+
+      # Must come after checkout; see the action for why. The step
+      # above is safe to have in between: the constraint is about
+      # checkout's `git clean -ffdx` deleting .cargo-cache, and writing
+      # fuzz-logs/ neither runs checkout again nor touches that
+      # directory.
+      #
+      # Its own key prefix: the fuzz targets compile with the network up
+      # and the cache writable, so what this job saves must never become
+      # the read-only input to an isolated build.
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key-prefix: fuzz-cargo-cache
 
       # Fatal, and first, deliberately. Everything below needs this
       # image, so a broken devcontainer build is not something to
@@ -206,6 +230,32 @@ jobs:
           printf 'fuzzed %s target(s): %s\n' \
             "${#TARGETS[@]}" "${TARGETS[*]}" > fuzz-logs/targets-ran.txt
 
+      # libFuzzer writes the input that produced a panic to
+      # shakenfist-spice-protocol/fuzz/artifacts/<target>/. The 40-line
+      # log tail the issue body carries usually includes its base64
+      # line, but that is a fallback rather than a guarantee, and under
+      # the old merge-tier arrangement a crash was in front of a human
+      # immediately whereas now it is a day later against develop --
+      # which makes the reproducer worth more, not less.
+      #
+      # Copied into fuzz-logs/ rather than added as a second `path:` on
+      # the upload: a second path moves the artifact's root up to the
+      # workspace, which would nest fuzz-logs/ one directory deeper
+      # than tools/report-fuzz-run.sh walks and quietly turn every
+      # failing night into a --no-artifact issue.
+      - name: Collect any crash reproducers
+        if: always()
+        run: |
+          REPRODUCERS=shakenfist-spice-protocol/fuzz/artifacts
+          if [ -d "${REPRODUCERS}" ]; then
+            mkdir -p fuzz-logs/artifacts
+            cp -r "${REPRODUCERS}/." fuzz-logs/artifacts/
+            echo "collected crash reproducers:"
+            find fuzz-logs/artifacts -type f
+          else
+            echo "no crash reproducers to collect"
+          fi
+
       - name: Upload fuzz logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -240,7 +290,31 @@ jobs:
   report:
     name: Report fuzz failures
     needs: [fuzz]
-    if: always() && needs.fuzz.result != 'success' && needs.fuzz.result != 'cancelled'
+    # Restricted to develop because ci.yml's header points a reader at
+    # `gh workflow run fuzz.yml` as the way to exercise this lane on
+    # demand, and a dispatch from a scratch branch would otherwise file
+    # genuine `bug`-labelled issues -- which the real nightly would
+    # then dedup onto, commenting on somebody's test issue instead of
+    # filing its own. A branch dispatch still runs the fuzz job and
+    # still uploads its logs; it just does not speak.
+    #
+    # `cancelled` is excluded because the fuzz job sets
+    # cancel-in-progress, so a manual dispatch superseding a nightly
+    # must not file spurious issues. That rests on GitHub recording a
+    # job killed by `timeout-minutes` as `failure` rather than
+    # `cancelled` -- the documented and generally observed behaviour,
+    # but not something this branch could confirm, because
+    # workflow_dispatch only offers a workflow that already exists on
+    # the default branch and so the experiment (a one-minute timeout,
+    # then read needs.fuzz.result) is not runnable until this lands.
+    # Worth running once it has: if a timeout does arrive as
+    # `cancelled`, the truncated-loop diagnosis the run-level branch
+    # exists for can never file, and this condition has to tell the two
+    # causes of cancellation apart rather than skipping both.
+    if: >-
+      always() && needs.fuzz.result != 'success'
+      && needs.fuzz.result != 'cancelled'
+      && github.ref == 'refs/heads/develop'
     runs-on: [self-hosted, static]
     timeout-minutes: 10
     permissions:
