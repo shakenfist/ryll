@@ -43,8 +43,11 @@ on:
   schedule:
     # Daily at 12:00 UTC. Deliberately outside the window where the
     # merge queue is busiest (roughly 19:00-04:00 UTC), and clear of
-    # supply-chain.yml's Monday 09:00 slot, so the four `l` runners
-    # this asks for are not competing with a merge group for them.
+    # supply-chain.yml's Monday 09:00 slot, so the one `l` runner this
+    # asks for is not competing with a merge group for it. The ask is
+    # a quarter of what it was, but the pool is six workers wide
+    # across every repository and this job holds its runner for up to
+    # ninety minutes, so the timing is still worth keeping.
     - cron: '0 12 * * *'
   workflow_dispatch:
 
@@ -190,6 +193,19 @@ jobs:
             fi
           done
 
+          # A positive marker, written only once the loop has been
+          # all the way through. A passing target writes nothing, so
+          # without this an empty marker set is ambiguous between
+          # "every target passed" and "the loop never ran" -- and the
+          # step above does abort, at the `exit 1`, when the extractor
+          # rejects the manifest. The report job keys its run-level
+          # branch on this file's absence, so that it says which of
+          # those happened directly rather than inferring it from the
+          # absence of other markers, which any second failure on the
+          # same night can mask.
+          printf 'fuzzed %s target(s): %s\n' \
+            "${#TARGETS[@]}" "${TARGETS[*]}" > fuzz-logs/targets-ran.txt
+
       - name: Upload fuzz logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -237,105 +253,26 @@ jobs:
       # creates fuzz-logs/ before anything that can fail, so normally
       # there is one; but a job that died in checkout never got that
       # far, and this job exists precisely to speak for a fuzz job that
-      # could not speak for itself. The zero-marker branch below is
-      # what turns "no artifact" into a filed issue rather than a
-      # green report job.
+      # could not speak for itself. The run-level branch in
+      # tools/report-fuzz-run.sh is what turns "no artifact" into a
+      # filed issue rather than a green report job.
       - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: fuzz-logs
           path: fuzz-logs
 
-      # A failure to report must not stop the loop: the other targets
-      # still have to be reported. Failures are counted and turned into
-      # a job failure at the end, so a nightly that could not tell
-      # anyone about a broken target is never silently green.
-      - name: File an issue per failing target
+      # The marker walk lives in tools/report-fuzz-run.sh rather than
+      # here. It is the step that decides what gets reported at all,
+      # its failure mode is silence -- a report job that walks the
+      # markers wrongly looks exactly like a nightly with nothing to
+      # report -- and nothing lints or tests a workflow `run:` block.
+      # That is the same reasoning that put tools/fuzz-targets.sh and
+      # tools/report-fuzz-failure.sh under tools/ with smoke tests, and
+      # this block was the last and most load-bearing one left inline.
+      # See tools/test-report-fuzz-run.sh.
+      - name: Report the failures the markers describe, and any they do not
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          shopt -s nullglob
-          FAILURES=0
-          REPORT_FAILURES=0
-          for MARKER in fuzz-logs/*.failed; do
-            TARGET=$(basename "${MARKER}" .failed)
-            FAILURES=$((FAILURES + 1))
-            if ! tools/report-fuzz-failure.sh \
-                "${TARGET}" "fuzz-logs/${TARGET}.log"; then
-              echo "::warning::could not file an issue for ${TARGET}"
-              REPORT_FAILURES=$((REPORT_FAILURES + 1))
-            fi
-          done
-
-          # The format check is not a target and must not be reported as
-          # one: it lives in its own subdirectory, so the glob above did
-          # not see it, and it gets its own mode and its own issue title.
-          # It also does not count towards FAILURES, because a run where
-          # only the formatting broke did reach the targets -- calling
-          # that "failed before reaching the targets" below would be an
-          # actively wrong diagnosis.
-          FMT_FAILED=0
-          if [ -f fuzz-logs/fmt/check.failed ]; then
-            FMT_FAILED=1
-            if ! tools/report-fuzz-failure.sh \
-                --fmt-failure fuzz-logs/fmt/check.log; then
-              echo "::warning::could not file an issue for the format check"
-              REPORT_FAILURES=$((REPORT_FAILURES + 1))
-            fi
-          fi
-
-          # No markers of either kind, and two quite different things
-          # produce that. The fuzz job may have failed before the target
-          # loop -- in checkout, the cargo cache or the devcontainer
-          # build -- or the artifact may simply not have arrived,
-          # because the download above is continue-on-error and the
-          # upload can be cut short by the job's timeout-minutes.
-          # Without this branch the loop above would run zero times,
-          # report "targets that failed: 0" and exit 0, leaving a red
-          # nightly that told nobody anything: exactly the hole this
-          # lane was built to close.
-          #
-          # run-info.txt tells the two apart. The fuzz job writes it
-          # before the first step that can fail, so its presence means
-          # the artifact round-tripped and the job really did die
-          # before any target; its absence means the logs never got
-          # here and the fuzz job's own failure is still unread. The
-          # two modes carry different titles, so a run of missing
-          # artifacts cannot dedup on top of a genuine early failure
-          # and bury it.
-          if [ "${FAILURES}" -eq 0 ] && [ "${FMT_FAILED}" -eq 0 ]; then
-            if [ -f fuzz-logs/run-info.txt ]; then
-              echo "::warning::no target markers; the run failed earlier"
-              REPORT_MODE=--run-failure
-            else
-              echo "::warning::no fuzz-logs artifact; nothing to read"
-              REPORT_MODE=--no-artifact
-            fi
-            if ! tools/report-fuzz-failure.sh "${REPORT_MODE}"; then
-              echo "::warning::could not file an issue for the run"
-              REPORT_FAILURES=$((REPORT_FAILURES + 1))
-            fi
-          fi
-
-          {
-            echo "### Nightly fuzz"
-            echo ""
-            echo "- targets that failed: ${FAILURES}"
-            if [ "${FMT_FAILED}" -eq 1 ]; then
-              echo "- the fuzz workspace is misformatted"
-            fi
-            if [ "${FAILURES}" -eq 0 ] && [ "${FMT_FAILED}" -eq 0 ]; then
-              if [ -f fuzz-logs/run-info.txt ]; then
-                echo "- the run failed before reaching any target"
-              else
-                echo "- the fuzz-logs artifact did not arrive"
-              fi
-            fi
-            echo "- could not be reported: ${REPORT_FAILURES}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "${REPORT_FAILURES}" -ne 0 ]; then
-            echo "::error::${REPORT_FAILURES} failure(s) could not be reported"
-            exit 1
-          fi
+        run: tools/report-fuzz-run.sh fuzz-logs

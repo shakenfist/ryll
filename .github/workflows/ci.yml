@@ -299,8 +299,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      # jq as well as shellcheck: the reporter test below runs under
+      # FUZZ_REPORTER_TEST_STRICT, which turns its `no jq` skip into a
+      # failure. Every other jq user in this repository runs on
+      # `[self-hosted, static]`, so nothing has previously established
+      # that the `debian-12` image carries it -- and this job already
+      # demonstrates that the image is not assumed to carry tooling.
+      # Installing it costs nothing if it is already there.
+      - name: Install shellcheck and jq
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq
 
       - name: Run shellcheck
         run: ./tools/run-shellcheck.sh
@@ -326,6 +333,12 @@ jobs:
         env:
           FUZZ_REPORTER_TEST_STRICT: '1'
         run: ./tools/test-report-fuzz-failure.sh
+
+      # And the marker walk that drives the reporter: it decides what
+      # gets reported at all, and a walk that reports nothing is
+      # indistinguishable from a nightly with nothing to report.
+      - name: Test the nightly fuzz marker walk
+        run: ./tools/test-report-fuzz-run.sh
 
       # And the target list it reports on: a target silently dropped
       # from the nightly is never built, never fails, and so is never

@@ -30,10 +30,13 @@
 #   tools/report-fuzz-failure.sh --no-artifact [--dry-run]
 #   tools/report-fuzz-failure.sh --fmt-failure LOG_FILE [--dry-run]
 #
-# The second form is for a run that died before the target loop --
-# checkout, the cargo cache, or the fuzz devcontainer build. There is
-# no target to name and no per-target log to excerpt, but the run still
+# The second form is for a fuzz job whose failure no target marker
+# accounts for: it died before the target loop, the loop was cut short
+# part way through, or it failed in a step after the loop. There is no
+# target to name and no per-target log to excerpt, but the run still
 # has to reach a human, so it files one issue about the run itself.
+# tools/report-fuzz-run.sh decides when that is the case; this only
+# writes the issue.
 #
 # The third form is for the case where the report job could not read
 # the fuzz job's logs at all.
@@ -176,8 +179,28 @@ if [ -s "${EXCERPT_FILE}" ]; then
     done
 fi
 
+# The same closing paragraphs on every mode. The lifecycle note is
+# here rather than only in docs/ci.md because the dedup below keys on
+# an *open* issue with this title: an issue left open after the fix
+# means every later failure of the same thing arrives as a comment on
+# a thread people have stopped reading, rather than as new work. The
+# person who has to close it is the person reading this body, so the
+# instruction belongs in the body.
+#
+# shellcheck disable=SC2016
+footer() {
+    printf -- '---\n\n'
+    printf 'Close this issue once the failure is fixed. The nightly '
+    printf 'dedups on an open issue with this exact title, so while '
+    printf 'this one stays open every recurrence is added here as a '
+    printf '"Failed again" comment instead of being filed as new work.'
+    printf '\n\n'
+    printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
+    printf 'from .github/workflows/fuzz.yml.\n'
+}
+
 case "${MODE}" in
-    run-failure) TITLE="Nightly fuzz run failed before reaching the targets" ;;
+    run-failure) TITLE="Nightly fuzz run failed outside the fuzz targets" ;;
     no-artifact) TITLE="Nightly fuzz run produced no log artifact" ;;
     fmt-failure) TITLE="Nightly fuzz: the fuzz workspace is misformatted" ;;
     *)           TITLE="Nightly fuzz failure: ${TARGET}" ;;
@@ -191,16 +214,29 @@ esac
 case "${MODE}" in
     run-failure)
         {
-            printf 'The nightly fuzz run failed before it built any fuzz '
-            printf 'target, so there is no per-target issue to file. The '
-            printf 'failure is in the run itself -- checkout, the cargo '
-            printf 'cache, or the `fuzz-devcontainer` build.\n\n'
+            printf 'The nightly fuzz job failed, and no fuzz target marker '
+            printf 'accounts for it, so there is no per-target issue to '
+            printf 'file. The failure is in the run itself. In rough order '
+            printf 'of likelihood:\n\n'
+            printf -- '- the fuzz target list extraction, '
+            printf '`tools/fuzz-targets.sh`, rejected '
+            printf '`shakenfist-spice-protocol/fuzz/Cargo.toml` -- that '
+            printf 'aborts the target step before any target is built;\n'
+            printf -- '- the `fuzz-devcontainer` build, which is fatal by '
+            printf 'design because every target needs the image;\n'
+            printf -- '- checkout or the cargo cache, both ahead of it;\n'
+            printf -- '- the target loop was cut short part way through, '
+            printf 'most plausibly by the job hitting its '
+            printf '`timeout-minutes`;\n'
+            printf -- '- a step after the loop, such as the artifact '
+            printf 'upload.\n\n'
             printf 'Run: %s\n\n' "${WORKFLOW_URL:-unknown}"
-            printf 'Start from the run log. The `fuzz-logs` artifact holds '
-            printf 'only the run marker in this case, because no target '
-            printf 'ever wrote one.\n\n'
-            printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
-            printf 'from .github/workflows/fuzz.yml.\n'
+            printf 'Start from the run log: it names the step that failed, '
+            printf 'which is what tells these apart. The `fuzz-logs` '
+            printf 'artifact holds whatever the job managed to write '
+            printf 'before it stopped, which may be nothing but the run '
+            printf 'marker.\n\n'
+            footer
         } > "${BODY_FILE}"
         ;;
     fmt-failure)
@@ -221,8 +257,7 @@ case "${MODE}" in
             printf '%s\n' "${FENCE}"
             cat "${EXCERPT_FILE}"
             printf '\n%s\n\n' "${FENCE}"
-            printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
-            printf 'from .github/workflows/fuzz.yml.\n'
+            footer
         } > "${BODY_FILE}"
         ;;
     no-artifact)
@@ -242,8 +277,7 @@ case "${MODE}" in
             printf '`timeout-minutes` before the `if: always()` upload '
             printf 'could run.\n\n'
             printf 'Start from the run log.\n\n'
-            printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
-            printf 'from .github/workflows/fuzz.yml.\n'
+            footer
         } > "${BODY_FILE}"
         ;;
     *)
@@ -258,8 +292,7 @@ case "${MODE}" in
             printf '%s\n' "${FENCE}"
             cat "${EXCERPT_FILE}"
             printf '\n%s\n\n' "${FENCE}"
-            printf 'Filed automatically by `tools/report-fuzz-failure.sh` '
-            printf 'from .github/workflows/fuzz.yml.\n'
+            footer
         } > "${BODY_FILE}"
         ;;
 esac

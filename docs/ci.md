@@ -39,7 +39,7 @@ enqueue` status check:
 | `cargo audit` | self-hosted `s` | RustSec advisory check |
 | `cargo deny` | self-hosted `s` | Licence, ban, and advisory policy (`deny.toml`) |
 | `gitleaks` | self-hosted `s` | Secret scanning over full history |
-| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh`, `tools/test-report-fuzz-failure.sh` and `tools/test-fuzz-targets.sh` |
+| `shellcheck` | self-hosted `s` | `tools/run-shellcheck.sh`, then `tools/audit/test-audit-range.sh`, `tools/test-report-fuzz-failure.sh`, `tools/test-report-fuzz-run.sh` and `tools/test-fuzz-targets.sh` |
 | `bidi and zero-width` | self-hosted `s` | `tools/check-bidi.sh` |
 | `skillsaw` | self-hosted `s` | `pre-commit run skillsaw` over the agent context |
 
@@ -114,6 +114,18 @@ containing a space arrives whole and is rejected by the
 its first word, which looks like a clean shorter name, agrees
 with the table count, and fuzzes a target that does not exist.
 
+A quoted value is matched and unwrapped whole, in both of TOML's
+string spellings, rather than having its quotes stripped and a
+trailing `#` comment cut off afterwards. That order is the point.
+Cutting at the first `#` first would turn `name = "fuzz#target"`
+into `fuzz` — a plausible-looking shorter name that passes the
+charset check and fuzzes a target that does not exist, which is
+the same silent shortening every other guard here exists to
+prevent. Unwrapping first means a `#` inside the literal survives
+to be rejected loudly, and a `#` after it is never part of the
+value at all. Both spellings and the trap are fixtures in
+`tools/test-fuzz-targets.sh`.
+
 It is one job, not a matrix leg per target. Every leg of the
 matrix it replaced spent 255 of its 340 seconds on `ensure-cache
 fuzz-devcontainer` — the same image build, four times, on four
@@ -187,9 +199,19 @@ nightly is a mark on the Actions tab, and GitHub's only
 notification for it is an email to whoever pushed last, which at
 12:00 UTC is nobody's inbox in particular.
 
-So the `report` job files a GitHub issue per failing target,
-through `tools/report-fuzz-failure.sh`, and *that* is the
-notification. Six details in the arrangement are load-bearing:
+So the `report` job files a GitHub issue per failing target, and
+*that* is the notification. Two scripts do it:
+`tools/report-fuzz-run.sh` walks the marker files the fuzz job
+left behind and decides what gets reported, and
+`tools/report-fuzz-failure.sh` writes each issue. Both are
+scripts rather than workflow `run:` blocks for the reason given
+above for `tools/fuzz-targets.sh`: nothing lints or tests a
+`run:` block, and every one of these three has silence as its
+failure mode. `tools/test-report-fuzz-run.sh` stubs the reporter
+and asserts which invocations the walk chooses, which is the part
+the reporter's own test cannot see.
+
+Six details in the arrangement are load-bearing:
 
 - The fuzzing step exits 0 whatever the target does, recording
   the verdict as a marker file. A step that aborted the job would
@@ -197,8 +219,8 @@ notification. Six details in the arrangement are load-bearing:
   carry text rather than being `touch`ed empty: a zero-byte
   file's survival through `upload-artifact` and back is an
   assumption, and a marker that went missing would read to the
-  report job as a run that died before the targets — an actively
-  wrong diagnosis, filed under the wrong title.
+  report job as a run that failed outside the targets — an
+  actively wrong diagnosis, filed under the wrong title.
 - The log is uploaded before anything fails, because when issue
   filing is the thing that broke, the artifact is how the failure
   reaches a human.
@@ -209,30 +231,37 @@ notification. Six details in the arrangement are load-bearing:
   an empty path creates no artifact, and a download of a missing
   artifact is a hard error that would take the report job — and
   with it the whole notification — down with the fuzz job.
-- The report job files an issue when there are *no* markers at
-  all. It only runs when the fuzz job did not succeed, so zero
-  markers is always a failure worth hearing about; without that
-  branch the per-target loop would run zero times and the report
-  job would exit 0, which is the same silence in a different
-  place. Two quite different things produce zero markers, and
-  `fuzz-logs/run-info.txt` — written before the first step that
-  can fail — tells them apart. Present, the artifact
-  round-tripped and the job really did die before any target:
+- The target step writes `fuzz-logs/targets-ran.txt` *after* the
+  loop, and the walk keys its run-level branch on that file's
+  absence. A passing target writes no marker, so an empty marker
+  set on its own is ambiguous between "every target passed" and
+  "the loop never ran" — and the loop does abort, at an
+  `exit 1`, when `tools/fuzz-targets.sh` rejects the manifest.
+  Inferring the answer from the absence of *other* markers is
+  what a second failure on the same night can mask: a formatting
+  drift and an unreadable manifest together used to file the
+  formatting issue and say nothing at all about no target having
+  been fuzzed. A positive completion marker says which happened
+  directly, so the two cannot interfere.
+- The report job never finishes having reported nothing. It only
+  runs when the fuzz job did not succeed, so a marker set that
+  accounts for no failure is itself a failure worth hearing
+  about — the run died before the loop, the loop was cut short,
+  or something after it (the artifact upload, say) broke. Which
+  of those gets said depends on `fuzz-logs/run-info.txt`, written
+  before the first step that can fail. Present, the artifact
+  round-tripped and the failure really is in the run:
   `--run-failure`. Absent, the logs never arrived at all and the
-  fuzz job's own failure is still unread: `--no-artifact`. A
-  format-check marker suppresses this branch entirely, because a
-  run where only the formatting broke did reach the targets and
-  calling it an early death would be wrong. The modes are
-  separate because they are different bugs with different first
-  moves, and because they carry separate titles none of them can
-  dedup on top of another and bury it.
+  fuzz job's own failure is still unread: `--no-artifact`. The
+  modes are separate because they are different bugs with
+  different first moves, and because they carry separate titles
+  none of them can dedup on top of another and bury it.
 - Reporting runs on the static runner, where the rest of this
   repository's `gh` calls run — `release.yml`'s version-mismatch
   issue is the precedent. The `debian-12-docker` image is not
-  known to carry the CLI.
-- A failure to report is counted rather than thrown, and fails
-  the job at the end. One target nobody could file about must not
-  stop the rest being filed.
+  known to carry the CLI. A failure to report is counted rather
+  than thrown, and fails the job at the end: one target nobody
+  could file about must not stop the rest being filed.
 
 Recurrences comment on the open issue for that target rather
 than filing a duplicate: a target that stops compiling stays
@@ -241,6 +270,17 @@ would file one issue per target per night. The dedup lookup
 matches on issue title alone and deliberately not on the `bug`
 label the reporter applies, because a label stripped during
 triage would silently switch dedup back off.
+
+Because dedup keys on an *open* issue, closing one is part of
+the fix. An issue left open after the target is repaired turns
+every later failure of the same thing into a "Failed again"
+comment on a thread people have stopped reading, rather than
+into new work. Nothing closes them automatically — the fuzz job
+runs on `debian-12-docker`, which is not known to carry `gh`,
+and giving it `issues: write` to close what the static runner
+filed would spread the credential across both — so every issue
+this lane files says so in its own body, where the person doing
+the fixing will read it.
 
 The reporter is the only channel this lane has, so its failure
 mode is silence — and silence is invisible until a fuzz target
@@ -263,8 +303,8 @@ and the test stubs it, driving the recurrence, first-failure,
 near-miss-title and broken-lookup paths against canned responses.
 
 It runs in pre-commit and in `ci.yml`'s `shellcheck` job, beside
-the audit-range test and `tools/test-fuzz-targets.sh`, which
-exist for the same reason.
+the audit-range test, `tools/test-report-fuzz-run.sh` and
+`tools/test-fuzz-targets.sh`, which exist for the same reason.
 
 Two of its assertions depend on tools the test does not itself
 need — `iconv` for the UTF-8 scrub, `jq` for the dedup lookup —
@@ -273,7 +313,11 @@ a missing tool must not block an unrelated commit, and wrong in
 CI, where an image change that dropped `jq` would quietly delete
 the most valuable coverage in the file and leave the check green.
 So `ci.yml` sets `FUZZ_REPORTER_TEST_STRICT=1` and the skips
-become failures there.
+become failures there — and, because that turns the `jq` skip
+into a hard failure, the job installs `jq` alongside `shellcheck`
+rather than assuming the `debian-12` image carries it. Every
+other `jq` user in this repository runs on the static runner, so
+nothing had established that it does.
 
 This shape is the fleet-wide standard, generalized from instar's
 `coverage-fuzz.yml`; the criterion is

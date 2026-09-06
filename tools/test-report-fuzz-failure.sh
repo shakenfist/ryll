@@ -204,12 +204,24 @@ echo "== --run-failure =="
 WORKFLOW_URL="https://example.invalid/run/2" \
     run_reporter --run-failure --dry-run
 assert_status 0 "--run-failure reports"
-assert_contains "Nightly fuzz run failed before reaching the targets" \
+assert_contains "Nightly fuzz run failed outside the fuzz targets" \
     "--run-failure has its own title"
 assert_contains "https://example.invalid/run/2" \
     "--run-failure records the run URL"
 assert_absent "make fuzz-build-" \
     "--run-failure names no per-target reproduce command"
+# The body sends a human to a step, so it has to name every step that
+# can produce this mode. The extractor is the one most likely to: it
+# aborts the target step on a manifest it will not read, and it is the
+# one this mode's body used not to mention at all.
+assert_contains "tools/fuzz-targets.sh" \
+    "--run-failure names the target list extraction as a cause"
+assert_contains "fuzz-devcontainer" \
+    "--run-failure names the devcontainer build as a cause"
+assert_contains "cut short" \
+    "--run-failure names a loop cut short as a cause"
+assert_contains "names the step that failed" \
+    "--run-failure sends the reader to the run log"
 
 echo
 echo "== --no-artifact =="
@@ -225,8 +237,8 @@ assert_absent "make fuzz-build-" \
 # The two run-level modes exist to be told apart, so neither may
 # borrow the other's title -- a shared title would dedup a spell of
 # missing artifacts onto a real early failure and bury it.
-assert_absent "failed before reaching the targets" \
-    "--no-artifact does not claim the run died before the targets"
+assert_absent "failed outside the fuzz targets" \
+    "--no-artifact does not borrow the run-failure title"
 
 echo
 echo "== --fmt-failure =="
@@ -247,8 +259,8 @@ assert_absent "make fuzz-build-" \
     "--fmt-failure names no per-target reproduce command"
 # Each of the three run-level modes must keep its own title: a shared
 # one would dedup them onto each other and bury the rarer diagnosis.
-assert_absent "failed before reaching the targets" \
-    "--fmt-failure does not claim the run died before the targets"
+assert_absent "failed outside the fuzz targets" \
+    "--fmt-failure does not borrow the run-failure title"
 assert_absent "no log artifact" \
     "--fmt-failure does not claim the artifact went missing"
 
@@ -258,6 +270,23 @@ run_reporter --fmt-failure "$WORK/does-not-exist.log" --dry-run
 assert_status 0 "--fmt-failure survives a missing log"
 assert_contains "the fuzz workspace is misformatted" \
     "--fmt-failure still files without a log excerpt"
+
+echo
+echo "== the lifecycle footer =="
+# Dedup keys on an *open* issue with a matching title, so an issue
+# left open after the fix quietly downgrades every later failure of
+# the same thing to a comment on a thread people have stopped reading.
+# The instruction to close it therefore has to reach the person who
+# fixes the failure, which means it has to be in every body.
+printf 'diff\n' > "$WORK/fmt-footer.log"
+for MODE_ARGS in "fuzz_footer $WORK/normal.log" "--run-failure" \
+        "--no-artifact" "--fmt-failure $WORK/fmt-footer.log"; do
+    # Deliberately unquoted: each entry is an argv, not one argument.
+    # shellcheck disable=SC2086
+    run_reporter $MODE_ARGS --dry-run
+    assert_contains "Close this issue once the failure is fixed" \
+        "$MODE_ARGS carries the close-me instruction"
+done
 
 echo
 echo "== dedup and recurrence, against a stubbed gh =="

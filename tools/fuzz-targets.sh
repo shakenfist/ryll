@@ -48,13 +48,31 @@ fi
 # charset check below. Reading `$3` would hand back the first word of it
 # and look like a clean, shorter name -- a silently wrong target rather
 # than a loud failure.
+#
+# A quoted literal is matched and unwrapped as a whole, in both of
+# TOML's spellings, rather than having its quotes stripped and a
+# trailing `#` comment cut off afterwards. The order matters: cutting at
+# the first `#` would turn `name = "fuzz#target"` into `fuzz`, which is
+# a plausible-looking shorter name that passes the charset check and
+# fuzzes a target that does not exist -- the exact silent shortening
+# every guard in this script exists to prevent. Unwrapping the literal
+# first means the `#` inside it survives to be rejected loudly, and the
+# `#` after it is simply never part of the value.
+#
+# Anything that is not a quoted literal is passed through with its
+# trailing whitespace trimmed, so it reaches the charset check and
+# fails there. It is not valid TOML for a string, so `cargo fuzz` would
+# reject the manifest too.
 TARGETS="$(awk '/^\[\[bin\]\]/ { in_bin = 1; next }
                 /^\[/          { in_bin = 0 }
                 in_bin && $1 == "name" {
                     value = $0
                     sub(/^[[:space:]]*name[[:space:]]*=[[:space:]]*/, "", value)
-                    sub(/[[:space:]]+$/, "", value)
-                    gsub(/"/, "", value)
+                    if (match(value, /^"[^"]*"/) || match(value, /^\047[^\047]*\047/)) {
+                        value = substr(value, RSTART + 1, RLENGTH - 2)
+                    } else {
+                        sub(/[[:space:]]+$/, "", value)
+                    }
                     print value
                 }' \
     "${MANIFEST}")"

@@ -129,6 +129,48 @@ run_extractor "$WORK/indented.toml"
 assert_status 1 "an indented [[bin]] table fails rather than being skipped"
 
 echo
+echo "== TOML spellings cargo fuzz accepts =="
+# A trailing comment on the name line. Stripping the quotes and
+# trimming whitespace, in that order, used to leave the comment glued
+# to the name, where the charset guard rejected it -- and rejecting
+# the manifest aborts the whole target step, so one comment on one
+# line stopped all four targets being fuzzed.
+manifest "$WORK/comment.toml" alpha
+printf '[[bin]]\nname = "bravo"  # the second one\npath = "x"\n' \
+    >> "$WORK/comment.toml"
+run_extractor "$WORK/comment.toml"
+assert_status 0 "a trailing comment on the name line is read"
+assert_equals $'alpha\nbravo' "the comment does not reach the name"
+
+# TOML literal strings. cargo fuzz accepts them and the old gsub
+# stripped only double quotes, so the quotes reached the charset guard.
+manifest "$WORK/literal.toml" alpha
+printf "[[bin]]\nname = 'bravo'\npath = \"x\"\n" >> "$WORK/literal.toml"
+run_extractor "$WORK/literal.toml"
+assert_status 0 "a single-quoted name is read"
+assert_equals $'alpha\nbravo' "the literal quotes do not reach the name"
+
+# And the trap in fixing the two above. Cutting at the first `#` would
+# turn this into `char`, which passes the charset guard and looks like
+# a perfectly ordinary shorter name -- the silent shortening every
+# guard in the extractor exists to prevent. The literal has to be
+# unwrapped before anything considers a comment, so the `#` inside it
+# survives to be rejected loudly.
+manifest "$WORK/hashname.toml"
+printf '[[bin]]\nname = "char#lie"\npath = "x"\n' >> "$WORK/hashname.toml"
+run_extractor "$WORK/hashname.toml"
+assert_status 1 "a '#' inside a quoted name is rejected, not cut"
+# A whole-line match, not a substring: the truncated name is exactly
+# `char`, and the rejection message legitimately quotes `char#lie`, so
+# a substring test would pass whether or not the truncation happened.
+if printf '%s\n' "$OUT" | grep -qx 'char'; then
+    red "FAIL: a name containing '#' was truncated at the '#'"
+    FAILURES=$((FAILURES + 1))
+else
+    green "ok: a name containing '#' is not truncated at the '#'"
+fi
+
+echo
 echo "== the zero-target guard =="
 manifest "$WORK/empty.toml"
 run_extractor "$WORK/empty.toml"
