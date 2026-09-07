@@ -1,0 +1,368 @@
+# Nightly cargo-fuzz build-and-smoke run.
+#
+# This workflow's merge_group trigger was removed from ci.yml's merge
+# tier: four `l`-sized self-hosted runners requested at the moment a
+# merge group forms is the largest single ask ryll makes of a fleet
+# whose `l` pool is six workers wide across every repo, and when that
+# pool is starved the merge queue does not merely run slowly, it hits
+# the 360-minute `check_response_timeout_minutes` wall and evicts the
+# PR. That happened three times in eight days (shakenfist/ryll#329);
+# on the third the fuzz jobs waited 6h05m for a runner, passed, and
+# reported success twenty minutes after the queue had already given up
+# on the PR.
+#
+# What remains here is the nightly cron against develop, following the
+# same shape as supply-chain.yml: the check still runs, it just no
+# longer sits on the critical path to landing a change. The trade is
+# deliberate — a fuzz target that stops building is now caught within a
+# day rather than before merge. That is an acceptable trade for this
+# particular job because it is a build-and-doesn't-panic gate rather
+# than a real fuzz campaign (long-running coverage-guided fuzzing is
+# tracked in shakenfist/ryll#135), and because nothing else in the
+# merge tier depends on its result.
+#
+# Nobody watches a scheduled workflow, so a nightly failure has to
+# reach a human by some route other than a red check standing between
+# someone and their merge. GitHub's only notification for a failed
+# scheduled run is an email to whoever pushed last, which at 12:00 UTC
+# is nobody's inbox in particular. So the `report` job below files an
+# issue per failing target, and that -- not the colour of this run --
+# is the notification. This is the requirement the fleet-wide
+# criterion exists to enforce; see shakenfist/development's
+# docs/audits/fuzz-nightly-reporting.md, generalized from instar's
+# coverage-fuzz.yml.
+#
+# The fuzz crate is its own detached workspace (see
+# shakenfist-spice-protocol/fuzz/Cargo.toml's `[workspace]` table) so
+# it needs its own toolchain/cache/dependency install, independent of
+# ci.yml's `lint` and `build` jobs.
+
+name: Fuzz
+
+on:
+  schedule:
+    # Daily at 12:00 UTC. Deliberately outside the window where the
+    # merge queue is busiest (roughly 19:00-04:00 UTC), and clear of
+    # supply-chain.yml's Monday 09:00 slot, so the one `l` runner this
+    # asks for is not competing with a merge group for it. The ask is
+    # a quarter of what it was, but the pool is six workers wide
+    # across every repository and this job holds its runner for up to
+    # ninety minutes, so the timing is still worth keeping.
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz
+    runs-on: [self-hosted, vm, debian-12-docker, l]
+    # Covers every target end to end, not one target: the matrix this
+    # replaced had a leg per target and this budget was per leg. Four
+    # targets at roughly 255s of shared devcontainer build plus 78s
+    # each finish inside ten minutes, so there is a lot of headroom --
+    # but the work is serial now and tools/fuzz-targets.sh exists so
+    # the target count grows without anyone editing this file, so the
+    # budget is worth revisiting when it does. A timeout truncates the
+    # loop, and the targets never reached write no marker; only
+    # targets-ran.txt's absence catches that, as one run-level issue
+    # that cannot name them.
+    timeout-minutes: 90
+    # One job rather than a matrix leg per target. Every leg of the
+    # matrix this replaced spent 255 of its 340 seconds on
+    # `ensure-cache fuzz-devcontainer` -- the same image build, four
+    # times, on four separate runners, ahead of 78 seconds of work that
+    # actually differed. Sharing it costs wall-clock the nightly does
+    # not need (roughly 570s serial against 340s parallel) and returns
+    # the thing that is actually scarce, which is `l` runners.
+    #
+    # github.ref is a stable key here: a scheduled run and a
+    # workflow_dispatch on develop both report refs/heads/develop, so a
+    # manual run supersedes an in-flight nightly rather than queueing
+    # behind it.
+    #
+    # Only a manual run may supersede, though. This job waits on the
+    # same starved `l` pool the lane exists to get out of the way of
+    # (#329), so a nightly can still be sitting unstarted when the next
+    # one is created -- and cancel-in-progress cancels pending members
+    # of a group as well as running ones. With a flat `true`, night N
+    # would be cancelled by night N+1, the report job skips `cancelled`,
+    # and the lane goes silent in precisely the runner-starvation
+    # condition it was written for, every night the pool stays starved.
+    # Left to queue instead, night N is failed by GitHub after 24h and
+    # correctly files `--no-artifact`. A dispatch superseding a nightly
+    # keeps its documented meaning, and its `cancelled` result is the
+    # one the report job is right to ignore.
+    concurrency:
+      group: ${{ github.workflow }}-fuzz-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Ahead of every step that can fail except checkout, so the
+      # artifact the report job downloads always exists. A job that
+      # dies later -- in the cargo cache, the devcontainer build, the
+      # format check -- never reaches the target loop and so writes no
+      # marker and no log; upload-artifact on an empty path creates no
+      # artifact at all, and download-artifact on a missing artifact is
+      # a hard error, which would take out the report job and with it
+      # the only notification this lane has.
+      #
+      # It sits ahead of the cargo cache rather than behind it because
+      # the two run-level issue bodies exist to be told apart. With the
+      # marker behind the cache restore, a cache failure wrote no
+      # marker and so filed `--no-artifact`, whose body sends the
+      # reader to the upload and download steps -- exactly the wrong
+      # first move for a job that never got as far as producing
+      # anything to upload. Checkout is now the only step ahead of the
+      # marker, and it is what `--no-artifact` names first.
+      - name: Prepare the log directory
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p fuzz-logs
+          printf 'run: %s\ncommit: %s\n' "${RUN_URL}" "${GITHUB_SHA}" \
+            > fuzz-logs/run-info.txt
+
+      # Must come after checkout; see the action for why. The step
+      # above is safe to have in between: the constraint is about
+      # checkout's `git clean -ffdx` deleting .cargo-cache, and writing
+      # fuzz-logs/ neither runs checkout again nor touches that
+      # directory.
+      #
+      # Its own key prefix: the fuzz targets compile with the network up
+      # and the cache writable, so what this job saves must never become
+      # the read-only input to an isolated build.
+      - uses: ./.github/actions/cargo-cache
+        with:
+          key-prefix: fuzz-cargo-cache
+
+      # Fatal, and first, deliberately. Everything below needs this
+      # image, so a broken devcontainer build is not something to
+      # report per-target: it would fail every target and file an issue
+      # about each of them for one problem. Failing here leaves no
+      # markers, which the report job reads as "the run died before the
+      # targets" and files exactly one issue about.
+      - name: Build the fuzz devcontainer
+        run: make ensure-cache fuzz-devcontainer
+
+      # The fuzz crate is a detached workspace, so ci.yml's lint job
+      # `cargo fmt --all --check` does not reach it and this is the only
+      # thing that checks its formatting.
+      #
+      # It stays here rather than in ci.yml's smoke tier -- where a
+      # format check would otherwise belong, since it is cheap and its
+      # findings are best delivered before merge -- because it is not
+      # cheap here. `make fuzz-fmt-check` depends on
+      # `ensure-cache fuzz-devcontainer`, which is 255 of the 340
+      # seconds a fuzz leg used to take, and it needs an `l` runner to
+      # do it. Putting that on every push to every PR spends more of
+      # the scarce pool than this whole change gives back.
+      #
+      # Tolerant rather than fatal, and reported as its own issue.
+      # Formatting drift here is the most likely non-target failure in
+      # this lane and the least urgent one, and an abort would mean a
+      # target that had genuinely stopped compiling stayed invisible
+      # for as long as the format nit went unfixed -- inverting the
+      # priority this lane exists to serve. The marker lives in its own
+      # subdirectory so it cannot be mistaken for a target by the
+      # `fuzz-logs/*.failed` glob the report job walks.
+      - name: Check fuzz formatting
+        run: |
+          mkdir -p fuzz-logs/fmt
+          if make fuzz-fmt-check > fuzz-logs/fmt/check.log 2>&1; then
+            echo "the fuzz workspace is formatted"
+          else
+            STATUS=$?
+            echo "::warning::make fuzz-fmt-check failed; see the log tail below"
+            tail -40 fuzz-logs/fmt/check.log
+            printf 'make fuzz-fmt-check failed (exit %s)\n' "${STATUS}" \
+              > fuzz-logs/fmt/check.failed
+          fi
+
+      # The target list comes from tools/fuzz-targets.sh rather than
+      # from a literal here: a new fuzz target should be fuzzed by the
+      # nightly because it exists, not because somebody remembered to
+      # add it to a workflow. It is a script rather than inline shell
+      # because it decides which targets run at all -- a silent failure
+      # mode -- and nothing lints or tests a workflow `run:` block.
+      # See tools/test-fuzz-targets.sh.
+      #
+      # Deliberately exits 0 whatever the targets do, recording each
+      # verdict as a marker file. Two later steps depend on having run:
+      # the artifact upload, which is how a log reaches a human when
+      # issue filing is the thing that broke, and the report job, which
+      # cannot file an issue about a step that aborted the job before
+      # writing its log. The loop continues past a failure for the same
+      # reason `fail-fast: false` was set on the matrix.
+      - name: Build and smoke-run the fuzz targets
+        run: |
+          MANIFEST=shakenfist-spice-protocol/fuzz/Cargo.toml
+
+          # A command substitution rather than `mapfile` from a process
+          # substitution: mapfile would succeed with an empty array when
+          # the extractor failed, which is the under-run this lane must
+          # never do quietly.
+          if ! TARGET_LIST="$(tools/fuzz-targets.sh "${MANIFEST}")"; then
+            echo "::error::could not determine the fuzz target list"
+            exit 1
+          fi
+          mapfile -t TARGETS <<< "${TARGET_LIST}"
+
+          echo "Fuzzing: ${TARGETS[*]}"
+
+          for TARGET in "${TARGETS[@]}"; do
+            if { make "fuzz-build-${TARGET}" && make "fuzz-smoke-${TARGET}" ; } \
+                > "fuzz-logs/${TARGET}.log" 2>&1; then
+              echo "${TARGET} built and smoke-ran cleanly"
+            else
+              STATUS=$?
+              echo "::warning::${TARGET} failed; see the log tail below"
+              tail -40 "fuzz-logs/${TARGET}.log"
+              # Content rather than `touch`: a zero-byte file's survival
+              # through upload-artifact and back is an assumption, and a
+              # marker that went missing would read to the report job as
+              # "the run died before the targets" -- an actively wrong
+              # diagnosis filed under the wrong title.
+              printf 'fuzz-build/fuzz-smoke %s failed (exit %s)\n' \
+                "${TARGET}" "${STATUS}" > "fuzz-logs/${TARGET}.failed"
+            fi
+          done
+
+          # A positive marker, written only once the loop has been
+          # all the way through. A passing target writes nothing, so
+          # without this an empty marker set is ambiguous between
+          # "every target passed" and "the loop never ran" -- and the
+          # step above does abort, at the `exit 1`, when the extractor
+          # rejects the manifest. The report job keys its run-level
+          # branch on this file's absence, so that it says which of
+          # those happened directly rather than inferring it from the
+          # absence of other markers, which any second failure on the
+          # same night can mask.
+          printf 'fuzzed %s target(s): %s\n' \
+            "${#TARGETS[@]}" "${TARGETS[*]}" > fuzz-logs/targets-ran.txt
+
+      # libFuzzer writes the input that produced a panic to
+      # shakenfist-spice-protocol/fuzz/artifacts/<target>/. The 40-line
+      # log tail the issue body carries usually includes its base64
+      # line, but that is a fallback rather than a guarantee, and under
+      # the old merge-tier arrangement a crash was in front of a human
+      # immediately whereas now it is a day later against develop --
+      # which makes the reproducer worth more, not less.
+      #
+      # Copied into fuzz-logs/ rather than added as a second `path:` on
+      # the upload: a second path moves the artifact's root up to the
+      # workspace, which would nest fuzz-logs/ one directory deeper
+      # than tools/report-fuzz-run.sh walks and quietly turn every
+      # failing night into a --no-artifact issue.
+      - name: Collect any crash reproducers
+        if: always()
+        run: |
+          REPRODUCERS=shakenfist-spice-protocol/fuzz/artifacts
+          if [ -d "${REPRODUCERS}" ]; then
+            mkdir -p fuzz-logs/artifacts
+            cp -r "${REPRODUCERS}/." fuzz-logs/artifacts/
+            echo "collected crash reproducers:"
+            find fuzz-logs/artifacts -type f
+          else
+            echo "no crash reproducers to collect"
+          fi
+
+      - name: Upload fuzz logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-logs
+          path: fuzz-logs/
+          retention-days: 30
+
+      # Last, so the job is red for a human scanning the Actions tab,
+      # but only after the logs have been uploaded for the report job to
+      # read. The report job runs on needs.fuzz.result, so this is what
+      # tells it there is something to report -- including the format
+      # check, which is tolerant above precisely so it reaches here
+      # rather than aborting the targets.
+      - name: Fail if any target or the format check failed
+        run: |
+          shopt -s nullglob
+          FAILED=(fuzz-logs/*.failed)
+          if [ "${#FAILED[@]}" -ne 0 ]; then
+            echo "::error::${#FAILED[@]} fuzz target(s) failed"
+          fi
+          if [ -f fuzz-logs/fmt/check.failed ]; then
+            echo "::error::the fuzz workspace is misformatted"
+          fi
+          if [ "${#FAILED[@]}" -ne 0 ] || [ -f fuzz-logs/fmt/check.failed ]; then
+            exit 1
+          fi
+
+  # Filing runs on the static runner because that is where the rest of
+  # this repository's `gh` calls run (release.yml's version-mismatch
+  # issue); the debian-12-docker image is not known to carry the CLI.
+  report:
+    name: Report fuzz failures
+    needs: [fuzz]
+    # Restricted to develop because ci.yml's header points a reader at
+    # `gh workflow run fuzz.yml` as the way to exercise this lane on
+    # demand, and a dispatch from a scratch branch would otherwise file
+    # genuine `bug`-labelled issues -- which the real nightly would
+    # then dedup onto, commenting on somebody's test issue instead of
+    # filing its own. A branch dispatch still runs the fuzz job and
+    # still uploads its logs; it just does not speak.
+    #
+    # `cancelled` is excluded because a manual dispatch superseding an
+    # in-flight nightly must not file spurious issues. That is now the
+    # only cancellation the lane produces: the fuzz job's
+    # cancel-in-progress is true only for a workflow_dispatch, so one
+    # nightly can no longer cancel another and take its report with it.
+    # It also rests on GitHub recording a job killed by
+    # `timeout-minutes` as `failure` rather than `cancelled` --
+    # the documented and generally observed behaviour,
+    # but not something this branch could confirm, because
+    # workflow_dispatch only offers a workflow that already exists on
+    # the default branch and so the experiment (a one-minute timeout,
+    # then read needs.fuzz.result) is not runnable until this lands.
+    # Worth running once it has: if a timeout does arrive as
+    # `cancelled`, the truncated-loop diagnosis the run-level branch
+    # exists for can never file, and this condition has to tell the two
+    # causes of cancellation apart rather than skipping both.
+    if: >-
+      always() && needs.fuzz.result != 'success'
+      && needs.fuzz.result != 'cancelled'
+      && github.ref == 'refs/heads/develop'
+    runs-on: [self-hosted, static]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tolerant of a missing artifact rather than fatal. The fuzz job
+      # creates fuzz-logs/ before anything that can fail, so normally
+      # there is one; but a job that died in checkout never got that
+      # far, and this job exists precisely to speak for a fuzz job that
+      # could not speak for itself. The run-level branch in
+      # tools/report-fuzz-run.sh is what turns "no artifact" into a
+      # filed issue rather than a green report job.
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: fuzz-logs
+          path: fuzz-logs
+
+      # The marker walk lives in tools/report-fuzz-run.sh rather than
+      # here. It is the step that decides what gets reported at all,
+      # its failure mode is silence -- a report job that walks the
+      # markers wrongly looks exactly like a nightly with nothing to
+      # report -- and nothing lints or tests a workflow `run:` block.
+      # That is the same reasoning that put tools/fuzz-targets.sh and
+      # tools/report-fuzz-failure.sh under tools/ with smoke tests, and
+      # this block was the last and most load-bearing one left inline.
+      # See tools/test-report-fuzz-run.sh.
+      - name: Report the failures the markers describe, and any they do not
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: tools/report-fuzz-run.sh fuzz-logs

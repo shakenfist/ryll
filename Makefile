@@ -84,11 +84,12 @@ CACHE_MOUNTS_RO := \
 
 # Networked invocation with a writable cache. Two groups use it. The
 # ones that compile nothing: `fetch` and `lock` (which resolve and
-# download only), `fuzz-fmt-check` (`cargo fmt --check`), and the
-# packaging and smoke targets that run after a build (`deb`, `rpm`,
-# `web-smoke`, `web-smoke-tls`), which repackage or run an
-# already-built binary. And the three that do compile with the network
-# up, and so execute build scripts unisolated: `fuzz-build-%`,
+# download only), `fuzz-fmt-check` and `fuzz-fmt` (`cargo fmt`, which
+# rewrites sources but compiles nothing), and the packaging and smoke
+# targets that run after a build (`deb`, `rpm`, `web-smoke`,
+# `web-smoke-tls`), which repackage or run an already-built binary. And
+# the three that do compile with the network up, and so execute build
+# scripts unisolated: `fuzz-build-%`,
 # `fuzz-smoke-%` and `publish-crates` -- see docs/ci.md for why those
 # cannot be isolated. `ensure-cache`'s permission fix is not one of
 # these: it needs a root container, so it writes its own docker run.
@@ -107,7 +108,7 @@ DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
-	deb rpm web-smoke web-smoke-tls fuzz-fmt-check publish-crates \
+	deb rpm web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console check-windows
@@ -133,6 +134,7 @@ help:
 	@echo "  make devcontainer           - Build the development container"
 	@echo "  make fuzz-devcontainer      - Build the fuzzing container (nightly + cargo-fuzz)"
 	@echo "  make fuzz-fmt-check         - Format-check the detached fuzz workspace"
+	@echo "  make fuzz-fmt               - Reformat the detached fuzz workspace"
 	@echo "  make fuzz-build-TARGET      - Build one cargo-fuzz target"
 	@echo "  make fuzz-smoke-TARGET      - Smoke-run one cargo-fuzz target (~30s)"
 	@echo "  make clean                  - Remove build artifacts"
@@ -320,6 +322,15 @@ fuzz-fmt-check: ensure-cache fuzz-devcontainer
 		-w /workspace/shakenfist-spice-protocol/fuzz \
 		$(RYLL_FUZZ_IMAGE) \
 		cargo +nightly fmt --check
+
+# The fix for the above. The nightly files an issue naming this target
+# when the format check fails, so it has to exist: the alternative is an
+# issue that tells a human to reconstruct the docker invocation.
+fuzz-fmt: ensure-cache fuzz-devcontainer
+	$(DOCKER_RUN) \
+		-w /workspace/shakenfist-spice-protocol/fuzz \
+		$(RYLL_FUZZ_IMAGE) \
+		cargo +nightly fmt
 
 # Build one cargo-fuzz target, e.g. `make fuzz-build-fuzz_link_mess_parse`.
 fuzz-build-%: ensure-cache fuzz-devcontainer
