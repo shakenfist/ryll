@@ -360,6 +360,16 @@ against canned responses — the last two also asserting the
 warning, which is the only thing separating a broken lookup from
 a first failure.
 
+The recurrence case asserts the recorded `gh` argv and not only
+the outcome. The stub answers any `issue list` from its canned
+response whatever it was asked, so an assertion that only reads
+the result holds just as well for a lookup that has lost
+`in:title` or asks for a field set the jq cannot read. The
+qualifier, the `--state open` filter and the exact
+`--json number,title` field set are each pinned directly, the
+last of them as a substring with a trailing space so that a
+widened field set does not satisfy it.
+
 It runs in pre-commit and in `ci.yml`'s `shellcheck` job, beside
 the audit-range test, `tools/test-report-fuzz-run.sh` and
 `tools/test-fuzz-targets.sh`, which exist for the same reason.
@@ -376,6 +386,36 @@ into a hard failure, the job installs `jq` alongside `shellcheck`
 rather than assuming the `debian-12` image carries it. Every
 other `jq` user in this repository runs on the static runner, so
 nothing had established that it does.
+
+### What the reporting does not cover
+
+Everything above protects against a *fuzz* failure going
+unheard. It does not protect against the notification channel
+itself being what broke, and that residual hole is worth naming
+rather than leaving a reader to infer that the lane is
+airtight.
+
+If `gh` is missing from the static runner, the `GITHUB_TOKEN` is
+under-scoped or expired, the `bug` label has been deleted, or
+`tools/report-fuzz-run.sh` exits 1 on failures it counted but
+could not file, the outcome is exactly the one this section
+opens by rejecting: a red scheduled run and no issue. The tests
+above make that unlikely for reasons inside the scripts —
+argument handling, body construction, the marker walk, the dedup
+lookup — but nothing exercises the live path, because the report
+job only runs on `develop` and only when a fuzz job has already
+failed. The first real execution of the filing path is the first
+night something genuinely breaks.
+
+Two things bound it in practice. The reporter fails the report
+job rather than swallowing an error, so the run is at least red
+on the Actions tab; and the fuzz job's own logs survive for 30
+days in the `fuzz-logs` artifact, which is the fallback the
+"upload before anything fails" ordering exists to guarantee. If
+a stronger guarantee is ever wanted, the shape that would give
+it is a low-frequency canary — a monthly dispatch that files a
+known issue and immediately closes it — which detects a dead
+reporter without waiting for a real failure to do it.
 
 This shape is the fleet-wide standard, generalized from instar's
 `coverage-fuzz.yml`; the criterion is
@@ -652,6 +692,29 @@ for what the unfixed version cost, and the fleet audit
 Scheduled, push-to-default, and release workflows must **not**
 enable `cancel-in-progress`. Cancelling a release mid-publish,
 or a renovate run mid-PR-creation, leaves partial state behind.
+
+`fuzz.yml` is the awkward case: it is scheduled, but it also
+takes a `workflow_dispatch`, and a manual run *should* supersede
+an in-flight nightly rather than queue behind it. It resolves
+that by making the flag an expression rather than choosing one
+answer for both events:
+
+```yaml
+      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+```
+
+A flat `true` there is the general rule's case exactly. The job
+waits on the same starved `l` pool the lane exists to get out of
+the way of, so a nightly can still be sitting unstarted when the
+next one is created, and `cancel-in-progress` cancels *pending*
+members of a group as well as running ones. Night N would be
+cancelled by night N+1; the report job skips `cancelled`; and
+the lane goes silent every night the pool stays starved — in
+precisely the condition it was written for. Left to queue, night
+N is failed by GitHub after 24 hours and correctly files
+`--no-artifact`. The only cancellation left is a dispatch
+superseding a nightly, which is the one the report job is right
+to ignore.
 
 ## Build network isolation
 

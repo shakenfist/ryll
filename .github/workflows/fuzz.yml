@@ -81,9 +81,22 @@ jobs:
     # workflow_dispatch on develop both report refs/heads/develop, so a
     # manual run supersedes an in-flight nightly rather than queueing
     # behind it.
+    #
+    # Only a manual run may supersede, though. This job waits on the
+    # same starved `l` pool the lane exists to get out of the way of
+    # (#329), so a nightly can still be sitting unstarted when the next
+    # one is created -- and cancel-in-progress cancels pending members
+    # of a group as well as running ones. With a flat `true`, night N
+    # would be cancelled by night N+1, the report job skips `cancelled`,
+    # and the lane goes silent in precisely the runner-starvation
+    # condition it was written for, every night the pool stays starved.
+    # Left to queue instead, night N is failed by GitHub after 24h and
+    # correctly files `--no-artifact`. A dispatch superseding a nightly
+    # keeps its documented meaning, and its `cancelled` result is the
+    # one the report job is right to ignore.
     concurrency:
       group: ${{ github.workflow }}-fuzz-${{ github.ref }}
-      cancel-in-progress: true
+      cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -298,11 +311,14 @@ jobs:
     # filing its own. A branch dispatch still runs the fuzz job and
     # still uploads its logs; it just does not speak.
     #
-    # `cancelled` is excluded because the fuzz job sets
-    # cancel-in-progress, so a manual dispatch superseding a nightly
-    # must not file spurious issues. That rests on GitHub recording a
-    # job killed by `timeout-minutes` as `failure` rather than
-    # `cancelled` -- the documented and generally observed behaviour,
+    # `cancelled` is excluded because a manual dispatch superseding an
+    # in-flight nightly must not file spurious issues. That is now the
+    # only cancellation the lane produces: the fuzz job's
+    # cancel-in-progress is true only for a workflow_dispatch, so one
+    # nightly can no longer cancel another and take its report with it.
+    # It also rests on GitHub recording a job killed by
+    # `timeout-minutes` as `failure` rather than `cancelled` --
+    # the documented and generally observed behaviour,
     # but not something this branch could confirm, because
     # workflow_dispatch only offers a workflow that already exists on
     # the default branch and so the experiment (a one-minute timeout,

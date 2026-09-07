@@ -252,6 +252,56 @@ assert_called "fuzz_bravo $WORK/reportfail/fuzz_bravo.log" \
 assert_summary_contains "could not be reported: 1" "the summary counts it"
 
 echo
+echo "== the marker names the workflow and the walk both hard-code =="
+# Every case above builds its fixtures from the same literals
+# report-fuzz-run.sh reads, so the script and its test can agree
+# perfectly while .github/workflows/fuzz.yml -- the only thing that
+# ever *writes* these files -- quietly disagrees. Nothing else joins
+# the two: tools/run-shellcheck.sh globs scripts/ and tools/, and no
+# job runs actionlint, so a `run:` block is unlinted and untested.
+# Renaming targets-ran.txt in the workflow alone would make every
+# night file --run-failure with all three suites green, which is the
+# silent misdiagnosis this lane exists to close.
+#
+# A grep is enough to pin the seam and needs no YAML parser. The
+# pre-commit hook matches the workflow as well as the scripts, so
+# editing either side runs this.
+WORKFLOW="$SCRIPT_DIR/../.github/workflows/fuzz.yml"
+
+assert_workflow_writes() {
+    local literal="$1"
+    if grep -Fq -- "$literal" "$WORKFLOW"; then
+        green "ok: the workflow still writes $literal"
+    else
+        red "FAIL: .github/workflows/fuzz.yml no longer mentions"
+        red "      '$literal', which tools/report-fuzz-run.sh reads."
+        red "      Rename it on both sides or the walk misdiagnoses."
+        FAILURES=$((FAILURES + 1))
+    fi
+}
+
+if [ ! -f "$WORKFLOW" ]; then
+    red "FAIL: $WORKFLOW is missing; the marker contract cannot be checked"
+    FAILURES=$((FAILURES + 1))
+else
+    # `${TARGET}` is the workflow's own text, not an expansion this
+    # script wants: the literal is what grep looks for in fuzz.yml.
+    # shellcheck disable=SC2016
+    assert_workflow_writes 'fuzz-logs/${TARGET}.failed'
+    # shellcheck disable=SC2016
+    assert_workflow_writes 'fuzz-logs/${TARGET}.log'
+    assert_workflow_writes 'fuzz-logs/fmt/check.failed'
+    assert_workflow_writes 'fuzz-logs/fmt/check.log'
+    assert_workflow_writes 'fuzz-logs/targets-ran.txt'
+    assert_workflow_writes 'fuzz-logs/run-info.txt'
+    # And that the walk is pointed at the directory those paths are
+    # relative to. A LOG_DIR that does not match is the one way to get
+    # all six literals right and still walk nothing -- which reports
+    # --no-artifact every night.
+    assert_workflow_writes 'tools/report-fuzz-run.sh fuzz-logs'
+fi
+
+echo
 echo "== usage =="
 run_walker
 assert_status 2 "no arguments is a usage error"

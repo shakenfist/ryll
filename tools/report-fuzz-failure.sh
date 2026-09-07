@@ -304,6 +304,15 @@ case "${MODE}" in
             printf ' The tail below usually repeats it as a base64 '
             printf 'line, but that is a fallback rather than a '
             printf 'guarantee.\n\n'
+            # Dedup keys on an open issue, so an issue for a long-lived
+            # breakage outlives the artifact it points at -- which is
+            # the case dedup exists for. Saying when the link dies
+            # sends that reader to the log tail instead of to a 404
+            # they have no explanation for.
+            printf 'The artifact is deleted 30 days after the run. '
+            printf 'After that the log tail below is what is left, '
+            printf 'and a fresh reproducer means re-running the '
+            printf 'target.\n\n'
             printf 'Log tail:\n\n'
             printf '%s\n' "${FENCE}"
             cat "${EXCERPT_FILE}"

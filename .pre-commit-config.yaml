@@ -60,12 +60,17 @@ repos:
       # reported at all, so a walk that reports nothing looks exactly
       # like a nightly with nothing to report -- the same silence, one
       # step further out. It stubs the reporter, so no gh either.
+      #
+      # fuzz.yml is in the file set because the test also pins the
+      # marker names the workflow writes and the walk reads. Those are
+      # independent literals on either side of an unlinted `run:`
+      # block, so the drift this catches is a workflow-only edit.
       - id: fuzz-run-report-test
         name: nightly fuzz marker walk smoke test
         entry: ./tools/test-report-fuzz-run.sh
         language: script
         pass_filenames: false
-        files: ^tools/(test-)?report-fuzz-run
+        files: ^(tools/(test-)?report-fuzz-run|\.github/workflows/fuzz\.yml$)
 
       # And the target list the same lane fuzzes. A target this drops
       # is never built, never fails and so is never reported -- the

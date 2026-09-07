@@ -368,6 +368,26 @@ else
         "an open issue with the same title is found"
     assert_called "issue comment 42" "a recurrence comments on the issue"
     assert_not_called "issue create" "a recurrence files no duplicate"
+    # The argv, not just the outcome. The stub answers any `issue
+    # list` from $GH_LIST_JSON whatever it was asked, so without these
+    # the lookup's two fragile pieces are still unpinned: dropping
+    # `in:title` widens the search to bodies and comments, and asking
+    # for a field set jq cannot read makes every lookup return
+    # nothing. Either files a fresh issue every night, which is
+    # indistinguishable from ordinary nightly noise -- and either would
+    # have passed this suite on the assertions above alone.
+    assert_called "issue list" "the lookup goes through gh issue list"
+    assert_called 'in:title "Nightly fuzz failure: fuzz_dedup"' \
+        "the search is qualified to titles, and to this title"
+    assert_called "--state open" "only open issues can dedup"
+    # The trailing space is load-bearing: assert_called is a substring
+    # match, so without it `--json number,title,body` -- or any other
+    # superset -- satisfies an assertion meant to pin the field set.
+    # That is the mutation that proved the looser form passed for the
+    # wrong reason. Dropping either field leaves the jq select reading
+    # null, which is the break this is here for.
+    assert_called "--json number,title " \
+        "the field set is exactly the two fields the jq select reads"
 
     # Nothing open: file.
     run_stubbed_reporter '[]' fuzz_new "$WORK/normal.log"
