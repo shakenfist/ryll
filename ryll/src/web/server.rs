@@ -703,16 +703,13 @@ mod tests {
             "app.js should reference the reconnect button id: \
              missing"
         );
-        // The server writes control messages as bytes, and
-        // `binaryType` defaults to "blob", which `TextDecoder` cannot
-        // decode. Without this line Firefox discards every control
-        // message the server sends (ryll#348); Chromium's non-standard
-        // "arraybuffer" default hid it.
-        assert!(
-            body.contains("binaryType = 'arraybuffer'"),
-            "app.js should set the control channel binaryType to \
-             arraybuffer: missing"
-        );
+        // binaryType is pinned by app_js_pins_control_channel_pairing
+        // rather than here (ryll#348). A bare `contains` over the whole
+        // file is satisfied by a comment quoting the line, or by the
+        // same assignment on some other channel; that test scopes it to
+        // the control channel's own setup and normalises formatting
+        // away first, so this one only weakened the guarantee by
+        // looking like a second, independent check of it.
         // Hello handshake assertions (ryll#347). The first message
         // after `onopen` can be dropped by webrtc-rs before the SCTP
         // connected procedure dials the server's end of the channel,
