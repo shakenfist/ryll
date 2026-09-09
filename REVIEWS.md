@@ -17,16 +17,19 @@ for how this works, including how to verify the attestations.
 
 | File | Reviewer | Date | Blob SHA |
 |------|----------|------|----------|
+| .devcontainer/Dockerfile | mikal | 2026-09-10 | 502d3811eed4 |
+| .devcontainer/devcontainer.json | mikal | 2026-09-10 | 49f7a86770a9 |
+| .devcontainer/fuzz/Dockerfile | mikal | 2026-09-10 | 88adf6b676bb |
 | .github/actionlint.yaml | mikal | 2026-08-05 | ae5000edd331 |
 | .github/actions/cargo-cache/action.yml | mikal | 2026-08-24 | 7a223bb8c7f0 |
 | .github/workflows/codeql-analysis.yml | mikal | 2026-08-24 | f0d5443811bf |
 | .github/workflows/export-repo-config.yml | mikal | 2026-08-05 | 53b5d8eb46e8 |
 | .github/workflows/manual-build.yml | mikal | 2026-08-24 | faaea0d0597f |
-| .github/workflows/pr-re-review.yml | mikal | - | - |
+| .github/workflows/pr-re-review.yml | mikal | 2026-09-10 | 6386f11d6067 |
 | .github/workflows/pr-retest.yml | mikal | 2026-08-05 | b19193b8ea1d |
 | .github/workflows/prune-reviews.yml | mikal | 2026-08-11 | 726d173ac44f |
 | .github/workflows/release.yml | mikal | 2026-08-24 | 34b27e2711ee |
-| .github/workflows/renovate.yml | mikal | - | - |
+| .github/workflows/renovate.yml | mikal | 2026-09-10 | 80e4c14fbeaf |
 | .github/workflows/supply-chain.yml | mikal | 2026-08-10 | 382bbe63ac57 |
 | MERGE-TEMPLATE.md | mikal | 2026-08-18 | c022cc88de86 |
 | README.md | mikal | 2026-08-18 | 9e3a0c73e3dc |

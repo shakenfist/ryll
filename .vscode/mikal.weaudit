@@ -402,6 +402,26 @@
     {
       "path": ".github/workflows/renovate.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/fuzz/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/fuzz",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/devcontainer.json",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
