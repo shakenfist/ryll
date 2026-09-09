@@ -180,63 +180,30 @@ between design and implementation is explicit in `git log`.
 
 ## WebRTC conventions
 
-Both of these were learned the hard way and apply to all webrtc-rs work:
+Two rules for all webrtc-rs work. Both were learned the hard way,
+and both are easy to get backwards from a reading of the types:
 
 - **Handler methods must never block — they run inline in the
-  driver event loop.** webrtc-rs 0.20 replaced the per-object
-  callback registrations (`on_peer_connection_state_change`,
-  `on_track`, `on_data_channel`, `on_message`, ...) with one
-  `PeerConnectionEventHandler` supplied to the builder before the
-  peer connection exists, and every method on it is awaited
-  inline by the driver loop. A slow or blocking handler method
-  stalls the whole connection, not just the event it is handling.
-  So anything that needs to *loop* — reading a datachannel's
-  events or a remote track's RTP — must `tokio::spawn` and return
-  immediately, and anything that needs to *hand off from inside a
-  handler method* must use `try_send`, never `send().await`, so a
-  full channel degrades to a dropped message rather than stalling
-  the driver. This is stricter than pre-0.20, where only
-  `on_track` firings were serialised on each other.
-
-  **The rule is about the dispatch path, not about the type.**
-  Check where a function is actually *called from* before applying
-  it. `BridgeEvents` holds both kinds: `on_state_change` is
-  dispatched from the handler and uses `try_send`, while
-  `on_control_message` is reached only from a spawned
-  `run_dc_pump` and therefore awaits — deliberately, because it
-  carries keyboard and mouse events, and back-pressure onto SCTP
-  is better than a dropped key-up leaving a modifier stuck down in
-  the guest. Applying "never block" to the second one cost real
-  input events before it was caught. See
-  [`docs/web-mode-internals.md`](docs/web-mode-internals.md) for
-  where each case bites in `bridge.rs`.
+  driver event loop.** webrtc-rs 0.20 awaits every
+  `PeerConnectionEventHandler` method inline, so anything that
+  needs to *loop* must `tokio::spawn` and return immediately,
+  and anything handing off from inside a handler method must
+  `try_send` rather than `send().await`. The rule follows the
+  *dispatch path*, not the type: `BridgeEvents` holds both
+  kinds, and `on_control_message` awaits deliberately because it
+  is reached only from a spawned pump. Applying "never block" to
+  that one cost real input events.
 
 - **One-shot lifecycle events use `StickySignal`, never a bare
-  `Notify`.** `Notify::notify_waiters()` wakes only the waiters
-  registered at that instant — a waiter that subscribes afterwards
-  blocks forever, and `Notified` does not even register interest
-  until it is first polled, so the naive "check a flag, then
-  await" ordering has a lost-wakeup window. This was a real
-  production bug in the bridge reaper.
-  `shakenfist_spice_webrtc::StickySignal` packages the correct
-  pattern — `Notified::enable()` before the flag check on the wait
-  side, `notify_waiters()` (never `notify_one()`, which would leak
-  a permit) on the raise side — and is unit-tested against the
-  lost-wakeup schedule. Do not hand-roll a fifth copy; that is how
-  the original bug got in.
+  `Notify`.** A *recurring* wake source is the opposite case and
+  uses a bare `Notify` plus an explicit re-check of the
+  condition, because such a wake carries no information. Both
+  directions were production bugs before they were rules; do not
+  hand-roll either.
 
-  A *recurring* wake source is the other case, and the rules
-  invert. `WebState::bridge_replaced` is a bare `Notify` using
-  `notify_one()` on purpose: the stored permit is the feature,
-  because it survives the reaper's 500 ms no-bridge sleep and is
-  still there when the loop next parks. The cost is that a wake
-  carries no information. Any loop that gains a second wake
-  source must re-check the condition it actually cares about
-  rather than treating the wake as proof — the reaper waking and
-  concluding "my bridge died" is a bug that shipped, and the fix
-  was to gate the reap on `StickySignal::is_raised`. Sticky for
-  a one-shot fact; bare `Notify` plus an explicit re-check for a
-  recurring nudge.
+[`docs/web-mode-internals.md`](docs/web-mode-internals.md) states
+both normatively and says where each bites, in `bridge.rs` and in
+the bridge reaper.
 
 ## The vendored sfui copy
 
