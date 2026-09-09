@@ -21,6 +21,10 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
+    ".github/workflows/ci.yml": {
+      "sha": "7078e1fab1871a8b3f3b86282e257999a6b24915",
+      "date": "2026-09-10"
+    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
       "date": "2026-08-24"
@@ -28,6 +32,10 @@
     ".github/workflows/export-repo-config.yml": {
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
+    },
+    ".github/workflows/fuzz.yml": {
+      "sha": "99f6e06d7ebafbb53db49799555d1cf4f61dc8da",
+      "date": "2026-09-10"
     },
     ".github/workflows/manual-build.yml": {
       "sha": "faaea0d0597f8160dcb804a068f90383777f8525",
