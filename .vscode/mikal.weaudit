@@ -402,6 +402,38 @@
     {
       "path": ".github/workflows/renovate.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/fuzz/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/fuzz",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/devcontainer.json",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

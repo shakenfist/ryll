@@ -1,6 +1,18 @@
 {
   "version": 1,
   "files": {
+    ".devcontainer/Dockerfile": {
+      "sha": "502d3811eed477975f6c7b213b96324e839e63fc",
+      "date": "2026-09-10"
+    },
+    ".devcontainer/devcontainer.json": {
+      "sha": "49f7a86770a92824fecdde678d773bb02971deb7",
+      "date": "2026-09-10"
+    },
+    ".devcontainer/fuzz/Dockerfile": {
+      "sha": "88adf6b676bb497b78a4e07cc9c1ee72c1e36c0e",
+      "date": "2026-09-10"
+    },
     ".github/actionlint.yaml": {
       "sha": "ae5000edd331c581d151995892b925a789446048",
       "date": "2026-08-05"
@@ -8,6 +20,10 @@
     ".github/actions/cargo-cache/action.yml": {
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
+    },
+    ".github/workflows/ci.yml": {
+      "sha": "7078e1fab1871a8b3f3b86282e257999a6b24915",
+      "date": "2026-09-10"
     },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
@@ -17,9 +33,17 @@
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
     },
+    ".github/workflows/fuzz.yml": {
+      "sha": "99f6e06d7ebafbb53db49799555d1cf4f61dc8da",
+      "date": "2026-09-10"
+    },
     ".github/workflows/manual-build.yml": {
       "sha": "faaea0d0597f8160dcb804a068f90383777f8525",
       "date": "2026-08-24"
+    },
+    ".github/workflows/pr-re-review.yml": {
+      "sha": "6386f11d6067b9086d52548d29e7fdc72b43c4b6",
+      "date": "2026-09-10"
     },
     ".github/workflows/pr-retest.yml": {
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
@@ -32,6 +56,10 @@
     ".github/workflows/release.yml": {
       "sha": "34b27e2711ee22669b893f67576387e3e0ccb455",
       "date": "2026-08-24"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "80e4c14fbeaf8745019a572265bf87be08c9f10f",
+      "date": "2026-09-10"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
