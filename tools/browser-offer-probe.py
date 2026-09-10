@@ -60,12 +60,33 @@ PAGE = """<!doctype html><meta charset=utf-8><title>ryll offer probe</title>
 """
 
 
+class SafeHeaderMixin:
+    """Strip CR and LF from header values before they reach the wire.
+
+    A header value containing a line break splits the HTTP response
+    (CWE-113), letting whatever produced the value inject headers or a
+    body of its own. The probe server below only sends static and
+    length-derived values today, but the sanitisation is the audited
+    property, not the call sites.
+
+    Inherit this *before* the handler base class -- listed after it,
+    the handler's own send_header() wins the MRO and nothing here ever
+    runs. The mixin is spelled out here rather than imported because
+    ryll ships no Python package for a shared copy to live in, and this
+    probe must run against nothing but the standard library.
+    """
+
+    def send_header(self, keyword, value):
+        value = str(value).replace('\r', '').replace('\n', '')
+        super().send_header(keyword, value)
+
+
 def serve_once(port, direction, timeout):
     """Serve the probe page until the browser posts its result back."""
     body = PAGE.replace('DIRECTION', direction).encode('utf-8')
     got = []
 
-    class Handler(http.server.BaseHTTPRequestHandler):
+    class Handler(SafeHeaderMixin, http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
