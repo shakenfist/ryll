@@ -400,10 +400,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".devcontainer/fuzz/Dockerfile",
       "author": "mikal"
     },
@@ -429,10 +425,6 @@
     },
     {
       "path": ".github/workflows/fuzz.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     }
   ],
