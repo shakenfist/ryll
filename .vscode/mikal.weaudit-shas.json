@@ -85,6 +85,14 @@
       "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
       "date": "2026-08-18"
     },
+    "docs/channel-diagnostics-audit.md": {
+      "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
+      "date": "2026-09-14"
+    },
+    "docs/ci.md": {
+      "sha": "af0ca7ff5a9b88c082e1bc789aa1fd5f26faf022",
+      "date": "2026-09-14"
+    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
