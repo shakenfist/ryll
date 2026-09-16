@@ -27,13 +27,6 @@ ignore = [
     # https://rustsec.org/advisories/RUSTSEC-2024-0436
     "RUSTSEC-2024-0436",
 
-    # RUSTSEC-2026-0097: rand 0.8.5 unsound with custom logger.
-    # Transitive via rsa. Only triggers with a custom logger that
-    # calls rand::rng() in the log path, which we do not have.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0097
-    "RUSTSEC-2026-0097",
-
     # RUSTSEC-2023-0071: rsa Marvin timing attack.
     # No fixed version available in the ecosystem yet. Exploitation
     # requires local timing observation of the SPICE client;
@@ -48,34 +41,6 @@ ignore = [
     # Tracked in PLAN-supply-chain-followups.md.
     # https://rustsec.org/advisories/RUSTSEC-2025-0134
     "RUSTSEC-2025-0134",
-
-    # RUSTSEC-2026-0150: audiopus_sys unmaintained.
-    # Cargo build with CMake 4.0 fails on the bundled libopus
-    # `cmake_minimum_required(VERSION <3.5)`. We work around this
-    # in CI (ci.yml + release.yml + manual-build.yml all set
-    # CMAKE_POLICY_VERSION_MINIMUM=3.5). Upstream maintainer
-    # unresponsive for >5 years and a third-party PR is open with
-    # no reply. Replacement requires migrating off audiopus
-    # entirely (or vendoring/forking).
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0150
-    "RUSTSEC-2026-0150",
-
-    # RUSTSEC-2026-0194: quick-xml quadratic duplicate-attribute
-    # check. Fixed in 0.41.0, semver-incompatible with the 0.39.2
-    # we get transitively via wayland-scanner (build-time codegen)
-    # and zbus_xml. Neither path parses attacker-controlled XML at
-    # runtime, so exposure is low.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0194
-    "RUSTSEC-2026-0194",
-
-    # RUSTSEC-2026-0195: quick-xml unbounded namespace allocation
-    # in NsReader. Same inclusion path and rationale as
-    # RUSTSEC-2026-0194 above.
-    # Tracked in PLAN-supply-chain-followups.md.
-    # https://rustsec.org/advisories/RUSTSEC-2026-0195
-    "RUSTSEC-2026-0195",
 
     # RUSTSEC-2026-0192: ttf-parser unmaintained. Reaches us via
     # egui's font stack (ab_glyph -> owned_ttf_parser). No upstream
