@@ -177,6 +177,14 @@
       "sha": "8fbb7eda083fcd53c61f49c88a83e4b991a9aab8",
       "date": "2026-09-17"
     },
+    "examples/control-socket-demo.py": {
+      "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
+      "date": "2026-09-17"
+    },
+    "examples/ryll-web.service": {
+      "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
+      "date": "2026-09-17"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"

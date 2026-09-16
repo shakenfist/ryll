@@ -498,6 +498,18 @@
     {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
+    },
+    {
+      "path": "examples/control-socket-demo.py",
+      "author": "mikal"
+    },
+    {
+      "path": "examples/ryll-web.service",
+      "author": "mikal"
+    },
+    {
+      "path": "examples",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
