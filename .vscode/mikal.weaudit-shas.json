@@ -185,9 +185,17 @@
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
     },
+    "ryll/Cargo.toml": {
+      "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",
+      "date": "2026-09-18"
+    },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
+    },
+    "ryll/pyproject.toml": {
+      "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
+      "date": "2026-09-18"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
