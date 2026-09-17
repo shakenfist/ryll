@@ -93,9 +93,37 @@
       "sha": "af0ca7ff5a9b88c082e1bc789aa1fd5f26faf022",
       "date": "2026-09-14"
     },
+    "docs/configuration.md": {
+      "sha": "5a84027d836f34eeae6ecc5743db1235d9f843b3",
+      "date": "2026-09-17"
+    },
+    "docs/control-socket-protocol.md": {
+      "sha": "790565811c9d129ba254461352d59d1ed7b3968e",
+      "date": "2026-09-17"
+    },
+    "docs/design-decisions.md": {
+      "sha": "5a943f62bbcdca4aa9dcd631dd629a10a88e0d4f",
+      "date": "2026-09-17"
+    },
+    "docs/development-macos.md": {
+      "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
+      "date": "2026-09-17"
+    },
+    "docs/development.md": {
+      "sha": "add5a91a0c9f5252f81372ee17b926f16f378ee9",
+      "date": "2026-09-17"
+    },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
+    },
+    "docs/diagnostics.md": {
+      "sha": "0e771cbc92a7478f8d57bfaaea534ac5248d31a1",
+      "date": "2026-09-17"
+    },
+    "docs/features.md": {
+      "sha": "df99377661b3689e67e8b004dcd75eacff83930a",
+      "date": "2026-09-17"
     },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
@@ -105,9 +133,17 @@
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
     },
+    "docs/libvirt-spice-recommendations.md": {
+      "sha": "6582d4c951f1ddb1c365be149dc584d597dbe402",
+      "date": "2026-09-17"
+    },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
+    },
+    "docs/multi-mode-parity.md": {
+      "sha": "5b2ba70d057442a03571d8957c9c71f2826ba1f2",
+      "date": "2026-09-17"
     },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
@@ -124,6 +160,30 @@
     "docs/session-lifecycle.md": {
       "sha": "552be9b26d9380f270a021ba34b4818bc9991239",
       "date": "2026-08-17"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "94066f42f06e5c6ad554c3e3bcc8f4b86e57d671",
+      "date": "2026-09-17"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "6c0f3d743ff95c436a31cb464cf65a665b0e18bf",
+      "date": "2026-09-17"
+    },
+    "docs/web-frontend.md": {
+      "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
+      "date": "2026-09-17"
+    },
+    "docs/web-mode-internals.md": {
+      "sha": "8fbb7eda083fcd53c61f49c88a83e4b991a9aab8",
+      "date": "2026-09-17"
+    },
+    "examples/control-socket-demo.py": {
+      "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
+      "date": "2026-09-17"
+    },
+    "examples/ryll-web.service": {
+      "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
+      "date": "2026-09-17"
     },
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
