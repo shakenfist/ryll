@@ -606,6 +606,42 @@
     {
       "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/logging.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

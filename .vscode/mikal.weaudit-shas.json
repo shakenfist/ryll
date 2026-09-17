@@ -197,6 +197,10 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "c0a2f17d56386bbdf07bbb8403967150242022f7",
+      "date": "2026-09-18"
+    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "167a1f9b93efc81fa4264627f478c1efccf018c5",
       "date": "2026-09-18"
@@ -325,6 +329,10 @@
       "sha": "adb8a2e9a7f0d325d1c286ad7bfc8e1f98081289",
       "date": "2026-09-18"
     },
+    "shakenfist-spice-protocol/Cargo.toml": {
+      "sha": "823f189f4f50cb6f46d12da92bc605fa02721d9d",
+      "date": "2026-09-18"
+    },
     "shakenfist-spice-protocol/README.md": {
       "sha": "0932e63d327eeafd2b32059859f0af1443d15dfa",
       "date": "2026-08-02"
@@ -332,6 +340,10 @@
     "shakenfist-spice-protocol/fuzz/.gitignore": {
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
+      "sha": "aaa03a1560483e2ed23edf92dd21757e8c6afa4e",
+      "date": "2026-09-18"
     },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
       "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
@@ -349,13 +361,33 @@
       "sha": "a98e2c2d16d4db8c5c4bfdad0b5670d7b1e558ea",
       "date": "2026-08-02"
     },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "52cb01b6cae1858eb236de3721a810e202ec61b8",
+      "date": "2026-09-18"
+    },
+    "shakenfist-spice-protocol/src/constants.rs": {
+      "sha": "d26af989a6313ca989bc1cf7cb2d6e33e32c9719",
+      "date": "2026-09-18"
+    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
     },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "196bb344b31a3ccf0f5100a527fce30ee6bd6835",
+      "date": "2026-09-18"
+    },
     "shakenfist-spice-protocol/src/link.rs": {
       "sha": "8bf1ba08dd47059e01c486fccf265a7a1aca4e64",
       "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/logging.rs": {
+      "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
+      "date": "2026-09-18"
+    },
+    "shakenfist-spice-protocol/src/messages.rs": {
+      "sha": "58555e0a32da442a72ffa3b8b997d8a5b28f0dac",
+      "date": "2026-09-18"
     },
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
