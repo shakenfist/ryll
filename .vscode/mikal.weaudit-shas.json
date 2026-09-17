@@ -197,6 +197,30 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "98ffca2cfdb12444540bc54d4e356d749387b212",
+      "date": "2026-09-18"
+    },
+    "ryll/src/auto_snapshot.rs": {
+      "sha": "167a1f9b93efc81fa4264627f478c1efccf018c5",
+      "date": "2026-09-18"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "a2fd5a604c41051b26cfc03211248ad49dfac3a7",
+      "date": "2026-09-18"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "6f70cecfb9343748de0ad8c251a5d85e0758d714",
+      "date": "2026-09-18"
+    },
+    "ryll/src/clipboard_arboard.rs": {
+      "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
+      "date": "2026-09-18"
+    },
+    "ryll/src/config.rs": {
+      "sha": "0d31fe6e4a0a503103ff970da7394605b2d83b1f",
+      "date": "2026-09-18"
+    },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
       "date": "2026-07-26"
@@ -205,17 +229,57 @@
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
     },
+    "ryll/src/main.rs": {
+      "sha": "bd2e3c4ecf2dce1e36075df032151c3ddc3d4d0b",
+      "date": "2026-09-18"
+    },
+    "ryll/src/notifications.rs": {
+      "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
+      "date": "2026-09-18"
+    },
     "ryll/src/settings.rs": {
       "sha": "3c9cfb5286bd15ebbf735f7f95b2f58745978e58",
       "date": "2026-07-26"
+    },
+    "ryll/src/streaming_state.rs": {
+      "sha": "97a8b835b632848460133f977573a678f8d6c395",
+      "date": "2026-09-18"
+    },
+    "ryll/src/web/assets.rs": {
+      "sha": "14bf58b6af695a60888196dc18be4d8f69c2ed8c",
+      "date": "2026-09-18"
+    },
+    "ryll/src/web/audio.rs": {
+      "sha": "a8862ff70dcfa6aad31e68dd4a40370f4eb93e6c",
+      "date": "2026-09-18"
+    },
+    "ryll/src/web/control.rs": {
+      "sha": "ceac6073469593ec204a6a4149a56cfff9f4e8f5",
+      "date": "2026-09-18"
     },
     "ryll/src/web/cursor.rs": {
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
+    "ryll/src/web/inputs.rs": {
+      "sha": "27508364194805a51621010a8ad75834508a0e2c",
+      "date": "2026-09-18"
+    },
+    "ryll/src/web/lifecycle.rs": {
+      "sha": "edc8d98358c50af750f3c134e6adacbf63628a03",
+      "date": "2026-09-18"
+    },
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "edcf8164820887ad7f917d523ccc977fda842194",
+      "date": "2026-09-18"
+    },
+    "ryll/src/web/signalling.rs": {
+      "sha": "44ae35563974812b068953f94ee67bea51eed186",
+      "date": "2026-09-18"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",

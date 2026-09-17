@@ -518,6 +518,70 @@
     {
       "path": "ryll/Cargo.toml",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/control.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/auto_snapshot.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/clipboard_arboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/notifications.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/streaming_state.rs",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

@@ -2929,7 +2929,8 @@ impl RyllApp {
                     return;
                 }
                 warn!(
-                    "app: bug-report metrics sampler did not report within {:?};                      writing the report without a sample",
+                    "app: bug-report metrics sampler did not report within {:?}; \
+                     writing the report without a sample",
                     waited
                 );
                 RuntimeMetrics::unavailable(format!(
