@@ -548,10 +548,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/auto_snapshot.rs",
       "author": "mikal"
     },
@@ -581,6 +577,34 @@
     },
     {
       "path": "ryll/src/streaming_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/jpeg.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
       "author": "mikal"
     }
   ],

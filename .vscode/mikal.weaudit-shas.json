@@ -197,10 +197,6 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
-    "ryll/src/app.rs": {
-      "sha": "98ffca2cfdb12444540bc54d4e356d749387b212",
-      "date": "2026-09-18"
-    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "167a1f9b93efc81fa4264627f478c1efccf018c5",
       "date": "2026-09-18"
@@ -289,9 +285,25 @@
       "sha": "ed18e13bae620b5e684caf735f361982d52b32fb",
       "date": "2026-08-02"
     },
+    "shakenfist-spice-compression/Cargo.toml": {
+      "sha": "a9a45dc18064ce6e2a380c8ab78e125c70616625",
+      "date": "2026-09-18"
+    },
     "shakenfist-spice-compression/README.md": {
       "sha": "393fdfc290ebba7b7518b6014a7085e72dfcf726",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
+      "sha": "7a7323cc6153643991583fd44ba6ab04cdb5cded",
+      "date": "2026-09-18"
+    },
+    "shakenfist-spice-compression/src/glz.rs": {
+      "sha": "b1ec2131c981b4cfbb0e93d0da7224fa8596f391",
+      "date": "2026-09-18"
+    },
+    "shakenfist-spice-compression/src/jpeg.rs": {
+      "sha": "52ce4857bb40ce7a9b4d4576d48c10e0590fb7b8",
+      "date": "2026-09-18"
     },
     "shakenfist-spice-compression/src/lib.rs": {
       "sha": "acfe70b86a1b0cc1b537338bdb3f638fd74dd8bc",
@@ -301,9 +313,17 @@
       "sha": "6fe93535c1072a69e427c53960a4f40cfefac663",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-compression/src/lz4.rs": {
+      "sha": "ee93db34c1ab1649a1f6aeac22ec4d53c77e8070",
+      "date": "2026-09-18"
+    },
     "shakenfist-spice-compression/src/quic.rs": {
       "sha": "6e93dea56cb55fe0714f83d99f646efa573f004d",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-compression/src/video.rs": {
+      "sha": "adb8a2e9a7f0d325d1c286ad7bfc8e1f98081289",
+      "date": "2026-09-18"
     },
     "shakenfist-spice-protocol/README.md": {
       "sha": "0932e63d327eeafd2b32059859f0af1443d15dfa",
