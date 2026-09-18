@@ -510,6 +510,138 @@
     {
       "path": "examples",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/pyproject.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/audio.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/control.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/inputs.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/lifecycle.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/server.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/signalling.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/auto_snapshot.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/bugreport.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/capture.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/clipboard_arboard.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/main.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/notifications.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/streaming_state.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/byte_bounded_lru.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/glz.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/jpeg.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/lz4.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/video.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/app.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/constants.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/logging.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/messages.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
