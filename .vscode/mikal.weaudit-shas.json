@@ -589,6 +589,10 @@
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-usbredir/Cargo.toml": {
+      "sha": "8339c8126af209dd7c2e165e8defd2087c88cad6",
+      "date": "2026-09-19"
+    },
     "shakenfist-spice-usbredir/README.md": {
       "sha": "0187a350db60c8203eb81818b207d89bc35ea77d",
       "date": "2026-08-02"
@@ -600,6 +604,10 @@
     "shakenfist-spice-usbredir/src/lib.rs": {
       "sha": "cad9883642ef2bddad4f2e88c5eb6045bfb6155f",
       "date": "2026-07-22"
+    },
+    "shakenfist-spice-usbredir/src/messages.rs": {
+      "sha": "e2a0887d77ae49db80b830d3ae789a711385e215",
+      "date": "2026-09-19"
     },
     "shakenfist-spice-usbredir/src/parser.rs": {
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
