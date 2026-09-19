@@ -432,14 +432,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
       "path": "docs/channel-diagnostics-audit.md",
       "author": "mikal"
     },
