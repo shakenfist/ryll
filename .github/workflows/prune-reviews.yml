@@ -37,8 +37,13 @@ jobs:
     # workflow_dispatch match.
     if: github.ref == 'refs/heads/develop'
     runs-on: [self-hosted, static]
-    permissions:
-      contents: write
+    # No permissions are needed. The checkout below supplies
+    # DEPENDENCIES_TOKEN and the push reuses its persisted
+    # credentials, so GITHUB_TOKEN authorises nothing here -- and a
+    # permissions: block does not constrain a PAT in any case. The
+    # contents: write this replaces was left over from the design
+    # before a0227e05 switched to the PAT.
+    permissions: {}
     steps:
       - name: Checkout ryll
         uses: actions/checkout@v7
