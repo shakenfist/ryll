@@ -7,6 +7,13 @@
 #   regen   regenerate REVIEWS.md from current state
 #   next    pick a random unreviewed in-scope file and open it
 #   status  report effective review coverage against HEAD (read-only)
+#   scope-orphans
+#           list tracked files that are in neither include nor
+#           exclude, so nobody has decided about them (read-only)
+#
+# This list is copied prose and has drifted from the helper before,
+# in both directions. The helper is the authority; see the link
+# below if a subcommand here does not work.
 #
 # These used to run automatically from git hooks (pre-commit,
 # post-merge, post-checkout, post-rewrite), which made them fire
