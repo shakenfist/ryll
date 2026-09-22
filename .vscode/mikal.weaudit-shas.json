@@ -53,9 +53,17 @@
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
     },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
+      "date": "2026-09-23"
+    },
     ".github/workflows/release.yml": {
       "sha": "34b27e2711ee22669b893f67576387e3e0ccb455",
       "date": "2026-08-24"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "f95f89951023d7e8f6c2a5d299f8164f6bcffbb5",
+      "date": "2026-09-23"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
