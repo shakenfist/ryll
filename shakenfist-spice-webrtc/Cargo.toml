@@ -38,7 +38,7 @@ test-support = []
 # lockfile detail: see `CONTROL_DC_STREAM_ID` in src/bridge.rs.
 # Declared as a floor rather than `=0.20.4` so patch updates still
 # flow. See docs/plans/PLAN-webrtc-0.20-upgrade.md.
-webrtc = "0.20.4"
+webrtc = "0.21.0"
 
 # The sans-io core `webrtc` is built on. A direct dependency because
 # `webrtc` deliberately does not re-export it, yet its types appear in
