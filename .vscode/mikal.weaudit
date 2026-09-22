@@ -818,6 +818,18 @@
     {
       "path": "shakenfist-spice-webrtc",
       "author": "mikal"
+    },
+    {
+      "path": "Makefile",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

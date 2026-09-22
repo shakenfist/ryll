@@ -65,6 +65,18 @@
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
       "date": "2026-08-18"
     },
+    "Makefile": {
+      "sha": "a8b2f3ecfb2f257e114d4553cb948456b262410b",
+      "date": "2026-09-23"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "59fbbad82d38a34a373748f3be729248f332faf8",
+      "date": "2026-09-23"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "b3de1c08e648c689561428003b777f8a56e8aea9",
+      "date": "2026-09-23"
+    },
     "README.md": {
       "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
       "date": "2026-08-18"
