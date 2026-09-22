@@ -51,7 +51,7 @@ webrtc = "0.20.4"
 # was about. Replaces the standalone `rtp` crate, an abandoned line
 # ending at 0.17.2 (Decision 2). Tracks `webrtc`'s floor, including the
 # 0.20.4 datachannel fix described above.
-rtc = "0.20.4"
+rtc = "0.21.0"
 
 # `webrtc::peer_connection::PeerConnectionEventHandler` is declared with
 # `#[async_trait::async_trait]`, and `webrtc` does not re-export the
