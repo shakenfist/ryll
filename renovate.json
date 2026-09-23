@@ -36,6 +36,14 @@
       "groupName": "rustcrypto digest ecosystem"
     },
     {
+      "description": "Group webrtc with its sans-io core rtc so they upgrade in lockstep. webrtc pins rtc to an exact patch and exposes rtc types (Packet, RtpCodecKind, RTCRtpCodecParameters) in its public API, so bumping either alone puts two rtc versions in the graph and shakenfist-spice-webrtc fails to compile (see #393 / #394).",
+      "matchPackageNames": [
+        "rtc",
+        "webrtc"
+      ],
+      "groupName": "webrtc-rs"
+    },
+    {
       "description": "Hold sha1 < 0.11 until rsa 0.10 stable releases. sha1 0.11 moves to digest 0.11, but our transitive rsa 0.9 still requires digest 0.10, so Sha1 no longer satisfies rsa::Oaep::new's DynDigest bound. Tracked in shakenfist/ryll#93 / RustCrypto/RSA#647.",
       "matchPackageNames": [
         "sha1"
