@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    ".cargo/audit.toml": {
+      "sha": "0581654f692987a847e63ff60606a5dd6cd49572",
+      "date": "2026-09-23"
+    },
     ".devcontainer/Dockerfile": {
       "sha": "502d3811eed477975f6c7b213b96324e839e63fc",
       "date": "2026-09-10"
@@ -53,17 +57,57 @@
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
     },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
+      "date": "2026-09-23"
+    },
     ".github/workflows/release.yml": {
       "sha": "34b27e2711ee22669b893f67576387e3e0ccb455",
       "date": "2026-08-24"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "f95f89951023d7e8f6c2a5d299f8164f6bcffbb5",
+      "date": "2026-09-23"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
     },
+    ".gitignore": {
+      "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
+      "date": "2026-09-23"
+    },
+    ".pre-commit-config.yaml": {
+      "sha": "bf7e0037cbb5b0ca6ed4c334dc2c585246e0fcb0",
+      "date": "2026-09-23"
+    },
+    "AGENTS.md": {
+      "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
+      "date": "2026-09-23"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "a1dcdfbc45f7d4a8b699f9b19a61d5abaf8f6ee8",
+      "date": "2026-09-23"
+    },
+    "Cargo.toml": {
+      "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
+      "date": "2026-09-23"
+    },
     "MERGE-TEMPLATE.md": {
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
       "date": "2026-08-18"
+    },
+    "Makefile": {
+      "sha": "a8b2f3ecfb2f257e114d4553cb948456b262410b",
+      "date": "2026-09-23"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "59fbbad82d38a34a373748f3be729248f332faf8",
+      "date": "2026-09-23"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "b3de1c08e648c689561428003b777f8a56e8aea9",
+      "date": "2026-09-23"
     },
     "README.md": {
       "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
@@ -76,6 +120,14 @@
     "STYLEGUIDE.md": {
       "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
       "date": "2026-08-18"
+    },
+    "clippy.toml": {
+      "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
+      "date": "2026-09-23"
+    },
+    "deny.toml": {
+      "sha": "c952afb188490748898188583f4e7413fa43077a",
+      "date": "2026-09-23"
     },
     "docs/channel-diagnostics-audit.md": {
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
@@ -100,6 +152,10 @@
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
+    },
+    "docs/development.md": {
+      "sha": "f86a2246334d917e3c02e9af0b0c64c854395ac1",
+      "date": "2026-09-23"
     },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
@@ -173,6 +229,10 @@
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
     },
+    "renovate.json": {
+      "sha": "7023c583b58b44a68839db9c55ae3302379b9488",
+      "date": "2026-09-23"
+    },
     "ryll/Cargo.toml": {
       "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",
       "date": "2026-09-18"
@@ -236,6 +296,18 @@
     "ryll/src/web/assets.rs": {
       "sha": "14bf58b6af695a60888196dc18be4d8f69c2ed8c",
       "date": "2026-09-18"
+    },
+    "ryll/src/web/assets/app.js": {
+      "sha": "1f5ada4ed0f5193923bd9f7cccc18ff2f33c2665",
+      "date": "2026-09-23"
+    },
+    "ryll/src/web/assets/index.html": {
+      "sha": "d2000983e09c5a1db2688664c4420a16cb9c4e80",
+      "date": "2026-09-23"
+    },
+    "ryll/src/web/assets/style.css": {
+      "sha": "b8619914ce82816fb3f9f8897d472d6e1e32be7b",
+      "date": "2026-09-23"
     },
     "ryll/src/web/audio.rs": {
       "sha": "a8862ff70dcfa6aad31e68dd4a40370f4eb93e6c",
@@ -637,6 +709,38 @@
       "sha": "fb80f9a84bfe379e4f1fb845650fd065107ee24b",
       "date": "2026-09-19"
     },
+    "tools/audit/audit-range.sh": {
+      "sha": "7d2ec8fd099b53103c5734e2dc3c891b409e6226",
+      "date": "2026-09-23"
+    },
+    "tools/audit/filter-println-hits.py": {
+      "sha": "902cb409d633398bdcab77a02ad575139e7b2e78",
+      "date": "2026-09-23"
+    },
+    "tools/audit/test-audit-range.sh": {
+      "sha": "7d2cb5ffd61d2d11b53e82925aaf2590350b2a5e",
+      "date": "2026-09-23"
+    },
+    "tools/audit/test-wave1-style.sh": {
+      "sha": "aef10ab8969fe84d2d56382ea93fe0eb2b63537b",
+      "date": "2026-09-23"
+    },
+    "tools/audit/wave1-checks.sh": {
+      "sha": "dfa3aeb60c51dd096dca0eff78eb85eafc59f3e2",
+      "date": "2026-09-23"
+    },
+    "tools/audit/wave1.sh": {
+      "sha": "b4d4188cf37905280464d275fccbe8b955da5c83",
+      "date": "2026-09-23"
+    },
+    "tools/audit/wave2-mechanical.sh": {
+      "sha": "8cc1a09f25583a31081118cb43781e428b4f2989",
+      "date": "2026-09-23"
+    },
+    "tools/browser-offer-probe.py": {
+      "sha": "7e3d345aa050de2ee9bde9c0a38cdab439d576f2",
+      "date": "2026-09-23"
+    },
     "tools/build-ryll-wheel-in-container.sh": {
       "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
       "date": "2026-07-26"
@@ -653,21 +757,57 @@
       "sha": "6daef1e07eb05d46b0a13745d5338cf1aea23cd8",
       "date": "2026-08-03"
     },
+    "tools/fuzz-targets.sh": {
+      "sha": "b6cba20bf72f5b01a12e52b029aaadfee2dead8d",
+      "date": "2026-09-23"
+    },
+    "tools/gen-swatches-jpeg/Cargo.toml": {
+      "sha": "95fa743e1acfca35eab4e422ab2ea79e7ea8519d",
+      "date": "2026-09-23"
+    },
     "tools/gen-swatches-jpeg/src/main.rs": {
       "sha": "2536d38324b70eaf5f81e39e6f8b730ed31cb030",
       "date": "2026-07-26"
+    },
+    "tools/homebrew-formula.rb": {
+      "sha": "fab510095ba9b21f72adb5a69cf6d0bb4bf03851",
+      "date": "2026-09-23"
     },
     "tools/make-cloud-seed.sh": {
       "sha": "00f50deddb05a9189609a78a69e948aa8efb2d7f",
       "date": "2026-08-18"
     },
+    "tools/measure-idle-cpu.sh": {
+      "sha": "a6196c07d0d66927322893b62791a8d8f9425506",
+      "date": "2026-09-23"
+    },
+    "tools/mermaid-lint.sh": {
+      "sha": "67eb5c5100835cf244b9d8e905bfc7d31896399e",
+      "date": "2026-09-23"
+    },
     "tools/pcap-inspect.py": {
       "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
       "date": "2026-07-26"
     },
+    "tools/propose-release.sh": {
+      "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
+      "date": "2026-09-23"
+    },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
       "date": "2026-07-26"
+    },
+    "tools/report-fuzz-failure.sh": {
+      "sha": "431d9995ae224a161b5793d3b0293bdfbd19ce08",
+      "date": "2026-09-23"
+    },
+    "tools/report-fuzz-run.sh": {
+      "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",
+      "date": "2026-09-23"
+    },
+    "tools/review-tracking.sh": {
+      "sha": "c413992b72dbc2f189fa8f079e1ddac175b81f85",
+      "date": "2026-09-23"
     },
     "tools/run-shellcheck.sh": {
       "sha": "a070aa57d15755cd3543756bad447c58da0253d7",
@@ -677,13 +817,29 @@
       "sha": "835d0b4125fddd9a20a63b412db15519a1643c30",
       "date": "2026-07-26"
     },
+    "tools/start-desktop-qemu.sh": {
+      "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
+      "date": "2026-09-23"
+    },
     "tools/tag-release.sh": {
       "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",
       "date": "2026-07-26"
     },
+    "tools/test-fuzz-targets.sh": {
+      "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",
+      "date": "2026-09-23"
+    },
     "tools/test-k1-idle.sh": {
       "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
       "date": "2026-07-26"
+    },
+    "tools/test-report-fuzz-failure.sh": {
+      "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
+      "date": "2026-09-23"
+    },
+    "tools/test-report-fuzz-run.sh": {
+      "sha": "229657cdb6f553011fd7adc5488bcb6d274128ed",
+      "date": "2026-09-23"
     },
     "tools/test-usb-disk.sh": {
       "sha": "6291194d54fb64259540757263974c4afc7c89e0",
@@ -696,6 +852,10 @@
     "tools/web-smoke.sh": {
       "sha": "2140f1e6ff60e1f17205e83c3ed5681843dea5c4",
       "date": "2026-07-26"
+    },
+    "tools/web-soak.sh": {
+      "sha": "465a9a2b482e99997c09ddee840e533d64dfa25e",
+      "date": "2026-09-23"
     }
   }
 }

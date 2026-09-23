@@ -818,6 +818,186 @@
     {
       "path": "shakenfist-spice-webrtc",
       "author": "mikal"
+    },
+    {
+      "path": "Makefile",
+      "author": "mikal"
+    },
+    {
+      "path": "PLAN-TEMPLATE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "PUSH-AUDIT.md",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/prune-reviews.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/audit-range.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/filter-println-hits.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/test-audit-range.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/test-wave1-style.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave1-checks.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave1.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit/wave2-mechanical.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/audit",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/fuzz-targets.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/homebrew-formula.rb",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/measure-idle-cpu.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/mermaid-lint.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/propose-release.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/report-fuzz-failure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/report-fuzz-run.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/review-tracking.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/start-desktop-qemu.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-fuzz-targets.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-report-fuzz-failure.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-report-fuzz-run.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/web-soak.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/app.js",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/index.html",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/style.css",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/browser-offer-probe.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo/audit.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo",
+      "author": "mikal"
+    },
+    {
+      "path": "deny.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
+    },
+    {
+      "path": "renovate.json",
+      "author": "mikal"
+    },
+    {
+      "path": "clippy.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".gitignore",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
