@@ -57,7 +57,7 @@ permissions:
 jobs:
   fuzz:
     name: Fuzz
-    runs-on: [self-hosted, vm, debian-12-docker, l]
+    runs-on: [self-hosted, vm, debian-13-docker, l]
     # Covers every target end to end, not one target: the matrix this
     # replaced had a leg per target and this budget was per leg. Four
     # targets at roughly 255s of shared devcontainer build plus 78s
@@ -299,7 +299,7 @@ jobs:
 
   # Filing runs on the static runner because that is where the rest of
   # this repository's `gh` calls run (release.yml's version-mismatch
-  # issue); the debian-12-docker image is not known to carry the CLI.
+  # issue); the debian-13-docker image is not known to carry the CLI.
   report:
     name: Report fuzz failures
     needs: [fuzz]
