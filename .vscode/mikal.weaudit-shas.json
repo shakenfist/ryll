@@ -229,10 +229,6 @@
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
     },
-    "renovate.json": {
-      "sha": "7023c583b58b44a68839db9c55ae3302379b9488",
-      "date": "2026-09-23"
-    },
     "ryll/Cargo.toml": {
       "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",
       "date": "2026-09-18"

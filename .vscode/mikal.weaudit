@@ -988,10 +988,6 @@
       "author": "mikal"
     },
     {
-      "path": "renovate.json",
-      "author": "mikal"
-    },
-    {
       "path": "clippy.toml",
       "author": "mikal"
     },
