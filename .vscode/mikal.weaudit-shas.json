@@ -1,6 +1,10 @@
 {
   "version": 1,
   "files": {
+    ".cargo/audit.toml": {
+      "sha": "0581654f692987a847e63ff60606a5dd6cd49572",
+      "date": "2026-09-23"
+    },
     ".devcontainer/Dockerfile": {
       "sha": "502d3811eed477975f6c7b213b96324e839e63fc",
       "date": "2026-09-10"
@@ -69,6 +73,26 @@
       "sha": "382bbe63ac57d0a965a59181ed85a14f8c8fc2e7",
       "date": "2026-08-10"
     },
+    ".gitignore": {
+      "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
+      "date": "2026-09-23"
+    },
+    ".pre-commit-config.yaml": {
+      "sha": "bf7e0037cbb5b0ca6ed4c334dc2c585246e0fcb0",
+      "date": "2026-09-23"
+    },
+    "AGENTS.md": {
+      "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
+      "date": "2026-09-23"
+    },
+    "ARCHITECTURE.md": {
+      "sha": "a1dcdfbc45f7d4a8b699f9b19a61d5abaf8f6ee8",
+      "date": "2026-09-23"
+    },
+    "Cargo.toml": {
+      "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
+      "date": "2026-09-23"
+    },
     "MERGE-TEMPLATE.md": {
       "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
       "date": "2026-08-18"
@@ -97,6 +121,14 @@
       "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
       "date": "2026-08-18"
     },
+    "clippy.toml": {
+      "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
+      "date": "2026-09-23"
+    },
+    "deny.toml": {
+      "sha": "c952afb188490748898188583f4e7413fa43077a",
+      "date": "2026-09-23"
+    },
     "docs/channel-diagnostics-audit.md": {
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
@@ -120,6 +152,10 @@
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
+    },
+    "docs/development.md": {
+      "sha": "f86a2246334d917e3c02e9af0b0c64c854395ac1",
+      "date": "2026-09-23"
     },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
@@ -192,6 +228,10 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
+    },
+    "renovate.json": {
+      "sha": "7023c583b58b44a68839db9c55ae3302379b9488",
+      "date": "2026-09-23"
     },
     "ryll/Cargo.toml": {
       "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",

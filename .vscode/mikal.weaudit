@@ -954,6 +954,50 @@
     {
       "path": "tools",
       "author": "mikal"
+    },
+    {
+      "path": ".cargo/audit.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".cargo",
+      "author": "mikal"
+    },
+    {
+      "path": "deny.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "AGENTS.md",
+      "author": "mikal"
+    },
+    {
+      "path": "Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/development.md",
+      "author": "mikal"
+    },
+    {
+      "path": ".pre-commit-config.yaml",
+      "author": "mikal"
+    },
+    {
+      "path": "renovate.json",
+      "author": "mikal"
+    },
+    {
+      "path": "clippy.toml",
+      "author": "mikal"
+    },
+    {
+      "path": ".gitignore",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
