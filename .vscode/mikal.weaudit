@@ -926,6 +926,18 @@
     {
       "path": "tools/web-soak.sh",
       "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/app.js",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/index.html",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/web/assets/style.css",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

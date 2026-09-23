@@ -257,6 +257,18 @@
       "sha": "14bf58b6af695a60888196dc18be4d8f69c2ed8c",
       "date": "2026-09-18"
     },
+    "ryll/src/web/assets/app.js": {
+      "sha": "1f5ada4ed0f5193923bd9f7cccc18ff2f33c2665",
+      "date": "2026-09-23"
+    },
+    "ryll/src/web/assets/index.html": {
+      "sha": "d2000983e09c5a1db2688664c4420a16cb9c4e80",
+      "date": "2026-09-23"
+    },
+    "ryll/src/web/assets/style.css": {
+      "sha": "b8619914ce82816fb3f9f8897d472d6e1e32be7b",
+      "date": "2026-09-23"
+    },
     "ryll/src/web/audio.rs": {
       "sha": "a8862ff70dcfa6aad31e68dd4a40370f4eb93e6c",
       "date": "2026-09-18"
