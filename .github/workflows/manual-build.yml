@@ -90,13 +90,13 @@ jobs:
 
   # Linux x86_64 builds on an l-size self-hosted runner inside the
   # devcontainer (see Makefile), so it is a separate job from the
-  # GitHub-hosted matrix below. The debian-12-docker image ships
+  # GitHub-hosted matrix below. The debian-13-docker image ships
   # with docker.io preinstalled (see supply-chain.yml).
   build-linux-x86_64:
     name: Build (Linux x86_64)
     needs: resolve-matrix
     if: needs.resolve-matrix.outputs.linux_x86_64 == 'true'
-    runs-on: [self-hosted, vm, debian-12-docker, l]
+    runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 120
     permissions:
       contents: read

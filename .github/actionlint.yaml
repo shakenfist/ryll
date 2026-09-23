@@ -5,9 +5,8 @@ self-hosted-runner:
   # Custom labels used by our self-hosted runners
   labels:
     - claude-code
-    - debian-12
-    - debian-12-docker
     - debian-13
+    - debian-13-docker
     - static
     - vm
     - xs

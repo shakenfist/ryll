@@ -70,7 +70,7 @@ jobs:
 
   # Linux x86_64 jobs run on l-size self-hosted runners with the
   # build wrapped in the devcontainer (see Makefile), matching the
-  # pattern instar uses. The debian-12-docker image ships with
+  # pattern instar uses. The debian-13-docker image ships with
   # docker.io preinstalled (see supply-chain.yml).
   #
   # The l pool is the scarcest resource on the fleet (MAX_WORKERS = 6
@@ -80,7 +80,7 @@ jobs:
   # while its replacement queues behind it.
   lint:
     name: Lint
-    runs-on: [self-hosted, vm, debian-12-docker, l]
+    runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 45
     needs: [check_paths]
     if: >-
@@ -112,7 +112,7 @@ jobs:
   # another runner instead.
   check-windows:
     name: Cross-check Windows
-    runs-on: [self-hosted, vm, debian-12-docker, l]
+    runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 45
     needs: [check_paths]
     if: >-
@@ -135,7 +135,7 @@ jobs:
   # from the GitHub-hosted matrix below to warrant a separate job.
   build-linux:
     name: Build (Linux x86_64)
-    runs-on: [self-hosted, vm, debian-12-docker, l]
+    runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 120
     needs: [check_paths]
     if: >-
@@ -193,7 +193,7 @@ jobs:
   # larger runner.
 
   # cargo-audit needs cargo on PATH. The static runner is minimal
-  # (git only), so we run on debian-12 and install the stable rust
+  # (git only), so we run on debian-13 and install the stable rust
   # toolchain into $HOME via dtolnay/rust-toolchain (no sudo needed
   # for the toolchain itself).
   #
@@ -206,7 +206,7 @@ jobs:
   # has something to report, so a clean audit hides the problem.
   cargo-audit:
     name: cargo audit
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
     permissions:
       contents: read
@@ -228,11 +228,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # cargo-deny-action runs cargo-deny inside a Docker
-  # container, so this job needs the debian-12-docker image
+  # container, so this job needs the debian-13-docker image
   # which ships with docker.io preinstalled.
   cargo-deny:
     name: cargo deny
-    runs-on: [self-hosted, vm, debian-12-docker, s]
+    runs-on: [self-hosted, vm, debian-13-docker, s]
     timeout-minutes: 15
     needs: [check_paths]
     if: >-
@@ -287,7 +287,7 @@ jobs:
   # shellcheck is packaged in Debian 12, so apt-install and run.
   shellcheck:
     name: shellcheck
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
     needs: [check_paths]
     if: >-
@@ -303,7 +303,7 @@ jobs:
       # FUZZ_REPORTER_TEST_STRICT, which turns its `no jq` skip into a
       # failure. Every other jq user in this repository runs on
       # `[self-hosted, static]`, so nothing has previously established
-      # that the `debian-12` image carries it -- and this job already
+      # that the `debian-13` image carries it -- and this job already
       # demonstrates that the image is not assumed to carry tooling.
       # Installing it costs nothing if it is already there.
       - name: Install shellcheck and jq
@@ -348,7 +348,7 @@ jobs:
 
   bidi-check:
     name: bidi and zero-width
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
     if: github.event_name != 'merge_group'
     concurrency:
@@ -382,7 +382,7 @@ jobs:
   # same way.
   skillsaw:
     name: skillsaw
-    runs-on: [self-hosted, vm, debian-12, s]
+    runs-on: [self-hosted, vm, debian-13, s]
     timeout-minutes: 15
     needs: [check_paths]
     if: >-
