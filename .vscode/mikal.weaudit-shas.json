@@ -697,6 +697,10 @@
       "sha": "8cc1a09f25583a31081118cb43781e428b4f2989",
       "date": "2026-09-23"
     },
+    "tools/browser-offer-probe.py": {
+      "sha": "7e3d345aa050de2ee9bde9c0a38cdab439d576f2",
+      "date": "2026-09-23"
+    },
     "tools/build-ryll-wheel-in-container.sh": {
       "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
       "date": "2026-07-26"
@@ -715,6 +719,10 @@
     },
     "tools/fuzz-targets.sh": {
       "sha": "b6cba20bf72f5b01a12e52b029aaadfee2dead8d",
+      "date": "2026-09-23"
+    },
+    "tools/gen-swatches-jpeg/Cargo.toml": {
+      "sha": "95fa743e1acfca35eab4e422ab2ea79e7ea8519d",
       "date": "2026-09-23"
     },
     "tools/gen-swatches-jpeg/src/main.rs": {

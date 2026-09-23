@@ -938,6 +938,22 @@
     {
       "path": "ryll/src/web/assets/style.css",
       "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/gen-swatches-jpeg",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/browser-offer-probe.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
