@@ -48,6 +48,8 @@
 //! Nothing here performs DNS resolution, TLS, or the SPICE handshake; the
 //! caller dials the proxy, runs the exchange, and then treats the stream
 //! as if it were connected to the target.
+//! [`SpiceClient`](crate::SpiceClient) is that caller when
+//! [`ConnectionConfig::proxy`](crate::ConnectionConfig::proxy) is set.
 
 use std::fmt;
 use std::net::Ipv6Addr;

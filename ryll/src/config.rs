@@ -418,6 +418,7 @@ impl From<&Config> for ConnectionConfig {
             password: c.password.clone(),
             ca_cert: c.ca_cert.clone(),
             host_subject: c.host_subject.clone(),
+            proxy: None,
         }
     }
 }

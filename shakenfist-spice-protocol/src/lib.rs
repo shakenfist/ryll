@@ -38,7 +38,8 @@
 //!   `spiceproxy`.
 //!
 //! - [`ConnectionConfig`] — SPICE server connection
-//!   parameters (host, port, TLS, credentials). This is the
+//!   parameters (host, port, TLS, credentials, HTTP proxy).
+//!   This is the
 //!   narrow configuration type that [`SpiceClient`] accepts.
 //! - [`client`] — `SpiceClient` for managing SPICE channel
 //!   connections (TLS/TCP, keepalive, link handshake, auth).
@@ -122,4 +123,50 @@ pub struct ConnectionConfig {
     /// preserves the relaxed behaviour described on
     /// `ca_cert`.
     pub host_subject: Option<String>,
+    /// HTTP proxy to tunnel the connection through with
+    /// `CONNECT`, as a Proxmox VE `.vv` file's `proxy=` key
+    /// requires. Build it with [`proxy::parse_proxy_uri`]
+    /// where the address arrives as a string, so a malformed
+    /// value fails there rather than at a dial. When set,
+    /// every channel dials the proxy instead of `host`, asks
+    /// it to `CONNECT` to `host:tls_port`, and runs TLS and
+    /// the SPICE handshake through the tunnel. `host` is then
+    /// never resolved locally: it is handed to the proxy
+    /// verbatim and may be an opaque name only the proxy
+    /// understands (Proxmox's is a signed ticket, which is
+    /// why [`display_target`](Self::display_target) keeps it
+    /// out of logs).
+    ///
+    /// A tunnel requires both `tls_port` and `host_subject`,
+    /// and [`SpiceClient::new`] refuses a config that sets
+    /// `proxy` without either. It is TLS-only because a
+    /// plaintext session through a third-party proxy would
+    /// have no identity check at all. It must be pinned
+    /// because the TLS server name is then the proxy's host,
+    /// used for SNI only: the name the certificate is checked
+    /// against cannot identify the backend, so the pinned
+    /// subject has to. `None` dials `host` directly, exactly
+    /// as before this field existed.
+    pub proxy: Option<proxy::HttpProxy>,
+}
+
+impl ConnectionConfig {
+    /// A description of where this connection goes, safe to
+    /// log, record in capture metadata, or put in a bug
+    /// report.
+    ///
+    /// Without a proxy this is `host:port`, where the port is
+    /// the one a connection dials: `tls_port` if set,
+    /// otherwise `port`. With a proxy it is
+    /// `<proxy host>:<proxy port> (tunnelled, target
+    /// redacted)`, because `host` is then whatever the proxy
+    /// was asked to connect to, and for Proxmox that is a
+    /// signed ticket. The crate treats `host` as opaque and
+    /// does not try to extract a friendlier name from it.
+    pub fn display_target(&self) -> String {
+        match &self.proxy {
+            Some(proxy) => format!("{}:{} (tunnelled, target redacted)", proxy.host, proxy.port),
+            None => format!("{}:{}", self.host, self.tls_port.unwrap_or(self.port)),
+        }
+    }
 }
