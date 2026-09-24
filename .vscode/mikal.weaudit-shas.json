@@ -641,20 +641,12 @@
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
     },
-    "shakenfist-spice-webrtc/Cargo.toml": {
-      "sha": "603cc785ed9e555462660ec86cb246500850211f",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
     },
     "shakenfist-spice-webrtc/src/bind_addrs.rs": {
       "sha": "03a8a93721957eef128a027ec0505554f88223e9",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/src/bridge.rs": {
-      "sha": "4bc7f06f362b708c9317a777642db9dcf66bc83c",
       "date": "2026-09-19"
     },
     "shakenfist-spice-webrtc/src/lib.rs": {
@@ -665,16 +657,8 @@
       "sha": "fd60aa65416f0231bae4b185cc18183bba6210cc",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-webrtc/src/test_client.rs": {
-      "sha": "91a9211c05643ebf55b961faeb36c8161b75f32f",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/tests/loopback.rs": {
-      "sha": "fb80f9a84bfe379e4f1fb845650fd065107ee24b",
       "date": "2026-09-19"
     },
     "tools/audit/audit-range.sh": {
