@@ -390,7 +390,7 @@ fn run_headless(
         // `target_host` here becomes `ReportMetadata::target_host`
         // (bugreport.rs), which lands in a bug-report zip: pass
         // `display_target()` rather than `config.host`, which under
-        // a proxy tunnel is a signed pseudo-hostname (decision 6).
+        // a proxy tunnel is a signed pseudo-hostname.
         BugReport::register_pedantic_observer(
             pedantic,
             connection_config.display_target(),

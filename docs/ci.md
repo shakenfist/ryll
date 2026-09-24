@@ -511,8 +511,8 @@ that pull request forever. It runs on `pull_request` against
 because drift in the Proxmox substrate itself is the job of the
 action repository's own weekly lane, not this one.
 
-It carries the same fork guard as ryll's other self-hosted VM
-lanes: the runners hold `/srv/github/id_ci`, the key to every
+Unlike ryll's other self-hosted VM lanes, it carries a fork
+guard: the runners hold `/srv/github/id_ci`, the key to every
 node in the CI mesh, and this lane uses it to create a Shaken
 Fist instance, so it does not run against a pull request from a
 fork.

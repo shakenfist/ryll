@@ -86,7 +86,7 @@ LAUNCH_BOUND = 10.0
 # The expired check's wait after the mint. Not 45: that is only four
 # seconds clear of the first 401 measured, and the mint time is taken just
 # before the API request, so the real ticket age at the CONNECT is higher
-# still. See the phase 1b plan, decision 10.
+# still.
 EXPIRED_DELAY = 50.0
 
 # The positive session must still be alive this long after its mint: long

@@ -1,8 +1,7 @@
 # Deploys a real single-node Proxmox VE 9 through shakenfist/actions'
 # deploy-proxmox-on-shakenfist@main, builds this branch's ryll, and runs
 # tools/proxmox-smoke.py's four checks against the node's spiceproxy. See
-# shakenfist/kerbside docs/plans/PLAN-proxmox-source-phase-01b-ci-substrate.md,
-# decisions 8 and 9.
+# "The Proxmox lane" in docs/ci.md.
 #
 # Deliberately not a gate, for the same reason mermaid-lint.yml gives under
 # "It is deliberately not a gate" in docs/ci.md: this is path-filtered, and
@@ -50,8 +49,7 @@ jobs:
       contents: read
     # These runners hold /srv/github/id_ci, the key to every node in the CI
     # mesh, and this lane creates a Shaken Fist instance with it. Ryll's
-    # other VM lanes carry no such guard yet (survey finding 7 in the phase
-    # 1b plan); that gap is recorded there as future work, not fixed here.
+    # other VM lanes do not carry this guard.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository

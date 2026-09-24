@@ -559,10 +559,9 @@ impl Config {
 
         // `proxy=<uri>` -> an HTTP CONNECT proxy to tunnel through, as
         // Proxmox VE's `.vv` files carry (spice-gtk reads the same
-        // key). Parsed at this boundary, per decision 2 of
-        // PLAN-proxmox-source-phase-02-ryll-connect.md, so a malformed
-        // value fails the .vv load and never reaches a dial. The
-        // error names the key, matching `parse_optional_u16` above.
+        // key). Parsed at this boundary, so a malformed value fails
+        // the .vv load and never reaches a dial. The error names the
+        // key, matching `parse_optional_u16` above.
         let proxy = match ini.get(section, "proxy").and_then(filter_none) {
             Some(s) => {
                 Some(parse_proxy_uri(&s).map_err(|e| anyhow!("Invalid proxy '{}': {}", s, e))?)
@@ -851,7 +850,7 @@ mod tests {
         assert!(cfg.ticket_valid_until.is_none());
     }
 
-    // ── `proxy=` (PLAN-proxmox-source-phase-02-ryll-connect.md) ─────
+    // ── `proxy=` ─────────────────────────────────────────────────────
 
     /// A Proxmox-shaped `.vv`: a signed pseudo-hostname in `host`, a
     /// `tls-port`, a `proxy=` naming the node's `spiceproxy`, a
@@ -888,11 +887,10 @@ delete-this-file=1\n";
         );
         assert!(cfg.ca_cert.as_deref().expect("ca present").contains("\\n"));
 
-        // The pseudo-hostname is a signed ticket (decision 6): it must
-        // never reach a log line, capture-metadata field, or bug
-        // report, so `ConnectionConfig::display_target()` — what all
-        // three now print through — must redact it, not merely
-        // reformat it.
+        // The pseudo-hostname is a signed ticket: it must never reach
+        // a log line, capture-metadata field, or bug report, so
+        // `ConnectionConfig::display_target()` — what all three print
+        // through — must redact it, not merely reformat it.
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&cfg).into();
         let shown = connection_config.display_target();
         assert_eq!(shown, "pve1.example:3128 (tunnelled, target redacted)");
@@ -906,7 +904,7 @@ delete-this-file=1\n";
     }
 
     /// `https://` proxies are parsed and refused by
-    /// `parse_proxy_uri` (decision 2); the `.vv` load must fail with
+    /// `parse_proxy_uri`; the `.vv` load must fail with
     /// an error naming the `proxy` key, not just the underlying
     /// scheme error, so an operator staring at `ryll --file` output
     /// knows which `.vv` line is at fault.

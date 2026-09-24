@@ -1118,12 +1118,10 @@ impl RyllApp {
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
-        // Built here (rather than at its previous call site below) so
-        // it is available for `target_host`, which feeds bug-report
-        // metadata and the "Connected to" bell entry: under a proxy
-        // tunnel `config.host` is a signed pseudo-hostname, and
-        // `display_target()` is what keeps it out of both (decision 6,
-        // PLAN-proxmox-source-phase-02-ryll-connect.md).
+        // Built here so it is available for `target_host`, which feeds
+        // bug-report metadata and the "Connected to" bell entry: under a
+        // proxy tunnel `config.host` is a signed pseudo-hostname, and
+        // `display_target()` is what keeps it out of both.
         let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let target_host = connection_config.display_target();
         let target_port = config.port;
