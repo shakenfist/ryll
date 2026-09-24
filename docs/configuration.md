@@ -292,6 +292,11 @@ dropped session does not retry against a now-dead ticket -- it
 suppresses ryll's auto-reconnect for this single-use ticket, per the
 [Ticket lifecycle keys](#ticket-lifecycle-keys) above.
 
+This example is exercised, not just documented: [the Proxmox
+lane](ci.md#the-proxmox-lane) mints a `.vv` in this shape against a
+real Proxmox VE node on every pull request that touches the CONNECT
+tunnelling code, and asserts that ryll connects through it.
+
 ## Keyboard Shortcuts
 
 These shortcuts are available during a GUI session. They are consumed
