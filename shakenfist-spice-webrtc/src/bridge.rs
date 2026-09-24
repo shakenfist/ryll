@@ -38,6 +38,7 @@ use crate::sticky::StickySignal;
 // `rtc::rtp::Packet`, and an `rtp` 0.17 `Packet` is not a different
 // version of that type, it is a different type entirely. Note the
 // module is `codec`, singular, where the old crate had `codecs`.
+use rtc::ice::mdns::MulticastDnsMode;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_H264, MIME_TYPE_OPUS};
 use rtc::rtp::codec::h264::H264Payloader;
 use rtc::rtp::codec::opus::OpusPayloader;
@@ -54,7 +55,7 @@ use webrtc::media_stream::MediaStreamTrack;
 use webrtc::peer_connection::{
     register_default_interceptors, MediaEngine, PeerConnection, PeerConnectionBuilder,
     PeerConnectionEventHandler, RTCConfigurationBuilder, RTCIceGatheringState, RTCIceServer,
-    RTCPeerConnectionState, RTCSessionDescription, Registry,
+    RTCPeerConnectionState, RTCSessionDescription, Registry, SettingEngine, SettingEngineBuilder,
 };
 
 /// Payload type we register H.264 under in the MediaEngine, and the
@@ -865,6 +866,7 @@ impl WebrtcBridge {
                         .build(),
                 )
                 .with_media_engine(media_engine)
+                .with_setting_engine(setting_engine())
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::new(BridgeHandler(events.clone())))
                 .with_udp_addrs(udp_addrs)
@@ -1509,6 +1511,23 @@ pub(crate) fn register_h264(media_engine: &mut MediaEngine) -> Result<()> {
     };
     media_engine.register_codec(h264, RtpCodecKind::Video)?;
     Ok(())
+}
+
+/// The `SettingEngine` every peer connection in this crate is built
+/// with: webrtc-rs defaults, but with mDNS off.
+///
+/// 0.20's `PeerConnectionBuilder` hard-coded mDNS off and ignored the
+/// setting engine's mode. 0.21 honours it, and its default is
+/// `QueryOnly`, which makes `build()` bind 5353 and join 224.0.0.251.
+/// On a host with no multicast-capable interface — a loopback-only
+/// container, as `make test` runs in — that join fails with ENODEV
+/// and takes the whole `build()` down with it. We neither advertise
+/// nor resolve `.local` candidates (media addresses are explicit), so
+/// off is also the correct setting, not merely the pre-0.21 one.
+pub(crate) fn setting_engine() -> SettingEngine {
+    SettingEngineBuilder::new()
+        .with_multicast_dns_mode(MulticastDnsMode::Disabled)
+        .build()
 }
 
 /// The payload type negotiated for `mime_type`, if the remote peer
