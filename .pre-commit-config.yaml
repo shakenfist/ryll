@@ -83,6 +83,17 @@ repos:
         pass_filenames: false
         files: ^(tools/(test-)?fuzz-targets|shakenfist-spice-protocol/fuzz/Cargo\.toml)
 
+      # And the Proxmox lane's driver. Its negative checks pass when ryll
+      # fails to connect, so a driver bug tends to read as a green lane,
+      # and the lane itself books a nested Proxmox node to run. A fake
+      # ryll and a fake mint script stand in; Python 3 only.
+      - id: proxmox-smoke-test
+        name: Proxmox lane driver smoke test
+        entry: ./tools/test-proxmox-smoke.sh
+        language: script
+        pass_filenames: false
+        files: ^tools/(test-)?proxmox-smoke
+
   - repo: local
     hooks:
       - id: bidi-check
