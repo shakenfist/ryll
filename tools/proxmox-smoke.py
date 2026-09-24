@@ -260,19 +260,34 @@ def replace_key(lines, key, value):
     return out
 
 
-def secrets_of(fields):
+class Redaction:
+    """A string ryll must never print, and a description safe to report.
+
+    The description and the value are separate attributes rather than a
+    tuple, so nothing built from the description (a problem message, the
+    summary line) is derived from the value.
+    """
+
+    __slots__ = ('description', 'value')
+
+    def __init__(self, description, value):
+        self.description = description
+        self.value = value
+
+
+def redactions_of(fields):
     """The strings ryll must never print: the password and the ticket."""
-    secrets = []
+    redactions = []
     password = fields.get('password', '')
     if password:
-        secrets.append(('the SPICE password', password))
+        redactions.append(Redaction('the SPICE password', password))
     host = fields.get('host', '')
     if host:
-        secrets.append(('the pseudo-hostname', host))
+        redactions.append(Redaction('the pseudo-hostname', host))
         for part in host.split(':'):
             if len(part) >= SECRET_FIELD_MIN:
-                secrets.append(('part of the pseudo-hostname', part))
-    return secrets
+                redactions.append(Redaction('part of the pseudo-hostname', part))
+    return redactions
 
 
 # ── ryll's log ──────────────────────────────────────────────────────────────
@@ -303,7 +318,7 @@ def dial_targets(lines):
     return [m.group('target') for m in (DIAL_RE.search(line) for line in lines) if m]
 
 
-def scrub_log(path, secrets):
+def scrub_log(path, redactions):
     """Redact secrets from a saved log; return a problem per secret found."""
     try:
         with open(path, 'rb') as f:
@@ -312,11 +327,12 @@ def scrub_log(path, secrets):
         return []
     problems = []
     # Longest first, so the whole pseudo-hostname is counted before its parts.
-    for label, secret in sorted(secrets, key=lambda s: -len(s[1])):
-        count = text.count(secret)
+    for redaction in sorted(redactions, key=lambda r: -len(r.value)):
+        count = text.count(redaction.value)
         if count:
-            problems.append(f'ryll printed {label} {count} time(s); redacted from the saved log')
-            text = text.replace(secret, '<redacted>')
+            text = text.replace(redaction.value, '<redacted>')
+            problems.append(f'ryll printed {redaction.description} {count} time(s); '
+                            'redacted from the saved log')
     if problems:
         fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -405,7 +421,7 @@ class Check:
         self.sockdir = None
         self.sock = None
         self.proc = None
-        self.secrets = []
+        self.redactions = []
         self.notes = []
         self.problems = []
         self.harness = False
@@ -452,7 +468,7 @@ class Check:
         if not os.path.exists(self.vv):
             raise HarnessError('the mint script succeeded but wrote no .vv')
         lines, fields = read_vv(self.vv)
-        self.secrets = secrets_of(fields)
+        self.redactions = redactions_of(fields)
         for key in ('proxy', 'host', 'tls-port', 'password', 'host-subject'):
             if not fields.get(key):
                 raise HarnessError(f'the minted .vv has no {key} field')
@@ -516,7 +532,7 @@ class Check:
         if self.sockdir:
             shutil.rmtree(self.sockdir, ignore_errors=True)
         if os.path.exists(self.ryll_log):
-            for problem in scrub_log(self.ryll_log, self.secrets):
+            for problem in scrub_log(self.ryll_log, self.redactions):
                 self.fail(problem)
 
     def summary(self):
