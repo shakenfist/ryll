@@ -387,14 +387,13 @@ fn run_headless(
              is not populated — that field is updated by the GUI loop only. \
              See docs/plans/PLAN-display-draw-ops.md."
         );
-        // `target_host` here becomes `ReportMetadata::target_host`
+        // `target` here becomes `ReportMetadata::target`
         // (bugreport.rs), which lands in a bug-report zip: pass
         // `display_target()` rather than `config.host`, which under
         // a proxy tunnel is a signed pseudo-hostname.
         BugReport::register_pedantic_observer(
             pedantic,
             connection_config.display_target(),
-            config.port,
             traffic.clone(),
             snapshots.clone(),
             app_snapshot,
@@ -573,7 +572,6 @@ fn run_web(
             BugReport::register_pedantic_observer(
                 pedantic,
                 connection_config.display_target(),
-                config.port,
                 traffic.clone(),
                 snapshots.clone(),
                 app_snapshot,

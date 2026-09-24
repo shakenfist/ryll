@@ -53,6 +53,10 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
+    # Cancelling is safe: the Proxmox node lives in this runner's own
+    # Shaken Fist namespace, which is deleted with everything in it when
+    # the runner finishes, so a cancelled or timed-out run leaks nothing
+    # and needs no teardown step (see deploy-proxmox-on-shakenfist's docs).
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}-proxmox-functional
       cancel-in-progress: true
@@ -77,6 +81,9 @@ jobs:
       # log outside the workdir so the upload step below can pick it up
       # alongside the per-check ryll logs without also picking up a .vv.
       - name: Run the Proxmox lane checks
+        # Explicit bash, not the default: only `shell: bash` adds pipefail,
+        # without which the step takes tee's status and could never fail.
+        shell: bash
         run: |
           mkdir -p "${RUNNER_TEMP}/proxmox-smoke"
           python3 tools/proxmox-smoke.py --ryll target/release/ryll \

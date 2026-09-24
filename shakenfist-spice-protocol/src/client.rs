@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::host_subject::{parse_host_subject, ExpectedSubject};
 use crate::link::{perform_auth, perform_link, SpiceStream};
-use crate::proxy::{read_connect_response, write_connect_request};
+use crate::proxy::{establish_tunnel, CONNECT_EXCHANGE_TIMEOUT};
 use crate::{ChannelType, ConnectionConfig, SpiceError};
 
 /// TLS certificate verifier that trusts a caller-supplied CA and, for
@@ -466,8 +466,13 @@ impl SpiceClient {
         // stream is positioned at the server's first byte, so TLS runs
         // over it exactly as over a direct connection.
         if proxy.is_some() {
-            write_connect_request(&mut tcp_stream, &self.config.host, port).await?;
-            read_connect_response(&mut tcp_stream).await?;
+            establish_tunnel(
+                &mut tcp_stream,
+                &self.config.host,
+                port,
+                CONNECT_EXCHANGE_TIMEOUT,
+            )
+            .await?;
         }
 
         // Wrap in TLS if needed

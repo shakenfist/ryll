@@ -82,7 +82,9 @@ async fn headless_against(port: u16) -> anyhow::Result<()> {
 async fn headless_connect_failure_is_an_error() {
     let port = closed_port();
     for attempt in 0..20 {
-        let result = tokio::time::timeout(Duration::from_secs(10), headless_against(port))
+        // A refused loopback connect returns at once; one that takes two
+        // seconds is itself the bug, so keep the worst case short.
+        let result = tokio::time::timeout(Duration::from_secs(2), headless_against(port))
             .await
             .unwrap_or_else(|_| panic!("attempt {}: run_headless did not return", attempt));
         let err = result.expect_err("a refused connect must be an Err");

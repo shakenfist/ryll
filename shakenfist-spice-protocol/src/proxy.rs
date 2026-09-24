@@ -53,6 +53,7 @@
 
 use std::fmt;
 use std::net::Ipv6Addr;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -190,7 +191,20 @@ pub enum ConnectError {
         /// The status line as received, truncated for quoting.
         status_line: String,
     },
+
+    /// The CONNECT exchange did not finish within the limit given to
+    /// [`establish_tunnel`]: the proxy accepted the TCP connection but
+    /// never completed its response.
+    #[error("HTTP proxy did not complete the CONNECT exchange within {0:?}")]
+    TimedOut(Duration),
 }
+
+/// How long [`establish_tunnel`] waits for the whole CONNECT exchange when
+/// a client dials through a proxy. TCP keepalive only notices a dead peer;
+/// a live proxy that never answers would otherwise hold the dial forever.
+/// Proxmox tickets last about 30 seconds, so a tunnel that takes longer
+/// than this would be refused anyway.
+pub const CONNECT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parse a proxy URI, such as a `.vv` file's `proxy=` value, into an
 /// [`HttpProxy`].
@@ -471,6 +485,32 @@ impl fmt::Display for HttpProxy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "http://{}", authority(&self.host, self.port))
     }
+}
+
+/// Ask the proxy on `stream` for a tunnel to `target_host:target_port`:
+/// [`write_connect_request`] then [`read_connect_response`], with the pair
+/// bounded by `limit`. On success the stream is positioned at the target's
+/// first byte.
+///
+/// # Errors
+///
+/// [`ConnectError::TimedOut`] if the exchange takes longer than `limit`,
+/// and anything either half returns.
+pub async fn establish_tunnel<S>(
+    stream: &mut S,
+    target_host: &str,
+    target_port: u16,
+    limit: Duration,
+) -> Result<(), ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    tokio::time::timeout(limit, async {
+        write_connect_request(stream, target_host, target_port).await?;
+        read_connect_response(stream).await
+    })
+    .await
+    .map_err(|_| ConnectError::TimedOut(limit))?
 }
 
 #[cfg(test)]
@@ -756,6 +796,32 @@ mod tests {
         let (mut client, peer) = responding_peer(response).await;
         drop(peer);
         read_connect_response(&mut client).await
+    }
+
+    // ---- establish_tunnel ----
+
+    /// A proxy that accepts the connection and never answers must not hold
+    /// the dial forever.
+    #[tokio::test]
+    async fn establish_tunnel_times_out_on_a_silent_proxy() {
+        let (mut client, _peer) = duplex(64 * 1024);
+        let limit = Duration::from_millis(50);
+        let err = establish_tunnel(&mut client, "spice.example", 5900, limit)
+            .await
+            .expect_err("a silent proxy must time out");
+        assert!(
+            matches!(err, ConnectError::TimedOut(d) if d == limit),
+            "{err:?}"
+        );
+    }
+
+    /// Within the limit, the exchange behaves exactly as its two halves.
+    #[tokio::test]
+    async fn establish_tunnel_succeeds_within_the_limit() {
+        let (mut client, _peer) = responding_peer(b"HTTP/1.1 200 OK\r\n\r\n").await;
+        establish_tunnel(&mut client, "spice.example", 5900, Duration::from_secs(5))
+            .await
+            .expect("a prompt 200 must tunnel");
     }
 
     #[tokio::test]

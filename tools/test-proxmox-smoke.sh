@@ -14,9 +14,9 @@
 # case below injects one fault and asserts that the driver catches it, and
 # every case asserts that the driver never printed the ticket or password.
 #
-# The fake ryll behaves as ryll should, not as it does: it exits non-zero
-# when a connection fails. Real headless ryll currently exits 0 then, which
-# the driver reports; the "exit-zero" case pins that.
+# The fake ryll exits non-zero when a connection fails, as headless ryll
+# does. The "exit-zero" case proves the driver still catches a regression
+# back to exiting 0 on a failed connection.
 #
 # No network, no Docker, no cargo, no Proxmox. Python 3 only. Runs in about
 # fifteen seconds.
@@ -131,7 +131,8 @@ if cn != 'pve1.test':
 
 stop = threading.Event()
 signal.signal(signal.SIGINT, lambda *_: stop.set())
-PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
+PNG = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk'
+                       '+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==')
 
 def serve(conn):
     f = conn.makefile('rwb')

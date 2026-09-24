@@ -212,6 +212,11 @@ reconnect UX correctly.
   example below), so the certificate-subject pin is the only identity
   check the connection has.
 
+  The CONNECT exchange with the proxy must finish within 10 seconds.
+  A proxy that accepts the TCP connection and then never answers fails
+  the dial with "HTTP proxy did not complete the CONNECT exchange"
+  rather than holding it open.
+
   When a connection is tunnelled, ryll's info log, capture
   `metadata.json`, and any bug report show the proxy's address with
   the target redacted (`<proxy host>:<proxy port> (tunnelled, target

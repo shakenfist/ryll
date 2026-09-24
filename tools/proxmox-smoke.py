@@ -557,12 +557,14 @@ def wait_for_socket(check):
             check.fail(f'ryll exited with status {check.proc.returncode} before its control socket appeared')
             return None
         if os.path.exists(check.sock):
+            control = None
             try:
                 control = Control(check.sock)
                 control.hello()
                 return control
             except (OSError, EOFError, RuntimeError, ValueError):
-                pass
+                if control is not None:
+                    control.close()
         time.sleep(0.2)
     check.fail(f'the control socket did not answer within {SOCKET_BOUND:.0f} s of the launch')
     return None
