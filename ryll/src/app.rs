@@ -1118,7 +1118,14 @@ impl RyllApp {
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
-        let target_host = config.host.clone();
+        // Built here (rather than at its previous call site below) so
+        // it is available for `target_host`, which feeds bug-report
+        // metadata and the "Connected to" bell entry: under a proxy
+        // tunnel `config.host` is a signed pseudo-hostname, and
+        // `display_target()` is what keeps it out of both (decision 6,
+        // PLAN-proxmox-source-phase-02-ryll-connect.md).
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
+        let target_host = connection_config.display_target();
         let target_port = config.port;
 
         // Register the --pedantic gap observer now that the live traffic,
@@ -1151,7 +1158,6 @@ impl RyllApp {
         // `EventSink::emit`, which signals as part of sending, so egui sleeps
         // when nothing is happening and wakes immediately when something is.
         let repaint_notify = Arc::new(Notify::new());
-        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
@@ -1775,9 +1781,14 @@ impl RyllApp {
                     // Surface the link in the bell history. Fires on initial
                     // connect and on every reconnect success; the 30 s dedup
                     // collapses storm reconnects to a single entry.
+                    // `target_host` already carries the port (or, under
+                    // a proxy tunnel, the redacted target) via
+                    // `display_target()` — do not append `target_port`
+                    // again here, which would either double it or
+                    // print a meaningless port for a tunnelled session.
                     self.push_connection_event(
                         NotifySeverity::Info,
-                        format!("Connected to {}:{}", self.target_host, self.target_port),
+                        format!("Connected to {}", self.target_host),
                     );
 
                     // Spawn the auto-snapshot interval task. Retire-and-respawn
