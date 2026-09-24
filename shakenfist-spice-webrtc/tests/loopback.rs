@@ -164,7 +164,8 @@ async fn loopback_video_audio_datachannel() {
                     let counter = match track.kind().await {
                         RtpCodecKind::Video => video_count,
                         RtpCodecKind::Audio => audio_count,
-                        RtpCodecKind::Unspecified => return,
+                        // `RtpCodecKind` is `#[non_exhaustive]` from 0.21.
+                        _ => return,
                     };
                     tokio::spawn(async move {
                         while let Some(event) = track.poll().await {
@@ -377,7 +378,8 @@ async fn loopback_media_flows_when_client_offers_a_narrow_codec_set() {
                     let counter = match track.kind().await {
                         RtpCodecKind::Video => video_count,
                         RtpCodecKind::Audio => audio_count,
-                        RtpCodecKind::Unspecified => return,
+                        // `RtpCodecKind` is `#[non_exhaustive]` from 0.21.
+                        _ => return,
                     };
                     tokio::spawn(async move {
                         while let Some(event) = track.poll().await {
@@ -490,7 +492,8 @@ async fn loopback_video_stops_when_the_client_offers_no_h264() {
                     let counter = match track.kind().await {
                         RtpCodecKind::Video => video_count,
                         RtpCodecKind::Audio => audio_count,
-                        RtpCodecKind::Unspecified => return,
+                        // `RtpCodecKind` is `#[non_exhaustive]` from 0.21.
+                        _ => return,
                     };
                     tokio::spawn(async move {
                         while let Some(event) = track.poll().await {

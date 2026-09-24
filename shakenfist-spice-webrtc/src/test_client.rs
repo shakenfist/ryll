@@ -55,7 +55,7 @@ use webrtc::peer_connection::{
 use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 use crate::bind_addrs::bind_addrs_for_tests;
-use crate::bridge::{register_h264, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
+use crate::bridge::{register_h264, setting_engine, CONTROL_DC_LABEL, CONTROL_DC_STREAM_ID};
 use crate::sticky::StickySignal;
 
 /// How often [`TestPeer::wait_until_connected`] re-checks the state.
@@ -319,6 +319,7 @@ impl TestPeerBuilder {
             PeerConnectionBuilder::new()
                 .with_configuration(RTCConfigurationBuilder::new().build())
                 .with_media_engine(media_engine)
+                .with_setting_engine(setting_engine())
                 .with_interceptor_registry(registry)
                 .with_handler(events)
                 .with_udp_addrs(udp_addrs)
@@ -669,6 +670,7 @@ mod tests {
             PeerConnectionBuilder::new()
                 .with_configuration(RTCConfigurationBuilder::new().build())
                 .with_media_engine(media_engine)
+                .with_setting_engine(setting_engine())
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::new(IgnoreEvents))
                 .with_udp_addrs(udp_addrs)
