@@ -72,7 +72,7 @@ ryll --file connection.vv --capture /tmp/capture
 
 This writes:
 
-- `metadata.json` — session context (ryll version, platform, target host)
+- `metadata.json` — session context (ryll version, platform, target)
   for self-describing capture directories in bug reports
 - `main.pcap`, `display.pcap`, `cursor.pcap`, `inputs.pcap`, `usbredir.pcap`,
   `webdav.pcap` — per-channel pcap files with fake TCP/IP headers, openable
