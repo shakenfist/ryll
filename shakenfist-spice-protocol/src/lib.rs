@@ -29,6 +29,13 @@
 //!   and matching (`parse_host_subject`, `ExpectedSubject`),
 //!   replicating spice-common's `ssl_verify.c` semantics for
 //!   `host-subject` pinning.
+//! - [`proxy`] — HTTP CONNECT proxy support: proxy URI parsing
+//!   (`parse_proxy_uri`, `HttpProxy`) with spice-gtk's
+//!   semantics, and the CONNECT exchange
+//!   (`write_connect_request`, `read_connect_response`,
+//!   `parse_connect_response`) that tunnels a SPICE
+//!   connection through a proxy such as Proxmox VE's
+//!   `spiceproxy`.
 //!
 //! - [`ConnectionConfig`] — SPICE server connection
 //!   parameters (host, port, TLS, credentials). This is the
@@ -52,6 +59,7 @@ pub mod link;
 pub mod logging;
 pub mod messages;
 pub mod parse;
+pub mod proxy;
 pub mod reader;
 
 pub use client::SpiceClient;
