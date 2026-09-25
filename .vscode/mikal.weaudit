@@ -780,10 +780,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": "tools/audit/audit-range.sh",
       "author": "mikal"
     },
