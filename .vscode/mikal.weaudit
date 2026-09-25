@@ -930,6 +930,38 @@
     {
       "path": ".gitignore",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/mermaid-lint.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/fuzz.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/manual-build.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/supply-chain.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/actionlint.yaml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
