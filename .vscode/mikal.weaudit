@@ -962,6 +962,38 @@
     {
       "path": ".github/workflows",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/bridge.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src/test_client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/src",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests/loopback.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-webrtc",
+      "author": "mikal"
+    },
+    {
+      "path": "renovate.json",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
