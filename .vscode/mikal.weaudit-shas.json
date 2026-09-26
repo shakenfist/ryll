@@ -17,9 +17,17 @@
       "sha": "88adf6b676bb497b78a4e07cc9c1ee72c1e36c0e",
       "date": "2026-09-10"
     },
+    ".github/actionlint.yaml": {
+      "sha": "96f8de34ab79cb7b61c051138f54f4a00618f9ab",
+      "date": "2026-09-26"
+    },
     ".github/actions/cargo-cache/action.yml": {
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
+    },
+    ".github/workflows/ci.yml": {
+      "sha": "60103e7f1e33648189cdf21cb5cd174f4c7d125e",
+      "date": "2026-09-26"
     },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
@@ -28,6 +36,18 @@
     ".github/workflows/export-repo-config.yml": {
       "sha": "53b5d8eb46e89e228dd88d42d7e1b0c3ea6694cd",
       "date": "2026-08-05"
+    },
+    ".github/workflows/fuzz.yml": {
+      "sha": "2f83d312b9fd3bc5399aa16e1ddea91ae68d3337",
+      "date": "2026-09-26"
+    },
+    ".github/workflows/manual-build.yml": {
+      "sha": "c37b7ded5e75f0b8a130441b000b2edfcf015be3",
+      "date": "2026-09-26"
+    },
+    ".github/workflows/mermaid-lint.yml": {
+      "sha": "97eb7ba192f93c0fa7379d5635b4d89f6a41c6ad",
+      "date": "2026-09-26"
     },
     ".github/workflows/pr-re-review.yml": {
       "sha": "6386f11d6067b9086d52548d29e7fdc72b43c4b6",
@@ -40,6 +60,14 @@
     ".github/workflows/prune-reviews.yml": {
       "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
       "date": "2026-09-23"
+    },
+    ".github/workflows/release.yml": {
+      "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
+      "date": "2026-09-26"
+    },
+    ".github/workflows/supply-chain.yml": {
+      "sha": "c855b8e116194dc365244a69aff28900f33023fe",
+      "date": "2026-09-26"
     },
     ".gitignore": {
       "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
@@ -196,6 +224,10 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
+    },
+    "renovate.json": {
+      "sha": "f22c6f9e0c0d8763ade5e4a2c5399fca647a7963",
+      "date": "2026-09-26"
     },
     "ryll/Cargo.toml": {
       "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",
@@ -637,6 +669,10 @@
       "sha": "70308378d11d123fbed6f75df2e54e2e887382f8",
       "date": "2026-07-22"
     },
+    "shakenfist-spice-webrtc/Cargo.toml": {
+      "sha": "10712cd6cc5048f63c20bcd7dfb4812f203e4ac1",
+      "date": "2026-09-26"
+    },
     "shakenfist-spice-webrtc/README.md": {
       "sha": "19072e84e4fdec20fad7c35b04a26db76d5e35f0",
       "date": "2026-08-02"
@@ -644,6 +680,10 @@
     "shakenfist-spice-webrtc/src/bind_addrs.rs": {
       "sha": "03a8a93721957eef128a027ec0505554f88223e9",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-webrtc/src/bridge.rs": {
+      "sha": "69a4e4be837b87d20d4c1943486c165ca01bd461",
+      "date": "2026-09-26"
     },
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "f4ae5da82db95cfaf142f4bd59f52460c233d255",
@@ -653,9 +693,17 @@
       "sha": "fd60aa65416f0231bae4b185cc18183bba6210cc",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-webrtc/src/test_client.rs": {
+      "sha": "1e940b3e85dd1bad369a48522bb3b254cde48412",
+      "date": "2026-09-26"
+    },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
       "date": "2026-09-19"
+    },
+    "shakenfist-spice-webrtc/tests/loopback.rs": {
+      "sha": "c9fe0c4abf2be1373a3831e00f51f94b078a6430",
+      "date": "2026-09-26"
     },
     "tools/audit/audit-range.sh": {
       "sha": "7d2ec8fd099b53103c5734e2dc3c891b409e6226",
