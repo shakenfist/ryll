@@ -173,10 +173,6 @@
       "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
       "date": "2026-08-17"
     },
-    "docs/spice-protocol.md": {
-      "sha": "94066f42f06e5c6ad554c3e3bcc8f4b86e57d671",
-      "date": "2026-09-17"
-    },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
       "date": "2026-09-17"
@@ -357,10 +353,6 @@
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
     },
-    "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "8bf1ba08dd47059e01c486fccf265a7a1aca4e64",
-      "date": "2026-07-17"
-    },
     "shakenfist-spice-protocol/src/logging.rs": {
       "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
       "date": "2026-09-18"
@@ -371,10 +363,6 @@
     },
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
-      "date": "2026-07-17"
-    },
-    "shakenfist-spice-protocol/src/reader.rs": {
-      "sha": "d9953c5499e5f0dbae5bcb1cb5764b8f2715210c",
       "date": "2026-07-17"
     },
     "shakenfist-spice-renderer/Cargo.toml": {

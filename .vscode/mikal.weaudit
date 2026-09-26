@@ -76,15 +76,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/parse.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/reader.rs",
       "author": "mikal"
     },
     {
@@ -401,10 +393,6 @@
     },
     {
       "path": "docs/libvirt-spice-recommendations.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/spice-protocol.md",
       "author": "mikal"
     },
     {
