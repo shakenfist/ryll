@@ -93,6 +93,21 @@ pub enum LinkError {
     /// error is cleaner than a panic.
     #[error("bad RSA public key length: expected 162 bytes, got {len}")]
     BadKeyLength { len: usize },
+
+    /// A link capability set lacks capabilities the SPICE client
+    /// drivers cannot work without. `set` says which set was
+    /// checked (`"advertised"` or `"server"`), `missing` names
+    /// each absent capability, and `caps` is the common
+    /// capability array as checked.
+    #[error(
+        "{set} common capabilities lack {}, which this client requires ({set} common caps: {caps:?})",
+        .missing.join(", ")
+    )]
+    MissingRequiredCaps {
+        set: &'static str,
+        missing: Vec<&'static str>,
+        caps: Vec<u32>,
+    },
 }
 
 /// A cursor over a byte slice that tracks position and enforces

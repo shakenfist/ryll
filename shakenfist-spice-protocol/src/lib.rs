@@ -13,6 +13,7 @@
 //!   types (`KeyEvent`, `MousePosition`, etc.).
 //! - [`link`] — SPICE link handshake for both roles.
 //!   Client: `SpiceLinkMess`, `SpiceLinkReply`, `perform_link`,
+//!   `perform_link_with_caps` (caller-chosen capabilities),
 //!   `perform_auth`, `encrypt_password`. Server/proxy:
 //!   `read_link_mess`, `send_link_reply`/`send_need_secured`,
 //!   `read_auth_ticket`, `send_auth_result`, plus
@@ -42,7 +43,9 @@
 //!   This is the
 //!   narrow configuration type that [`SpiceClient`] accepts.
 //! - [`client`] — `SpiceClient` for managing SPICE channel
-//!   connections (TLS/TCP, keepalive, link handshake, auth).
+//!   connections (TLS/TCP, keepalive, link handshake, auth),
+//!   including `connect_channel_with_caps` for forwarding a
+//!   client's capabilities and reading back the server's.
 //!
 //! # Crypto provider
 //!

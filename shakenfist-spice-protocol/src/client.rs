@@ -16,8 +16,12 @@ use tokio_rustls::rustls::{
 use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 
+use crate::constants::capabilities;
 use crate::host_subject::{parse_host_subject, ExpectedSubject};
-use crate::link::{perform_auth, perform_link, SpiceStream};
+use crate::link::{
+    check_advertised_caps, default_channel_caps, perform_auth, perform_link_with_caps,
+    SpiceLinkReply, SpiceStream,
+};
 use crate::proxy::{establish_tunnel, CONNECT_EXCHANGE_TIMEOUT};
 use crate::{ChannelType, ConnectionConfig, SpiceError};
 
@@ -368,13 +372,50 @@ impl SpiceClient {
         Ok(TlsConnector::from(Arc::new(tls_config)))
     }
 
-    /// Connect to a specific channel
+    /// Connect to a specific channel, advertising ryll's default
+    /// capabilities (see [`perform_link`](crate::link::perform_link)).
     pub async fn connect_channel(
         &self,
         connection_id: u32,
         channel_type: ChannelType,
         channel_id: u8,
     ) -> Result<SpiceStream> {
+        let (stream, _reply) = self
+            .connect_channel_with_caps(
+                connection_id,
+                channel_type,
+                channel_id,
+                &[capabilities::DEFAULT_COMMON],
+                &[default_channel_caps(channel_type)],
+            )
+            .await?;
+        Ok(stream)
+    }
+
+    /// Connect to a specific channel, advertising exactly the given common
+    /// and channel capability words (see [`perform_link_with_caps`]), and
+    /// return the authenticated stream together with the server's
+    /// [`SpiceLinkReply`], whose `common_caps` and `channel_caps` are the
+    /// capabilities the server offers.
+    ///
+    /// This is the path for a proxy forwarding a real client's
+    /// capabilities to the server on its backend leg. `common_caps` must
+    /// include `AUTH_SELECTION` and `MINI_HEADER` (checked before
+    /// dialling), and the server's reply must list those and `AUTH_SPICE`
+    /// (checked before authenticating), or this fails with a
+    /// [`LinkError::MissingRequiredCaps`](crate::reader::LinkError::MissingRequiredCaps)
+    /// naming what is missing.
+    pub async fn connect_channel_with_caps(
+        &self,
+        connection_id: u32,
+        channel_type: ChannelType,
+        channel_id: u8,
+        common_caps: &[u32],
+        channel_caps: &[u32],
+    ) -> Result<(SpiceStream, SpiceLinkReply)> {
+        // Refuse unsendable caps before dialling, not after.
+        check_advertised_caps(common_caps, channel_caps)?;
+
         // Determine if we should use TLS. `new` refuses a proxy without a
         // TLS port, so a tunnelled connection always takes the first arm.
         let (use_tls, port) = match self.config.tls_port {
@@ -391,7 +432,15 @@ impl SpiceClient {
             channel_id
         );
 
-        let reply = perform_link(&mut stream, connection_id, channel_type, channel_id).await?;
+        let reply = perform_link_with_caps(
+            &mut stream,
+            connection_id,
+            channel_type,
+            channel_id,
+            common_caps,
+            channel_caps,
+        )
+        .await?;
 
         // Check for errors
         match reply.error {
@@ -406,13 +455,18 @@ impl SpiceClient {
             }
         }
 
+        // perform_auth assumes the server offers auth selection and SPICE
+        // ticket auth, and the stream is only useful to a mini-header
+        // speaker.
+        reply.check_client_requirements()?;
+
         // Perform authentication
         info!("{}: authenticating...", channel_type.name());
         perform_auth(&mut stream, &reply.pub_key, self.config.password.as_deref()).await?;
 
         info!("{}: connected successfully", channel_type.name());
 
-        Ok(stream)
+        Ok((stream, reply))
     }
 
     /// Open the byte stream a channel's link handshake runs over: dial,
@@ -522,6 +576,7 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     use crate::proxy::{ConnectError, HttpProxy};
+    use crate::reader::LinkError;
 
     // ── Test helpers ────────────────────────────────────────────────
 
@@ -1329,5 +1384,185 @@ mod tests {
             std::io::ErrorKind::WouldBlock,
             "the proxy was dialled"
         );
+    }
+
+    // ── Link: caller-supplied capabilities ──────────────────────────
+
+    /// A plaintext SPICE server on `listener` that reads one link
+    /// message, replies granting `granted_common`, and — only if the
+    /// client goes on to authenticate — reads the ticket and accepts it.
+    /// Returns the link message it received and whether auth happened.
+    async fn caps_server(
+        listener: TcpListener,
+        granted_common: Vec<u32>,
+    ) -> (crate::link::SpiceLinkMess, bool) {
+        use crate::link::{
+            generate_ticket_keypair, read_auth_ticket, read_link_mess, send_auth_result,
+            send_link_reply,
+        };
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut stream = SpiceStream::Plain(tcp);
+        let (key, der) = generate_ticket_keypair().unwrap();
+        let link_mess = read_link_mess(&mut stream).await.unwrap();
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: der,
+            common_caps: granted_common,
+            channel_caps: vec![0x0000_0005, 0x0000_0010],
+        };
+        send_link_reply(&mut stream, &reply).await.unwrap();
+        let authed = match read_auth_ticket(&mut stream, &key).await {
+            Ok(password) => {
+                assert_eq!(password, "pw");
+                send_auth_result(&mut stream, SpiceError::Ok).await.unwrap();
+                true
+            }
+            Err(_) => false,
+        };
+        (link_mess, authed)
+    }
+
+    fn plain_config(port: u16) -> ConnectionConfig {
+        ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port,
+            password: Some("pw".into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_channel_with_caps_forwards_caps_and_returns_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(caps_server(
+            listener,
+            vec![capabilities::DEFAULT_COMMON, 0x0000_0100],
+        ));
+
+        let common = [
+            capabilities::DEFAULT_COMMON | capabilities::AUTH_SASL,
+            0x0000_0002,
+        ];
+        let channel = [0x0000_0001, 0x8000_0000];
+        let client = SpiceClient::new(plain_config(port)).unwrap();
+        let (stream, reply) = client
+            .connect_channel_with_caps(3, ChannelType::Display, 1, &common, &channel)
+            .await
+            .unwrap();
+        assert!(matches!(stream, SpiceStream::Plain(_)));
+        assert_eq!(reply.error, SpiceError::Ok);
+        assert_eq!(
+            reply.common_caps,
+            vec![capabilities::DEFAULT_COMMON, 0x0000_0100]
+        );
+        assert_eq!(reply.channel_caps, vec![0x0000_0005, 0x0000_0010]);
+
+        let (link_mess, authed) = server.await.unwrap();
+        assert_eq!(link_mess.connection_id, 3);
+        assert_eq!(link_mess.channel_type, ChannelType::Display as u8);
+        assert_eq!(link_mess.channel_id, 1);
+        assert_eq!(link_mess.common_caps, common.to_vec());
+        assert_eq!(link_mess.channel_caps, channel.to_vec());
+        assert!(authed);
+    }
+
+    /// A reply missing a capability this client depends on fails the
+    /// connection before authenticating. The SASL case is a spice-server
+    /// with SASL enabled, which offers AUTH_SASL in place of AUTH_SPICE and
+    /// would reject the SPICE ticket mechanism.
+    #[tokio::test]
+    async fn connect_channel_with_caps_fails_before_auth_on_missing_server_cap() {
+        let cases = [
+            (
+                capabilities::AUTH_SELECTION | capabilities::AUTH_SPICE,
+                "MINI_HEADER",
+            ),
+            (
+                capabilities::AUTH_SELECTION | capabilities::AUTH_SASL | capabilities::MINI_HEADER,
+                "AUTH_SPICE",
+            ),
+        ];
+        for (offered, missing) in cases {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = tokio::spawn(caps_server(listener, vec![offered]));
+
+            let client = SpiceClient::new(plain_config(port)).unwrap();
+            let err = match client
+                .connect_channel_with_caps(
+                    0,
+                    ChannelType::Main,
+                    0,
+                    &[capabilities::DEFAULT_COMMON],
+                    &[capabilities::DEFAULT_MAIN],
+                )
+                .await
+            {
+                Err(e) => e,
+                Ok(_) => panic!("a reply without {missing} must fail the connection"),
+            };
+            match err.downcast_ref::<LinkError>() {
+                Some(LinkError::MissingRequiredCaps {
+                    set: "server",
+                    missing: got,
+                    ..
+                }) => assert_eq!(got, &vec![missing]),
+                _ => panic!("expected MissingRequiredCaps naming {missing}, got {err:?}"),
+            }
+
+            let (_link_mess, authed) = server.await.unwrap();
+            assert!(
+                !authed,
+                "the client must not authenticate after a failed check"
+            );
+        }
+    }
+
+    /// Unsendable advertised caps are refused before the transport is
+    /// opened: pointed at a port nothing listens on, the error is the
+    /// capability refusal, not a failure to connect.
+    #[tokio::test]
+    async fn connect_channel_with_caps_refuses_before_dialling() {
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let client = SpiceClient::new(plain_config(port)).unwrap();
+        let err = match client
+            .connect_channel_with_caps(0, ChannelType::Main, 0, &[capabilities::AUTH_SPICE], &[])
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("advertising without the required caps must fail"),
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<LinkError>(),
+                Some(LinkError::MissingRequiredCaps {
+                    set: "advertised",
+                    ..
+                })
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_channel_still_advertises_the_defaults() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(caps_server(listener, vec![capabilities::DEFAULT_COMMON]));
+
+        let client = SpiceClient::new(plain_config(port)).unwrap();
+        client
+            .connect_channel(0, ChannelType::Display, 0)
+            .await
+            .unwrap();
+
+        let (link_mess, authed) = server.await.unwrap();
+        assert_eq!(link_mess.common_caps, vec![capabilities::DEFAULT_COMMON]);
+        assert_eq!(link_mess.channel_caps, vec![capabilities::DEFAULT_DISPLAY]);
+        assert!(authed);
     }
 }

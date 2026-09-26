@@ -12,12 +12,16 @@ needed to implement a SPICE client, server, or proxy in Rust:
   including the input event types (`KeyEvent`,
   `MousePosition`, `MouseButton`, `InputsKeyModifiers`).
 - **`link`** — SPICE link handshake (`SpiceLinkMess`,
-  `SpiceLinkReply`, `perform_link`, `perform_auth`),
+  `SpiceLinkReply`, `perform_link`, `perform_auth`, and
+  `perform_link_with_caps` to advertise caller-chosen,
+  possibly multi-word, capabilities instead of the defaults),
   `SpiceStream` (a Plain/TLS wrapper), and the
   `encrypt_password` helper for SPICE password auth
   (RSA-OAEP + SHA1).
 - **`client`** — `SpiceClient` for managing SPICE channel
-  connections (TLS/TCP, keepalive, link handshake, auth),
+  connections (TLS/TCP, keepalive, link handshake, auth;
+  `connect_channel_with_caps` forwards caller-chosen
+  capabilities and returns the server's `SpiceLinkReply`),
   configured via a narrow [`ConnectionConfig`] struct so it
   can be driven from contexts other than ryll's CLI. Setting
   `ConnectionConfig::proxy` tunnels the connection through an
