@@ -264,14 +264,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/README.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/README.md",
       "author": "mikal"
     },
@@ -305,10 +297,6 @@
     },
     {
       "path": "docs/releasing.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/session-lifecycle.md",
       "author": "mikal"
     },
     {
@@ -400,14 +388,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/ci.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/control-socket-protocol.md",
       "author": "mikal"
     },
@@ -420,27 +400,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/libvirt-spice-recommendations.md",
       "author": "mikal"
     },
     {
-      "path": "docs/multi-mode-parity.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/troubleshooting.md",
       "author": "mikal"
     },
     {
@@ -500,27 +464,7 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/auto_snapshot.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/clipboard_arboard.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
       "author": "mikal"
     },
     {
@@ -560,19 +504,7 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/app.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/client.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/constants.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
       "author": "mikal"
     },
     {
@@ -581,18 +513,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/messages.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -700,15 +620,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/session.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/snapshots.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src",
       "author": "mikal"
     },
     {
@@ -720,15 +632,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/tests",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer",
       "author": "mikal"
     },
     {
@@ -888,10 +792,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools",
-      "author": "mikal"
-    },
-    {
       "path": ".cargo/audit.toml",
       "author": "mikal"
     },
@@ -917,10 +817,6 @@
     },
     {
       "path": "docs/development.md",
-      "author": "mikal"
-    },
-    {
-      "path": ".pre-commit-config.yaml",
       "author": "mikal"
     },
     {
@@ -957,10 +853,6 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
       "author": "mikal"
     },
     {
