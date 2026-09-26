@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 use crate::host_subject::{parse_host_subject, ExpectedSubject};
 use crate::link::{perform_auth, perform_link, SpiceStream};
+use crate::proxy::{establish_tunnel, CONNECT_EXCHANGE_TIMEOUT};
 use crate::{ChannelType, ConnectionConfig, SpiceError};
 
 /// TLS certificate verifier that trusts a caller-supplied CA and, for
@@ -276,6 +277,12 @@ impl SpiceClient {
     /// is configured yet, so the error surfaces on the first (possibly
     /// plaintext) connection attempt, not only after a `need_secured`
     /// retry upgrades to TLS.
+    ///
+    /// Also fails if `config.proxy` is set without a `host_subject` or
+    /// without a `tls_port`: a tunnel is TLS-only and must be pinned (see
+    /// [`ConnectionConfig::proxy`]). Both are checked here, before a TLS
+    /// connector exists, rather than on the dial path, so that no caller
+    /// can reach a dial with a misconfigured tunnel.
     pub fn new(config: ConnectionConfig) -> Result<Self> {
         let expected_subject = config
             .host_subject
@@ -283,6 +290,26 @@ impl SpiceClient {
             .map(parse_host_subject)
             .transpose()
             .map_err(|e| anyhow!("refusing to connect with a malformed host_subject: {e}"))?;
+
+        if let Some(proxy) = &config.proxy {
+            // Under a tunnel the TLS server name is the proxy's host,
+            // which cannot identify the backend, so the pinned subject
+            // is the only identity check the connection has.
+            if expected_subject.is_none() {
+                return Err(anyhow!(
+                    "refusing to tunnel through HTTP proxy {proxy} without a host_subject: a \
+                     tunnelled connection must pin the server's certificate subject"
+                ));
+            }
+            // A plaintext session through a third-party proxy would have
+            // no identity check at all.
+            if config.tls_port.is_none() {
+                return Err(anyhow!(
+                    "refusing to tunnel through HTTP proxy {proxy} without a tls_port: tunnelled \
+                     connections are TLS-only"
+                ));
+            }
+        }
 
         let tls_connector = if config.tls_port.is_some() {
             Some(Self::create_tls_connector(&config, expected_subject)?)
@@ -348,44 +375,14 @@ impl SpiceClient {
         channel_type: ChannelType,
         channel_id: u8,
     ) -> Result<SpiceStream> {
-        // Determine if we should use TLS
+        // Determine if we should use TLS. `new` refuses a proxy without a
+        // TLS port, so a tunnelled connection always takes the first arm.
         let (use_tls, port) = match self.config.tls_port {
             Some(tls_port) => (true, tls_port),
             None => (false, self.config.port),
         };
 
-        let addr = format!("{}:{}", self.config.host, port);
-        debug!("Connecting to {} (TLS: {})", addr, use_tls);
-
-        // Connect TCP
-        let tcp_stream = TcpStream::connect(&addr).await?;
-        tcp_stream.set_nodelay(true)?;
-
-        // Enable TCP keepalive to prevent NAT/firewall idle timeouts and
-        // detect dead connections.  Values match spice-gtk behaviour:
-        // 30 s idle before first probe, then 3 probes at 15 s intervals
-        // (75 s total to detect a dead peer).
-        let sock_ref = SockRef::from(&tcp_stream);
-        let keepalive = socket2::TcpKeepalive::new()
-            .with_time(Duration::from_secs(30))
-            .with_interval(Duration::from_secs(15))
-            .with_retries(3);
-        sock_ref.set_keepalive(true)?;
-        sock_ref.set_tcp_keepalive(&keepalive)?;
-
-        // Wrap in TLS if needed
-        let mut stream = if use_tls {
-            let connector = self
-                .tls_connector
-                .as_ref()
-                .ok_or_else(|| anyhow!("TLS not configured"))?;
-
-            let server_name = ServerName::try_from(self.config.host.clone())?;
-            let tls_stream = connector.connect(server_name, tcp_stream).await?;
-            SpiceStream::Tls(tls_stream)
-        } else {
-            SpiceStream::Plain(tcp_stream)
-        };
+        let mut stream = self.open_transport(use_tls, port).await?;
 
         // Perform link handshake
         info!(
@@ -417,6 +414,97 @@ impl SpiceClient {
 
         Ok(stream)
     }
+
+    /// Open the byte stream a channel's link handshake runs over: dial,
+    /// set `nodelay` and keepalive, run the HTTP CONNECT exchange if a
+    /// proxy is configured, and wrap the result in TLS if `use_tls`.
+    ///
+    /// `port` is the SPICE server's port. Without a proxy it is dialled
+    /// on `config.host`; with one, the proxy is dialled instead and asked
+    /// to connect to `config.host:port`. A tunnel is TLS-only, so a
+    /// plaintext request with a proxy configured is refused before
+    /// anything is dialled.
+    async fn open_transport(&self, use_tls: bool, port: u16) -> Result<SpiceStream> {
+        let proxy = self.config.proxy.as_ref();
+        if proxy.is_some() && !use_tls {
+            return Err(anyhow!(
+                "refusing to open a plaintext connection through an HTTP proxy: tunnelled \
+                 connections are TLS-only"
+            ));
+        }
+
+        debug!(
+            "Connecting to {} (TLS: {})",
+            self.config.display_target(),
+            use_tls
+        );
+
+        // Connect TCP. A (host, port) tuple rather than a formatted
+        // "host:port" string, so an IP literal (IPv6 included) is parsed
+        // as one rather than split back apart at its last ':' and handed
+        // to the resolver.
+        let mut tcp_stream = match proxy {
+            Some(proxy) => TcpStream::connect((proxy.host.as_str(), proxy.port)).await?,
+            None => TcpStream::connect((self.config.host.as_str(), port)).await?,
+        };
+        tcp_stream.set_nodelay(true)?;
+
+        // Enable TCP keepalive to prevent NAT/firewall idle timeouts and
+        // detect dead connections.  Values match spice-gtk behaviour:
+        // 30 s idle before first probe, then 3 probes at 15 s intervals
+        // (75 s total to detect a dead peer). Under a tunnel this is the
+        // socket to the proxy, which is the only socket there is.
+        let sock_ref = SockRef::from(&tcp_stream);
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(30))
+            .with_interval(Duration::from_secs(15))
+            .with_retries(3);
+        sock_ref.set_keepalive(true)?;
+        sock_ref.set_tcp_keepalive(&keepalive)?;
+
+        // Ask the proxy for a tunnel to the SPICE server. On success the
+        // stream is positioned at the server's first byte, so TLS runs
+        // over it exactly as over a direct connection.
+        if proxy.is_some() {
+            establish_tunnel(
+                &mut tcp_stream,
+                &self.config.host,
+                port,
+                CONNECT_EXCHANGE_TIMEOUT,
+            )
+            .await?;
+        }
+
+        // Wrap in TLS if needed
+        let stream = if use_tls {
+            let connector = self
+                .tls_connector
+                .as_ref()
+                .ok_or_else(|| anyhow!("TLS not configured"))?;
+
+            let server_name = match proxy {
+                // Under a tunnel `host` is whatever the proxy was asked to
+                // connect to, which need not be a valid server name at all
+                // (Proxmox's pseudo-hostname has colons in it, so
+                // `ServerName` rejects it outright). The proxy's host is
+                // used instead, and it is SNI only, not an identity claim:
+                // `new` refuses a tunnel without `host_subject`, so this
+                // connection always gets `SpiceCaVerifier`, which forgives
+                // the name and enforces the pinned subject. The proxy's
+                // name could not be the identity check anyway: in a
+                // Proxmox cluster the proxy may be a different node from
+                // the one running the VM. qemu ignores SNI.
+                Some(proxy) => ServerName::try_from(proxy.host.clone())?,
+                None => ServerName::try_from(self.config.host.clone())?,
+            };
+            let tls_stream = connector.connect(server_name, tcp_stream).await?;
+            SpiceStream::Tls(tls_stream)
+        } else {
+            SpiceStream::Plain(tcp_stream)
+        };
+
+        Ok(stream)
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +515,13 @@ mod tests {
         BasicConstraints, CertificateParams, DistinguishedName, DnType, DnValue, IsCa, Issuer,
         KeyPair,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_rustls::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    use crate::proxy::{ConnectError, HttpProxy};
 
     // ── Test helpers ────────────────────────────────────────────────
 
@@ -434,11 +529,23 @@ mod tests {
     /// directly rather than going through the process-wide
     /// `CryptoProvider::install_default()`/`get_default()` machinery:
     /// `SpiceCaVerifier` only uses whatever provider it is handed, and
-    /// none of these tests exercise `SpiceClient::create_tls_connector`
-    /// (the only caller that consults the global default), so a fresh
+    /// only the tunnelled-connection tests exercise
+    /// `SpiceClient::create_tls_connector` (the only caller that consults
+    /// the global default, see `install_crypto_provider`), so a fresh
     /// instance per test avoids any cross-test install race entirely.
     fn crypto_provider() -> Arc<CryptoProvider> {
         Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    /// Install a process-wide default CryptoProvider, for the tests that
+    /// go through `SpiceClient::new` with a TLS port and so reach
+    /// `create_tls_connector`, which (like production) requires one.
+    /// Losing an install race to another test is fine: all that matters
+    /// is that some provider is installed afterwards.
+    fn install_crypto_provider() {
+        let _ = CryptoProvider::install_default(
+            tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
+        );
     }
 
     fn utf8(s: &str) -> DnValue {
@@ -490,6 +597,16 @@ mod tests {
         ca_params: &CertificateParams,
         entries: &[(DnType, DnValue)],
     ) -> Vec<u8> {
+        leaf_and_key_signed_by(ca_key, ca_params, entries).0
+    }
+
+    /// `leaf_signed_by`, also returning the leaf's key pair, for a test
+    /// that needs to run a TLS server presenting the leaf.
+    fn leaf_and_key_signed_by(
+        ca_key: &KeyPair,
+        ca_params: &CertificateParams,
+        entries: &[(DnType, DnValue)],
+    ) -> (Vec<u8>, KeyPair) {
         let issuer = Issuer::from_params(ca_params, ca_key);
         let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
         let mut dn = DistinguishedName::new();
@@ -498,7 +615,8 @@ mod tests {
         }
         params.distinguished_name = dn;
         let leaf_key = KeyPair::generate().unwrap();
-        params.signed_by(&leaf_key, &issuer).unwrap().der().to_vec()
+        let der = params.signed_by(&leaf_key, &issuer).unwrap().der().to_vec();
+        (der, leaf_key)
     }
 
     /// Mint a leaf certificate carrying a subject alternative name.
@@ -826,5 +944,390 @@ mod tests {
             ..Default::default()
         };
         assert!(SpiceClient::new(config).is_ok());
+    }
+
+    // ── Tunnelled connections: construction ─────────────────────────
+
+    /// A Proxmox-shaped pseudo-hostname: an opaque, signed connect string
+    /// that only the proxy understands. The colons make it neither a DNS
+    /// name nor an IP address, so it can never be a TLS `ServerName`.
+    const PSEUDO_HOST: &str = "pvespiceproxy:6aaf3e30:100:pve1:61000::0ce0beef";
+
+    /// The TLS port signed into `PSEUDO_HOST`, which the CONNECT target
+    /// must name.
+    const PSEUDO_TLS_PORT: u16 = 61000;
+
+    fn test_proxy(port: u16) -> HttpProxy {
+        HttpProxy {
+            host: "127.0.0.1".into(),
+            port,
+        }
+    }
+
+    /// A config for a tunnelled connection that `SpiceClient::new`
+    /// accepts. Each refusal test removes one thing from it.
+    fn tunnel_config(ca: &TestCa, host_subject: &str, proxy_port: u16) -> ConnectionConfig {
+        ConnectionConfig {
+            host: PSEUDO_HOST.into(),
+            port: 0,
+            tls_port: Some(PSEUDO_TLS_PORT),
+            ca_cert: Some(ca.vv_ca_field.clone()),
+            host_subject: Some(host_subject.into()),
+            proxy: Some(test_proxy(proxy_port)),
+            ..Default::default()
+        }
+    }
+
+    /// `SpiceClient::new`'s error, which `unwrap_err()` cannot give us
+    /// because `SpiceClient` does not derive Debug.
+    fn new_err(config: ConnectionConfig) -> anyhow::Error {
+        match SpiceClient::new(config) {
+            Err(e) => e,
+            Ok(_) => panic!("expected SpiceClient::new to refuse the config"),
+        }
+    }
+
+    #[test]
+    fn spice_client_new_refuses_a_tunnel_without_host_subject() {
+        let ca = make_ca("cluster ca");
+        let config = ConnectionConfig {
+            host_subject: None,
+            ..tunnel_config(&ca, "CN=hv1", 3128)
+        };
+        let err = new_err(config);
+        assert!(
+            err.to_string().contains("without a host_subject"),
+            "error {err} does not name host_subject"
+        );
+
+        // The refusal comes before the TLS connector is built. With an
+        // unusable ca= field, create_tls_connector would fail with its
+        // own message; getting the host_subject refusal instead proves
+        // the check ran first.
+        let config = ConnectionConfig {
+            host_subject: None,
+            ca_cert: Some("not a certificate at all".into()),
+            ..tunnel_config(&ca, "CN=hv1", 3128)
+        };
+        let err = new_err(config);
+        assert!(
+            err.to_string().contains("without a host_subject"),
+            "error {err} does not name host_subject"
+        );
+    }
+
+    #[test]
+    fn spice_client_new_refuses_a_tunnel_without_tls_port() {
+        let ca = make_ca("cluster ca");
+        let config = ConnectionConfig {
+            tls_port: None,
+            ..tunnel_config(&ca, "CN=hv1", 3128)
+        };
+        let err = new_err(config);
+        assert!(
+            err.to_string().contains("without a tls_port"),
+            "error {err} does not name tls_port"
+        );
+    }
+
+    #[test]
+    fn spice_client_new_accepts_a_pinned_tls_tunnel() {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        assert!(SpiceClient::new(tunnel_config(&ca, "CN=hv1", 3128)).is_ok());
+
+        // A pin with no ca= field (public roots) is also enough: the pin
+        // is what the refusal asks for.
+        let config = ConnectionConfig {
+            ca_cert: None,
+            ..tunnel_config(&ca, "CN=hv1", 3128)
+        };
+        assert!(SpiceClient::new(config).is_ok());
+    }
+
+    // ── display_target ──────────────────────────────────────────────
+
+    #[test]
+    fn display_target_without_a_proxy_is_host_and_dialled_port() {
+        let config = ConnectionConfig {
+            host: "hv1.example".into(),
+            port: 5900,
+            ..Default::default()
+        };
+        assert_eq!(config.display_target(), "hv1.example:5900");
+
+        let config = ConnectionConfig {
+            tls_port: Some(5901),
+            ..config
+        };
+        assert_eq!(config.display_target(), "hv1.example:5901");
+    }
+
+    #[test]
+    fn display_target_with_a_proxy_redacts_the_target() {
+        let config = ConnectionConfig {
+            host: PSEUDO_HOST.into(),
+            port: 0,
+            tls_port: Some(PSEUDO_TLS_PORT),
+            proxy: Some(HttpProxy {
+                host: "pve1.example".into(),
+                port: 3128,
+            }),
+            ..Default::default()
+        };
+        let shown = config.display_target();
+        assert_eq!(shown, "pve1.example:3128 (tunnelled, target redacted)");
+        assert!(!shown.contains("pvespiceproxy"));
+    }
+
+    // ── Transport: direct dial ──────────────────────────────────────
+
+    /// Dial `host` with no proxy and no TLS through `open_transport`, and
+    /// prove the stream reaches the listener by passing a byte across.
+    async fn direct_plain_dial(listener: TcpListener, host: &str) {
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            tcp.write_all(b"x").await.unwrap();
+        });
+
+        let config = ConnectionConfig {
+            host: host.into(),
+            port,
+            ..Default::default()
+        };
+        let client = SpiceClient::new(config).unwrap();
+        let mut stream = client.open_transport(false, port).await.unwrap();
+        assert!(matches!(stream, SpiceStream::Plain(_)));
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).await.unwrap();
+        assert_eq!(&byte, b"x");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_transport_dials_an_ipv4_host_directly() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        direct_plain_dial(listener, "127.0.0.1").await;
+    }
+
+    #[tokio::test]
+    async fn open_transport_dials_an_ipv6_literal_directly() {
+        // A bare IPv6 literal host must dial. The formatted "host:port"
+        // this replaced produced "::1:<port>", which only worked because
+        // the standard library falls back to splitting at the last ':'
+        // and resolving the remainder; the (host, port) tuple parses the
+        // literal directly. Either way, this pins the behaviour.
+        let listener = match TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!(
+                    "SKIPPED open_transport_dials_an_ipv6_literal_directly: this environment has \
+                     no IPv6 loopback ({e})"
+                );
+                return;
+            }
+        };
+        direct_plain_dial(listener, "::1").await;
+    }
+
+    // ── Transport: through an HTTP CONNECT proxy ────────────────────
+
+    /// A TLS server presenting a leaf with the given CN, signed by `ca`.
+    /// Accepts one connection and, if the handshake completes, sends
+    /// `hello`. Resolves to whether the handshake completed.
+    async fn tls_backend(ca: &TestCa, cn: &str) -> (u16, tokio::task::JoinHandle<bool>) {
+        let (leaf, key) =
+            leaf_and_key_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8(cn))]);
+        let config = ServerConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(leaf)],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            match acceptor.accept(tcp).await {
+                Ok(mut tls) => {
+                    tls.write_all(b"hello").await.unwrap();
+                    tls.flush().await.unwrap();
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+        (port, task)
+    }
+
+    /// A fake HTTP CONNECT proxy. Accepts one connection, reads the
+    /// request head, answers with `response`, and, if given a backend
+    /// port, splices the client to it. Resolves to the request head, so
+    /// the test can check what was asked for.
+    async fn fake_proxy(
+        response: &'static str,
+        backend_port: Option<u16>,
+    ) -> (u16, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                assert_eq!(
+                    client.read(&mut byte).await.unwrap(),
+                    1,
+                    "client closed early"
+                );
+                head.push(byte[0]);
+            }
+            client.write_all(response.as_bytes()).await.unwrap();
+            if let Some(backend_port) = backend_port {
+                let mut upstream = TcpStream::connect(("127.0.0.1", backend_port))
+                    .await
+                    .unwrap();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                });
+            }
+            String::from_utf8(head).unwrap()
+        });
+        (port, task)
+    }
+
+    /// Assert the proxy was asked to CONNECT to the pseudo-hostname on
+    /// the TLS port, in both the request line and the `Host` header
+    /// (Proxmox reads the latter).
+    fn assert_connect_target(head: &str) {
+        let target = format!("{PSEUDO_HOST}:{PSEUDO_TLS_PORT}");
+        assert!(
+            head.starts_with(&format!("CONNECT {target} HTTP/1.0\r\n")),
+            "unexpected request line in {head:?}"
+        );
+        assert!(
+            head.contains(&format!("\r\nHost: {target}\r\n")),
+            "no Host header naming {target} in {head:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_transport_tunnels_tls_through_the_proxy_with_a_matching_pin() {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        let (backend_port, backend) = tls_backend(&ca, "hv1").await;
+        let (proxy_port, proxy) = fake_proxy(
+            "HTTP/1.0 200 Connection established\r\n\r\n",
+            Some(backend_port),
+        )
+        .await;
+
+        let client = SpiceClient::new(tunnel_config(&ca, "CN=hv1", proxy_port)).unwrap();
+        let mut stream = client.open_transport(true, PSEUDO_TLS_PORT).await.unwrap();
+        assert!(matches!(stream, SpiceStream::Tls(_)));
+
+        // Bytes from the backend arrive through TLS and the tunnel.
+        let mut hello = [0u8; 5];
+        stream.read_exact(&mut hello).await.unwrap();
+        assert_eq!(&hello, b"hello");
+
+        assert_connect_target(&proxy.await.unwrap());
+        assert!(backend.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn open_transport_through_the_proxy_fails_on_a_mismatched_pin() {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        let (backend_port, backend) = tls_backend(&ca, "hv2").await;
+        let (proxy_port, proxy) = fake_proxy(
+            "HTTP/1.0 200 Connection established\r\n\r\n",
+            Some(backend_port),
+        )
+        .await;
+
+        let client = SpiceClient::new(tunnel_config(&ca, "CN=hv1", proxy_port)).unwrap();
+        let err = match client.open_transport(true, PSEUDO_TLS_PORT).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected the handshake to fail on the pinned subject"),
+        };
+        let rustls_err = err
+            .downcast_ref::<std::io::Error>()
+            .and_then(|e| e.get_ref())
+            .and_then(|e| e.downcast_ref::<Error>());
+        assert!(
+            matches!(
+                rustls_err,
+                Some(Error::InvalidCertificate(CertificateError::NotValidForName))
+            ),
+            "expected a certificate rejection, got {err:?}"
+        );
+
+        assert_connect_target(&proxy.await.unwrap());
+        assert!(!backend.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn open_transport_surfaces_a_proxy_refusal() {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        let (proxy_port, proxy) = fake_proxy(
+            "HTTP/1.1 401 permission denied - invalid PVE ticket\r\n\r\n",
+            None,
+        )
+        .await;
+
+        let client = SpiceClient::new(tunnel_config(&ca, "CN=hv1", proxy_port)).unwrap();
+        let err = match client.open_transport(true, PSEUDO_TLS_PORT).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected the 401 to fail the connection"),
+        };
+        assert!(
+            matches!(
+                err.downcast_ref::<ConnectError>(),
+                Some(ConnectError::Unauthorized(_))
+            ),
+            "expected ConnectError::Unauthorized, got {err:?}"
+        );
+        assert_connect_target(&proxy.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn open_transport_never_tunnels_plaintext() {
+        // `new` already refuses a tunnel without a TLS port; this is the
+        // backstop in `open_transport` itself, built around `new` to
+        // reach it. It must refuse before dialling anything.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+
+        let client = SpiceClient {
+            config: ConnectionConfig {
+                host: PSEUDO_HOST.into(),
+                port: 5900,
+                proxy: Some(test_proxy(proxy_port)),
+                ..Default::default()
+            },
+            tls_connector: None,
+        };
+        let err = match client.open_transport(false, 5900).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected a plaintext tunnel to be refused"),
+        };
+        assert!(
+            err.to_string().contains("TLS-only"),
+            "unexpected error {err}"
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the proxy was dialled"
+        );
     }
 }

@@ -1,0 +1,115 @@
+# Deploys a real single-node Proxmox VE 9 through shakenfist/actions'
+# deploy-proxmox-on-shakenfist@main, builds this branch's ryll, and runs
+# tools/proxmox-smoke.py's four checks against the node's spiceproxy. See
+# "The Proxmox lane" in docs/ci.md.
+#
+# Deliberately not a gate, for the same reason mermaid-lint.yml gives under
+# "It is deliberately not a gate" in docs/ci.md: this is path-filtered, and
+# a required check that never reports blocks a pull request forever.
+# `paths` does not work on merge_group either, so the alternative is
+# spinning a nested Proxmox node on every merge attempt regardless of what
+# changed. Drift in Proxmox itself is caught by the actions repository's
+# own weekly proxmox-substrate.yml lane, not here.
+#
+# It builds ryll before deploying the node (`make release` first) so a
+# compile error never books the ~20-minute node deploy, and so mint-to-launch
+# stays short once the node is up: the binary is already there when the
+# first ticket is minted.
+#
+# These commits live on this branch rather than a branch of their own
+# because the positive check cannot pass without this branch's SPICE HTTP
+# CONNECT tunnelling code, and workflow_dispatch only offers workflows that
+# already exist on the default branch -- so a pull_request run of this
+# workflow, on this branch's own pull request, is the only way to validate
+# it before merge.
+name: Proxmox functional
+
+on:
+  pull_request:
+    branches: [develop]
+    paths:
+      - 'shakenfist-spice-protocol/src/**'
+      - 'shakenfist-spice-renderer/src/**'
+      - 'ryll/src/config.rs'
+      - 'ryll/src/main.rs'
+      - '.github/workflows/proxmox-functional.yml'
+      - 'tools/proxmox-smoke.py'
+  workflow_dispatch:
+
+jobs:
+  proxmox-functional:
+    name: Proxmox functional
+    # debian-13-docker because make release builds inside the devcontainer
+    # (docs/ci.md, "Build network isolation"); l because that build is
+    # l-sized, same as build-linux in ci.yml, and the nested Proxmox node
+    # this lane also books needs a runner able to hold an l slot.
+    runs-on: [self-hosted, vm, debian-13-docker, l]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    # These runners hold /srv/github/id_ci, the key to every node in the CI
+    # mesh, and this lane creates a Shaken Fist instance with it. Ryll's
+    # other VM lanes do not carry this guard.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    # Cancelling is safe: the Proxmox node lives in this runner's own
+    # Shaken Fist namespace, which is deleted with everything in it when
+    # the runner finishes, so a cancelled or timed-out run leaks nothing
+    # and needs no teardown step (see deploy-proxmox-on-shakenfist's docs).
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-proxmox-functional
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+
+      # Must stay directly after checkout; see the action for why.
+      - uses: ./.github/actions/cargo-cache
+
+      - name: Build ryll
+        run: make release
+
+      - name: Deploy a Proxmox VE node
+        id: deploy
+        timeout-minutes: 60
+        uses: shakenfist/actions/deploy-proxmox-on-shakenfist@main
+
+      # Each of the four checks mints its own ticket through the action's
+      # mint_script and launches ryll immediately; see tools/proxmox-smoke.py
+      # for the checks and their oracles. Its own stdout carries the
+      # "[proxmox-smoke] <check>: PASS/FAIL" summary lines and is tee'd to a
+      # log outside the workdir so the upload step below can pick it up
+      # alongside the per-check ryll logs without also picking up a .vv.
+      - name: Run the Proxmox lane checks
+        # Explicit bash, not the default: only `shell: bash` adds pipefail,
+        # without which the step takes tee's status and could never fail.
+        shell: bash
+        run: |
+          mkdir -p "${RUNNER_TEMP}/proxmox-smoke"
+          python3 tools/proxmox-smoke.py --ryll target/release/ryll \
+              --mint-script "${{ steps.deploy.outputs.mint_script }}" \
+              --api-url "${{ steps.deploy.outputs.api_url }}" \
+              --node "${{ steps.deploy.outputs.node_name }}" \
+              --vmid "${{ steps.deploy.outputs.vmid }}" \
+              --token-id "${{ steps.deploy.outputs.token_id }}" \
+              --token-file "${{ steps.deploy.outputs.token_file }}" \
+              --ca-file "${{ steps.deploy.outputs.ca_file }}" \
+              --workdir "${RUNNER_TEMP}/proxmox-smoke" \
+              2>&1 | tee "${RUNNER_TEMP}/proxmox-smoke.log"
+
+      # Only the driver's own (already-redacted) log and each check's
+      # ryll.log. Never the workdir's .vv files: each carries a live SPICE
+      # password until the driver deletes it, and a crash between mint and
+      # cleanup can leave one behind. Never /tmp/ryll.log either -- that is
+      # headless ryll's unredacted --verbose append (ryll/src/main.rs), not
+      # this driver's output.
+      - name: Upload the Proxmox lane logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: proxmox-functional-logs
+          path: |
+            ${{ runner.temp }}/proxmox-smoke.log
+            ${{ runner.temp }}/proxmox-smoke/*/ryll.log
+          retention-days: 30
+          if-no-files-found: ignore

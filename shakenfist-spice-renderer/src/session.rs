@@ -64,6 +64,15 @@ pub const INPUT_CHANNEL_SIZE: usize = 256;
 /// carries it — the secondary channels have no equivalent history.
 const MAIN_EVENT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long `run_headless` waits for the connection task to wind
+/// down once the session loop has stopped for some reason other
+/// than the task finishing (Ctrl+C, main-channel disconnect, the
+/// event stream closing). Once `run_connection` has spawned its
+/// channel tasks it notices the cancel flag within 100 ms; the
+/// grace only runs out when a cancel lands mid-setup, where
+/// nothing polls the flag, and the task is then aborted.
+const CONNECTION_JOIN_GRACE: Duration = Duration::from_secs(2);
+
 /// Capacity of the per-headless broadcast bus that fans
 /// `ChannelEvent`s out to multiple subscribers (the headless stats
 /// drain, the control-socket per-client tap, and future digest /
@@ -584,6 +593,16 @@ pub fn spawn_digest_poller(
 /// - The `cancel` flag and any bridge to host-level signal state
 ///   (e.g. the host's process-global Ctrl+C flag flipped by its
 ///   `ctrlc::set_handler`).
+///
+/// However the event loop stops, the connection task is joined
+/// before this returns, and its outcome decides the result: an
+/// error from `run_connection` (a refused dial, a proxy's 401, a
+/// TLS or `host_subject` rejection, a failed link) is logged as
+/// `Connection task failed: ...` and returned as an `Err` carrying
+/// it, so a headless process exits non-zero on a failed connect.
+/// A session that ends because the host raised `cancel` or the
+/// main channel disconnected returns `Ok` unless the connection
+/// task itself failed, or `--paste-text` did.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_headless(
     config: ConnectionConfig,
@@ -659,12 +678,15 @@ pub async fn run_headless(
         cancel.clone(),
     );
 
-    // Spawn connection task. The cancel flag is passed through so
-    // a host-side Ctrl+C bridge can flip it and have every channel
-    // task exit promptly.
-    let cancel_for_conn = cancel.clone();
+    // Spawn connection task. It gets a cancel flag of its own rather
+    // than the host's: whenever the event loop below stops without
+    // the task having finished -- the host's `cancel`, a main-channel
+    // disconnect, the event stream closing -- this flag is raised so
+    // the task can be wound down and joined before this returns.
+    let conn_cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_conn = conn_cancel.clone();
     let spice_connected_for_conn = spice_connected.clone();
-    let connection_handle = tokio::spawn(async move {
+    let mut connection_handle = tokio::spawn(async move {
         let result = run_connection(
             config,
             event_tx,
@@ -693,7 +715,6 @@ pub async fn run_headless(
         spice_connected_for_conn.store(false, Ordering::Relaxed);
         result
     });
-    tokio::pin!(connection_handle);
 
     // Clone input_tx for each consumer before any `async move` closure
     // captures ownership.  Order matters: clones must precede moves.
@@ -840,6 +861,10 @@ pub async fn run_headless(
     let mut stats = HeadlessStats::default();
     let mut last_stats_print = Instant::now();
     let mut paste_failed = false;
+    // Set when the loop stops because the connection task finished.
+    // Every other way out leaves it `None`, and the task is joined
+    // after the loop instead.
+    let mut connection_join: Option<ConnectionJoin> = None;
 
     loop {
         tokio::select! {
@@ -933,11 +958,7 @@ pub async fn run_headless(
                 }
             }
             join_result = &mut connection_handle => {
-                match join_result {
-                    Ok(Ok(())) => info!("Connection task completed"),
-                    Ok(Err(e)) => error!("Connection task failed: {:#}", e),
-                    Err(e) => error!("Connection task panicked: {}", e),
-                }
+                connection_join = Some(join_result);
                 break;
             }
             // Poll the host's cancel flag at a reasonable interval. The host
@@ -950,6 +971,32 @@ pub async fn run_headless(
             }
         }
     }
+
+    // Collect the connection task's outcome however the loop ended.
+    // "Event stream closed" and "connection task finished" become
+    // ready together when a connect fails -- `run_connection`
+    // returning drops the last event sender -- and `select!` picks
+    // between ready branches at random, so the join cannot be left
+    // to the loop: an error that lost that race used to go unlogged
+    // and unreported.
+    let connection_join = match connection_join {
+        Some(join_result) => Some(join_result),
+        None => {
+            conn_cancel.store(true, Ordering::Relaxed);
+            match tokio::time::timeout(CONNECTION_JOIN_GRACE, &mut connection_handle).await {
+                Ok(join_result) => Some(join_result),
+                Err(_) => {
+                    warn!(
+                        "session: connection task did not stop within {:?} of the session ending; aborting it",
+                        CONNECTION_JOIN_GRACE
+                    );
+                    connection_handle.abort();
+                    None
+                }
+            }
+        }
+    };
+    let connection_result = connection_outcome(connection_join);
 
     if let Some(handle) = cadence_handle {
         handle.abort();
@@ -966,10 +1013,98 @@ pub async fn run_headless(
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
 
+    connection_result?;
     if paste_failed {
         anyhow::bail!("paste-as-keystrokes failed");
     }
 
     info!("Headless mode finished");
     Ok(())
+}
+
+/// What joining `run_headless`'s connection task produced.
+type ConnectionJoin = std::result::Result<Result<()>, tokio::task::JoinError>;
+
+/// Log the connection task's outcome and turn it into
+/// `run_headless`'s result.
+///
+/// `None` means the task was aborted after outliving
+/// [`CONNECTION_JOIN_GRACE`], which only happens once the session
+/// has already been told to stop, so it is not a failure.
+///
+/// The `Connection task failed: {:#}` line is matched verbatim by
+/// `tools/proxmox-smoke.py`; change the two together. The returned
+/// error wraps rather than repeats that text, so a host that prints
+/// it (ryll's `main` does, on stderr) does not produce a second
+/// line containing it.
+fn connection_outcome(join: Option<ConnectionJoin>) -> Result<()> {
+    match join {
+        // Already warned about where the task was aborted.
+        None => Ok(()),
+        Some(Ok(Ok(()))) => {
+            info!("Connection task completed");
+            Ok(())
+        }
+        Some(Ok(Err(e))) => {
+            error!("Connection task failed: {:#}", e);
+            Err(e.context("headless SPICE connection failed"))
+        }
+        Some(Err(e)) => {
+            error!("Connection task panicked: {}", e);
+            Err(anyhow::anyhow!(
+                "headless SPICE connection task panicked: {}",
+                e
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_outcome_clean_finish_is_ok() {
+        assert!(connection_outcome(Some(Ok(Ok(())))).is_ok());
+    }
+
+    #[test]
+    fn connection_outcome_aborted_after_stop_is_ok() {
+        assert!(connection_outcome(None).is_ok());
+    }
+
+    #[test]
+    fn connection_outcome_failure_is_err_carrying_the_cause() {
+        let cause =
+            anyhow::anyhow!("Connection refused (os error 111)").context("dialling 127.0.0.1:1");
+        let err = connection_outcome(Some(Ok(Err(cause)))).unwrap_err();
+
+        assert_eq!(err.to_string(), "headless SPICE connection failed");
+        let chain: Vec<String> = err.chain().map(|e| e.to_string()).collect();
+        assert_eq!(
+            chain,
+            vec![
+                "headless SPICE connection failed".to_string(),
+                "dialling 127.0.0.1:1".to_string(),
+                "Connection refused (os error 111)".to_string(),
+            ]
+        );
+        // ryll's `main` prints the error with `{:?}`. That must not
+        // repeat the log line tools/proxmox-smoke.py matches.
+        assert!(!format!("{:?}", err).contains("Connection task failed"));
+    }
+
+    #[tokio::test]
+    async fn connection_outcome_panic_is_err() {
+        let deliberate = true;
+        let join: ConnectionJoin = tokio::spawn(async move {
+            if deliberate {
+                panic!("connection_outcome_panic_is_err: deliberate");
+            }
+            Ok(())
+        })
+        .await;
+        let err = connection_outcome(Some(join)).unwrap_err();
+        assert!(err.to_string().contains("panicked"), "{}", err);
+    }
 }

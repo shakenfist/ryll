@@ -812,8 +812,7 @@ pub struct RyllApp {
     recent_display_mark_lag_us: VecDeque<u32>,
 
     // Connection target for bug report metadata
-    target_host: String,
-    target_port: u16,
+    target: String,
 
     // Bug report dialog state
     show_bug_dialog: bool,
@@ -1118,8 +1117,12 @@ impl RyllApp {
         // Channel state snapshots (always active)
         let channel_snapshots = ChannelSnapshots::new();
         let app_snapshot = Arc::new(std::sync::Mutex::new(AppSnapshot::default()));
-        let target_host = config.host.clone();
-        let target_port = config.port;
+        // Built here so it is available for `target`, which feeds
+        // bug-report metadata and the "Connected to" bell entry: under a
+        // proxy tunnel `config.host` is a signed pseudo-hostname, and
+        // `display_target()` is what keeps it out of both.
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
+        let target = connection_config.display_target();
 
         // Register the --pedantic gap observer now that the live traffic,
         // channel-snapshot, and app-snapshot handles exist. The underlying
@@ -1129,8 +1132,7 @@ impl RyllApp {
         if let Some(config) = pedantic_config {
             BugReport::register_pedantic_observer(
                 config,
-                target_host.clone(),
-                target_port,
+                target.clone(),
                 traffic.clone(),
                 channel_snapshots.clone(),
                 app_snapshot.clone(),
@@ -1151,7 +1153,6 @@ impl RyllApp {
         // `EventSink::emit`, which signals as part of sending, so egui sleeps
         // when nothing is happening and wakes immediately when something is.
         let repaint_notify = Arc::new(Notify::new());
-        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let event_tx_clone = event_tx.clone();
         let resize_rx_for_conn = resize_rx;
         let ctx = cc.egui_ctx.clone();
@@ -1282,8 +1283,7 @@ impl RyllApp {
             video_drop_count: 0,
             recent_image_ready_lag_us: VecDeque::new(),
             recent_display_mark_lag_us: VecDeque::new(),
-            target_host,
-            target_port,
+            target,
             show_bug_dialog: false,
             bug_report_type: BugReportType::Display,
             bug_description: String::new(),
@@ -1775,9 +1775,12 @@ impl RyllApp {
                     // Surface the link in the bell history. Fires on initial
                     // connect and on every reconnect success; the 30 s dedup
                     // collapses storm reconnects to a single entry.
+                    // `target` already carries the port (or, under
+                    // a proxy tunnel, the redacted target) via
+                    // `display_target()`, so it is printed as is.
                     self.push_connection_event(
                         NotifySeverity::Info,
-                        format!("Connected to {}:{}", self.target_host, self.target_port),
+                        format!("Connected to {}", self.target),
                     );
 
                     // Spawn the auto-snapshot interval task. Retire-and-respawn
@@ -1830,8 +1833,7 @@ impl RyllApp {
                             channel_snapshots: self.channel_snapshots.clone(),
                             app_snapshot: self.app_snapshot.clone(),
                             notifications: self.notifications.clone(),
-                            target_host: self.target_host.clone(),
-                            target_port: self.target_port,
+                            target: self.target.clone(),
                             output_dir,
                             interval: Duration::from_secs(interval_secs),
                             cap,
@@ -2571,8 +2573,7 @@ impl RyllApp {
             pending.report_type,
             pending.description,
             pending.region,
-            &self.target_host,
-            self.target_port,
+            &self.target,
             &self.traffic,
             &self.channel_snapshots,
             &self.app_snapshot,
@@ -2648,8 +2649,7 @@ impl RyllApp {
         match BugReport::write_disconnect(
             &output_dir,
             cause,
-            &self.target_host,
-            self.target_port,
+            &self.target,
             &self.traffic,
             &self.channel_snapshots,
             &self.app_snapshot,
@@ -2759,8 +2759,7 @@ impl RyllApp {
             &output_dir,
             &entry,
             snapshot_state,
-            &self.target_host,
-            self.target_port,
+            &self.target,
             traffic_ref,
             &self.channel_snapshots,
             &self.app_snapshot,

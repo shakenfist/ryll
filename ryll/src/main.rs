@@ -228,10 +228,14 @@ fn main() -> Result<()> {
     // / `--direct`, including `--web`: `run_web` spawns
     // `run_connection` and actually connects to SPICE.
     let config = Config::from_args(&args)?;
+    // Built once here for the log line and the capture metadata
+    // below; `run_headless` / `run_web` / `run_gui` each build their
+    // own from the `config` they take by value. `(&config).into()`
+    // borrows, so this doesn't consume it.
+    let startup_connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
     info!(
-        "Connecting to {}:{} (TLS: {})",
-        config.host,
-        config.port,
+        "Connecting to {} (TLS: {})",
+        startup_connection_config.display_target(),
         config.tls_port.is_some()
     );
 
@@ -246,8 +250,7 @@ fn main() -> Result<()> {
     let capture = match &args.capture {
         Some(dir) => Some(Arc::new(CaptureSession::new(
             std::path::PathBuf::from(dir),
-            &config.host,
-            config.port,
+            &startup_connection_config.display_target(),
             config.tls_port,
         )?)),
         None => None,
@@ -367,6 +370,7 @@ fn run_headless(
     let notifications: SharedNotifications =
         Arc::new(std::sync::Mutex::new(NotificationStore::new()));
     let snapshots = ChannelSnapshots::new();
+    let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
 
     // Register the --pedantic gap observer. Traffic is live in headless
     // so pedantic zips will have a real pcap. Channel-state snapshots
@@ -383,10 +387,13 @@ fn run_headless(
              is not populated — that field is updated by the GUI loop only. \
              See docs/plans/PLAN-display-draw-ops.md."
         );
+        // `target` here becomes `ReportMetadata::target`
+        // (bugreport.rs), which lands in a bug-report zip: pass
+        // `display_target()` rather than `config.host`, which under
+        // a proxy tunnel is a signed pseudo-hostname.
         BugReport::register_pedantic_observer(
             pedantic,
-            config.host.clone(),
-            config.port,
+            connection_config.display_target(),
             traffic.clone(),
             snapshots.clone(),
             app_snapshot,
@@ -395,7 +402,6 @@ fn run_headless(
     }
     register_gap_notification_observer(notifications.clone());
 
-    let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
     let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
         traffic as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
     let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> = capture
@@ -544,6 +550,7 @@ fn run_web(
         let notifications: SharedNotifications =
             Arc::new(std::sync::Mutex::new(NotificationStore::new()));
         let snapshots = ChannelSnapshots::new();
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
 
         // Pedantic-mode bug-report observer. As in headless,
         // `app_snapshot` stays at its default — that field is
@@ -559,10 +566,12 @@ fn run_web(
                  latency) is not populated — that field is updated by the \
                  GUI loop only."
             );
+            // See the matching comment in `run_headless`:
+            // `display_target()` keeps a tunnelled connection's
+            // signed pseudo-hostname out of the pedantic bug report.
             BugReport::register_pedantic_observer(
                 pedantic,
-                config.host.clone(),
-                config.port,
+                connection_config.display_target(),
                 traffic.clone(),
                 snapshots.clone(),
                 app_snapshot,
@@ -571,7 +580,6 @@ fn run_web(
         }
         register_gap_notification_observer(notifications.clone());
 
-        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&config).into();
         let traffic_dyn: Arc<dyn shakenfist_spice_renderer::TrafficSink> =
             traffic.clone() as Arc<dyn shakenfist_spice_renderer::TrafficSink>;
         let capture_dyn: Option<Arc<dyn shakenfist_spice_renderer::CaptureSink>> =

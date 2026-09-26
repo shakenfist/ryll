@@ -19,7 +19,17 @@ needed to implement a SPICE client, server, or proxy in Rust:
 - **`client`** — `SpiceClient` for managing SPICE channel
   connections (TLS/TCP, keepalive, link handshake, auth),
   configured via a narrow [`ConnectionConfig`] struct so it
-  can be driven from contexts other than ryll's CLI.
+  can be driven from contexts other than ryll's CLI. Setting
+  `ConnectionConfig::proxy` tunnels the connection through an
+  HTTP CONNECT proxy (e.g. Proxmox VE's `spiceproxy`); a
+  tunnelled connection requires both `tls_port` and
+  `host_subject`, which `SpiceClient::new` enforces.
+- **`proxy`** — `HttpProxy` and `parse_proxy_uri` for a
+  `proxy=` URI (spice-gtk's rules: optional `http://` scheme,
+  default port 3128, bracketed IPv6 hosts; `https://` and
+  `user:pass@` credentials are parsed and refused), plus the
+  HTTP CONNECT request/response exchange `SpiceClient` runs
+  when a proxy is set.
 - **`logging`** — protocol-traffic logging helpers and a
   `message_names` lookup module for every channel direction.
 

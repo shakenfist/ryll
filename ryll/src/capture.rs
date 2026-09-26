@@ -707,12 +707,19 @@ impl CaptureSession {
     /// Writes a `metadata.json` file with session context (platform,
     /// version, connection target) so that capture directories are
     /// self-describing when shared for bug reports.
-    pub fn new(dir: PathBuf, host: &str, port: u16, tls_port: Option<u16>) -> anyhow::Result<Self> {
+    ///
+    /// `target` is [`ConnectionConfig::display_target`]
+    /// (`shakenfist_spice_protocol::ConnectionConfig`), not a raw
+    /// `host:port`: under an HTTP CONNECT tunnel (a Proxmox `.vv`'s
+    /// `proxy=`), `host` is a signed pseudo-hostname, and a capture
+    /// directory is exactly the kind of artefact that gets attached
+    /// to a bug report, so the ticket must not land in it either.
+    pub fn new(dir: PathBuf, target: &str, tls_port: Option<u16>) -> anyhow::Result<Self> {
         fs::create_dir_all(&dir)?;
         info!("capture: writing to {}", dir.display());
 
         // Write session metadata
-        Self::write_metadata(&dir, host, port, tls_port)?;
+        Self::write_metadata(&dir, target, tls_port)?;
 
         let mut writers: HashMap<&'static str, PcapChannelWriter> = HashMap::new();
         for &channel in CHANNELS {
@@ -742,8 +749,7 @@ impl CaptureSession {
     /// Write a metadata.json file describing this capture session.
     fn write_metadata(
         dir: &std::path::Path,
-        host: &str,
-        port: u16,
+        target: &str,
         tls_port: Option<u16>,
     ) -> anyhow::Result<()> {
         use std::io::Write;
@@ -768,8 +774,7 @@ impl CaptureSession {
              \x20 \"ryll_git_sha\": \"{}\",\n\
              \x20 \"platform_os\": \"{}\",\n\
              \x20 \"platform_arch\": \"{}\",\n\
-             \x20 \"target_host\": \"{}\",\n\
-             \x20 \"target_port\": {},\n\
+             \x20 \"target\": \"{}\",\n\
              \x20 \"target_tls_port\": {},\n\
              \x20 \"capture_started\": \"{}\"\n\
              }}\n",
@@ -777,8 +782,7 @@ impl CaptureSession {
             git_sha,
             os,
             arch,
-            host.replace('\\', "\\\\").replace('"', "\\\""),
-            port,
+            target.replace('\\', "\\\\").replace('"', "\\\""),
             tls_str,
             chrono_now(),
         )?;
@@ -1195,7 +1199,7 @@ mod tests {
         // CaptureSink callers rely on.
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
 
         let mut accepted = 0u64;
         let mut dropped = 0u64;
@@ -1233,7 +1237,7 @@ mod tests {
     async fn capture_session_close_is_idempotent_and_stops_accepting() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
 
         assert!(session.packet_received("display", &[0u8; 10]));
         session.close();
@@ -1365,7 +1369,7 @@ mod tests {
     async fn capture_session_frame_returns_false_when_video_queue_full() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
 
         let w: u32 = 64;
         let h: u32 = 64;
@@ -1401,7 +1405,7 @@ mod tests {
     async fn capture_session_frame_returns_false_after_close() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test", 5900, None).expect("session new");
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
         let w: u32 = 64;
         let h: u32 = 64;
         let pixels = rgba_test_frame(w, h);

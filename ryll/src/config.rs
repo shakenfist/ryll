@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use configparser::ini::Ini;
+use shakenfist_spice_protocol::proxy::{parse_proxy_uri, HttpProxy};
 use shakenfist_spice_protocol::ConnectionConfig;
 use shakenfist_spice_webrtc::{BindSelector, UdpBindPolicy};
 use tracing::warn;
@@ -392,6 +393,13 @@ pub struct Config {
     pub ca_cert: Option<String>,
     #[allow(dead_code)]
     pub host_subject: Option<String>,
+    /// HTTP proxy to tunnel the connection through, from a `.vv`
+    /// file's `proxy=` key (Proxmox VE's `spiceproxy`). `None` for
+    /// `--direct` and for a `.vv` with no `proxy` key, in which case
+    /// the connection dials `host` directly, as before this field
+    /// existed. See [`ConnectionConfig::proxy`] for what setting it
+    /// requires (`tls_port` and `host_subject`).
+    pub proxy: Option<HttpProxy>,
     /// True when the .vv file set `delete-this-file=1`. ryll
     /// treats this as "the ticket is single-use" — auto-reconnect
     /// skips Pending entirely and shows the `OneShotConsumed`
@@ -418,6 +426,7 @@ impl From<&Config> for ConnectionConfig {
             password: c.password.clone(),
             ca_cert: c.ca_cert.clone(),
             host_subject: c.host_subject.clone(),
+            proxy: c.proxy.clone(),
         }
     }
 }
@@ -494,6 +503,10 @@ impl Config {
                     password: None,
                     ca_cert: None,
                     host_subject: None,
+                    // --direct never carries a proxy: it names a host
+                    // and port to dial directly, with no `.vv` for a
+                    // `proxy=` key to come from.
+                    proxy: None,
                     ticket_is_single_use: false,
                     ticket_valid_until: None,
                 })
@@ -509,6 +522,7 @@ impl Config {
                     password: None,
                     ca_cert: None,
                     host_subject: None,
+                    proxy: None,
                     ticket_is_single_use: false,
                     ticket_valid_until: None,
                 })
@@ -543,6 +557,18 @@ impl Config {
         let ca_cert = ini.get(section, "ca").and_then(filter_none);
         let host_subject = ini.get(section, "host-subject").and_then(filter_none);
 
+        // `proxy=<uri>` -> an HTTP CONNECT proxy to tunnel through, as
+        // Proxmox VE's `.vv` files carry (spice-gtk reads the same
+        // key). Parsed at this boundary, so a malformed value fails
+        // the .vv load and never reaches a dial. The error names the
+        // key, matching `parse_optional_u16` above.
+        let proxy = match ini.get(section, "proxy").and_then(filter_none) {
+            Some(s) => {
+                Some(parse_proxy_uri(&s).map_err(|e| anyhow!("Invalid proxy '{}': {}", s, e))?)
+            }
+            None => None,
+        };
+
         // `delete-this-file=1` → single-use ticket. Standard
         // virt-viewer key; ryll layers an extra interpretation
         // documented in console-vv-extensions.md. Any value
@@ -566,6 +592,7 @@ impl Config {
             password,
             ca_cert,
             host_subject,
+            proxy,
             ticket_is_single_use,
             ticket_valid_until,
         })
@@ -821,6 +848,81 @@ mod tests {
         );
         let cfg = parse(&vv);
         assert!(cfg.ticket_valid_until.is_none());
+    }
+
+    // ── `proxy=` ─────────────────────────────────────────────────────
+
+    /// A Proxmox-shaped `.vv`: a signed pseudo-hostname in `host`, a
+    /// `tls-port`, a `proxy=` naming the node's `spiceproxy`, a
+    /// comma-bearing `host-subject`, a `ca` with escaped `\n` (as
+    /// Proxmox's API response encodes it), and `delete-this-file=1`
+    /// for the single-use ticket. All of it must parse together, with
+    /// `proxy` set.
+    #[test]
+    fn vv_proxmox_shaped_file_parses_with_proxy_set() {
+        let vv = "[virt-viewer]\n\
+host=pvespiceproxy:6aaf3e30:100:pve1:61000::0ce02a5c1176f3d7c7b3a9e1d8f0c9a1\n\
+tls-port=61000\n\
+proxy=http://pve1.example:3128\n\
+host-subject=OU=PVE Cluster Node,O=Proxmox Virtual Environment,CN=pve1.example\n\
+ca=-----BEGIN CERTIFICATE-----\\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A\\n-----END CERTIFICATE-----\\n\n\
+delete-this-file=1\n";
+        let cfg = parse(vv);
+
+        let proxy = cfg
+            .proxy
+            .clone()
+            .expect("proxy set from a Proxmox-shaped .vv");
+        assert_eq!(proxy.host, "pve1.example");
+        assert_eq!(proxy.port, 3128);
+        assert_eq!(cfg.tls_port, Some(61000));
+        assert!(cfg.ticket_is_single_use);
+        assert_eq!(
+            cfg.host,
+            "pvespiceproxy:6aaf3e30:100:pve1:61000::0ce02a5c1176f3d7c7b3a9e1d8f0c9a1"
+        );
+        assert_eq!(
+            cfg.host_subject.as_deref(),
+            Some("OU=PVE Cluster Node,O=Proxmox Virtual Environment,CN=pve1.example")
+        );
+        assert!(cfg.ca_cert.as_deref().expect("ca present").contains("\\n"));
+
+        // The pseudo-hostname is a signed ticket: it must never reach
+        // a log line, capture-metadata field, or bug report, so
+        // `ConnectionConfig::display_target()` — what all three print
+        // through — must redact it, not merely reformat it.
+        let connection_config: shakenfist_spice_protocol::ConnectionConfig = (&cfg).into();
+        let shown = connection_config.display_target();
+        assert_eq!(shown, "pve1.example:3128 (tunnelled, target redacted)");
+        assert!(!shown.contains("pvespiceproxy"));
+    }
+
+    #[test]
+    fn vv_without_a_proxy_key_yields_none() {
+        let cfg = parse("[virt-viewer]\nhost=h\nport=5900\n");
+        assert!(cfg.proxy.is_none());
+    }
+
+    /// `https://` proxies are parsed and refused by
+    /// `parse_proxy_uri`; the `.vv` load must fail with
+    /// an error naming the `proxy` key, not just the underlying
+    /// scheme error, so an operator staring at `ryll --file` output
+    /// knows which `.vv` line is at fault.
+    #[test]
+    fn vv_proxy_https_scheme_fails_naming_the_key() {
+        let err = Config::parse_vv_content(
+            "[virt-viewer]\nhost=h\nport=5900\nproxy=https://proxy.example:3129\n",
+        )
+        .expect_err("an https:// proxy must fail the .vv load");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("proxy"),
+            "error should name the 'proxy' key: {msg}"
+        );
+        assert!(
+            msg.contains("https"),
+            "error should still explain what about it failed: {msg}"
+        );
     }
 
     fn web_args(extra: &[&str]) -> Args {

@@ -68,8 +68,7 @@ pub struct AutoSnapshotState {
     pub channel_snapshots: ChannelSnapshots,
     pub app_snapshot: Arc<Mutex<AppSnapshot>>,
     pub notifications: SharedNotifications,
-    pub target_host: String,
-    pub target_port: u16,
+    pub target: String,
     /// Resolved output directory: `<bug_report_dir>/auto-snapshots/`.
     pub output_dir: PathBuf,
     pub interval: Duration,
@@ -275,8 +274,7 @@ pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
         let channel_snap = state.channel_snapshots.clone();
         let app_snap_arc = state.app_snapshot.clone();
         let notifications_snap = state.notifications.clone();
-        let host = state.target_host.clone();
-        let port = state.target_port;
+        let host = state.target.clone();
         let output_dir = state.output_dir.clone();
         let cap = state.cap;
         let byte_cap = state.byte_cap;
@@ -290,7 +288,6 @@ pub async fn run_auto_snapshot_loop(state: AutoSnapshotState) {
                 description,
                 None, // no region
                 &host,
-                port,
                 &traffic_snap,
                 &channel_snap,
                 &app_snap_arc,

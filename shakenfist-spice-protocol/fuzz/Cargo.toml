@@ -51,3 +51,17 @@ path = "fuzz_targets/fuzz_parse_host_subject.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_parse_proxy_uri"
+path = "fuzz_targets/fuzz_parse_proxy_uri.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_connect_response"
+path = "fuzz_targets/fuzz_parse_connect_response.rs"
+test = false
+doc = false
+bench = false
