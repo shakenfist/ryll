@@ -152,6 +152,9 @@ pub struct SpiceLinkMess {
 }
 
 impl SpiceLinkMess {
+    /// Convenience constructor for the common case of one capability word
+    /// per set. A sender with multi-word capability sets builds the struct
+    /// directly, as [`perform_link_with_caps`] does.
     pub fn new(
         connection_id: u32,
         channel_type: ChannelType,
@@ -308,13 +311,40 @@ impl SpiceLinkMess {
 pub struct SpiceLinkReply {
     pub error: SpiceError,
     pub pub_key: Vec<u8>,
-    #[allow(dead_code)]
     pub common_caps: Vec<u32>,
-    #[allow(dead_code)]
     pub channel_caps: Vec<u32>,
 }
 
 impl SpiceLinkReply {
+    /// Check that the server supports the common capabilities this crate's
+    /// client drivers depend on, so a mismatch fails here with a clear
+    /// error rather than as a garbled exchange later.
+    ///
+    /// All three live in common-capability word 0:
+    ///
+    /// - [`capabilities::AUTH_SELECTION`]: [`perform_auth`] always writes
+    ///   an auth mechanism selector before the ticket.
+    /// - [`capabilities::AUTH_SPICE`]: the mechanism [`perform_auth`]
+    ///   selects is always SPICE ticket auth. A server with SASL enabled
+    ///   lists `AUTH_SASL` instead, and rejects the SPICE mechanism.
+    /// - [`capabilities::MINI_HEADER`]: this crate only speaks the 6-byte
+    ///   mini header, not the full data header.
+    ///
+    /// A server's reply lists the capabilities it supports, not the
+    /// intersection with what the link message advertised (that is
+    /// checked before sending, by [`perform_link_with_caps`]). So this
+    /// catches a server, or an intermediary, that cannot speak the
+    /// exchange this crate uses at all. Only meaningful on a successful
+    /// reply; an error reply carries no capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkError::MissingRequiredCaps`] naming each missing
+    /// capability.
+    pub fn check_client_requirements(&self) -> Result<(), LinkError> {
+        check_required_common_caps("server", REQUIRED_SERVER_CAPS, &self.common_caps)
+    }
+
     /// Parse a link reply (16-byte header + body) received from a server.
     ///
     /// Although ryll only parses replies from SPICE servers it chose to
@@ -579,7 +609,87 @@ pub fn decrypt_password(key: &RsaPrivateKey, blob: &[u8; 128]) -> Result<String,
     String::from_utf8(decrypted).map_err(|_| LinkError::BadUtf8)
 }
 
-/// Perform the link handshake
+/// Common capabilities (all in word 0) a link message from this crate's
+/// client drivers must advertise: the server picks its auth exchange and
+/// message framing from these. See [`perform_link_with_caps`].
+const REQUIRED_ADVERTISED_CAPS: &[(u32, &str)] = &[
+    (capabilities::AUTH_SELECTION, "AUTH_SELECTION"),
+    (capabilities::MINI_HEADER, "MINI_HEADER"),
+];
+
+/// Common capabilities (all in word 0) a server's link reply must list for
+/// this crate's client drivers to talk to it. A server never consults
+/// whether the client advertised `AUTH_SPICE`, but offers it only when
+/// SASL is off. See [`SpiceLinkReply::check_client_requirements`].
+const REQUIRED_SERVER_CAPS: &[(u32, &str)] = &[
+    (capabilities::AUTH_SELECTION, "AUTH_SELECTION"),
+    (capabilities::AUTH_SPICE, "AUTH_SPICE"),
+    (capabilities::MINI_HEADER, "MINI_HEADER"),
+];
+
+/// Fail with [`LinkError::MissingRequiredCaps`] naming each of `required`
+/// absent from word 0 of `common_caps`, the `set` of caps being checked.
+fn check_required_common_caps(
+    set: &'static str,
+    required: &[(u32, &'static str)],
+    common_caps: &[u32],
+) -> Result<(), LinkError> {
+    let word0 = common_caps.first().copied().unwrap_or(0);
+    let missing: Vec<&'static str> = required
+        .iter()
+        .filter(|(bit, _)| word0 & bit == 0)
+        .map(|(_, name)| *name)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(LinkError::MissingRequiredCaps {
+            set,
+            missing,
+            caps: common_caps.to_vec(),
+        })
+    }
+}
+
+/// Check capability words a caller wants advertised in a link message,
+/// before anything is sent: each set must fit in [`MAX_CAP_WORDS`] words
+/// (what this crate's own parsers accept), and the common set must include
+/// [`REQUIRED_ADVERTISED_CAPS`]. See [`perform_link_with_caps`].
+pub(crate) fn check_advertised_caps(
+    common_caps: &[u32],
+    channel_caps: &[u32],
+) -> Result<(), LinkError> {
+    for (what, caps) in [
+        ("advertised common capability words", common_caps),
+        ("advertised channel capability words", channel_caps),
+    ] {
+        if caps.len() > MAX_CAP_WORDS {
+            return Err(LinkError::TooLarge {
+                what,
+                value: caps.len(),
+                max: MAX_CAP_WORDS,
+            });
+        }
+    }
+    check_required_common_caps("advertised", REQUIRED_ADVERTISED_CAPS, common_caps)
+}
+
+/// The channel capability word ryll advertises by default for
+/// `channel_type`, as sent by [`perform_link`].
+///
+/// The display caps are critical: without COMPOSITE the guest QXL driver
+/// renders via a software fallback that produces far fewer display updates.
+pub fn default_channel_caps(channel_type: ChannelType) -> u32 {
+    match channel_type {
+        ChannelType::Display => capabilities::DEFAULT_DISPLAY,
+        ChannelType::Usbredir => capabilities::DEFAULT_SPICEVMC,
+        _ => capabilities::DEFAULT_MAIN,
+    }
+}
+
+/// Perform the link handshake, advertising ryll's default capabilities:
+/// [`capabilities::DEFAULT_COMMON`] and [`default_channel_caps`] for
+/// `channel_type`. See [`perform_link_with_caps`] to advertise others.
 pub async fn perform_link<S>(
     stream: &mut S,
     connection_id: u32,
@@ -589,23 +699,68 @@ pub async fn perform_link<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    // Per-channel capabilities.  The display caps are critical:
-    // without COMPOSITE the guest QXL driver renders via a
-    // software fallback that produces far fewer display updates.
-    let channel_caps = match channel_type {
-        ChannelType::Display => capabilities::DEFAULT_DISPLAY,
-        ChannelType::Usbredir => capabilities::DEFAULT_SPICEVMC,
-        _ => capabilities::DEFAULT_MAIN,
-    };
-
-    // Send link message
-    let link_mess = SpiceLinkMess::new(
+    perform_link_with_caps(
+        stream,
         connection_id,
         channel_type,
         channel_id,
-        capabilities::DEFAULT_COMMON,
-        channel_caps,
-    );
+        &[capabilities::DEFAULT_COMMON],
+        &[default_channel_caps(channel_type)],
+    )
+    .await
+}
+
+/// Perform the link handshake, advertising exactly the given common and
+/// channel capability words.
+///
+/// Each slice is sent verbatim as the link message's capability array, so
+/// multi-word capability sets are supported (word `n` carries bits
+/// `32n..32n+31`). An empty slice advertises no capabilities in that set.
+/// This is what a proxy uses to forward a real client's capabilities to
+/// the server on its backend leg, rather than ryll's defaults.
+///
+/// `common_caps` must include [`capabilities::AUTH_SELECTION`] and
+/// [`capabilities::MINI_HEADER`]. A SPICE server decides whether to expect
+/// an auth mechanism selector, and whether to use the mini header, from
+/// what the *client advertised* — its own reply lists the capabilities it
+/// supports regardless — so leaving either out would have the server speak
+/// a protocol that [`perform_auth`] and this crate's message framing do
+/// not. Each slice must also be at most 16 words, the limit this crate's
+/// own parsers accept. Both are refused here, before anything is written.
+///
+/// Returns the server's [`SpiceLinkReply`] as parsed, without judging it:
+/// the caller inspects `reply.error`, and on success should call
+/// [`SpiceLinkReply::check_client_requirements`] before [`perform_auth`].
+///
+/// # Errors
+///
+/// Fails without writing, with [`LinkError::MissingRequiredCaps`] if
+/// `common_caps` lacks a required capability or [`LinkError::TooLarge`]
+/// if either slice is over 16 words. Propagates write/read errors from
+/// `stream`, rejects a reply whose declared size exceeds
+/// [`MAX_LINK_MESSAGE_SIZE`] before allocating for it, and propagates any
+/// parse error from [`SpiceLinkReply::parse`].
+pub async fn perform_link_with_caps<S>(
+    stream: &mut S,
+    connection_id: u32,
+    channel_type: ChannelType,
+    channel_id: u8,
+    common_caps: &[u32],
+    channel_caps: &[u32],
+) -> Result<SpiceLinkReply>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    check_advertised_caps(common_caps, channel_caps)?;
+
+    // Send link message
+    let link_mess = SpiceLinkMess {
+        connection_id,
+        channel_type: channel_type as u8,
+        channel_id,
+        common_caps: common_caps.to_vec(),
+        channel_caps: channel_caps.to_vec(),
+    };
 
     let data = link_mess.serialize();
     stream.write_all(&data).await?;
@@ -615,11 +770,21 @@ where
     let mut header = [0u8; 16];
     stream.read_exact(&mut header).await?;
 
-    // Parse size from header
+    // Parse size from header, and refuse an oversized one before
+    // allocating the body buffer: the parser enforces the same cap, but
+    // only after the allocation it would otherwise be asked to make.
     let size = {
         let mut cursor = Cursor::new(&header[12..16]);
         ReadBytesExt::read_u32::<LittleEndian>(&mut cursor)? as usize
     };
+    if size > MAX_LINK_MESSAGE_SIZE {
+        return Err(LinkError::TooLarge {
+            what: "link reply size",
+            value: size,
+            max: MAX_LINK_MESSAGE_SIZE,
+        }
+        .into());
+    }
 
     // Read rest of reply
     let mut reply_data = vec![0u8; 16 + size];
@@ -875,6 +1040,13 @@ mod tests {
         // Channel type/id follow the connection id.
         assert_eq!(body[4], ChannelType::Main as u8);
         assert_eq!(body[5], 0);
+
+        // The wrapper advertises ryll's defaults, one word each.
+        let mut whole = header.to_vec();
+        whole.extend_from_slice(&body);
+        let parsed = SpiceLinkMess::parse(&whole).expect("parse link message");
+        assert_eq!(parsed.common_caps, vec![capabilities::DEFAULT_COMMON]);
+        assert_eq!(parsed.channel_caps, vec![capabilities::DEFAULT_MAIN]);
 
         // Let the still-blocked perform_link task unwind cleanly.
         drop(server);
@@ -1401,5 +1573,299 @@ mod tests {
             result.is_err(),
             "read_link_mess must reject an oversized declared size"
         );
+    }
+
+    /// `perform_link_with_caps` sends the caller's capability words
+    /// verbatim, multi-word sets included, and hands back the server's
+    /// reply with its caps intact; auth then completes over the same
+    /// stream.
+    #[tokio::test]
+    async fn perform_link_with_caps_round_trips_multi_word_caps() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+
+        let common = vec![capabilities::DEFAULT_COMMON, 0x8000_0001];
+        let channel = vec![0xdead_beef, 0, 0x0000_0001];
+        let (sent_common, sent_channel) = (common.clone(), channel.clone());
+        let client = tokio::spawn(async move {
+            let reply = perform_link_with_caps(
+                &mut client_end,
+                7,
+                ChannelType::Display,
+                2,
+                &sent_common,
+                &sent_channel,
+            )
+            .await
+            .expect("client perform_link_with_caps");
+            reply
+                .check_client_requirements()
+                .expect("reply grants the required caps");
+            perform_auth(&mut client_end, &reply.pub_key, Some("pw"))
+                .await
+                .expect("client perform_auth");
+            reply
+        });
+
+        let (private_key, der) = generate_ticket_keypair().expect("keypair generation");
+        let link_mess = read_link_mess(&mut server_end)
+            .await
+            .expect("read_link_mess");
+        assert_eq!(link_mess.connection_id, 7);
+        assert_eq!(link_mess.channel_type, ChannelType::Display as u8);
+        assert_eq!(link_mess.channel_id, 2);
+        assert_eq!(
+            link_mess.common_caps, common,
+            "server sees every common word"
+        );
+        assert_eq!(
+            link_mess.channel_caps, channel,
+            "server sees every channel word"
+        );
+
+        let reply = SpiceLinkReply {
+            error: SpiceError::Ok,
+            pub_key: der.clone(),
+            common_caps: vec![capabilities::DEFAULT_COMMON, 0x0000_0004],
+            channel_caps: vec![9, 0x0000_0002],
+        };
+        send_link_reply(&mut server_end, &reply)
+            .await
+            .expect("send_link_reply");
+        let password = read_auth_ticket(&mut server_end, &private_key)
+            .await
+            .expect("read_auth_ticket");
+        assert_eq!(password, "pw");
+        send_auth_result(&mut server_end, SpiceError::Ok)
+            .await
+            .expect("send_auth_result");
+
+        let got = client.await.expect("client task panicked");
+        assert_eq!(got.error, SpiceError::Ok);
+        assert_eq!(got.pub_key, der);
+        assert_eq!(
+            got.common_caps,
+            vec![capabilities::DEFAULT_COMMON, 0x0000_0004]
+        );
+        assert_eq!(got.channel_caps, vec![9, 0x0000_0002]);
+    }
+
+    /// Advertising common caps without AUTH_SELECTION or MINI_HEADER, or
+    /// more capability words than this crate's own parsers accept, is
+    /// refused with a typed error before anything reaches the wire: a
+    /// server would then expect a protocol this crate does not speak, or a
+    /// peer built on this crate would reject the message.
+    #[tokio::test]
+    async fn perform_link_with_caps_refuses_unsendable_caps() {
+        let too_many = vec![capabilities::DEFAULT_COMMON; MAX_CAP_WORDS + 1];
+        let missing = |missing: Vec<&'static str>, caps: &[u32]| LinkError::MissingRequiredCaps {
+            set: "advertised",
+            missing,
+            caps: caps.to_vec(),
+        };
+        let cases: Vec<(Vec<u32>, Vec<u32>, LinkError)> = vec![
+            (
+                vec![],
+                vec![],
+                missing(vec!["AUTH_SELECTION", "MINI_HEADER"], &[]),
+            ),
+            (
+                vec![capabilities::AUTH_SPICE],
+                vec![],
+                missing(
+                    vec!["AUTH_SELECTION", "MINI_HEADER"],
+                    &[capabilities::AUTH_SPICE],
+                ),
+            ),
+            (
+                vec![capabilities::AUTH_SELECTION | capabilities::AUTH_SPICE],
+                vec![],
+                missing(
+                    vec!["MINI_HEADER"],
+                    &[capabilities::AUTH_SELECTION | capabilities::AUTH_SPICE],
+                ),
+            ),
+            (
+                vec![capabilities::AUTH_SPICE | capabilities::MINI_HEADER],
+                vec![],
+                missing(
+                    vec!["AUTH_SELECTION"],
+                    &[capabilities::AUTH_SPICE | capabilities::MINI_HEADER],
+                ),
+            ),
+            (
+                too_many.clone(),
+                vec![],
+                LinkError::TooLarge {
+                    what: "advertised common capability words",
+                    value: MAX_CAP_WORDS + 1,
+                    max: MAX_CAP_WORDS,
+                },
+            ),
+            (
+                vec![capabilities::DEFAULT_COMMON],
+                too_many,
+                LinkError::TooLarge {
+                    what: "advertised channel capability words",
+                    value: MAX_CAP_WORDS + 1,
+                    max: MAX_CAP_WORDS,
+                },
+            ),
+        ];
+        for (common, channel, expected) in cases {
+            let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+            // Bounded, so a missing guard fails here rather than hanging
+            // on a reply the silent peer never sends.
+            let err = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                perform_link_with_caps(&mut client_end, 0, ChannelType::Main, 0, &common, &channel),
+            )
+            .await
+            .expect("refusal must be immediate, not wait on the peer")
+            .expect_err("unsendable caps must be refused");
+            assert_eq!(
+                err.downcast_ref::<LinkError>(),
+                Some(&expected),
+                "for {common:?} / {channel:?}"
+            );
+
+            // Nothing was written: the peer sees EOF, not a link message.
+            drop(client_end);
+            let mut buf = Vec::new();
+            server_end.read_to_end(&mut buf).await.unwrap();
+            assert!(buf.is_empty(), "no bytes may be sent for {common:?}");
+        }
+
+        // Exactly MAX_CAP_WORDS words in each set is sendable, and a
+        // parser from this crate accepts the result.
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+        let full = vec![capabilities::DEFAULT_COMMON; MAX_CAP_WORDS];
+        let sent = full.clone();
+        let client = tokio::spawn(async move {
+            perform_link_with_caps(&mut client_end, 0, ChannelType::Main, 0, &sent, &sent).await
+        });
+        let link_mess = read_link_mess(&mut server_end)
+            .await
+            .expect("a link message at the word limit parses");
+        assert_eq!(link_mess.common_caps, full);
+        assert_eq!(link_mess.channel_caps, full);
+        drop(server_end);
+        let _ = client.await.expect("client task panicked");
+    }
+
+    /// A reply that does not list AUTH_SELECTION, AUTH_SPICE or MINI_HEADER
+    /// parses fine, but `check_client_requirements` fails with a typed
+    /// error naming what is missing, which is how the connect path stops
+    /// before auth. The SASL case is what a spice-server with SASL enabled
+    /// sends: it offers AUTH_SASL in place of AUTH_SPICE.
+    #[tokio::test]
+    async fn reply_missing_required_caps_fails_check() {
+        let cases: [(Vec<u32>, Vec<&'static str>); 4] = [
+            (vec![], vec!["AUTH_SELECTION", "AUTH_SPICE", "MINI_HEADER"]),
+            (
+                vec![capabilities::AUTH_SELECTION | capabilities::AUTH_SPICE],
+                vec!["MINI_HEADER"],
+            ),
+            (
+                vec![
+                    capabilities::AUTH_SPICE | capabilities::MINI_HEADER,
+                    0xffff_ffff,
+                ],
+                vec!["AUTH_SELECTION"],
+            ),
+            (
+                vec![
+                    capabilities::AUTH_SELECTION
+                        | capabilities::AUTH_SASL
+                        | capabilities::MINI_HEADER,
+                ],
+                vec!["AUTH_SPICE"],
+            ),
+        ];
+        for (granted, missing) in cases {
+            let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+            let client = tokio::spawn(async move {
+                perform_link_with_caps(
+                    &mut client_end,
+                    0,
+                    ChannelType::Main,
+                    0,
+                    &[capabilities::DEFAULT_COMMON],
+                    &[capabilities::DEFAULT_MAIN],
+                )
+                .await
+                .expect("a well-formed reply parses")
+            });
+
+            let (_key, der) = generate_ticket_keypair().expect("keypair generation");
+            read_link_mess(&mut server_end)
+                .await
+                .expect("read_link_mess");
+            let reply = SpiceLinkReply {
+                error: SpiceError::Ok,
+                pub_key: der,
+                common_caps: granted.clone(),
+                channel_caps: vec![],
+            };
+            send_link_reply(&mut server_end, &reply)
+                .await
+                .expect("send_link_reply");
+
+            let got = client.await.expect("client task panicked");
+            assert_eq!(got.common_caps, granted);
+            let err = got
+                .check_client_requirements()
+                .expect_err("missing caps must fail the check");
+            let msg = err.to_string();
+            for name in &missing {
+                assert!(msg.contains(name), "error {msg:?} should name {name}");
+            }
+            assert_eq!(
+                err,
+                LinkError::MissingRequiredCaps {
+                    set: "server",
+                    missing,
+                    caps: granted,
+                }
+            );
+        }
+    }
+
+    /// The client refuses a link reply declaring an oversized body before
+    /// allocating for it, rather than waiting for bytes that never come.
+    #[tokio::test]
+    async fn perform_link_rejects_oversized_reply_size() {
+        let (mut client_end, mut server_end) = tokio::io::duplex(8192);
+        let client =
+            tokio::spawn(
+                async move { perform_link(&mut client_end, 0, ChannelType::Main, 0).await },
+            );
+
+        read_link_mess(&mut server_end)
+            .await
+            .expect("read_link_mess");
+        server_end
+            .write_all(&header(SPICE_VERSION_MAJOR, SPICE_VERSION_MINOR, u32::MAX))
+            .await
+            .expect("write reply header");
+        server_end.flush().await.expect("flush");
+
+        let result = client.await.expect("client task panicked");
+        assert!(result.is_err(), "an oversized reply size must be rejected");
+    }
+
+    /// `default_channel_caps` is public API: pin its whole mapping.
+    #[test]
+    fn default_channel_caps_by_channel_type() {
+        assert_eq!(
+            default_channel_caps(ChannelType::Display),
+            capabilities::DEFAULT_DISPLAY
+        );
+        assert_eq!(
+            default_channel_caps(ChannelType::Usbredir),
+            capabilities::DEFAULT_SPICEVMC
+        );
+        for other in [ChannelType::Main, ChannelType::Inputs, ChannelType::Cursor] {
+            assert_eq!(default_channel_caps(other), capabilities::DEFAULT_MAIN);
+        }
     }
 }
