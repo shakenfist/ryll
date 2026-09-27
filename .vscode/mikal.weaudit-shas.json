@@ -33,6 +33,10 @@
       "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
       "date": "2026-08-24"
     },
+    ".github/workflows/export-repo-config.yml": {
+      "sha": "d199e4e868917440bb6f783e6c7036d94897c662",
+      "date": "2026-09-28"
+    },
     ".github/workflows/fuzz.yml": {
       "sha": "2f83d312b9fd3bc5399aa16e1ddea91ae68d3337",
       "date": "2026-09-26"
@@ -44,6 +48,18 @@
     ".github/workflows/mermaid-lint.yml": {
       "sha": "97eb7ba192f93c0fa7379d5635b4d89f6a41c6ad",
       "date": "2026-09-26"
+    },
+    ".github/workflows/pr-re-review.yml": {
+      "sha": "72059c8c57e2111baa5004d517d5ec188e960be3",
+      "date": "2026-09-28"
+    },
+    ".github/workflows/pr-retest.yml": {
+      "sha": "60d01c0ee9cc8b8beb826b6ff3afc2b346a45bb4",
+      "date": "2026-09-28"
+    },
+    ".github/workflows/proxmox-functional.yml": {
+      "sha": "81535a2717a5419b04e0736763df07e25dfab749",
+      "date": "2026-09-28"
     },
     ".github/workflows/prune-reviews.yml": {
       "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
@@ -88,6 +104,14 @@
     "Makefile": {
       "sha": "a8b2f3ecfb2f257e114d4553cb948456b262410b",
       "date": "2026-09-23"
+    },
+    "PLAN-TEMPLATE.md": {
+      "sha": "fe1ec5dafbfdc3248459bdb106d51d992fe1b6d6",
+      "date": "2026-09-28"
+    },
+    "PUSH-AUDIT.md": {
+      "sha": "be3f1e97208725725f0c3444b288722a9b21ead0",
+      "date": "2026-09-28"
     },
     "README.md": {
       "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
