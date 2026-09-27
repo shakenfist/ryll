@@ -950,6 +950,46 @@
     {
       "path": "shakenfist-spice-protocol/README.md",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_connect_response.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_proxy_uri.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/client.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/lib.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/link.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/proxy.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/reader.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

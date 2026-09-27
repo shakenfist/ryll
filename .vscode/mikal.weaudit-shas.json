@@ -401,6 +401,10 @@
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
+      "sha": "7b34b7b07d619cfd1fc12c958fbccaac65a7382b",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
       "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
       "date": "2026-07-10"
@@ -413,9 +417,21 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_connect_response.rs": {
+      "sha": "47fbc11c4f1e5cd4a83ae5d3f0adf222afc55d45",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_host_subject.rs": {
       "sha": "a98e2c2d16d4db8c5c4bfdad0b5670d7b1e558ea",
       "date": "2026-08-02"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_proxy_uri.rs": {
+      "sha": "4fe7778cc81abf246495fb0aa741089f99d66238",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "b9d70e6ece8e54b8bdecc0e0810cddb0156cc672",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "d26af989a6313ca989bc1cf7cb2d6e33e32c9719",
@@ -424,6 +440,14 @@
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "477de37d6221e452f67d23ef1a525a2d51e0693b",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "dc07ef80e6f6d1c9b134f2117d0d1349f4aa33e4",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-protocol/src/logging.rs": {
       "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
@@ -436,6 +460,14 @@
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
       "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/proxy.rs": {
+      "sha": "af1583a5be46edca4ff82dfe6bfebfa81c78839b",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/reader.rs": {
+      "sha": "af122c5e1dbce00ff13fc39b48b536e84bcd905c",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-renderer/Cargo.toml": {
       "sha": "cb76893d6ae3aed847e03a4f4c147ad7e72555dd",
