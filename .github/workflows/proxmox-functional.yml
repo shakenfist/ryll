@@ -36,6 +36,9 @@ on:
       - 'tools/proxmox-smoke.py'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   proxmox-functional:
     name: Proxmox functional
@@ -45,8 +48,6 @@ jobs:
     # this lane also books needs a runner able to hold an l slot.
     runs-on: [self-hosted, vm, debian-13-docker, l]
     timeout-minutes: 120
-    permissions:
-      contents: read
     # These runners hold /srv/github/id_ci, the key to every node in the CI
     # mesh, and this lane creates a Shaken Fist instance with it. Ryll's
     # other VM lanes do not carry this guard.
