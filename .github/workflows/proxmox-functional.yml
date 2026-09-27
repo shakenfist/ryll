@@ -98,11 +98,11 @@ jobs:
 
       # Only the driver's own (already-redacted) log and each check's
       # scrubbed ryll.log -- never ryll.raw.log, which is all a check
-      # killed before its cleanup leaves. Never the workdir's .vv files: each carries a live SPICE
-      # password until the driver deletes it, and a crash between mint and
-      # cleanup can leave one behind. Never /tmp/ryll.log either -- that is
-      # headless ryll's unredacted --verbose append (ryll/src/main.rs), not
-      # this driver's output.
+      # killed before its cleanup leaves. Never the workdir's .vv files:
+      # each carries a live SPICE password until the driver deletes it,
+      # and a crash between mint and cleanup can leave one behind. Never
+      # /tmp/ryll.log either -- that is headless ryll's unredacted
+      # --verbose append (ryll/src/main.rs), not this driver's output.
       - name: Upload the Proxmox lane logs
         if: always()
         uses: actions/upload-artifact@v7

@@ -219,8 +219,14 @@ pub const CONNECT_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Returns a [`ProxyError`] naming what is wrong. An `https` scheme and
 /// userinfo get their own variants, [`ProxyError::HttpsUnsupported`] and
 /// [`ProxyError::CredentialsUnsupported`], so the message says which
-/// feature is missing rather than that the URI is malformed.
+/// feature is missing rather than that the URI is malformed. Userinfo is
+/// checked first, whatever the scheme, so a URI carrying credentials always
+/// fails with the one variant a caller knows not to quote the URI beside.
 pub fn parse_proxy_uri(uri: &str) -> Result<HttpProxy, ProxyError> {
+    if uri.contains('@') {
+        return Err(ProxyError::CredentialsUnsupported);
+    }
+
     let rest = match uri.split_once("://") {
         Some((scheme, rest)) if is_uri_scheme(scheme) => {
             if scheme.eq_ignore_ascii_case("https") {
@@ -235,10 +241,6 @@ pub fn parse_proxy_uri(uri: &str) -> Result<HttpProxy, ProxyError> {
     };
 
     let rest = rest.trim_end_matches('/');
-
-    if rest.contains('@') {
-        return Err(ProxyError::CredentialsUnsupported);
-    }
 
     let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
         let (host, after) = bracketed
@@ -630,6 +632,8 @@ mod tests {
             "user:pass@pve1.example",
             "http://user:pass@pve1.example:3128",
             "http://user@h",
+            "https://user:pass@pve1.example:3129",
+            "socks5://user:pass@pve1.example:1080",
         ] {
             assert_eq!(
                 parse_proxy_uri(uri),

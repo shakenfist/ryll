@@ -335,10 +335,17 @@ def scrub_log(raw_path, path, redactions):
             text = text.replace(redaction.value, '<redacted>')
             problems.append(f'ryll printed {redaction.description} {count} time(s); '
                             'redacted from the saved log')
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, 'w', encoding='utf-8') as f:
-        f.write(text)
-    os.unlink(raw_path)
+    # The raw log goes whether or not the scrubbed copy could be written:
+    # it is never kept, and a failed write is a problem to report, not a
+    # reason to leave unredacted output in the workdir.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+    except OSError as e:
+        problems.append(f'could not save the scrubbed log {path}: {e}')
+    finally:
+        os.unlink(raw_path)
     return problems
 
 
