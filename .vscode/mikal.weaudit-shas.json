@@ -81,6 +81,10 @@
       "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
       "date": "2026-09-23"
     },
+    ".pre-commit-config.yaml": {
+      "sha": "ffe8de823db6e869d1ca3791caad48ee60e3384b",
+      "date": "2026-09-27"
+    },
     "AGENTS.md": {
       "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
       "date": "2026-09-23"
@@ -809,6 +813,10 @@
       "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
       "date": "2026-09-23"
     },
+    "tools/proxmox-smoke.py": {
+      "sha": "c8f941eaabe76d892402bcf5d3f76152d8937713",
+      "date": "2026-09-27"
+    },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
       "date": "2026-07-26"
@@ -848,6 +856,10 @@
     "tools/test-k1-idle.sh": {
       "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
       "date": "2026-07-26"
+    },
+    "tools/test-proxmox-smoke.sh": {
+      "sha": "454550681aff60e006f960f35b62fe423ae4498d",
+      "date": "2026-09-27"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
