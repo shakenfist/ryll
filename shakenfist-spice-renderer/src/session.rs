@@ -977,8 +977,8 @@ pub async fn run_headless(
     // ready together when a connect fails -- `run_connection`
     // returning drops the last event sender -- and `select!` picks
     // between ready branches at random, so the join cannot be left
-    // to the loop: an error that lost that race used to go unlogged
-    // and unreported.
+    // to the loop, or an error that loses that race goes unlogged and
+    // unreported.
     let connection_join = match connection_join {
         Some(join_result) => Some(join_result),
         None => {

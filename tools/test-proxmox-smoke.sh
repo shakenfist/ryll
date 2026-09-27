@@ -242,6 +242,15 @@ assert_hygiene() {
         red "FAIL: .vv files left behind: $left"
         FAILURES=$((FAILURES + 1))
     fi
+    # Only the scrubbed ryll.log may outlive a check; the upload step
+    # never matches the raw one, but it must not linger either.
+    left="$(find "$RUN_WORKDIR" -name 'ryll.raw.log' 2>/dev/null)"
+    if [ -z "$left" ]; then
+        green "ok: no unscrubbed ryll log left in the workdir"
+    else
+        red "FAIL: unscrubbed ryll logs left behind: $left"
+        FAILURES=$((FAILURES + 1))
+    fi
 }
 
 echo "== a ryll that behaves =="

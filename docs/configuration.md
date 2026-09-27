@@ -299,8 +299,8 @@ suppresses ryll's auto-reconnect for this single-use ticket, per the
 
 This example is exercised, not just documented: [the Proxmox
 lane](ci.md#the-proxmox-lane) mints a `.vv` in this shape against a
-real Proxmox VE node on every pull request that touches the CONNECT
-tunnelling code, and asserts that ryll connects through it.
+real Proxmox VE node on every pull request from this repository that
+touches the CONNECT tunnelling code, and asserts that ryll connects through it.
 
 ## Keyboard Shortcuts
 

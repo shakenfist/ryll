@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 use configparser::ini::Ini;
-use shakenfist_spice_protocol::proxy::{parse_proxy_uri, HttpProxy};
+use shakenfist_spice_protocol::proxy::{parse_proxy_uri, HttpProxy, ProxyError};
 use shakenfist_spice_protocol::ConnectionConfig;
 use shakenfist_spice_webrtc::{BindSelector, UdpBindPolicy};
 use tracing::warn;
@@ -561,11 +561,13 @@ impl Config {
         // Proxmox VE's `.vv` files carry (spice-gtk reads the same
         // key). Parsed at this boundary, so a malformed value fails
         // the .vv load and never reaches a dial. The error names the
-        // key, matching `parse_optional_u16` above.
+        // key, matching `parse_optional_u16` above, and quotes the
+        // value unless the value holds credentials.
         let proxy = match ini.get(section, "proxy").and_then(filter_none) {
-            Some(s) => {
-                Some(parse_proxy_uri(&s).map_err(|e| anyhow!("Invalid proxy '{}': {}", s, e))?)
-            }
+            Some(s) => Some(parse_proxy_uri(&s).map_err(|e| match e {
+                ProxyError::CredentialsUnsupported => anyhow!("Invalid proxy: {}", e),
+                _ => anyhow!("Invalid proxy '{}': {}", s, e),
+            })?),
             None => None,
         };
 
@@ -923,6 +925,25 @@ delete-this-file=1\n";
             msg.contains("https"),
             "error should still explain what about it failed: {msg}"
         );
+    }
+
+    /// A refused `user:pass@` proxy must not have its credentials
+    /// echoed into the error, which reaches stderr, logs and bug
+    /// reports.
+    #[test]
+    fn vv_proxy_credentials_are_not_echoed() {
+        let err = Config::parse_vv_content(
+            "[virt-viewer]\nhost=h\nport=5900\nproxy=http://alice:s3cret@proxy.example:3128\n",
+        )
+        .expect_err("a proxy with credentials must fail the .vv load");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("proxy"),
+            "error should name the 'proxy' key: {msg}"
+        );
+        assert!(msg.contains("credentials"), "error should say why: {msg}");
+        assert!(!msg.contains("s3cret"), "error echoed the password: {msg}");
+        assert!(!msg.contains("alice"), "error echoed the user: {msg}");
     }
 
     fn web_args(extra: &[&str]) -> Args {
