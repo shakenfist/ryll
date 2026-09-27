@@ -245,9 +245,29 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "64b0801115cdcb1a918406e9145cb9faed49f39f",
+      "date": "2026-09-27"
+    },
+    "ryll/src/auto_snapshot.rs": {
+      "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
+      "date": "2026-09-27"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "a2eee650510d2540c2578274974c500dc0b9eb96",
+      "date": "2026-09-27"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "768a13052f69062a164e084896d7002944365f5c",
+      "date": "2026-09-27"
+    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
+    },
+    "ryll/src/config.rs": {
+      "sha": "84525c0b210130de905c6e7ba5058d8aa25c9876",
+      "date": "2026-09-27"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -256,6 +276,10 @@
     "ryll/src/input_egui.rs": {
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
+    },
+    "ryll/src/main.rs": {
+      "sha": "cf47148c8a747303dc1914c4243b515f5c91d3ed",
+      "date": "2026-09-27"
     },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
