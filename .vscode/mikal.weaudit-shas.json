@@ -609,6 +609,10 @@
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-renderer/src/session.rs": {
+      "sha": "b44e36b8e2cc3fa5f7d36fb3274a34f63ba9c3fd",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-renderer/src/snapshots.rs": {
       "sha": "f1f638ea45447f40cc6969ef87852976f1c1a68d",
       "date": "2026-09-19"
@@ -652,6 +656,10 @@
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/tests/headless_connect_failure.rs": {
+      "sha": "263b65da12267743f53805737ab3c202f60d7a20",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
