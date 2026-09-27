@@ -57,6 +57,10 @@
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
     },
+    ".github/workflows/proxmox-functional.yml": {
+      "sha": "17c89f28d3d23e2f1dbc159aea9104352cdb241b",
+      "date": "2026-09-27"
+    },
     ".github/workflows/prune-reviews.yml": {
       "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
       "date": "2026-09-23"
@@ -64,6 +68,10 @@
     ".github/workflows/release.yml": {
       "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
       "date": "2026-09-26"
+    },
+    ".github/workflows/renovate.yml": {
+      "sha": "8e2f2546defcf4163fdb415c11cd7dcbb13489f3",
+      "date": "2026-09-27"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
@@ -125,6 +133,14 @@
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
     },
+    "docs/ci.md": {
+      "sha": "e0b27947e2afa497ed57ccc6e6e4e2b494c274c7",
+      "date": "2026-09-27"
+    },
+    "docs/configuration.md": {
+      "sha": "8cfdaaab6ff8c09ff25fd219e64f44d4c6326995",
+      "date": "2026-09-27"
+    },
     "docs/control-socket-protocol.md": {
       "sha": "790565811c9d129ba254461352d59d1ed7b3968e",
       "date": "2026-09-17"
@@ -145,6 +161,14 @@
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
     },
+    "docs/diagnostics.md": {
+      "sha": "470c4cfcd62ffa2a4dad91edd66a06ce9a290255",
+      "date": "2026-09-27"
+    },
+    "docs/features.md": {
+      "sha": "9cf98a96cb0118d8e4af813b37134b9234e28a31",
+      "date": "2026-09-27"
+    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -161,6 +185,10 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "1b1c53250c7e39067c8ec45001129f1bf91048e3",
+      "date": "2026-09-27"
+    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
@@ -172,6 +200,18 @@
     "docs/rendering-pipeline.md": {
       "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
       "date": "2026-08-17"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "b47afd6f9fd96952573ba228948006093daa4c59",
+      "date": "2026-09-27"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "f716591931e0e804168ee023c3cffa53d8f484aa",
+      "date": "2026-09-27"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "1513e4c97dcb7eac8aa4edb4d70bbbc2210346e1",
+      "date": "2026-09-27"
     },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
