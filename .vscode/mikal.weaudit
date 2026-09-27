@@ -942,6 +942,14 @@
     {
       "path": "ryll/src/main.rs",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/Cargo.toml",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/README.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],

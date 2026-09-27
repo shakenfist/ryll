@@ -389,6 +389,14 @@
       "sha": "adb8a2e9a7f0d325d1c286ad7bfc8e1f98081289",
       "date": "2026-09-18"
     },
+    "shakenfist-spice-protocol/Cargo.toml": {
+      "sha": "ef204bdaf9034303aefbb5757a375ba6e86ba247",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/README.md": {
+      "sha": "aac1a414317163746925ff996245b7ad1446fbac",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-protocol/fuzz/.gitignore": {
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
