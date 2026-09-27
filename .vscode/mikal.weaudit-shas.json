@@ -57,6 +57,10 @@
       "sha": "b19193b8ea1d684e3a1c08adde64fbbfca99d43f",
       "date": "2026-08-05"
     },
+    ".github/workflows/proxmox-functional.yml": {
+      "sha": "17c89f28d3d23e2f1dbc159aea9104352cdb241b",
+      "date": "2026-09-27"
+    },
     ".github/workflows/prune-reviews.yml": {
       "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
       "date": "2026-09-23"
@@ -65,6 +69,10 @@
       "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
       "date": "2026-09-26"
     },
+    ".github/workflows/renovate.yml": {
+      "sha": "8e2f2546defcf4163fdb415c11cd7dcbb13489f3",
+      "date": "2026-09-27"
+    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"
@@ -72,6 +80,10 @@
     ".gitignore": {
       "sha": "699123a656b8063ccbc2898ade84ad60c8050f3d",
       "date": "2026-09-23"
+    },
+    ".pre-commit-config.yaml": {
+      "sha": "ffe8de823db6e869d1ca3791caad48ee60e3384b",
+      "date": "2026-09-27"
     },
     "AGENTS.md": {
       "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
@@ -125,6 +137,14 @@
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
     },
+    "docs/ci.md": {
+      "sha": "e0b27947e2afa497ed57ccc6e6e4e2b494c274c7",
+      "date": "2026-09-27"
+    },
+    "docs/configuration.md": {
+      "sha": "8cfdaaab6ff8c09ff25fd219e64f44d4c6326995",
+      "date": "2026-09-27"
+    },
     "docs/control-socket-protocol.md": {
       "sha": "790565811c9d129ba254461352d59d1ed7b3968e",
       "date": "2026-09-17"
@@ -145,6 +165,14 @@
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
     },
+    "docs/diagnostics.md": {
+      "sha": "470c4cfcd62ffa2a4dad91edd66a06ce9a290255",
+      "date": "2026-09-27"
+    },
+    "docs/features.md": {
+      "sha": "9cf98a96cb0118d8e4af813b37134b9234e28a31",
+      "date": "2026-09-27"
+    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -161,6 +189,10 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "1b1c53250c7e39067c8ec45001129f1bf91048e3",
+      "date": "2026-09-27"
+    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
@@ -172,6 +204,18 @@
     "docs/rendering-pipeline.md": {
       "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
       "date": "2026-08-17"
+    },
+    "docs/session-lifecycle.md": {
+      "sha": "b47afd6f9fd96952573ba228948006093daa4c59",
+      "date": "2026-09-27"
+    },
+    "docs/spice-protocol.md": {
+      "sha": "f716591931e0e804168ee023c3cffa53d8f484aa",
+      "date": "2026-09-27"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "1513e4c97dcb7eac8aa4edb4d70bbbc2210346e1",
+      "date": "2026-09-27"
     },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
@@ -205,9 +249,29 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "64b0801115cdcb1a918406e9145cb9faed49f39f",
+      "date": "2026-09-27"
+    },
+    "ryll/src/auto_snapshot.rs": {
+      "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
+      "date": "2026-09-27"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "a2eee650510d2540c2578274974c500dc0b9eb96",
+      "date": "2026-09-27"
+    },
+    "ryll/src/capture.rs": {
+      "sha": "768a13052f69062a164e084896d7002944365f5c",
+      "date": "2026-09-27"
+    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
+    },
+    "ryll/src/config.rs": {
+      "sha": "84525c0b210130de905c6e7ba5058d8aa25c9876",
+      "date": "2026-09-27"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -216,6 +280,10 @@
     "ryll/src/input_egui.rs": {
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
+    },
+    "ryll/src/main.rs": {
+      "sha": "cf47148c8a747303dc1914c4243b515f5c91d3ed",
+      "date": "2026-09-27"
     },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
@@ -325,9 +393,21 @@
       "sha": "adb8a2e9a7f0d325d1c286ad7bfc8e1f98081289",
       "date": "2026-09-18"
     },
+    "shakenfist-spice-protocol/Cargo.toml": {
+      "sha": "ef204bdaf9034303aefbb5757a375ba6e86ba247",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/README.md": {
+      "sha": "aac1a414317163746925ff996245b7ad1446fbac",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-protocol/fuzz/.gitignore": {
       "sha": "fe68c971b7971971a920ec01e21f0154c6041be4",
       "date": "2026-07-10"
+    },
+    "shakenfist-spice-protocol/fuzz/Cargo.toml": {
+      "sha": "7b34b7b07d619cfd1fc12c958fbccaac65a7382b",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_decrypt_password.rs": {
       "sha": "efceaf469aa9a2032b534aa404334275ac657cab",
@@ -341,9 +421,21 @@
       "sha": "7c3d8a6e5effde04a9e5875cb2d9fca33bbce1cd",
       "date": "2026-07-10"
     },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_connect_response.rs": {
+      "sha": "47fbc11c4f1e5cd4a83ae5d3f0adf222afc55d45",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_host_subject.rs": {
       "sha": "a98e2c2d16d4db8c5c4bfdad0b5670d7b1e558ea",
       "date": "2026-08-02"
+    },
+    "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_proxy_uri.rs": {
+      "sha": "4fe7778cc81abf246495fb0aa741089f99d66238",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/client.rs": {
+      "sha": "b9d70e6ece8e54b8bdecc0e0810cddb0156cc672",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "d26af989a6313ca989bc1cf7cb2d6e33e32c9719",
@@ -352,6 +444,14 @@
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
+    },
+    "shakenfist-spice-protocol/src/lib.rs": {
+      "sha": "477de37d6221e452f67d23ef1a525a2d51e0693b",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/link.rs": {
+      "sha": "dc07ef80e6f6d1c9b134f2117d0d1349f4aa33e4",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-protocol/src/logging.rs": {
       "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
@@ -364,6 +464,14 @@
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
       "date": "2026-07-17"
+    },
+    "shakenfist-spice-protocol/src/proxy.rs": {
+      "sha": "af1583a5be46edca4ff82dfe6bfebfa81c78839b",
+      "date": "2026-09-27"
+    },
+    "shakenfist-spice-protocol/src/reader.rs": {
+      "sha": "af122c5e1dbce00ff13fc39b48b536e84bcd905c",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-renderer/Cargo.toml": {
       "sha": "cb76893d6ae3aed847e03a4f4c147ad7e72555dd",
@@ -505,6 +613,10 @@
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
       "date": "2026-09-19"
     },
+    "shakenfist-spice-renderer/src/session.rs": {
+      "sha": "b44e36b8e2cc3fa5f7d36fb3274a34f63ba9c3fd",
+      "date": "2026-09-27"
+    },
     "shakenfist-spice-renderer/src/snapshots.rs": {
       "sha": "f1f638ea45447f40cc6969ef87852976f1c1a68d",
       "date": "2026-09-19"
@@ -548,6 +660,10 @@
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
+    },
+    "shakenfist-spice-renderer/tests/headless_connect_failure.rs": {
+      "sha": "263b65da12267743f53805737ab3c202f60d7a20",
+      "date": "2026-09-27"
     },
     "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
@@ -697,6 +813,10 @@
       "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
       "date": "2026-09-23"
     },
+    "tools/proxmox-smoke.py": {
+      "sha": "c8f941eaabe76d892402bcf5d3f76152d8937713",
+      "date": "2026-09-27"
+    },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
       "date": "2026-07-26"
@@ -736,6 +856,10 @@
     "tools/test-k1-idle.sh": {
       "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
       "date": "2026-07-26"
+    },
+    "tools/test-proxmox-smoke.sh": {
+      "sha": "454550681aff60e006f960f35b62fe423ae4498d",
+      "date": "2026-09-27"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
