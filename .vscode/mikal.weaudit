@@ -950,6 +950,62 @@
     {
       "path": ".github/workflows/pr-retest.yml",
       "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src/session.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/src",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/proxmox-smoke.py",
+      "author": "mikal"
+    },
+    {
+      "path": "tools/test-proxmox-smoke.sh",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/configuration.md",
+      "author": "mikal"
+    },
+    {
+      "path": "ryll/src/config.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/ci.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests/headless_connect_failure.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer/tests",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-renderer",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src/proxy.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-protocol/src",
+      "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/proxmox-functional.yml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
