@@ -57,10 +57,6 @@
       "sha": "60d01c0ee9cc8b8beb826b6ff3afc2b346a45bb4",
       "date": "2026-09-28"
     },
-    ".github/workflows/prune-reviews.yml": {
-      "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
-      "date": "2026-09-23"
-    },
     ".github/workflows/release.yml": {
       "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
       "date": "2026-09-26"
@@ -741,10 +737,6 @@
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
       "date": "2026-07-26"
     },
-    "tools/ci-prune-reviews.sh": {
-      "sha": "6daef1e07eb05d46b0a13745d5338cf1aea23cd8",
-      "date": "2026-08-03"
-    },
     "tools/fuzz-targets.sh": {
       "sha": "b6cba20bf72f5b01a12e52b029aaadfee2dead8d",
       "date": "2026-09-23"
@@ -791,10 +783,6 @@
     },
     "tools/report-fuzz-run.sh": {
       "sha": "3b60592ec658db548536a3c9d5989d29c457adc1",
-      "date": "2026-09-23"
-    },
-    "tools/review-tracking.sh": {
-      "sha": "c413992b72dbc2f189fa8f079e1ddac175b81f85",
       "date": "2026-09-23"
     },
     "tools/run-shellcheck.sh": {

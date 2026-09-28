@@ -31,7 +31,7 @@ for how this works, including how to verify the attestations.
 | .github/workflows/mermaid-lint.yml | mikal | 2026-09-26 | 97eb7ba192f9 | - |
 | .github/workflows/pr-re-review.yml | mikal | 2026-09-28 | 72059c8c57e2 | - |
 | .github/workflows/pr-retest.yml | mikal | 2026-09-28 | 60d01c0ee9cc | - |
-| .github/workflows/prune-reviews.yml | mikal | 2026-09-23 | c720db0809c3 | - |
+| .github/workflows/prune-reviews.yml | mikal | 2026-09-27 | 7fc119ce4625 | development@149c6f72446e |
 | .github/workflows/release.yml | mikal | 2026-09-26 | c359f63ea871 | - |
 | .github/workflows/renovate.yml | mikal | 2026-09-27 | 8e2f2546defc | - |
 | .github/workflows/supply-chain.yml | mikal | 2026-09-26 | c855b8e11619 | - |
@@ -202,7 +202,7 @@ for how this works, including how to verify the attestations.
 | tools/build-ryll-wheel-in-container.sh | mikal | 2026-07-26 | 5ba9e12fb882 | - |
 | tools/build-ryll-wheel.sh | mikal | 2026-07-26 | d60ed8ba5633 | - |
 | tools/check-bidi.sh | mikal | 2026-07-26 | ea7d6b5bc018 | - |
-| tools/ci-prune-reviews.sh | mikal | 2026-08-03 | 6daef1e07eb0 | - |
+| tools/ci-prune-reviews.sh | mikal | 2026-09-27 | cb496c3933ea | development@d7718169e6b3 |
 | tools/fuzz-targets.sh | mikal | 2026-09-23 | b6cba20bf72f | - |
 | tools/gen-swatches-jpeg/Cargo.toml | mikal | 2026-09-23 | 95fa743e1acf | - |
 | tools/gen-swatches-jpeg/src/main.rs | mikal | 2026-07-26 | 2536d38324b7 | - |
@@ -215,7 +215,7 @@ for how this works, including how to verify the attestations.
 | tools/publish-crates.sh | mikal | 2026-07-26 | f9979a0b7822 | - |
 | tools/report-fuzz-failure.sh | mikal | 2026-09-23 | 431d9995ae22 | - |
 | tools/report-fuzz-run.sh | mikal | 2026-09-23 | 3b60592ec658 | - |
-| tools/review-tracking.sh | mikal | 2026-09-23 | c413992b72db | - |
+| tools/review-tracking.sh | mikal | 2026-09-27 | db83f953a7b9 | development@d7718169e6b3 |
 | tools/run-shellcheck.sh | mikal | 2026-07-26 | a070aa57d157 | - |
 | tools/sign-release-tag.sh | mikal | 2026-07-26 | 835d0b4125fd | - |
 | tools/start-desktop-qemu.sh | mikal | 2026-09-23 | 6d1810430685 | - |

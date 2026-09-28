@@ -276,10 +276,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/ci-prune-reviews.sh",
-      "author": "mikal"
-    },
-    {
       "path": "docs/releasing.md",
       "author": "mikal"
     },
@@ -648,10 +644,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/prune-reviews.yml",
-      "author": "mikal"
-    },
-    {
       "path": "tools/audit/audit-range.sh",
       "author": "mikal"
     },
@@ -709,10 +701,6 @@
     },
     {
       "path": "tools/report-fuzz-run.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/review-tracking.sh",
       "author": "mikal"
     },
     {
