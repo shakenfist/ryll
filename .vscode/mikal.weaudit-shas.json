@@ -57,10 +57,6 @@
       "sha": "60d01c0ee9cc8b8beb826b6ff3afc2b346a45bb4",
       "date": "2026-09-28"
     },
-    ".github/workflows/proxmox-functional.yml": {
-      "sha": "81535a2717a5419b04e0736763df07e25dfab749",
-      "date": "2026-09-28"
-    },
     ".github/workflows/prune-reviews.yml": {
       "sha": "c720db0809c3da46060f7c0da5418205ffd2e318",
       "date": "2026-09-23"
@@ -87,10 +83,6 @@
     },
     "AGENTS.md": {
       "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
-      "date": "2026-09-23"
-    },
-    "ARCHITECTURE.md": {
-      "sha": "a1dcdfbc45f7d4a8b699f9b19a61d5abaf8f6ee8",
       "date": "2026-09-23"
     },
     "Cargo.toml": {
@@ -136,14 +128,6 @@
     "docs/channel-diagnostics-audit.md": {
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
-    },
-    "docs/ci.md": {
-      "sha": "e0b27947e2afa497ed57ccc6e6e4e2b494c274c7",
-      "date": "2026-09-27"
-    },
-    "docs/configuration.md": {
-      "sha": "8cfdaaab6ff8c09ff25fd219e64f44d4c6326995",
-      "date": "2026-09-27"
     },
     "docs/control-socket-protocol.md": {
       "sha": "790565811c9d129ba254461352d59d1ed7b3968e",
@@ -268,10 +252,6 @@
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
-    },
-    "ryll/src/config.rs": {
-      "sha": "84525c0b210130de905c6e7ba5058d8aa25c9876",
-      "date": "2026-09-27"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
@@ -465,10 +445,6 @@
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
       "date": "2026-07-17"
     },
-    "shakenfist-spice-protocol/src/proxy.rs": {
-      "sha": "af1583a5be46edca4ff82dfe6bfebfa81c78839b",
-      "date": "2026-09-27"
-    },
     "shakenfist-spice-protocol/src/reader.rs": {
       "sha": "af122c5e1dbce00ff13fc39b48b536e84bcd905c",
       "date": "2026-09-27"
@@ -613,10 +589,6 @@
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/session.rs": {
-      "sha": "b44e36b8e2cc3fa5f7d36fb3274a34f63ba9c3fd",
-      "date": "2026-09-27"
-    },
     "shakenfist-spice-renderer/src/snapshots.rs": {
       "sha": "f1f638ea45447f40cc6969ef87852976f1c1a68d",
       "date": "2026-09-19"
@@ -660,10 +632,6 @@
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/tests/headless_connect_failure.rs": {
-      "sha": "263b65da12267743f53805737ab3c202f60d7a20",
-      "date": "2026-09-27"
     },
     "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
@@ -813,10 +781,6 @@
       "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
       "date": "2026-09-23"
     },
-    "tools/proxmox-smoke.py": {
-      "sha": "c8f941eaabe76d892402bcf5d3f76152d8937713",
-      "date": "2026-09-27"
-    },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
       "date": "2026-07-26"
@@ -856,10 +820,6 @@
     "tools/test-k1-idle.sh": {
       "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
       "date": "2026-07-26"
-    },
-    "tools/test-proxmox-smoke.sh": {
-      "sha": "454550681aff60e006f960f35b62fe423ae4498d",
-      "date": "2026-09-27"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
