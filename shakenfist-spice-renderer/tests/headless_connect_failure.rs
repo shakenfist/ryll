@@ -1,9 +1,8 @@
 //! `run_headless` against a port nothing listens on.
 //!
 //! A failed connect must come back as an `Err`, so `ryll --headless`
-//! exits non-zero. It used to be logged and swallowed, and even the
-//! log line was lost whenever the loop's "event stream closed" branch
-//! won its `select!` race against the connection-result branch (both
+//! exits non-zero, even when the loop's "event stream closed" branch
+//! wins its `select!` race against the connection-result branch (both
 //! become ready together when `run_connection` returns). The race is
 //! decided at random on each run, so the test repeats the connect
 //! enough times that a regression cannot hide behind a lucky draw.

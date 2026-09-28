@@ -561,11 +561,18 @@ impl Config {
         // Proxmox VE's `.vv` files carry (spice-gtk reads the same
         // key). Parsed at this boundary, so a malformed value fails
         // the .vv load and never reaches a dial. The error names the
-        // key, matching `parse_optional_u16` above.
+        // key, matching `parse_optional_u16` above, and quotes the
+        // value unless it could hold credentials. That is decided from
+        // the value, not the error variant, so no future variant can
+        // echo a `user:pass@` into stderr, logs or bug reports.
         let proxy = match ini.get(section, "proxy").and_then(filter_none) {
-            Some(s) => {
-                Some(parse_proxy_uri(&s).map_err(|e| anyhow!("Invalid proxy '{}': {}", s, e))?)
-            }
+            Some(s) => Some(parse_proxy_uri(&s).map_err(|e| {
+                if s.contains('@') {
+                    anyhow!("Invalid proxy: {}", e)
+                } else {
+                    anyhow!("Invalid proxy '{}': {}", s, e)
+                }
+            })?),
             None => None,
         };
 
@@ -923,6 +930,35 @@ delete-this-file=1\n";
             msg.contains("https"),
             "error should still explain what about it failed: {msg}"
         );
+    }
+
+    /// A refused `user:pass@` proxy must not have its credentials
+    /// echoed into the error, which reaches stderr, logs and bug
+    /// reports.
+    #[test]
+    fn vv_proxy_credentials_are_not_echoed() {
+        for uri in [
+            "http://alice:s3cret@proxy.example:3128",
+            "https://alice:s3cret@proxy.example:3129",
+            "socks5://alice:s3cret@proxy.example:1080",
+            "alice:s3cret@proxy.example:3128",
+        ] {
+            let err = Config::parse_vv_content(&format!(
+                "[virt-viewer]\nhost=h\nport=5900\nproxy={uri}\n"
+            ))
+            .expect_err("a proxy with credentials must fail the .vv load");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("proxy"),
+                "{uri}: error should name the 'proxy' key: {msg}"
+            );
+            assert!(
+                msg.contains("credentials"),
+                "{uri}: error should say why: {msg}"
+            );
+            assert!(!msg.contains("s3cret"), "{uri}: echoed the password: {msg}");
+            assert!(!msg.contains("alice"), "{uri}: echoed the user: {msg}");
+        }
     }
 
     fn web_args(extra: &[&str]) -> Args {

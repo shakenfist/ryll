@@ -242,6 +242,15 @@ assert_hygiene() {
         red "FAIL: .vv files left behind: $left"
         FAILURES=$((FAILURES + 1))
     fi
+    # Only the scrubbed ryll.log may outlive a check; the upload step
+    # never matches the raw one, but it must not linger either.
+    left="$(find "$RUN_WORKDIR" -name 'ryll.raw.log' 2>/dev/null)"
+    if [ -z "$left" ]; then
+        green "ok: no unscrubbed ryll log left in the workdir"
+    else
+        red "FAIL: unscrubbed ryll logs left behind: $left"
+        FAILURES=$((FAILURES + 1))
+    fi
 }
 
 echo "== a ryll that behaves =="
@@ -342,6 +351,39 @@ else
     green "ok: ryll was not launched"
 fi
 assert_hygiene
+
+echo
+echo "== the scrubbed ryll log cannot be written =="
+# A disk-full or permissions failure while saving the scrubbed copy must
+# still remove the raw log, and must be reported rather than swallowed.
+SCRUB_DIR="$WORK/scrub-write-fails"
+mkdir -p "$SCRUB_DIR"
+echo "hello" > "$SCRUB_DIR/ryll.raw.log"
+if python3 - "$DRIVER" "$SCRUB_DIR" <<'PYEOF'
+import importlib.util
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location('smoke', sys.argv[1])
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+raw = os.path.join(sys.argv[2], 'ryll.raw.log')
+problems = smoke.scrub_log(raw, os.path.join(sys.argv[2], 'no-such-dir', 'ryll.log'), [])
+ok = True
+if os.path.exists(raw):
+    print('raw log survived a failed scrubbed write')
+    ok = False
+if not any('could not save' in p for p in problems):
+    print(f'the failed write was not reported: {problems}')
+    ok = False
+sys.exit(0 if ok else 1)
+PYEOF
+then
+    green "ok: the raw log is removed and the failed write reported"
+else
+    red "FAIL: a failed scrubbed write left the raw log or went unreported"
+    FAILURES=$((FAILURES + 1))
+fi
 
 echo
 echo "== usage =="

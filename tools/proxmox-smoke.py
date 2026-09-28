@@ -42,9 +42,11 @@ SECRETS. A minted .vv carries a live SPICE password and a pseudo-hostname
 holding a proxy ticket. This script never prints either, nor the .vv. Each
 .vv is written 0600 by the mint script, edited in place at 0600, and deleted
 when its check ends. ryll's output is captured to a per-check log under
---workdir; if it contains the password or any long part of the
+--workdir as ryll.raw.log, and only a scrubbed copy is ever saved as
+ryll.log: if the raw log contains the password or any long part of the
 pseudo-hostname the check fails and those strings are redacted from the
-saved log. Never upload a .vv: this script deletes them, but a crash
+copy. A run killed before a check's cleanup leaves only the raw log, which
+nothing uploads. Never upload a .vv: this script deletes them, but a crash
 between mint and cleanup can leave one behind.
 
 ryll --verbose also appends to /tmp/ryll.log (see ryll/src/main.rs). That
@@ -318,10 +320,10 @@ def dial_targets(lines):
     return [m.group('target') for m in (DIAL_RE.search(line) for line in lines) if m]
 
 
-def scrub_log(path, redactions):
-    """Redact secrets from a saved log; return a problem per secret found."""
+def scrub_log(raw_path, path, redactions):
+    """Save raw_path, secrets redacted, as path; return a problem per secret."""
     try:
-        with open(path, 'rb') as f:
+        with open(raw_path, 'rb') as f:
             text = f.read().decode('utf-8', errors='replace')
     except FileNotFoundError:
         return []
@@ -333,10 +335,17 @@ def scrub_log(path, redactions):
             text = text.replace(redaction.value, '<redacted>')
             problems.append(f'ryll printed {redaction.description} {count} time(s); '
                             'redacted from the saved log')
-    if problems:
-        fd = os.open(path, os.O_WRONLY | os.O_TRUNC)
+    # The raw log goes whether or not the scrubbed copy could be written:
+    # it is never kept, and a failed write is a problem to report, not a
+    # reason to leave unredacted output in the workdir.
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(text)
+    except OSError as e:
+        problems.append(f'could not save the scrubbed log {path}: {e}')
+    finally:
+        os.unlink(raw_path)
     return problems
 
 
@@ -417,6 +426,8 @@ class Check:
         self.name = name
         self.dir = os.path.join(smoke.workdir, name)
         self.vv = os.path.join(self.dir, 'console.vv')
+        # ryll writes raw_log; cleanup saves it, scrubbed, as ryll_log.
+        self.raw_log = os.path.join(self.dir, 'ryll.raw.log')
         self.ryll_log = os.path.join(self.dir, 'ryll.log')
         self.sockdir = None
         self.sock = None
@@ -439,7 +450,7 @@ class Check:
 
     def mint(self):
         os.makedirs(self.dir, mode=0o700, exist_ok=True)
-        for stale in (self.vv, self.ryll_log):
+        for stale in (self.vv, self.raw_log, self.ryll_log):
             if os.path.exists(stale):
                 os.unlink(stale)
         s = self.smoke.args
@@ -490,7 +501,7 @@ class Check:
         env = dict(os.environ, NO_COLOR='1')
         cmd = [self.smoke.args.ryll, '--headless', '--verbose', '--file', self.vv,
                '--control-socket', self.sock]
-        logf = open(self.ryll_log, 'wb')
+        logf = open(self.raw_log, 'wb')
         try:
             self.launch_time = time.time()
             self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=logf,
@@ -531,8 +542,8 @@ class Check:
                 os.unlink(path)
         if self.sockdir:
             shutil.rmtree(self.sockdir, ignore_errors=True)
-        if os.path.exists(self.ryll_log):
-            for problem in scrub_log(self.ryll_log, self.redactions):
+        if os.path.exists(self.raw_log):
+            for problem in scrub_log(self.raw_log, self.ryll_log, self.redactions):
                 self.fail(problem)
 
     def summary(self):
@@ -578,7 +589,7 @@ def run_positive(check):
         # Say how far the channels got, which is usually why.
         if check.proc.poll() is None:
             check.stop()
-        missing = [c for c in CHANNELS if c not in channels_up(read_log(check.ryll_log))]
+        missing = [c for c in CHANNELS if c not in channels_up(read_log(check.raw_log))]
         if missing:
             check.fail(f'no "<channel>: connected successfully" line for {", ".join(missing)}')
         return
@@ -588,7 +599,7 @@ def run_positive(check):
         status = {}
         up = []
         while time.time() < deadline and check.proc.poll() is None:
-            up = channels_up(read_log(check.ryll_log))
+            up = channels_up(read_log(check.raw_log))
             resp = control.request('status')
             status = resp.get('result', {}) if resp.get('ok') else {}
             if len(up) == len(CHANNELS) and status.get('surfaces'):
@@ -625,7 +636,7 @@ def run_positive(check):
     # Every dial went through the proxy. This also proves DIAL_RE still
     # matches ryll's dial line, which the missing-pin check relies on
     # matching nothing.
-    targets = dial_targets(read_log(check.ryll_log))
+    targets = dial_targets(read_log(check.raw_log))
     if len(targets) < len(CHANNELS):
         check.fail(f'only {len(targets)} dial line(s) matched; the missing-pin check\'s "no dial" '
                    'oracle is not trustworthy')
@@ -665,7 +676,7 @@ def run_positive(check):
             check.fail(f'second {what}')
     finally:
         control.close()
-    if contains(read_log(check.ryll_log), CONNECT_FAILED):
+    if contains(read_log(check.raw_log), CONNECT_FAILED):
         check.fail('ryll logged "Connection task failed" during the session')
 
     rc, took = check.stop()
@@ -692,7 +703,7 @@ def run_negative(check, prepare, deliberate_wait, verify):
         check.fail(f'ryll exited with status 0, {took:.1f}s after the launch')
     else:
         check.note(f'exited {rc} {took:.1f}s after launch')
-    verify(check, read_log(check.ryll_log), context)
+    verify(check, read_log(check.raw_log), context)
 
 
 def expired_prepare(check, lines, fields):

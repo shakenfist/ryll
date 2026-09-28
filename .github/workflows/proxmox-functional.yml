@@ -1,5 +1,5 @@
 # Deploys a real single-node Proxmox VE 9 through shakenfist/actions'
-# deploy-proxmox-on-shakenfist@main, builds this branch's ryll, and runs
+# deploy-proxmox-on-shakenfist@main, builds the ryll under test, and runs
 # tools/proxmox-smoke.py's four checks against the node's spiceproxy. See
 # "The Proxmox lane" in docs/ci.md.
 #
@@ -15,13 +15,6 @@
 # compile error never books the ~20-minute node deploy, and so mint-to-launch
 # stays short once the node is up: the binary is already there when the
 # first ticket is minted.
-#
-# These commits live on this branch rather than a branch of their own
-# because the positive check cannot pass without this branch's SPICE HTTP
-# CONNECT tunnelling code, and workflow_dispatch only offers workflows that
-# already exist on the default branch -- so a pull_request run of this
-# workflow, on this branch's own pull request, is the only way to validate
-# it before merge.
 name: Proxmox functional
 
 on:
@@ -85,25 +78,32 @@ jobs:
         # Explicit bash, not the default: only `shell: bash` adds pipefail,
         # without which the step takes tee's status and could never fail.
         shell: bash
+        # The action's outputs reach the shell as environment variables,
+        # never spliced into the script text, so none can inject a command.
+        env:
+          MINT_SCRIPT: ${{ steps.deploy.outputs.mint_script }}
+          API_URL: ${{ steps.deploy.outputs.api_url }}
+          NODE: ${{ steps.deploy.outputs.node_name }}
+          VMID: ${{ steps.deploy.outputs.vmid }}
+          TOKEN_ID: ${{ steps.deploy.outputs.token_id }}
+          TOKEN_FILE: ${{ steps.deploy.outputs.token_file }}
+          CA_FILE: ${{ steps.deploy.outputs.ca_file }}
         run: |
           mkdir -p "${RUNNER_TEMP}/proxmox-smoke"
           python3 tools/proxmox-smoke.py --ryll target/release/ryll \
-              --mint-script "${{ steps.deploy.outputs.mint_script }}" \
-              --api-url "${{ steps.deploy.outputs.api_url }}" \
-              --node "${{ steps.deploy.outputs.node_name }}" \
-              --vmid "${{ steps.deploy.outputs.vmid }}" \
-              --token-id "${{ steps.deploy.outputs.token_id }}" \
-              --token-file "${{ steps.deploy.outputs.token_file }}" \
-              --ca-file "${{ steps.deploy.outputs.ca_file }}" \
+              --mint-script "$MINT_SCRIPT" --api-url "$API_URL" \
+              --node "$NODE" --vmid "$VMID" --token-id "$TOKEN_ID" \
+              --token-file "$TOKEN_FILE" --ca-file "$CA_FILE" \
               --workdir "${RUNNER_TEMP}/proxmox-smoke" \
               2>&1 | tee "${RUNNER_TEMP}/proxmox-smoke.log"
 
       # Only the driver's own (already-redacted) log and each check's
-      # ryll.log. Never the workdir's .vv files: each carries a live SPICE
-      # password until the driver deletes it, and a crash between mint and
-      # cleanup can leave one behind. Never /tmp/ryll.log either -- that is
-      # headless ryll's unredacted --verbose append (ryll/src/main.rs), not
-      # this driver's output.
+      # scrubbed ryll.log -- never ryll.raw.log, which is all a check
+      # killed before its cleanup leaves. Never the workdir's .vv files:
+      # each carries a live SPICE password until the driver deletes it,
+      # and a crash between mint and cleanup can leave one behind. Never
+      # /tmp/ryll.log either -- that is headless ryll's unredacted
+      # --verbose append (ryll/src/main.rs), not this driver's output.
       - name: Upload the Proxmox lane logs
         if: always()
         uses: actions/upload-artifact@v7
