@@ -1002,6 +1002,10 @@
     {
       "path": ".github/workflows/proxmox-functional.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
