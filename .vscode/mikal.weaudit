@@ -840,10 +840,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
       "path": "docs/diagnostics.md",
       "author": "mikal"
     },
