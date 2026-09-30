@@ -1,54 +1,125 @@
+# CodeQL analysis.
+#
+# Template source: shakenfist/development/templates/codeql/. Copy this
+# file verbatim; it has no per-repository parameters. It names both
+# main and develop so the same bytes serve either default branch. A
+# repository that pins `languages` (kerbside, where autobuild fails on
+# its C file) or runs a language matrix (actions) keeps a documented
+# per-repository copy instead; see the template's README.
+#
+# Review-only changes cannot affect code analysis, and neither can
+# docs/, so neither runs it. Analyze is a required status check in
+# some repositories that carry this file, which rules out a
+# trigger-level filter on pull_request: a workflow that never starts
+# never reports, and a required check that never reports blocks the
+# merge forever. Pull requests instead skip Analyze at the job level
+# through check_paths, and a skipped job satisfies a required check.
+# push carries no required check, so it filters at the trigger. See
+# step 8 of "Adopting a repository" in
+# https://github.com/shakenfist/development/blob/main/docs/code-review-tracking.md
+# for the pattern and why each detail of it matters.
 name: CodeQL
 
 permissions: {}
 
-# Documentation and review-only changes cannot affect code analysis, so
-# skip them. CodeQL is not part of ci.yml's gate scheme and is not a
-# required check, so it keeps a workflow-level paths-ignore rather than
-# a check_paths job.
-# Keep the path list in sync with ci.yml's check_paths filter and the
-# .vscode whitelist in .gitignore.
 on:
   push:
-    branches: [develop]
+    branches: [main, develop]
+    # Keep in step with check_paths' filter below.
     paths-ignore:
-      - 'docs/**'
       - 'REVIEWS.md'
       - '.vscode/*.weaudit'
       - '.vscode/*.weaudit-shas.json'
       - '.vscode/review-scope.toml'
+      - 'docs/**'
   pull_request:
-    branches: [develop]
-    paths-ignore:
-      - 'docs/**'
-      - 'REVIEWS.md'
-      - '.vscode/*.weaudit'
-      - '.vscode/*.weaudit-shas.json'
-      - '.vscode/review-scope.toml'
+    branches: [main, develop]
   schedule:
     - cron: '0 17 * * 2'
 
 jobs:
-  analyze:
-    name: Analyze
+  # Detect review-only and docs-only pull requests so analyze can skip
+  # them. There is no checkout: dorny/paths-filter reads a pull
+  # request's changed files from the API, so a fork's content never
+  # reaches the runner and the job needs only pull-requests: read. On
+  # push and the weekly schedule the filter step is skipped and the
+  # output falls back to code_changed=true, so both always analyze.
+  check_paths:
+    name: "Check paths"
     runs-on: [self-hosted, static]
+    timeout-minutes: 10
     permissions:
+      pull-requests: read
+    outputs:
+      code_changed: ${{ steps.filter.outputs.code || 'true' }}
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          # The default quantifier is 'some', under which the bare '**'
+          # already matches and every '!' exclusion is a no-op. 'every'
+          # is what makes the exclusions work.
+          predicate-quantifier: 'every'
+          # Keep in step with the push trigger's paths-ignore above.
+          filters: |
+            code:
+              - '**'
+              - '!REVIEWS.md'
+              - '!.vscode/*.weaudit'
+              - '!.vscode/*.weaudit-shas.json'
+              - '!.vscode/review-scope.toml'
+              - '!docs/**'
+
+  analyze:
+    # A required status check in some repositories; do not rename it.
+    name: Analyze
+    needs: [check_paths]
+    # Three conditions, each load-bearing.
+    #
+    # !cancelled(): without it, a failed check_paths would skip this job
+    # by default propagation, and a required check reporting "skipped"
+    # reads as green. With it, this job evaluates its own condition, and
+    # a failed check_paths never reports code_changed as 'false', so the
+    # analysis runs. The filter fails open.
+    #
+    # The path filter: 'false' only for a pull request touching nothing
+    # but review state and docs/.
+    #
+    # The fork guard: a fork pull request does not run this job.
+    # Autobuild executes the pull request's build on the shared static
+    # pool, and running a stranger's build there is the worse risk. The
+    # cost is that a fork's change is not scanned before it merges -- the
+    # skipped job satisfies a required check -- but the push after merge
+    # scans it. A fork's token cannot hold security-events: write
+    # either, so the analysis would have nowhere to upload.
+    if: |
+      !cancelled()
+      && needs.check_paths.outputs.code_changed != 'false'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, static]
+    timeout-minutes: 30
+    # Successive pushes to a pull request each start an analysis on
+    # scarce static runners, and the superseded one has nothing to say,
+    # so pull request runs cancel. Push and schedule runs never do: they
+    # upload the results that become the branch's standing security
+    # posture, and they share a ref, so cancelling would let a later run
+    # discard an earlier one's analysis. (GitHub still lets a newer run
+    # displace one that is queued behind it in the group, but that newer
+    # run analyses the later tree, so nothing is left unscanned.)
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      # actions: read is required for workflow run telemetry.
       actions: read
       contents: read
       security-events: write
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}-analyze
-      cancel-in-progress: true
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 2
-
-      - name: Checkout PR head
-        run: git checkout HEAD^2
-        if: ${{ github.event_name == 'pull_request' }}
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
