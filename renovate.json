@@ -14,7 +14,7 @@
   },
   "packageRules": [
     {
-      "description": "Automatically merge minor and patch-level updates",
+      "description": "Minor, patch and digest updates are not merged automatically: every update needs review",
       "matchUpdateTypes": [
         "minor",
         "patch",
