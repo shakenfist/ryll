@@ -15,8 +15,8 @@ use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 use shakenfist_spice_compression::{
-    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, quic_decode, video,
-    DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
+    best_for_platform, decompress_glz, decompress_lz, decompress_spice_lz4, limits, quic_decode,
+    video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
 use shakenfist_spice_protocol::constants::{image_compression, ropd};
@@ -301,6 +301,85 @@ enum FillOutcome {
     SkipNoneBrush,
     /// Brush type was PATTERN — skip (not yet supported).
     SkipPatternBrush,
+}
+
+/// Why a ZLIB_GLZ_RGB payload was refused before GLZ decoding.
+#[derive(Debug)]
+enum InflateGlzError {
+    /// `rgba_len` refused the descriptor's dimensions.
+    DimensionsRefused,
+    /// The declared GLZ size exceeds the limit for the dimensions.
+    DeclaredTooLarge,
+    /// The zlib stream inflated to more than the limit.
+    TooLarge,
+    /// The inflated length is not the declared GLZ size.
+    SizeMismatch { inflated: usize },
+    /// The zlib stream was malformed.
+    Zlib(std::io::Error),
+}
+
+/// Fixed allowance for the GLZ header, which is 33 bytes, plus slack.
+const GLZ_STREAM_FIXED_OVERHEAD: usize = 64;
+
+/// Upper bound on the inflated GLZ stream for a `width` x `height` image.
+///
+/// The inflated data is a GLZ stream, not RGBA, so `rgba_len` alone is
+/// not quite the right bound. A stream can legitimately be a little
+/// larger than the pixels it describes: the server's GLZ encoder
+/// (spice/server/glz-encode.tmpl.c) emits a 33 byte header, one control
+/// byte per run of up to 32 literal pixels, and 3 bytes per literal
+/// RGB pixel. An RGBA image adds a second pass carrying the alpha
+/// byte, so incompressible RGBA costs about 4 + 2/32 bytes per pixel,
+/// slightly over the 4 bytes of the decoded output. Matches are only
+/// emitted when cheaper than the literals they replace, so nothing
+/// pushes the ratio much further. A quarter of the RGBA size plus a
+/// fixed allowance covers that with room to spare while still bounding
+/// the inflate to 1.25x the shared image cap.
+///
+/// `None` when `rgba_len` refuses the dimensions.
+fn glz_stream_limit(width: usize, height: usize) -> Option<usize> {
+    let rgba = limits::rgba_len(width, height)?;
+    Some(rgba + rgba / 4 + GLZ_STREAM_FIXED_OVERHEAD)
+}
+
+/// Inflate the zlib layer of a ZLIB_GLZ_RGB payload, refusing a
+/// decompression bomb.
+///
+/// `declared_glz_size` is the wire's `glz_data_size`: the exact length
+/// of the GLZ stream after inflating (see `glz_size` in the server's
+/// image-encoders.cpp, and canvas_base.c in spice-common, which
+/// allocates exactly that many bytes for the inflate). It counts
+/// compressed GLZ bytes, not RGBA bytes. It must fit within the limit
+/// and match the inflated length.
+fn inflate_glz_stream(
+    zlib_data: &[u8],
+    declared_glz_size: usize,
+    width: usize,
+    height: usize,
+) -> Result<Vec<u8>, InflateGlzError> {
+    let limit = glz_stream_limit(width, height).ok_or(InflateGlzError::DimensionsRefused)?;
+    if declared_glz_size > limit {
+        return Err(InflateGlzError::DeclaredTooLarge);
+    }
+
+    let mut decoder = ZlibDecoder::new(zlib_data);
+    let mut glz_data = Vec::new();
+    // One byte past the limit is enough to tell "exactly at the limit"
+    // from "over it" without inflating any further.
+    decoder
+        .by_ref()
+        .take(limit as u64 + 1)
+        .read_to_end(&mut glz_data)
+        .map_err(InflateGlzError::Zlib)?;
+    if glz_data.len() > limit {
+        return Err(InflateGlzError::TooLarge);
+    }
+    if glz_data.len() != declared_glz_size {
+        return Err(InflateGlzError::SizeMismatch {
+            inflated: glz_data.len(),
+        });
+    }
+    Ok(glz_data)
 }
 
 /// Emit a one-line "surface / rect / clip_type" preview of a draw-op
@@ -2254,14 +2333,18 @@ impl DisplayChannel {
                     );
                     None
                 } else {
-                    let _glz_size = read_u32_le(image_data, 0) as usize;
+                    let declared_glz_size = read_u32_le(image_data, 0) as usize;
                     let zlib_size = read_u32_le(image_data, 4) as usize;
 
                     let zlib_data = &image_data[8..8 + zlib_size.min(image_data.len() - 8)];
-                    let mut decoder = ZlibDecoder::new(zlib_data);
-                    let mut glz_data = Vec::new();
-                    match decoder.read_to_end(&mut glz_data) {
-                        Ok(_) => match decompress_glz(&glz_data, &self.glz_dictionary).await {
+                    match inflate_glz_stream(
+                        zlib_data,
+                        declared_glz_size,
+                        img_desc.width as usize,
+                        img_desc.height as usize,
+                    ) {
+                        Ok(glz_data) => match decompress_glz(&glz_data, &self.glz_dictionary).await
+                        {
                             Ok(img) => Some(img),
                             Err(e) => {
                                 warn_once!(
@@ -2272,7 +2355,44 @@ impl DisplayChannel {
                                 None
                             }
                         },
-                        Err(e) => {
+                        Err(InflateGlzError::DimensionsRefused) => {
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:dimensions_refused",
+                                "display: ZLIB_GLZ_RGB image dimensions refused: {}x{}",
+                                img_desc.width,
+                                img_desc.height
+                            );
+                            None
+                        }
+                        Err(InflateGlzError::DeclaredTooLarge) => {
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:declared_too_large",
+                                "display: ZLIB_GLZ_RGB declared GLZ size {} exceeds limit for {}x{}",
+                                declared_glz_size,
+                                img_desc.width,
+                                img_desc.height
+                            );
+                            None
+                        }
+                        Err(InflateGlzError::TooLarge) => {
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:inflate_too_large",
+                                "display: ZLIB_GLZ_RGB inflated past the limit for {}x{}",
+                                img_desc.width,
+                                img_desc.height
+                            );
+                            None
+                        }
+                        Err(InflateGlzError::SizeMismatch { inflated }) => {
+                            warn_once!(
+                                "display:decode_failure:zlib_glz:size_mismatch",
+                                "display: ZLIB_GLZ_RGB declared GLZ size {} but inflated {} bytes",
+                                declared_glz_size,
+                                inflated
+                            );
+                            None
+                        }
+                        Err(InflateGlzError::Zlib(e)) => {
                             warn_once!(
                                 "display:decode_failure:zlib_glz:zlib_failed",
                                 "display: ZLIB_GLZ_RGB zlib decompression failed: {}",
@@ -3113,6 +3233,71 @@ impl DisplayChannel {
 
 #[cfg(test)]
 mod tests {
+
+    // ZLIB_GLZ_RGB inflate bounds (#176).
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_bomb_past_limit() {
+        // A 1x1 image has a limit of 4 + 1 + 64 bytes. 1 MiB of zeros
+        // deflates to about a kilobyte and must be refused, whatever
+        // size the header claims.
+        let zlib = deflate(&vec![0u8; 1024 * 1024]);
+        assert!(zlib.len() < 4096);
+        let limit = glz_stream_limit(1, 1).unwrap();
+        assert!(matches!(
+            inflate_glz_stream(&zlib, limit, 1, 1),
+            Err(InflateGlzError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_accepts_limit_refuses_one_over() {
+        // The boundary: a stream exactly at the limit is accepted, one
+        // byte over it is refused.
+        let limit = glz_stream_limit(1, 1).unwrap();
+        let ok = deflate(&vec![7u8; limit]);
+        assert_eq!(inflate_glz_stream(&ok, limit, 1, 1).unwrap().len(), limit);
+        let over = deflate(&vec![7u8; limit + 1]);
+        assert!(matches!(
+            inflate_glz_stream(&over, limit, 1, 1),
+            Err(InflateGlzError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_oversized_declared_size() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, usize::MAX, 2, 2),
+            Err(InflateGlzError::DeclaredTooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_declared_size_mismatch() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 4, 2, 2),
+            Err(InflateGlzError::SizeMismatch { inflated: 3 })
+        ));
+        assert_eq!(inflate_glz_stream(&zlib, 3, 2, 2).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_absurd_dimensions() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 3, 65535, 65535),
+            Err(InflateGlzError::DimensionsRefused)
+        ));
+    }
     use super::*;
 
     // -------------------------------------------------------------------------
