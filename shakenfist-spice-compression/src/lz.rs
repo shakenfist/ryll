@@ -174,7 +174,10 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
         output = flipped;
     }
 
-    Ok(DecompressedImage::new(width, height, output, 0))
+    // `output` was sized from these dimensions above, so this only
+    // refuses dimensions outside the shared limits.
+    DecompressedImage::new(width, height, output, 0)
+        .ok_or_else(|| anyhow!("LZ image dimensions refused: {}x{}", width, height))
 }
 
 #[cfg(test)]

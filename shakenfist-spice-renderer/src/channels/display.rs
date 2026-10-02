@@ -2184,12 +2184,19 @@ impl DisplayChannel {
                                 rgba[di + 3] = if bmp_fmt == 9 { src_row[si + 3] } else { 255 };
                             }
                         }
-                        Some(DecompressedImage::new(
-                            width,
-                            height,
-                            rgba,
-                            img_desc.image_id,
-                        ))
+                        // `rgba` was sized from these dimensions, so
+                        // this refuses only a zero side or a side over
+                        // the shared per-side limit.
+                        let image = DecompressedImage::new(width, height, rgba, img_desc.image_id);
+                        if image.is_none() {
+                            warn_once!(
+                                "display:decode_failure:pixmap:dimensions_refused",
+                                "display: pixmap dimensions {}x{} refused, skipping",
+                                width,
+                                height
+                            );
+                        }
+                        image
                     }
                 }
             }
@@ -2292,12 +2299,14 @@ impl DisplayChannel {
             Some(ImageType::FromCache) => {
                 // Look up in cache
                 if let Some(pixels) = self.image_cache.get(&img_desc.image_id) {
-                    Some(DecompressedImage::new(
+                    // None when the cached buffer does not fit the
+                    // descriptor's dimensions.
+                    DecompressedImage::new(
                         img_desc.width,
                         img_desc.height,
                         pixels.clone(),
                         img_desc.image_id,
-                    ))
+                    )
                 } else {
                     warn_once!(
                         "display:decode_failure:from_cache:miss",
@@ -2323,22 +2332,17 @@ impl DisplayChannel {
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
                     let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
-                    match self.jpeg_decoder.decode(jpeg_data) {
-                        Some(dec) => Some(DecompressedImage::new(
-                            dec.width,
-                            dec.height,
-                            dec.rgba,
-                            img_desc.image_id,
-                        )),
-                        None => {
-                            warn_once!(
-                                "display:decode_failure:jpeg:decode_failed",
-                                "display: JPEG decode failed (backend {})",
-                                self.jpeg_decoder.name()
-                            );
-                            None
-                        }
+                    let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
+                        DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
+                    });
+                    if decoded.is_none() {
+                        warn_once!(
+                            "display:decode_failure:jpeg:decode_failed",
+                            "display: JPEG decode failed (backend {})",
+                            self.jpeg_decoder.name()
+                        );
                     }
+                    decoded
                 }
             }
             Some(ImageType::Quic) => {
@@ -2351,21 +2355,22 @@ impl DisplayChannel {
                 } else {
                     let data_size = read_u32_le(image_data, 0) as usize;
                     let quic_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
-                    match quic_decode(quic_data, img_desc.width, img_desc.height) {
-                        Some(rgba) => Some(DecompressedImage::new(
-                            img_desc.width,
-                            img_desc.height,
-                            rgba,
-                            img_desc.image_id,
-                        )),
-                        None => {
-                            warn_once!(
-                                "display:decode_failure:quic:decode_failed",
-                                "display: QUIC decode failed"
-                            );
-                            None
-                        }
+                    let decoded =
+                        quic_decode(quic_data, img_desc.width, img_desc.height).and_then(|rgba| {
+                            DecompressedImage::new(
+                                img_desc.width,
+                                img_desc.height,
+                                rgba,
+                                img_desc.image_id,
+                            )
+                        });
+                    if decoded.is_none() {
+                        warn_once!(
+                            "display:decode_failure:quic:decode_failed",
+                            "display: QUIC decode failed"
+                        );
                     }
+                    decoded
                 }
             }
             Some(ImageType::LzPalette) => {

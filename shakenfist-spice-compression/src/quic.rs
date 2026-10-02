@@ -2,6 +2,8 @@
 
 use tracing::{debug, warn};
 
+use crate::limits;
+
 const QUIC_IMAGE_TYPE_INVALID: u32 = 0;
 const QUIC_IMAGE_TYPE_GRAY: u32 = 1;
 const QUIC_IMAGE_TYPE_RGB16: u32 = 2;
@@ -1569,18 +1571,17 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Reject unreasonable dimensions to prevent huge allocations
-    // from a malicious server (16384x16384 = 1 GiB at 4 bpp).
-    if decoder.width > 16384 || decoder.height > 16384 {
+    // Reject dimensions outside the shared limits to prevent huge
+    // allocations from a malicious server.
+    let Some(total) = limits::rgba_len(decoder.width, decoder.height) else {
         warn!(
-            "quic: dimensions too large: {}x{}",
+            "quic: dimensions refused: {}x{}",
             decoder.width, decoder.height
         );
         return None;
-    }
-
-    let stride = decoder.width.checked_mul(4)?;
-    let total = decoder.height.checked_mul(stride)?;
+    };
+    // rgba_len has bounded the width, so this cannot overflow.
+    let stride = decoder.width * 4;
     let mut native = vec![0u8; total];
     if !decoder.quic_decode(&mut native, stride) {
         warn!("quic: decode failed");

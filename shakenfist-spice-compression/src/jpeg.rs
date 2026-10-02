@@ -21,13 +21,14 @@ use std::sync::Arc;
 use tracing::debug;
 use tracing::{info, warn};
 
+use crate::limits;
+
 /// A decoded JPEG frame: RGBA pixels plus width/height.
 ///
 /// Every backend upholds the same invariant: `width` and
-/// `height` are non-zero and no greater than
-/// [`MAX_DECODED_JPEG_DIMENSION`], and `rgba.len()` is exactly
-/// `width * height * 4` — which is what lets consumers index
-/// `rgba` from the dimensions without re-checking.
+/// `height` pass [`limits::rgba_len`], and `rgba.len()` is
+/// exactly the length it returns — which is what lets consumers
+/// index `rgba` from the dimensions without re-checking.
 ///
 /// Build one through [`DecodedJpeg::zeroed`] (backends that
 /// paint into a buffer we hand them) or
@@ -43,12 +44,12 @@ pub struct DecodedJpeg {
     pub height: u32,
 }
 
-/// Upper bound on per-side decoded JPEG dimension. 16384 leaves
-/// headroom for >8K displays (7680×4320 fits comfortably; one
-/// side at 16K just fits) while capping the resulting RGBA
-/// allocation at 16384×16384×4 = 1 GiB rather than the JPEG
-/// maximum of 65535×65535×4 ≈ 17 GiB — a hostile or buggy
-/// server cannot force a multi-GB allocation per frame.
+/// Upper bound on per-side decoded JPEG dimension: the shared
+/// [`limits::MAX_IMAGE_DIMENSION`], kept under its old name for
+/// existing users. A JPEG header can claim 65535×65535, which is
+/// about 17 GiB of RGBA; frames are also held to
+/// [`limits::MAX_IMAGE_PIXELS`] by [`DecodedJpeg::zeroed`] and
+/// [`DecodedJpeg::from_rgba`], which apply [`limits::rgba_len`].
 ///
 /// This is our bound, not a library default: `jpeg-decoder` 0.3
 /// ships `usize::MAX` as its decoding-buffer limit, so the
@@ -57,20 +58,19 @@ pub struct DecodedJpeg {
 /// [`MAX_DECODED_RGBA_BYTES`] to `set_max_decoding_buffer_size`
 /// first. The platform backends have no equivalent knob and are
 /// bounded by [`DecodedJpeg::zeroed`] instead.
-pub const MAX_DECODED_JPEG_DIMENSION: u32 = 16384;
+pub const MAX_DECODED_JPEG_DIMENSION: u32 = limits::MAX_IMAGE_DIMENSION;
 
-/// Byte ceiling implied by [`MAX_DECODED_JPEG_DIMENSION`]:
-/// 16384 × 16384 × 4 = 1 GiB.
+/// Byte ceiling implied by the shared limits: the largest length
+/// [`limits::rgba_len`] returns, `MAX_IMAGE_PIXELS × 4`.
 ///
 /// Fed to `jpeg_decoder::Decoder::set_max_decoding_buffer_size`,
 /// whose unit is `components × width × height` output bytes.
 /// JPEG has at most 4 components, so this bounds that crate's
-/// internal allocation by the same 1 GiB the RGBA output is
+/// internal allocation by the same ceiling the RGBA output is
 /// bounded by — a loose bound (a 1×65535 frame passes it and is
 /// then rejected on dimensions) but one that applies *before*
 /// the crate allocates rather than after.
-pub const MAX_DECODED_RGBA_BYTES: usize =
-    (MAX_DECODED_JPEG_DIMENSION as usize) * (MAX_DECODED_JPEG_DIMENSION as usize) * 4;
+pub const MAX_DECODED_RGBA_BYTES: usize = limits::MAX_IMAGE_PIXELS * 4;
 
 impl DecodedJpeg {
     /// Validate `width`/`height`, then allocate the zeroed RGBA
@@ -86,9 +86,9 @@ impl DecodedJpeg {
     /// that way; the other backends widen their `u32`, which is
     /// lossless on every target this crate builds for.
     pub fn zeroed(backend: &str, width: usize, height: usize) -> Option<Self> {
-        let (width, height) = validated_dimensions(backend, width, height)?;
+        let (width, height, len) = validated_dimensions(backend, width, height)?;
         Some(DecodedJpeg {
-            rgba: vec![0u8; (width as usize) * (height as usize) * 4],
+            rgba: vec![0u8; len],
             width,
             height,
         })
@@ -98,12 +98,12 @@ impl DecodedJpeg {
     ///
     /// Applies the same dimension bound as [`DecodedJpeg::zeroed`]
     /// and additionally rejects a buffer whose length is not
-    /// exactly `width * height * 4`. A mismatch means the decoder
-    /// and the frame header disagree about the geometry, and
-    /// every consumer of `rgba` indexes it assuming they agree.
+    /// exactly the one [`limits::rgba_len`] returns. A mismatch
+    /// means the decoder and the frame header disagree about the
+    /// geometry, and every consumer of `rgba` indexes it assuming
+    /// they agree.
     pub fn from_rgba(backend: &str, width: usize, height: usize, rgba: Vec<u8>) -> Option<Self> {
-        let (width, height) = validated_dimensions(backend, width, height)?;
-        let expected = (width as usize) * (height as usize) * 4;
+        let (width, height, expected) = validated_dimensions(backend, width, height)?;
         if rgba.len() != expected {
             warn!(
                 "{}: decoded buffer is {} bytes, expected {} for {}x{}, dropping frame",
@@ -123,26 +123,30 @@ impl DecodedJpeg {
     }
 }
 
-/// Bound a frame's dimensions before anything is allocated for
-/// it, narrowing them to `u32` on success.
+/// Bound a frame's dimensions with [`limits::rgba_len`] before
+/// anything is allocated for it. On success returns the
+/// dimensions narrowed to `u32` and the RGBA byte length.
 ///
 /// Deliberately free of any `cfg` gate: three of the four
 /// backends that call it are inside `#[cfg(target_os = ...)]`
 /// bodies, and this repo's CI runs `cargo test` on Linux only,
 /// so a copy per backend is a copy that is never executed by any
 /// test. See `dimension_guard_tests` below.
-fn validated_dimensions(backend: &str, width: usize, height: usize) -> Option<(u32, u32)> {
-    let max = MAX_DECODED_JPEG_DIMENSION as usize;
-    if width == 0 || height == 0 || width > max || height > max {
+fn validated_dimensions(backend: &str, width: usize, height: usize) -> Option<(u32, u32, usize)> {
+    let Some(len) = limits::rgba_len(width, height) else {
         warn!(
-            "{}: implausible dimensions {}x{}, dropping frame (cap: {})",
-            backend, width, height, MAX_DECODED_JPEG_DIMENSION
+            "{}: implausible dimensions {}x{}, dropping frame (caps: {} per side, {} pixels)",
+            backend,
+            width,
+            height,
+            limits::MAX_IMAGE_DIMENSION,
+            limits::MAX_IMAGE_PIXELS
         );
         return None;
-    }
-    // Both sides are <= MAX_DECODED_JPEG_DIMENSION, itself a u32
-    // constant, so neither narrowing cast can truncate.
-    Some((width as u32, height as u32))
+    };
+    // rgba_len bounds both sides by MAX_IMAGE_DIMENSION, itself a
+    // u32 constant, so neither narrowing cast can truncate.
+    Some((width as u32, height as u32, len))
 }
 
 /// Gate a payload on the JPEG SOI marker (`FF D8`) before any
@@ -343,7 +347,7 @@ impl JpegDecoder for MozJpegDecoder {
             // Bound the dimensions before asking libjpeg for
             // scanlines, so an implausible frame header costs a
             // warning rather than a multi-GB allocation.
-            let (width, height) =
+            let (width, height, _) =
                 validated_dimensions("MozJpegDecoder", decomp.width(), decomp.height())?;
             let mut started = decomp.rgba().ok()?;
             // `read_scanlines::<[u8; 4]>` returns one element
@@ -828,8 +832,8 @@ impl JpegDecoder for WicDecoder {
         }
 
         // 4 bytes per pixel; DecodedJpeg::zeroed has already
-        // bounded width and height to MAX_DECODED_JPEG_DIMENSION
-        // so this can't overflow on a 64-bit platform.
+        // bounded width and height with limits::rgba_len so this
+        // can't overflow.
         let stride = (width as usize) * 4;
 
         // CopyPixels signature: an optional source rect (None = full
@@ -2076,20 +2080,37 @@ mod dimension_guard_tests {
     const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/swatches.jpg");
 
     #[test]
-    fn max_rgba_bytes_is_the_square_of_the_dimension_cap() {
-        assert_eq!(MAX_DECODED_RGBA_BYTES, 1024 * 1024 * 1024);
+    fn max_rgba_bytes_is_the_largest_rgba_len() {
+        assert_eq!(MAX_DECODED_RGBA_BYTES, 256 * 1024 * 1024);
+        assert_eq!(limits::rgba_len(8192, 8192), Some(MAX_DECODED_RGBA_BYTES));
     }
 
     #[test]
     fn validated_dimensions_accepts_plausible_frames() {
-        assert_eq!(validated_dimensions("t", 1, 1), Some((1, 1)));
-        assert_eq!(validated_dimensions("t", 1920, 1080), Some((1920, 1080)));
-        let max = MAX_DECODED_JPEG_DIMENSION as usize;
+        assert_eq!(validated_dimensions("t", 1, 1), Some((1, 1, 4)));
         assert_eq!(
-            validated_dimensions("t", max, max),
-            Some((MAX_DECODED_JPEG_DIMENSION, MAX_DECODED_JPEG_DIMENSION)),
-            "the cap itself must be accepted, not rejected"
+            validated_dimensions("t", 1920, 1080),
+            Some((1920, 1080, 1920 * 1080 * 4))
         );
+        let max = MAX_DECODED_JPEG_DIMENSION as usize;
+        let rows = limits::MAX_IMAGE_PIXELS / max;
+        assert_eq!(
+            validated_dimensions("t", max, rows),
+            Some((
+                MAX_DECODED_JPEG_DIMENSION,
+                rows as u32,
+                MAX_DECODED_RGBA_BYTES
+            )),
+            "the caps themselves must be accepted, not rejected"
+        );
+    }
+
+    #[test]
+    fn validated_dimensions_applies_the_pixel_cap() {
+        // Each side is within the per-side cap, but the frame is
+        // 1 GiB of RGBA.
+        let max = MAX_DECODED_JPEG_DIMENSION as usize;
+        assert!(validated_dimensions("t", max, max).is_none());
     }
 
     #[test]
