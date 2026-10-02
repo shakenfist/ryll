@@ -244,7 +244,11 @@ commit each).**
   inflate with `decoder.by_ref().take(limit + 1).read_to_end(...)`
   and refuse when more than `limit` bytes come out. Derive `limit`
   from `rgba_len(img_desc.width, img_desc.height)`; a GLZ stream
-  never inflates to more than its RGBA output. Validate the declared
+  can be slightly larger than its RGBA output (33-byte header,
+  a control byte per 32 literals, and the alpha pass for RGBA),
+  so the implementation bounds the inflate at
+  `rgba_len + rgba_len/4 + 64` (`glz_stream_limit` in
+  `display.rs`). Validate the declared
   `_glz_size` against the same limit and against the inflated
   length, and rename it now that it is used. The test is a small
   DEFLATE stream of zeros that inflates past the limit.
@@ -272,8 +276,10 @@ commit each).**
 - #182: give `DisplaySurface::blit` (`surface.rs:66`) the same
   `left >= self.width || top >= self.height` early return as
   `blit_chroma` and `blit_alpha`, and compute `copy_width` with
-  saturating arithmetic. The test calls `blit` with `left = width`
-  and panics in debug on the old code.
+  saturating arithmetic. At `left == width` the old code
+  copied nothing but marked the surface dirty; the debug underflow
+  needs `left > width`, or a `left` large enough to overflow
+  `left * 4`. The test uses such a `left`.
 
 **Brief 5: documentation (one commit).**
 
@@ -308,13 +314,25 @@ pull request.
   shakenfist-spice-renderer/src` shows no non-test allocation sized
   from wire dimensions without going through `rgba_len`.
 * Each fix has a regression test that fails against `develop` at
-  78c7238.
+  78c7238. Exceptions: #177's 65535x65535 short-data test does not
+  fail on a host with lazy overcommit (the 16 GiB zeroed
+  allocation is never touched), so its regression proof is the
+  over-cap test instead; #172's and #175's oversized tests are
+  proven by reasoning, not by running the old code, which would
+  attempt multi-GiB allocations.
 * `pre-commit run --all-files` and `make test` pass on every commit.
 * The style guide, `docs/spice-protocol.md` and `AGENTS.md` describe
   the shared limit, and no prose quotes its value.
 
 ### Future work
 
+* `decode_image_and_emit` (`display.rs`, the `no_image_data` guard
+  `if image_data_start >= payload.len()`) refuses an image whose
+  descriptor ends exactly at the end of the payload. A FromCache
+  `SpiceImage` has no bytes after its descriptor, so if it is the
+  last pointed-to data in a DRAW_COPY (no mask), every such draw
+  would be dropped. Found during Step 4; not yet confirmed against
+  spice-server's marshalling or a capture; needs an issue.
 * Fuzz targets for the compression crate's decoders (#135). The
   helper makes "never allocates past the cap" a property a fuzzer
   can assert.

@@ -297,6 +297,21 @@ dimensions, version (major=0, minor=1), and codec type.
 All decompressors output RGBA pixels (BGRX/BGRA/BGR on the wire
 is converted to RGBA with alpha=255 for opaque formats).
 
+### Decode limits
+
+The image dimensions come from the server, so every image decoder
+(QUIC, LZ, GLZ, zlib-GLZ, LZ4, JPEG, H.264/video, pixmap and
+cursor) refuses an image over the shared per-side and total-pixel
+caps before allocating anything. The constants
+(`MAX_IMAGE_DIMENSION` and `MAX_IMAGE_PIXELS`) and the checked
+`rgba_len` size helper live in the
+[`limits` module](https://github.com/shakenfist/ryll/blob/develop/shakenfist-spice-compression/src/limits.rs)
+of `shakenfist-spice-compression`. A refused image is dropped and
+not painted, in the same way as a truncated LZ4 image above. The
+zlib layer of `ZLIB_GLZ_RGB` is inflated against a bound slightly
+above the RGBA size, because a GLZ stream can be a little larger
+than the pixels it decodes to.
+
 ## Display Channel Capabilities
 
 During the link handshake, ryll advertises per-channel capability flags
