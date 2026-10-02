@@ -5,9 +5,14 @@
 /// SPICE-button representations.  A future web-frontend adapter
 /// will provide the same conversions for `KeyboardEvent.code` /
 /// browser mouse-button values without touching this file.
+use std::collections::HashMap;
+
 use eframe::egui;
 
-use shakenfist_spice_renderer::channels::inputs::{Direction, LogicalKey, NavKey, PunctKey, WSKey};
+use shakenfist_spice_renderer::channels::inputs::{
+    scancode_for_logical_key, Direction, LogicalKey, NavKey, PunctKey, WSKey,
+};
+use shakenfist_spice_renderer::channels::InputEvent;
 
 /// Convert an egui key event to the substrate-neutral `LogicalKey`.
 ///
@@ -110,6 +115,78 @@ pub fn egui_key_to_logical(key: egui::Key) -> Option<LogicalKey> {
     }
 }
 
+/// The keys ryll has forwarded to the guest as pressed, keyed by the
+/// same key used for the scancode lookup.
+///
+/// egui's own `repeat` flag cannot be trusted for this. egui decides a
+/// press is a repeat by looking its *logical* key up in
+/// `InputState::keys_down`, and a key's logical identity can change
+/// between press and release: Shift+; arrives as `Key::Colon` but, if
+/// Shift is let go first, leaves as `Key::Semicolon`. `Colon` is then
+/// never removed, and every later `:` is flagged as a repeat (and was
+/// dropped) until the window lost focus. Tracking presses here, by the
+/// physical key, keeps each press paired with its release.
+#[derive(Debug, Default)]
+pub struct HeldKeys {
+    /// Held key -> the wire scancode that releases it.
+    held: HashMap<egui::Key, u32>,
+}
+
+impl HeldKeys {
+    /// Release every held key, returning the key-up events to send so
+    /// the guest does not see a key stuck down while ryll is not
+    /// forwarding input to it.
+    pub fn release_all(&mut self) -> Vec<InputEvent> {
+        self.held
+            .drain()
+            .map(|(_, up_code)| InputEvent::KeyUp(up_code))
+            .collect()
+    }
+}
+
+/// Translate one frame's egui events into the key events to forward to
+/// the guest.
+///
+/// A press of a key that is already held is an auto-repeat and is not
+/// forwarded. Releases are always forwarded, even for a key not
+/// recorded as held. Losing window focus releases every held key,
+/// because the matching key-ups will be delivered to another window.
+/// F11 and F12 are ryll's own shortcuts and are never forwarded.
+pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
+    let mut out = Vec::new();
+    for event in events {
+        match event {
+            egui::Event::WindowFocused(false) => out.extend(held.release_all()),
+            egui::Event::Key {
+                key,
+                physical_key,
+                pressed,
+                ..
+            } => {
+                let lookup_key = physical_key.unwrap_or(*key);
+                if lookup_key == egui::Key::F11 || lookup_key == egui::Key::F12 {
+                    continue;
+                }
+                let Some((down_code, up_code)) =
+                    egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
+                else {
+                    continue;
+                };
+                if *pressed {
+                    if held.held.insert(lookup_key, up_code).is_none() {
+                        out.push(InputEvent::KeyDown(down_code));
+                    }
+                } else {
+                    held.held.remove(&lookup_key);
+                    out.push(InputEvent::KeyUp(up_code));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Convert an egui pointer button to the SPICE wire button flag.
 ///
 /// This was previously in `channels::inputs` alongside the scancode
@@ -121,5 +198,114 @@ pub fn mouse_button_to_spice(button: egui::PointerButton) -> u32 {
         egui::PointerButton::Middle => shakenfist_spice_protocol::mouse_buttons::MIDDLE,
         egui::PointerButton::Extra1 => shakenfist_spice_protocol::mouse_buttons::UP,
         egui::PointerButton::Extra2 => shakenfist_spice_protocol::mouse_buttons::DOWN,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(logical: egui::Key, physical: egui::Key, pressed: bool, repeat: bool) -> egui::Event {
+        egui::Event::Key {
+            key: logical,
+            physical_key: Some(physical),
+            pressed,
+            repeat,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Reduce events to (is_down, scancode) pairs for comparison.
+    fn wire(events: Vec<InputEvent>) -> Vec<(bool, u32)> {
+        events
+            .into_iter()
+            .map(|e| match e {
+                InputEvent::KeyDown(code) => (true, code),
+                InputEvent::KeyUp(code) => (false, code),
+                other => panic!("unexpected event {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn colon_released_after_shift_is_not_stuck() {
+        // What egui hands ryll when `:` is typed twice, releasing
+        // Shift before ; each time. The first release arrives as
+        // logical Semicolon, so egui never clears Colon from
+        // keys_down and flags the second press as a repeat.
+        let mut held = HeldKeys::default();
+        let first = translate_key_events(
+            &[
+                key(egui::Key::Colon, egui::Key::Semicolon, true, false),
+                key(egui::Key::Semicolon, egui::Key::Semicolon, false, false),
+            ],
+            &mut held,
+        );
+        let second = translate_key_events(
+            &[
+                key(egui::Key::Colon, egui::Key::Semicolon, true, true),
+                key(egui::Key::Semicolon, egui::Key::Semicolon, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(first), vec![(true, 0x27), (false, 0xA7)]);
+        assert_eq!(wire(second), vec![(true, 0x27), (false, 0xA7)]);
+    }
+
+    #[test]
+    fn auto_repeat_of_held_key_is_not_forwarded() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::A, egui::Key::A, true, false),
+                key(egui::Key::A, egui::Key::A, true, true),
+                key(egui::Key::A, egui::Key::A, true, true),
+                key(egui::Key::A, egui::Key::A, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x1E), (false, 0x9E)]);
+    }
+
+    #[test]
+    fn focus_loss_releases_held_keys() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::Escape, egui::Key::Escape, true, false),
+                egui::Event::WindowFocused(false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x01), (false, 0x81)]);
+
+        // The release went to another window; pressing the key again
+        // after refocusing must still be forwarded.
+        let events = translate_key_events(
+            &[key(egui::Key::Escape, egui::Key::Escape, true, false)],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x01)]);
+    }
+
+    #[test]
+    fn release_all_empties_the_set() {
+        let mut held = HeldKeys::default();
+        translate_key_events(&[key(egui::Key::A, egui::Key::A, true, false)], &mut held);
+        assert_eq!(wire(held.release_all()), vec![(false, 0x9E)]);
+        assert!(held.release_all().is_empty());
+    }
+
+    #[test]
+    fn ryll_shortcuts_are_not_forwarded() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::F12, egui::Key::F12, true, false),
+                key(egui::Key::F12, egui::Key::F12, false, false),
+            ],
+            &mut held,
+        );
+        assert!(events.is_empty());
     }
 }

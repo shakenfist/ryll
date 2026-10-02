@@ -27,7 +27,7 @@ use crate::bugreport::{
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::GuiSurface;
-use crate::input_egui::{egui_key_to_logical, mouse_button_to_spice};
+use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
@@ -35,7 +35,6 @@ use crate::notifications::{
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
-use shakenfist_spice_renderer::channels::inputs::scancode_for_logical_key;
 use shakenfist_spice_renderer::channels::VolumeControl;
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
@@ -714,6 +713,11 @@ pub struct RyllApp {
     last_mouse_pos: Option<(u32, u32)>,
     last_modifiers: Option<egui::Modifiers>,
 
+    // Keys forwarded to the inputs channel as pressed. Used to filter
+    // auto-repeats and to send releases when input forwarding is
+    // suppressed or the window loses focus.
+    held_keys: HeldKeys,
+
     // Bitmask of mouse buttons we have forwarded as pressed to the
     // inputs channel.  Used to send synthetic releases when input
     // forwarding is suppressed (e.g. bug report dialog opens).
@@ -1272,6 +1276,7 @@ impl RyllApp {
             ticket_expiry_warned: false,
             last_mouse_pos: None,
             last_modifiers: None,
+            held_keys: HeldKeys::default(),
             forwarded_buttons: 0,
             pending_resize: None,
             last_auto_resize: None,
@@ -1425,6 +1430,7 @@ impl RyllApp {
         }
         self.last_mouse_pos = None;
         self.last_modifiers = None;
+        self.held_keys = HeldKeys::default();
         self.forwarded_buttons = 0;
         self.pending_resize = None;
         self.last_auto_resize = None;
@@ -3035,6 +3041,11 @@ impl RyllApp {
         // Don't forward input to the SPICE server when
         // the bug report dialog or region selection is active.
         if self.show_bug_dialog || self.region_select_active {
+            if let Some(tx) = &self.input_tx {
+                for ev in self.held_keys.release_all() {
+                    let _ = tx.try_send(ev);
+                }
+            }
             return;
         }
 
@@ -3076,30 +3087,8 @@ impl RyllApp {
 
             self.last_modifiers = Some(mods);
 
-            for event in &i.events {
-                if let egui::Event::Key {
-                    key,
-                    physical_key,
-                    pressed,
-                    repeat: false,
-                    ..
-                } = event
-                {
-                    let lookup_key = physical_key.unwrap_or(*key);
-                    if lookup_key == egui::Key::F11 || lookup_key == egui::Key::F12 {
-                        continue;
-                    }
-                    if let Some((down_code, up_code)) =
-                        egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
-                    {
-                        let ev = if *pressed {
-                            InputEvent::KeyDown(down_code)
-                        } else {
-                            InputEvent::KeyUp(up_code)
-                        };
-                        let _ = input_tx.try_send(ev);
-                    }
-                }
+            for ev in translate_key_events(&i.events, &mut self.held_keys) {
+                let _ = input_tx.try_send(ev);
             }
         });
     }
