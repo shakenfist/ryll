@@ -20,9 +20,10 @@ pub use usbredir::UsbredirChannel;
 pub use volume::VolumeControl;
 pub use webdav::WebdavChannel;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
@@ -56,6 +57,37 @@ pub struct EventSink {
     tx: mpsc::Sender<ChannelEvent>,
     repaint: Arc<Notify>,
     send_timeout: Option<Duration>,
+    /// Shared by every clone of this sink, so the main channel can report
+    /// drops regardless of which clone's `emit` timed out.
+    drops: Arc<EventDropCounter>,
+}
+
+/// Events discarded because a send timed out; see `EventSink::drop_stats`.
+///
+/// The last drop is stored as an `Instant` rather than a session-relative
+/// time: `EventSink` has no access to the traffic recorder's clock, so the
+/// owner converts it (`now - last_drop.elapsed()`) when it builds a snapshot.
+#[derive(Debug, Default)]
+struct EventDropCounter {
+    inner: Mutex<EventDropState>,
+}
+
+#[derive(Debug, Default)]
+struct EventDropState {
+    total: u64,
+    by_kind: BTreeMap<&'static str, u64>,
+    last_drop: Option<Instant>,
+}
+
+/// A point-in-time copy of an `EventSink`'s drop accounting.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventDropStats {
+    /// Total events dropped on send timeout.
+    pub total: u64,
+    /// Drops per `ChannelEvent::kind()`.
+    pub by_kind: BTreeMap<&'static str, u64>,
+    /// How long ago the most recent drop happened, if any.
+    pub since_last_drop: Option<Duration>,
 }
 
 impl EventSink {
@@ -64,6 +96,18 @@ impl EventSink {
             tx,
             repaint,
             send_timeout: None,
+            drops: Arc::new(EventDropCounter::default()),
+        }
+    }
+
+    /// Snapshot of the events this sink (and its clones) dropped on send
+    /// timeout. Always empty unless `with_send_timeout` was used.
+    pub fn drop_stats(&self) -> EventDropStats {
+        let state = self.drops.inner.lock().expect("lock poisoned");
+        EventDropStats {
+            total: state.total,
+            by_kind: state.by_kind.clone(),
+            since_last_drop: state.last_drop.map(|t| t.elapsed()),
         }
     }
 
@@ -83,14 +127,22 @@ impl EventSink {
                 self.tx.send(event).await.ok();
             }
             Some(limit) => {
+                // Computed before `event` is moved into `send`.
+                let kind = event.kind();
                 if tokio::time::timeout(limit, self.tx.send(event))
                     .await
                     .is_err()
                 {
+                    {
+                        let mut state = self.drops.inner.lock().expect("lock poisoned");
+                        state.total = state.total.saturating_add(1);
+                        *state.by_kind.entry(kind).or_insert(0) += 1;
+                        state.last_drop = Some(Instant::now());
+                    }
                     warn!(
-                        "channels: event send timed out after {:?}; \
+                        "channels: {} event dropped: send timed out after {:?}; \
                          renderer event consumer is wedged or starved",
-                        limit
+                        kind, limit
                     );
                 }
             }
@@ -421,6 +473,49 @@ pub struct CursorImage {
     pub pixels: Vec<u8>, // RGBA
 }
 
+impl ChannelEvent {
+    /// The variant name, for diagnostics that must not carry the payload.
+    /// Exhaustive on purpose: a new variant must be named here.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ChannelEvent::SessionInitialized { .. } => "SessionInitialized",
+            ChannelEvent::ChannelsAvailable { .. } => "ChannelsAvailable",
+            ChannelEvent::SurfaceCreated { .. } => "SurfaceCreated",
+            ChannelEvent::SurfaceDestroyed { .. } => "SurfaceDestroyed",
+            ChannelEvent::ImageReady { .. } => "ImageReady",
+            ChannelEvent::ImageReadyChroma { .. } => "ImageReadyChroma",
+            ChannelEvent::ImageReadyAlpha { .. } => "ImageReadyAlpha",
+            ChannelEvent::FillRect { .. } => "FillRect",
+            ChannelEvent::CopyBits { .. } => "CopyBits",
+            ChannelEvent::Invert { .. } => "Invert",
+            ChannelEvent::DisplayMark { .. } => "DisplayMark",
+            ChannelEvent::CursorPosition { .. } => "CursorPosition",
+            ChannelEvent::CursorShape { .. } => "CursorShape",
+            ChannelEvent::MouseMode { .. } => "MouseMode",
+            ChannelEvent::MonitorsConfig { .. } => "MonitorsConfig",
+            ChannelEvent::Statistics { .. } => "Statistics",
+            ChannelEvent::Latency { .. } => "Latency",
+            ChannelEvent::PasteCompleted { .. } => "PasteCompleted",
+            ChannelEvent::PasteFailed { .. } => "PasteFailed",
+            ChannelEvent::AgentConnected { .. } => "AgentConnected",
+            ChannelEvent::Error { .. } => "Error",
+            ChannelEvent::Notification { .. } => "Notification",
+            ChannelEvent::UsbChannelReady => "UsbChannelReady",
+            ChannelEvent::UsbDeviceConnected { .. } => "UsbDeviceConnected",
+            ChannelEvent::UsbDeviceDisconnected => "UsbDeviceDisconnected",
+            ChannelEvent::UsbConnectFailed { .. } => "UsbConnectFailed",
+            ChannelEvent::UsbDevicesChanged { .. } => "UsbDevicesChanged",
+            ChannelEvent::WebdavChannelReady => "WebdavChannelReady",
+            ChannelEvent::WebdavSharingStarted { .. } => "WebdavSharingStarted",
+            ChannelEvent::WebdavSharingStopped => "WebdavSharingStopped",
+            ChannelEvent::WebdavError { .. } => "WebdavError",
+            ChannelEvent::Disconnected { .. } => "Disconnected",
+            #[cfg(feature = "digest-decode")]
+            ChannelEvent::DigestUpdated { .. } => "DigestUpdated",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +608,60 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), repaint.notified())
             .await
             .expect("emit must wake the renderer even after the receiver is gone");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_sends_are_counted_by_kind() {
+        let (sink, _rx, _repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        assert_eq!(sink.drop_stats().total, 0);
+
+        // The slot is full and never drained, so this one times out.
+        sink.emit(ChannelEvent::MouseMode(2)).await;
+
+        let stats = sink.drop_stats();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.by_kind.get("MouseMode"), Some(&1));
+        assert_eq!(stats.by_kind.len(), 1);
+        assert!(stats.since_last_drop.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drops_are_shared_across_sink_clones() {
+        let (sink, _rx, _repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+        let clone = sink.clone();
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        clone.emit(ChannelEvent::AgentConnected(true)).await;
+
+        // `since_last_drop` is a live elapsed time, so compare the counts.
+        let (a, b) = (sink.drop_stats(), clone.drop_stats());
+        assert_eq!(a.total, 1);
+        assert_eq!(a.total, b.total);
+        assert_eq!(a.by_kind, b.by_kind);
+    }
+
+    #[tokio::test]
+    async fn a_sink_without_a_timeout_never_records_drops() {
+        let (sink, _rx, _repaint) = sink_pair(4);
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        sink.emit(ChannelEvent::MouseMode(2)).await;
+
+        assert_eq!(sink.drop_stats(), EventDropStats::default());
+    }
+
+    #[test]
+    fn kind_names_the_variant() {
+        assert_eq!(ChannelEvent::MouseMode(2).kind(), "MouseMode");
+        assert_eq!(
+            ChannelEvent::SessionInitialized(1).kind(),
+            "SessionInitialized"
+        );
+        assert_eq!(ChannelEvent::UsbChannelReady.kind(), "UsbChannelReady");
+        assert_eq!(ChannelEvent::AgentConnected(true).kind(), "AgentConnected");
     }
 }

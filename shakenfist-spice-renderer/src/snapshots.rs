@@ -6,7 +6,7 @@
 //! protocol-level introspection) without taking on ryll's
 //! bug-report ZIP machinery, which stays host-side.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -516,6 +516,24 @@ pub struct MainSnapshot {
     pub keepalive_timeout_fired: bool,
     /// See `DisplaySnapshot::writer_dropped_count`.
     pub writer_dropped_count: u64,
+    /// Total `ChannelEvent`s the main channel discarded because the
+    /// renderer's event queue stayed full for longer than
+    /// `MAIN_EVENT_SEND_TIMEOUT`. Non-zero means the UI stopped draining
+    /// events and those updates (mouse mode, latency, notifications and so
+    /// on) never reached it; see issue #428.
+    pub events_dropped_count: u64,
+    /// `events_dropped_count` broken down by `ChannelEvent` variant name,
+    /// so a report shows which state updates the UI missed.
+    pub events_dropped_by_kind: BTreeMap<String, u64>,
+    /// Session-relative seconds at the most recent event drop. `None` if no
+    /// event has been dropped.
+    pub last_event_drop_ts_secs: Option<f64>,
+    /// The server's current mouse mode (1 = server/relative, 2 =
+    /// client/absolute) as last announced by `MAIN_INIT` or `MOUSE_MODE`.
+    /// `None` until `MAIN_INIT` lands. Compare with the app snapshot's
+    /// `mouse_mode`: a mismatch means the client is sending the wrong kind
+    /// of pointer message.
+    pub server_mouse_mode: Option<u32>,
     /// Per-opcode receive counts since session start.
     /// Maps server-opcode → number of messages received with
     /// that opcode. Gives a complete picture of what message

@@ -236,6 +236,9 @@ pub struct MainChannel {
     /// Count of pcap-capture packets rejected by the writer task's
     /// queue. Mirrored into `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
+    /// The server's mouse mode as last announced by MAIN_INIT or
+    /// MOUSE_MODE. Mirrored into `MainSnapshot::server_mouse_mode`.
+    server_mouse_mode: Option<u32>,
     /// Bounded per-opcode message counters; flushed to the
     /// snapshot by `update_snapshot`. See `OpcodeCounters`.
     opcodes: OpcodeCounters,
@@ -342,6 +345,7 @@ impl MainChannel {
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
             capture_dropped_count: 0,
+            server_mouse_mode: None,
             opcodes: OpcodeCounters::new(message_names::main_server, message_names::main_client),
             mm_clock,
             agent_request_send_ts: HashMap::new(),
@@ -820,6 +824,7 @@ impl MainChannel {
                         "unknown"
                     }
                 };
+                self.server_mouse_mode = Some(init.current_mouse_mode);
                 info!(
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
@@ -855,6 +860,7 @@ impl MainChannel {
                         2 => "client (absolute)",
                         _ => "unknown",
                     };
+                    self.server_mouse_mode = Some(current as u32);
                     info!(
                         "main: mouse mode changed to {} ({}), supported_modes={}",
                         current, mode_name, supported
@@ -1130,6 +1136,20 @@ impl MainChannel {
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        snap.server_mouse_mode = self.server_mouse_mode;
+        // The sink records the drop as an Instant (it has no session
+        // clock); convert to session-relative seconds against the traffic
+        // clock here.
+        let drops = self.events.drop_stats();
+        snap.events_dropped_count = drops.total;
+        snap.events_dropped_by_kind = drops
+            .by_kind
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        snap.last_event_drop_ts_secs = drops
+            .since_last_drop
+            .map(|ago| self.traffic.elapsed().saturating_sub(ago).as_secs_f64());
         // mm_time clock state. `now()` is informational —
         // computed at snapshot time so a bug report shows the
         // server's current millisecond counter.
