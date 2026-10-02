@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use std::io::{Cursor, Read};
 
-use crate::DecompressedImage;
+use crate::{limits, DecompressedImage};
 
 const LZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
@@ -60,10 +60,9 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
     let top_down = cursor.read_u32::<BigEndian>()? != 0;
 
     // Output buffer (RGBA)
-    let output_size = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| anyhow!("LZ image dimensions overflow: {}x{}", width, height))?;
+    let Some(output_size) = limits::rgba_len(width as usize, height as usize) else {
+        return Err(anyhow!("LZ image dimensions refused: {}x{}", width, height));
+    };
     let mut output = vec![0u8; output_size];
 
     // Compressed data starts after the 28-byte header.
@@ -183,6 +182,26 @@ pub fn decompress_lz(data: &[u8]) -> Result<DecompressedImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lz_absurd_dimensions_refused_before_allocation() {
+        // 65535 x 65535 is 17 GiB of RGBA; a tiny payload must be refused
+        // rather than allocating it.
+        let mut data = Vec::new();
+        data.extend_from_slice(LZ_MAGIC);
+        data.extend_from_slice(&[0, 1]); // Version major
+        data.extend_from_slice(&[0, 0]); // Version minor
+        data.extend_from_slice(&[0, 0, 0]); // Padding
+        data.push(0); // Type
+        data.extend_from_slice(&65535u32.to_be_bytes()); // Width
+        data.extend_from_slice(&65535u32.to_be_bytes()); // Height
+        data.extend_from_slice(&0u32.to_be_bytes()); // Stride
+        data.extend_from_slice(&1u32.to_be_bytes()); // Top down
+        data.extend_from_slice(&[0, 1, 2, 3]); // Tiny payload
+
+        let err = decompress_lz(&data).expect_err("absurd dimensions must be refused");
+        assert!(err.to_string().contains("65535x65535"), "{}", err);
+    }
 
     #[test]
     fn test_lz_header_parse() {

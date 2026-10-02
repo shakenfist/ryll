@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 use crate::byte_bounded_lru::ByteBoundedLru;
-use crate::DecompressedImage;
+use crate::{limits, DecompressedImage};
 
 const GLZ_MAGIC: &[u8; 4] = b"  ZL";
 const LZ_MAX_COPY: u8 = 32;
@@ -269,10 +269,13 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
     );
 
     // Output buffer (RGBA)
-    let output_size = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| anyhow!("GLZ image dimensions overflow: {}x{}", width, height))?;
+    let Some(output_size) = limits::rgba_len(width as usize, height as usize) else {
+        return Err(anyhow!(
+            "GLZ image dimensions refused: {}x{}",
+            width,
+            height
+        ));
+    };
     let mut output = vec![0u8; output_size];
 
     // Compressed data starts after the 33-byte header.
@@ -534,6 +537,28 @@ pub async fn decompress_glz(data: &[u8], dictionary: &GlzDictionary) -> Result<D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glz_absurd_dimensions_refused_before_allocation() {
+        let mut data = Vec::new();
+        data.extend_from_slice(GLZ_MAGIC);
+        data.extend_from_slice(&[0, 1]); // Version major
+        data.extend_from_slice(&[0, 0]); // Version minor
+        data.push(0x10); // Type packed, top down
+        data.extend_from_slice(&65535u32.to_be_bytes()); // Width
+        data.extend_from_slice(&65535u32.to_be_bytes()); // Height
+        data.extend_from_slice(&0u32.to_be_bytes()); // Stride
+        data.extend_from_slice(&1u64.to_be_bytes()); // Image ID
+        data.extend_from_slice(&0u32.to_be_bytes()); // Win head dist
+        data.extend_from_slice(&[0, 1, 2, 3]); // Tiny payload
+
+        let dict = GlzDictionary::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(decompress_glz(&data, &dict))
+            .expect_err("absurd dimensions must be refused");
+        assert!(err.to_string().contains("65535x65535"), "{}", err);
+    }
 
     #[test]
     fn test_glz_header_parse() {
