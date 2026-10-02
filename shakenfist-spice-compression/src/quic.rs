@@ -482,6 +482,9 @@ struct QuicDecoder {
     image_type: u32,
     width: usize,
     height: usize,
+    /// Byte length of the RGBA image, from `limits::rgba_len`. Set
+    /// once `quic_decode_begin` has accepted the dimensions.
+    output_len: usize,
     io_idx: usize,
     io_available_bits: u32,
     io_word: u32,
@@ -525,6 +528,7 @@ impl QuicDecoder {
             image_type: QUIC_IMAGE_TYPE_INVALID,
             width: 0,
             height: 0,
+            output_len: 0,
             io_idx: 0,
             io_available_bits: 0,
             io_word: 0,
@@ -552,6 +556,7 @@ impl QuicDecoder {
         self.io_end = self.io_now.len();
         self.io_idx = 0;
         self.rows_completed = 0;
+        self.output_len = 0;
     }
 
     fn read_io_word(&mut self) -> bool {
@@ -635,6 +640,16 @@ impl QuicDecoder {
         if !self.decode_eat32bits() {
             return false;
         }
+
+        // The dimensions come from the server. Refuse them before
+        // reset_channels sizes each channel's row buffer from the
+        // width, or a header claiming a 4 Gi pixel row allocates
+        // 16 GiB per channel before any pixel data is read.
+        let Some(output_len) = limits::rgba_len(self.width, self.height) else {
+            warn!("quic: dimensions refused: {}x{}", self.width, self.height);
+            return false;
+        };
+        self.output_len = output_len;
 
         let bpc = quic_image_bpc(self.image_type);
         self.reset_channels(bpc)
@@ -1602,17 +1617,10 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Reject dimensions outside the shared limits to prevent huge
-    // allocations from a malicious server.
-    let Some(total) = limits::rgba_len(decoder.width, decoder.height) else {
-        warn!(
-            "quic: dimensions refused: {}x{}",
-            decoder.width, decoder.height
-        );
-        return None;
-    };
-    // rgba_len has bounded the width, so this cannot overflow.
-    let stride = decoder.width * 4;
+    // quic_decode_begin has checked the dimensions with rgba_len, so
+    // the width is bounded and the stride cannot overflow.
+    let total = decoder.output_len;
+    let stride = decoder.width * RGB32_PIXEL_SIZE;
     let mut native = vec![0u8; total];
     if !decoder.quic_decode(&mut native, stride) {
         warn!("quic: decode failed");
@@ -1723,6 +1731,29 @@ mod tests {
         // so trail some zero words to keep it fed.
         out.extend_from_slice(&[0u8; 16]);
         out
+    }
+
+    #[test]
+    fn oversized_width_is_refused_before_allocating() {
+        // Issue #172: the per-channel row buffers used to be sized
+        // from the wire width before the dimension check ran, so this
+        // header asked for four 16 GiB buffers.
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, u32::MAX, 1, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(!decoder.quic_decode_begin(&data));
+        for channel in &decoder.channels {
+            assert_eq!(channel.correlate_row.row.capacity(), 0);
+        }
+
+        assert_eq!(quic_decode(&data, u32::MAX, 1), None);
+    }
+
+    #[test]
+    fn oversized_height_is_refused() {
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, 1, u32::MAX, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(!decoder.quic_decode_begin(&data));
+        assert_eq!(quic_decode(&data, 1, u32::MAX), None);
     }
 
     /// A QUIC header (magic, version, type, width, height) followed
