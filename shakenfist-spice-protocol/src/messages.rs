@@ -1059,9 +1059,117 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// One complete message split off the front of a receive buffer by
+/// [`take_message`]: the header and the raw bytes it framed.
+#[derive(Debug, Clone)]
+pub struct ReceivedMessage {
+    pub header: MessageHeader,
+    /// The whole message as received, header included.
+    pub raw: Vec<u8>,
+}
+
+impl ReceivedMessage {
+    /// The message body, without its header.
+    pub fn payload(&self) -> &[u8] {
+        &self.raw[MessageHeader::SIZE..]
+    }
+}
+
+/// Split the next complete message off the front of a receive buffer.
+///
+/// Returns `Ok(None)` while `buffer` does not yet hold a whole message, so
+/// a read loop calls this until it returns `None` and then reads more.
+///
+/// # Errors
+///
+/// Fails with [`io::ErrorKind::InvalidData`] as soon as a header declares a
+/// body larger than `max_body`, without waiting for that body. The size is
+/// server-supplied, so without the check a peer could make the caller
+/// buffer up to 4 GiB per channel by declaring a huge message and sending
+/// it slowly. The caller should drop the connection.
+pub fn take_message(buffer: &mut Vec<u8>, max_body: usize) -> io::Result<Option<ReceivedMessage>> {
+    if buffer.len() < MessageHeader::SIZE {
+        return Ok(None);
+    }
+    let header = MessageHeader::read(buffer)?;
+    let body = header.message_size as usize;
+    if body > max_body {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "message type {} declares a {} byte body, over the {} byte limit",
+                header.message_type, body, max_body
+            ),
+        ));
+    }
+    let total = MessageHeader::SIZE + body;
+    if buffer.len() < total {
+        return Ok(None);
+    }
+    let raw = buffer.drain(..total).collect();
+    Ok(Some(ReceivedMessage { header, raw }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- take_message tests ---
+
+    #[test]
+    fn take_message_splits_complete_messages() {
+        let mut buffer = make_message(3, &[1, 2, 3]);
+        buffer.extend_from_slice(&make_message(4, &[]));
+        buffer.extend_from_slice(&[9]); // start of a third header
+
+        let first = take_message(&mut buffer, 16)
+            .expect("ok")
+            .expect("complete");
+        assert_eq!(first.header.message_type, 3);
+        assert_eq!(first.payload(), &[1, 2, 3]);
+        assert_eq!(first.raw.len(), MessageHeader::SIZE + 3);
+
+        let second = take_message(&mut buffer, 16)
+            .expect("ok")
+            .expect("complete");
+        assert_eq!(second.header.message_type, 4);
+        assert!(second.payload().is_empty());
+
+        assert!(take_message(&mut buffer, 16).expect("ok").is_none());
+        assert_eq!(buffer, vec![9]);
+    }
+
+    #[test]
+    fn take_message_waits_for_the_body() {
+        let full = make_message(3, &[1, 2, 3]);
+        let mut buffer = full[..full.len() - 1].to_vec();
+        assert!(take_message(&mut buffer, 16).expect("ok").is_none());
+        assert_eq!(
+            buffer.len(),
+            full.len() - 1,
+            "a partial message is left in place"
+        );
+    }
+
+    /// shakenfist/ryll#181: an oversized body is refused from the header
+    /// alone, before any of it has arrived.
+    #[test]
+    fn take_message_refuses_oversized_body_from_header() {
+        let mut buffer = Vec::new();
+        MessageHeader {
+            message_type: 3,
+            message_size: u32::MAX,
+        }
+        .write(&mut buffer)
+        .expect("write");
+        let err = take_message(&mut buffer, 16).expect_err("over the limit");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let mut buffer = make_message(3, &[0; 17]);
+        assert!(take_message(&mut buffer, 16).is_err());
+        let mut buffer = make_message(3, &[0; 16]);
+        assert!(take_message(&mut buffer, 16).expect("ok").is_some());
+    }
 
     // --- ChannelsList tests ---
 

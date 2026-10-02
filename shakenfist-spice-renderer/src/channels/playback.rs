@@ -14,11 +14,11 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+    make_message, take_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, EventSink};
+use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
 
 const AUDIO_DATA_MODE_RAW: u16 = 1;
 const AUDIO_DATA_MODE_OPUS: u16 = 3;
@@ -612,17 +612,9 @@ impl PlaybackChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        loop {
-            if self.buffer.len() < MessageHeader::SIZE {
-                break;
-            }
-            let header = MessageHeader::read(&self.buffer)?;
-            let total = MessageHeader::SIZE + header.message_size as usize;
-            if self.buffer.len() < total {
-                break;
-            }
-            let payload = self.buffer[MessageHeader::SIZE..total].to_vec();
-            self.buffer.drain(..total);
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let header = &message.header;
+            let payload = message.payload();
             let msg_type = header.message_type;
 
             // Counted before dispatch so both known and unknown
@@ -652,12 +644,12 @@ impl PlaybackChannel {
                 "playback",
                 msg_type,
                 message_names::playback_server(msg_type),
-                &payload,
+                payload,
             );
 
             match msg_type {
                 playback_server::SET_ACK => {
-                    let set_ack = SetAck::read(&payload)?;
+                    let set_ack = SetAck::read(payload)?;
                     self.ack_generation = set_ack.generation;
                     self.ack_window = set_ack.window;
                     self.message_count = 0;
@@ -671,7 +663,7 @@ impl PlaybackChannel {
                     self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                     self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                    let ping = Ping::read(&payload)?;
+                    let ping = Ping::read(payload)?;
                     let mut pong_payload = Vec::new();
                     ping.write_pong(&mut pong_payload)?;
                     let response = make_message(main_client::PONG, &pong_payload);
@@ -679,7 +671,7 @@ impl PlaybackChannel {
                     self.pong_send_count = self.pong_send_count.saturating_add(1);
                 }
                 playback_server::NOTIFY => {
-                    let notify = NotifyMessage::read(&payload)?;
+                    let notify = NotifyMessage::read(payload)?;
                     if self.log_config.verbose {
                         logging::log_detail(&format!(
                             "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
@@ -858,7 +850,7 @@ impl PlaybackChannel {
                     }
                 }
                 _ => {
-                    logging::log_unknown_once("playback", msg_type, &payload);
+                    logging::log_unknown_once("playback", msg_type, payload);
                     self.opcodes.note_unknown(msg_type);
                 }
             }

@@ -296,6 +296,21 @@ let output_size = (width as usize)
     .ok_or_else(|| anyhow!("dimensions overflow: {}x{}", width, height))?;
 ```
 
+### Message framing
+
+Channel read loops split messages off their receive buffer with
+`take_message` (`shakenfist-spice-protocol/src/messages.rs`), passing
+`MAX_MESSAGE_BODY` (`shakenfist-spice-renderer/src/channels/mod.rs`).
+Do not re-implement the header-then-body loop in a channel: the
+server-declared `message_size` is a `u32`, and the shared helper is
+what refuses an oversized body before buffering it. The cap is the
+largest pixmap the display channel will decode plus headroom, so it
+never refuses a message the renderer would otherwise accept.
+
+An oversized message is the one malformed message that ends the
+channel rather than being warned about and skipped: its body cannot
+be skipped without buffering it, so the framing cannot recover.
+
 ## Error handling
 
 - **Channel handlers never panic.** All methods return `Result<()>`.

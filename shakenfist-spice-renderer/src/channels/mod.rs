@@ -43,6 +43,15 @@ pub enum RequestId {
     Str(String),
 }
 
+/// Largest message body, in bytes, any channel will buffer before
+/// disconnecting (shakenfist/ryll#181). The biggest legitimate message is a
+/// display draw carrying an uncompressed pixmap, so this is the largest
+/// pixmap the display channel will decode plus 1 MiB for the draw's other
+/// fields; a cap any tighter would drop sessions that send uncompressed
+/// images the renderer would otherwise accept. The other channels carry
+/// far smaller messages, so this one shared cap is loose for them.
+pub(crate) const MAX_MESSAGE_BODY: usize = display::MAX_PIXMAP_PIXELS * 4 + 1024 * 1024;
+
 /// Where every channel hands a `ChannelEvent` to the renderer.
 ///
 /// An event only reaches the screen if the renderer is woken after it is

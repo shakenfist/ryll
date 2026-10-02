@@ -15,14 +15,14 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, InputsKeyModifiers, KeyEvent, MessageHeader, MouseButton, MouseMotion,
+    make_message, take_message, InputsKeyModifiers, KeyEvent, MouseButton, MouseMotion,
     MousePosition, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
-use super::{ChannelEvent, EventSink, InputEvent};
+use super::{ChannelEvent, EventSink, InputEvent, MAX_MESSAGE_BODY};
 
 /// spice-gtk throttles motion messages to this many pending before an ACK
 const MOTION_ACK_BUNCH: u32 = 4;
@@ -430,27 +430,16 @@ impl InputsChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while self.buffer.len() >= MessageHeader::SIZE {
-            let header = MessageHeader::read(&self.buffer)?;
-            let total_size = MessageHeader::SIZE + header.message_size as usize;
-
-            if self.buffer.len() < total_size {
-                break;
-            }
-
-            // Record to ring buffer before draining
-            let raw = self.buffer[..total_size].to_vec();
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "inputs",
-                header.message_type,
-                message_names::inputs_server(header.message_type),
-                &raw,
+                msg_type,
+                message_names::inputs_server(msg_type),
+                &message.raw,
             );
 
-            let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
-            self.buffer.drain(..total_size);
-
-            self.handle_server_message(header.message_type, &payload)
+            self.handle_server_message(msg_type, message.payload())
                 .await?;
         }
 
