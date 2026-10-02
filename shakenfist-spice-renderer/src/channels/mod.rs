@@ -149,6 +149,13 @@ impl EventSink {
         }
         self.repaint.notify_one();
     }
+
+    /// Wake the renderer without queueing anything, for state published
+    /// outside the event queue (see `crate::session_state`). Never blocks,
+    /// so it cannot stall the publisher the way a full queue can.
+    pub fn wake(&self) {
+        self.repaint.notify_one();
+    }
 }
 
 /// Events sent from channels to the main application
@@ -283,9 +290,6 @@ pub enum ChannelEvent {
     /// Cursor image shape updated
     CursorShape(CursorImage),
 
-    /// Mouse mode from server (1=server, 2=client)
-    MouseMode(u32),
-
     MonitorsConfig {
         width: u32,
         height: u32,
@@ -323,9 +327,6 @@ pub enum ChannelEvent {
         reason: String,
         request_id: Option<RequestId>,
     },
-
-    /// vdagent connection state changed.
-    AgentConnected(bool),
 
     /// Connection error
     Error {
@@ -491,13 +492,11 @@ impl ChannelEvent {
             ChannelEvent::DisplayMark { .. } => "DisplayMark",
             ChannelEvent::CursorPosition { .. } => "CursorPosition",
             ChannelEvent::CursorShape { .. } => "CursorShape",
-            ChannelEvent::MouseMode { .. } => "MouseMode",
             ChannelEvent::MonitorsConfig { .. } => "MonitorsConfig",
             ChannelEvent::Statistics { .. } => "Statistics",
             ChannelEvent::Latency { .. } => "Latency",
             ChannelEvent::PasteCompleted { .. } => "PasteCompleted",
             ChannelEvent::PasteFailed { .. } => "PasteFailed",
-            ChannelEvent::AgentConnected { .. } => "AgentConnected",
             ChannelEvent::Error { .. } => "Error",
             ChannelEvent::Notification { .. } => "Notification",
             ChannelEvent::UsbChannelReady => "UsbChannelReady",
@@ -619,11 +618,11 @@ mod tests {
         assert_eq!(sink.drop_stats().total, 0);
 
         // The slot is full and never drained, so this one times out.
-        sink.emit(ChannelEvent::MouseMode(2)).await;
+        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
 
         let stats = sink.drop_stats();
         assert_eq!(stats.total, 1);
-        assert_eq!(stats.by_kind.get("MouseMode"), Some(&1));
+        assert_eq!(stats.by_kind.get("Latency"), Some(&1));
         assert_eq!(stats.by_kind.len(), 1);
         assert!(stats.since_last_drop.is_some());
     }
@@ -635,7 +634,7 @@ mod tests {
         let clone = sink.clone();
 
         sink.emit(ChannelEvent::SessionInitialized(1)).await;
-        clone.emit(ChannelEvent::AgentConnected(true)).await;
+        clone.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
 
         // `since_last_drop` is a live elapsed time, so compare the counts.
         let (a, b) = (sink.drop_stats(), clone.drop_stats());
@@ -649,19 +648,22 @@ mod tests {
         let (sink, _rx, _repaint) = sink_pair(4);
 
         sink.emit(ChannelEvent::SessionInitialized(1)).await;
-        sink.emit(ChannelEvent::MouseMode(2)).await;
+        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
 
         assert_eq!(sink.drop_stats(), EventDropStats::default());
     }
 
     #[test]
     fn kind_names_the_variant() {
-        assert_eq!(ChannelEvent::MouseMode(2).kind(), "MouseMode");
+        assert_eq!(ChannelEvent::Latency { sample_ms: 2.0 }.kind(), "Latency");
         assert_eq!(
             ChannelEvent::SessionInitialized(1).kind(),
             "SessionInitialized"
         );
         assert_eq!(ChannelEvent::UsbChannelReady.kind(), "UsbChannelReady");
-        assert_eq!(ChannelEvent::AgentConnected(true).kind(), "AgentConnected");
+        assert_eq!(
+            ChannelEvent::Disconnected(ChannelType::Main).kind(),
+            "Disconnected"
+        );
     }
 }

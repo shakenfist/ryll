@@ -1,7 +1,7 @@
 use std::fmt::Write as FmtWrite;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +20,7 @@ use rand::RngCore;
 use shakenfist_spice_renderer::{ChannelEvent, InputEvent, SurfaceMirror};
 use shakenfist_spice_webrtc::{UdpBindPolicy, WebrtcBridge};
 use subtle::ConstantTimeEq;
-use tokio::sync::{broadcast, mpsc, Mutex, Notify};
+use tokio::sync::{broadcast, mpsc, watch, Mutex, Notify};
 use tracing::info;
 
 use super::signalling::EncoderInfra;
@@ -141,16 +141,16 @@ pub struct WebState {
     /// lock hold time is microseconds and no `.await` is held
     /// while the guard is live.
     pub last_offer_at: std::sync::Mutex<Instant>,
-    /// The SPICE session's current mouse mode, maintained by
-    /// [`crate::web::inputs::run_mouse_mode_tracker`] and read by
-    /// each bridge's input relay to choose between absolute and
-    /// relative pointer messages.
+    /// The SPICE session's current mouse mode, as the main channel
+    /// last published it through `SessionState`. Each bridge's input
+    /// relay gets a clone and reads it on every pointer event to
+    /// choose between absolute and relative pointer messages.
     ///
-    /// Lives in shared state rather than in the relay because the
-    /// mode is announced at session-init, seconds before any
-    /// browser connects: a `broadcast::Receiver` subscribed when
-    /// the relay spawns would never see that message.
-    pub mouse_mode: Arc<AtomicU32>,
+    /// A `watch` rather than an event subscription because the mode
+    /// is announced at session-init, seconds before any browser
+    /// connects: a receiver cloned when the relay spawns still holds
+    /// that value, where a `broadcast::Receiver` would never see it.
+    pub mouse_mode: watch::Receiver<u32>,
     /// Whether the current bridge's offer/answer failed to settle on
     /// a video codec, set by `post_offer` once `accept_offer`
     /// returns and read by the input relay when the browser says
@@ -185,6 +185,9 @@ impl WebState {
             None,
             None,
             None,
+            // No session, so nothing will ever publish a mode; the
+            // receiver keeps the initial value after its sender drops.
+            watch::channel(shakenfist_spice_renderer::MOUSE_MODE_UNKNOWN).1,
             Arc::new(Mutex::new(SurfaceMirror::new())),
             Arc::new(std::sync::Mutex::new(None)),
             // Loopback-capable, so the web tests still have an
@@ -199,10 +202,12 @@ impl WebState {
     /// 5a's `run_web` calls this after spawning `run_connection`
     /// so the HTTP handlers (and 5b–5e relays) can find the
     /// senders.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_channels(
         input_tx: mpsc::Sender<InputEvent>,
         resize_tx: mpsc::Sender<(u32, u32)>,
         event_tx: broadcast::Sender<ChannelEvent>,
+        mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
         udp_bind: UdpBindPolicy,
@@ -212,6 +217,7 @@ impl WebState {
             Some(input_tx),
             Some(resize_tx),
             Some(event_tx),
+            mouse_mode,
             surface_mirror,
             active_opus_tx,
             udp_bind,
@@ -224,6 +230,7 @@ impl WebState {
         input_tx: Option<mpsc::Sender<InputEvent>>,
         resize_tx: Option<mpsc::Sender<(u32, u32)>>,
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
+        mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
         active_opus_tx: super::audio::ActiveSenderSlot,
         udp_bind: UdpBindPolicy,
@@ -254,12 +261,7 @@ impl WebState {
             // Initialise 60 s in the past so the first offer
             // always succeeds without a cold-start delay.
             last_offer_at: std::sync::Mutex::new(Instant::now() - Duration::from_secs(60)),
-            // Default to client mode: it is what a guest running
-            // vdagent negotiates, and it keeps the pre-session
-            // behaviour identical to what it was before the mode
-            // was tracked at all. The tracker corrects this within
-            // milliseconds of session-init in any real session.
-            mouse_mode: Arc::new(AtomicU32::new(shakenfist_spice_protocol::MOUSE_MODE_CLIENT)),
+            mouse_mode,
             no_video_codec: Arc::new(AtomicBool::new(false)),
         }
     }

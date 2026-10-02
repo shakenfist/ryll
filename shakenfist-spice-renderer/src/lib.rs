@@ -28,6 +28,7 @@ pub mod notification;
 pub mod notification_sink;
 pub mod opcode_counters;
 pub mod session;
+pub mod session_state;
 pub mod snapshots;
 pub mod surface_mirror;
 pub mod traffic;
@@ -57,6 +58,7 @@ pub use session::spawn_digest_poller;
 pub use session::{run_connection, run_headless};
 #[cfg(unix)]
 pub use session::{spawn_control_socket, SessionStatus};
+pub use session_state::{SessionState, SessionStateRx, MOUSE_MODE_UNKNOWN};
 pub use snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
     InputEventRecord, InputsSnapshot, MainSnapshot, StreamSnapshot,

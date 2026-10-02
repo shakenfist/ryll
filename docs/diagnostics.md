@@ -127,7 +127,10 @@ audit matrix and minimum-baseline rationale.
 discarded because the renderer's event queue stayed full for longer than
 `MAIN_EVENT_SEND_TIMEOUT` (per `ChannelEvent` variant name, with the
 session-relative time of the latest drop); a non-zero count means the UI
-stopped draining events. `server_mouse_mode` is the mouse mode the server
+stopped draining events. Mouse mode and vdagent state are not events, so
+they are never counted here: the main channel publishes them through the
+renderer's `SessionState` watch channels, which hold the latest value and
+cannot drop it. `server_mouse_mode` is the mouse mode the server
 last announced in `MAIN_INIT` or `MOUSE_MODE` (1 = server/relative,
 2 = client/absolute); compare it with `mouse_mode` in the app snapshot, as a
 mismatch means the client is sending the wrong kind of pointer message.

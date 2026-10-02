@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
+use crate::session_state::SessionState;
 use crate::snapshots::MainSnapshot;
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
@@ -189,6 +190,10 @@ const MAX_OUTSTANDING_AGENT_REQUESTS: u32 = 99;
 pub struct MainChannel {
     stream: SpiceStream,
     events: EventSink,
+    /// Mouse mode and agent state, published as latest values rather
+    /// than as events so a stalled UI cannot lose them; see
+    /// `crate::session_state`.
+    state: SessionState,
     buffer: Vec<u8>,
     session_id: Option<u32>,
     agent_connected: bool,
@@ -300,6 +305,7 @@ impl MainChannel {
     pub fn new(
         stream: SpiceStream,
         events: EventSink,
+        state: SessionState,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -315,6 +321,7 @@ impl MainChannel {
         MainChannel {
             stream,
             events,
+            state,
             buffer: Vec::with_capacity(65536),
             session_id: None,
             agent_connected: false,
@@ -813,9 +820,9 @@ impl MainChannel {
                 self.events
                     .emit(ChannelEvent::SessionInitialized(init.session_id))
                     .await;
-                self.events
-                    .emit(ChannelEvent::AgentConnected(self.agent_connected))
-                    .await;
+                // Published after the event, as the event it replaced was,
+                // so the GUI announces the session before the agent.
+                self.publish_agent_connected();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
                     2 => "client (absolute)",
@@ -829,9 +836,7 @@ impl MainChannel {
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
                 );
-                self.events
-                    .emit(ChannelEvent::MouseMode(init.current_mouse_mode))
-                    .await;
+                self.publish_mouse_mode(init.current_mouse_mode);
 
                 // Request client mouse mode (absolute positioning) if
                 // the server supports it. Client mode allows absolute
@@ -872,9 +877,7 @@ impl MainChannel {
                     if current as u32 == MOUSE_MODE_CLIENT {
                         self.mouse_mode_request_pending = false;
                     }
-                    self.events
-                        .emit(ChannelEvent::MouseMode(current as u32))
-                        .await;
+                    self.publish_mouse_mode(current as u32);
 
                     // The server often reverts to SERVER mode after a
                     // guest reboot; re-request CLIENT mode so the
@@ -1041,14 +1044,14 @@ impl MainChannel {
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
-                self.events.emit(ChannelEvent::AgentConnected(true)).await;
+                self.publish_agent_connected();
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
-                self.events.emit(ChannelEvent::AgentConnected(false)).await;
+                self.publish_agent_connected();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
                 // Drop probe bookkeeping tied to the previous
@@ -1169,6 +1172,21 @@ impl MainChannel {
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    /// Publish the server's mouse mode to the frontends and wake the
+    /// renderer to read it. Never blocks: unlike an event, this cannot be
+    /// lost to a UI that has stopped draining the queue.
+    fn publish_mouse_mode(&self, mode: u32) {
+        self.state.publish_mouse_mode(mode);
+        self.events.wake();
+    }
+
+    /// Publish `self.agent_connected` to the frontends, as
+    /// `publish_mouse_mode` does for the mouse mode.
+    fn publish_agent_connected(&self) {
+        self.state.publish_agent_connected(self.agent_connected);
+        self.events.wake();
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports

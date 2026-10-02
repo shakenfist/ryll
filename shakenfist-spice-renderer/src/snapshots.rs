@@ -519,8 +519,10 @@ pub struct MainSnapshot {
     /// Total `ChannelEvent`s the main channel discarded because the
     /// renderer's event queue stayed full for longer than
     /// `MAIN_EVENT_SEND_TIMEOUT`. Non-zero means the UI stopped draining
-    /// events and those updates (mouse mode, latency, notifications and so
-    /// on) never reached it; see issue #428.
+    /// events and those updates (latency samples, notifications and so
+    /// on) never reached it; see issue #428. Mouse mode and agent state
+    /// cannot be among them: they are published through `SessionState`,
+    /// not the event queue.
     pub events_dropped_count: u64,
     /// `events_dropped_count` broken down by `ChannelEvent` variant name,
     /// so a report shows which state updates the UI missed.

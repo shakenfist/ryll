@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use tokio::sync::{broadcast, mpsc, oneshot, Notify};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -44,6 +44,7 @@ use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
 use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
 use crate::notification_sink::NotificationSink;
+use crate::session_state::SessionState;
 use crate::snapshots::ChannelSnapshots;
 use crate::surface_mirror::SurfaceMirror;
 use crate::traffic::TrafficSink;
@@ -94,21 +95,17 @@ struct HeadlessStats {
 ///
 /// `spice_connected` is conservative: we report `true` as long as
 /// the connection task handle is still alive (it exits only once the
-/// main channel disconnects).  `agent_connected` reflects the latest
-/// `ChannelEvent::AgentConnected` observed by the broadcast fan-out.
+/// main channel disconnects).  `agent_connected` reads the session's
+/// `SessionState` watch, so it is the main channel's latest value.
 /// `surfaces` is populated from the live `SurfaceMirror` so a
 /// `status` reply matches what the `screenshot` verb would observe.
 pub struct SessionStatus {
     /// True while the connection task is running.  The control server
     /// reads this via the `StatusProvider` trait.
     connected: Arc<AtomicBool>,
-    /// Current vdagent connection state, updated by the broadcast
-    /// fan-out task whenever a `ChannelEvent::AgentConnected` is
-    /// observed.  Reads here are best-effort: a `status` request
-    /// arriving between the SPICE main channel publishing the event
-    /// and the fan-out task storing it will see the older value, but
-    /// that race is at most one bus-tick wide.
-    agent_connected: Arc<AtomicBool>,
+    /// Current vdagent connection state, as the main channel last
+    /// published it through `SessionState`.
+    agent_connected: watch::Receiver<bool>,
     /// Live pixel-store mirror.  `snapshot()` uses `try_lock` so a
     /// slow apply task never stalls the `status` reply path; on
     /// contention it falls back to an empty surface list.  This is
@@ -127,7 +124,7 @@ impl SessionStatus {
     /// that did, until web mode grew a socket of its own.
     pub fn new(
         connected: Arc<AtomicBool>,
-        agent_connected: Arc<AtomicBool>,
+        agent_connected: watch::Receiver<bool>,
         surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     ) -> Self {
         Self {
@@ -170,7 +167,7 @@ impl crate::control::StatusProvider for SessionStatus {
         };
         crate::control::protocol::StatusResult {
             spice_connected: self.connected.load(Ordering::Relaxed),
-            agent_connected: self.agent_connected.load(Ordering::Relaxed),
+            agent_connected: *self.agent_connected.borrow(),
             surfaces,
         }
     }
@@ -184,10 +181,16 @@ impl crate::control::StatusProvider for SessionStatus {
 /// graceful disconnect, on error, or aborted by the `cancel`
 /// flag (a fresh reconnect superseding this attempt, or a
 /// host-side Ctrl+C bridge raising the same flag).
+///
+/// `session_state` is where the main channel publishes mouse mode and
+/// agent state. The caller subscribes to it before calling this, and
+/// should create a fresh one for every attempt: its senders are dropped
+/// when this session ends.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     config: ConnectionConfig,
     event_tx: mpsc::Sender<ChannelEvent>,
+    session_state: SessionState,
     repaint_notify: Arc<Notify>,
     input_rx: mpsc::Receiver<InputEvent>,
     usb_rx: mpsc::Receiver<UsbCommand>,
@@ -247,6 +250,7 @@ pub async fn run_connection(
     let mut main_channel = MainChannel::new(
         main_stream,
         events.clone().with_send_timeout(MAIN_EVENT_SEND_TIMEOUT),
+        session_state,
         capture.clone(),
         byte_counter.clone(),
         traffic.clone(),
@@ -523,6 +527,10 @@ pub async fn run_connection(
 /// the server unlinks its socket file on the way out and an abort
 /// would skip that.
 ///
+/// `agent_connected` is the session's `SessionStateRx::agent_connected`,
+/// which the `agent_connected` event is translated from. It is not on the
+/// event bus because a client lagging the bus could miss a transition.
+///
 /// Unix-only: the server uses `tokio::net::UnixListener`, which has
 /// no Windows equivalent in this shape.
 #[cfg(unix)]
@@ -530,6 +538,7 @@ pub fn spawn_control_socket(
     sock_path: PathBuf,
     status: Arc<dyn crate::control::StatusProvider>,
     event_tx: broadcast::Sender<ChannelEvent>,
+    agent_connected: watch::Receiver<bool>,
     input_tx: mpsc::Sender<InputEvent>,
     surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     cancel: CancellationToken,
@@ -537,7 +546,14 @@ pub fn spawn_control_socket(
     let server = crate::control::Server::new(sock_path);
     tokio::spawn(async move {
         if let Err(e) = server
-            .run(status, event_tx, input_tx, surface_mirror, cancel)
+            .run(
+                status,
+                event_tx,
+                agent_connected,
+                input_tx,
+                surface_mirror,
+                cancel,
+            )
             .await
         {
             warn!("control: server exited with error: {}", e);
@@ -650,11 +666,12 @@ pub async fn run_headless(
     // `status` queries.
     let spice_connected = Arc::new(AtomicBool::new(true));
 
-    // Track the current vdagent connection state.  Updated by the
-    // fan-out task whenever a `ChannelEvent::AgentConnected` arrives;
-    // read by the `SessionStatus` provider so `status` requests
-    // reflect reality without having to peer into the main channel.
-    let agent_connected = Arc::new(AtomicBool::new(false));
+    // Mouse mode and vdagent state, published by the main channel.
+    // Subscribed here, before the session exists, so nothing the main
+    // channel publishes can be missed. `status` requests and the
+    // control socket's `agent_connected` event read the agent half.
+    let session_state = SessionState::new();
+    let session_state_rx = session_state.subscribe();
 
     // Live pixel store rebuilt from the broadcast bus.  Constructed
     // unconditionally so the control socket's `screenshot` verb and
@@ -690,6 +707,7 @@ pub async fn run_headless(
         let result = run_connection(
             config,
             event_tx,
+            session_state,
             repaint_notify,
             input_rx,
             usb_rx,
@@ -769,13 +787,14 @@ pub async fn run_headless(
     let control_handle = control_socket_path.map(|sock_path| {
         let status: Arc<dyn crate::control::StatusProvider> = Arc::new(SessionStatus::new(
             spice_connected.clone(),
-            agent_connected.clone(),
+            session_state_rx.agent_connected.clone(),
             surface_mirror.clone(),
         ));
         spawn_control_socket(
             sock_path,
             status,
             event_broadcast_tx.clone(),
+            session_state_rx.agent_connected.clone(),
             input_tx_for_control,
             surface_mirror.clone(),
             control_cancel.clone(),
@@ -797,17 +816,10 @@ pub async fn run_headless(
     // `ryll/src/main.rs::run_web` follows the same shape; we keep
     // both paths separate rather than abstracting because each is
     // five lines and the surrounding wiring differs.
-    //
-    // The fan-out also caches the latest `agent_connected` state in
-    // the shared `AtomicBool` so `status` requests reflect reality.
     let stats_event_rx = event_broadcast_tx.subscribe();
     let fanout_broadcast_tx = event_broadcast_tx.clone();
-    let fanout_agent_connected = agent_connected.clone();
     let _fanout_handle = tokio::spawn(async move {
         while let Some(event) = event_rx.recv().await {
-            if let ChannelEvent::AgentConnected(connected) = &event {
-                fanout_agent_connected.store(*connected, Ordering::Relaxed);
-            }
             // `broadcast::Sender::send` is non-blocking.  An error
             // means there are no current receivers, which is fine
             // for events the headless stats drain does not care
@@ -865,9 +877,23 @@ pub async fn run_headless(
     // Every other way out leaves it `None`, and the task is joined
     // after the loop instead.
     let mut connection_join: Option<ConnectionJoin> = None;
+    // Logs each vdagent state the main channel publishes. Cleared once
+    // the session's senders are gone, so a finished session does not
+    // spin this branch on a `changed()` that fails at once.
+    let mut agent_connected_rx = session_state_rx.agent_connected;
+    let mut agent_state_open = true;
 
     loop {
         tokio::select! {
+            changed = agent_connected_rx.changed(), if agent_state_open => {
+                match changed {
+                    Ok(()) => {
+                        let connected = *agent_connected_rx.borrow_and_update();
+                        info!("headless: vdagent connected={}", connected);
+                    }
+                    Err(_) => agent_state_open = false,
+                }
+            }
             event_result = event_rx.recv() => {
                 let event = match event_result {
                     Ok(event) => event,
@@ -935,9 +961,6 @@ pub async fn run_headless(
                     ChannelEvent::PasteFailed { reason, .. } => {
                         error!("headless: paste failed: {}", reason);
                         paste_failed = true;
-                    }
-                    ChannelEvent::AgentConnected(connected) => {
-                        info!("headless: vdagent connected={}", connected);
                     }
                     ChannelEvent::Error { channel, message } => {
                         error!("Error on {}: {}", channel.name(), message);

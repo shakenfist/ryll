@@ -40,7 +40,8 @@ use shakenfist_spice_renderer::channels::VolumeControl;
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
-    ChannelEvent, ClipboardBackend, CursorImage, InputEvent, UsbCommand, WebdavCommand,
+    ChannelEvent, ClipboardBackend, CursorImage, InputEvent, SessionState, SessionStateRx,
+    UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -650,6 +651,10 @@ struct PendingBugReport {
 pub struct RyllApp {
     // Communication channels
     event_rx: mpsc::Receiver<ChannelEvent>,
+    /// Mouse mode and agent state, as the current session's main
+    /// channel publishes them. Replaced on every reconnect, together
+    /// with `event_rx`; read once per frame by `sync_session_state`.
+    session_state: SessionStateRx,
     input_tx: Option<mpsc::Sender<InputEvent>>,
     resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
     last_sent_resize: Option<(u32, u32)>,
@@ -677,6 +682,9 @@ pub struct RyllApp {
     // Session state
     connected: bool,
     error_message: Option<String>,
+    /// The mouse mode this app is acting on, copied from
+    /// `session_state` each frame. Kept as a field so a bug report
+    /// records the app's view beside the server's.
     mouse_mode: u32,
     /// Auto-reconnect state machine; supplants the old
     /// `show_disconnect_dialog` + `disconnect_reason` pair.
@@ -1099,6 +1107,8 @@ impl RyllApp {
         glz_dictionary_cap_bytes: usize,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+        let session_state = SessionState::new();
+        let session_state_rx = session_state.subscribe();
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
@@ -1201,6 +1211,7 @@ impl RyllApp {
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
+                    session_state,
                     conn_notify,
                     input_rx,
                     usb_rx,
@@ -1232,6 +1243,7 @@ impl RyllApp {
 
         RyllApp {
             event_rx,
+            session_state: session_state_rx,
             input_tx: Some(input_tx),
             resize_tx: Some(resize_tx),
             last_sent_resize: None,
@@ -1247,7 +1259,7 @@ impl RyllApp {
             last_cadence_key: Instant::now(),
             connected: false,
             error_message: None,
-            mouse_mode: 0,
+            mouse_mode: MOUSE_MODE_UNKNOWN,
             reconnect_state: ReconnectState::Idle,
             awaiting_reconnect_outcome: false,
             last_modal_at: None,
@@ -1367,6 +1379,10 @@ impl RyllApp {
         self.signal_auto_snapshot_retire();
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
+        // A fresh state for the new session, subscribed before it is
+        // spawned. Keeping the old receivers would leave this app
+        // reading a finished session's last mouse mode.
+        let session_state = SessionState::new();
         let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
         let (usb_tx, usb_rx) = mpsc::channel(16);
         let (webdav_tx, webdav_rx) = mpsc::channel(16);
@@ -1378,6 +1394,7 @@ impl RyllApp {
         let channel_snapshots = ChannelSnapshots::new();
 
         self.event_rx = event_rx;
+        self.session_state = session_state.subscribe();
         self.input_tx = Some(input_tx);
         self.resize_tx = Some(resize_tx);
         self.last_sent_resize = None;
@@ -1393,7 +1410,7 @@ impl RyllApp {
         self.last_cadence_key = Instant::now();
         self.connected = false;
         self.error_message = None;
-        self.mouse_mode = 0;
+        self.mouse_mode = MOUSE_MODE_UNKNOWN;
         // Clear the main-channel keepalive-timeout flag so a
         // subsequent disconnect reports its own cause cleanly
         // rather than inheriting the previous attempt's state.
@@ -1481,6 +1498,7 @@ impl RyllApp {
                 if let Err(e) = shakenfist_spice_renderer::run_connection(
                     connection_config,
                     event_tx_clone,
+                    session_state,
                     conn_notify,
                     input_rx,
                     usb_rx,
@@ -2090,15 +2108,6 @@ impl RyllApp {
                     self.cursor_texture = None; // force recreation
                 }
 
-                ChannelEvent::MouseMode(mode) => {
-                    info!(
-                        "app: mouse mode: {} ({})",
-                        mode,
-                        if mode == 1 { "server" } else { "client" }
-                    );
-                    self.mouse_mode = mode;
-                }
-
                 ChannelEvent::MonitorsConfig { width, height } => {
                     debug!("app: requested monitors config {}x{}", width, height);
                 }
@@ -2208,23 +2217,6 @@ impl RyllApp {
                     }
                 }
 
-                ChannelEvent::AgentConnected(connected) => {
-                    info!("app: vdagent connected={}", connected);
-                    self.agent_connected = connected;
-                    // Record the agent-state transition. Affects clipboard sync, paste,
-                    // and resolution updates — useful for the user to see when those
-                    // features come or go.
-                    self.push_connection_event(
-                        NotifySeverity::Info,
-                        if connected {
-                            "Guest agent connected"
-                        } else {
-                            "Guest agent disconnected"
-                        }
-                        .to_string(),
-                    );
-                }
-
                 ChannelEvent::Disconnected(channel) => {
                     info!("app: channel {} disconnected", channel.name());
 
@@ -2291,7 +2283,58 @@ impl RyllApp {
             }
         }
 
+        // After the drain rather than before it, so an agent change the
+        // main channel published after queueing `SessionInitialized` is
+        // announced after the session is, as it was when it was an event.
+        self.sync_session_state();
         self.update_app_snapshot();
+    }
+
+    /// Pick up the mouse mode and agent state the main channel has
+    /// published since the last frame.
+    ///
+    /// These travel on a `watch` rather than the event queue because
+    /// the main channel abandons an event it cannot queue within five
+    /// seconds, and a lost mouse-mode change left this app sending the
+    /// pointer messages the server ignores until reconnect (#428). A
+    /// `watch` only holds the latest value, so a stall can delay these
+    /// but not lose them; several agent changes inside one stall are
+    /// announced as one.
+    fn sync_session_state(&mut self) {
+        let mode = *self.session_state.mouse_mode.borrow();
+        if mode != self.mouse_mode {
+            info!(
+                "app: mouse mode: {} ({})",
+                mode,
+                if mode == MOUSE_MODE_SERVER {
+                    "server"
+                } else {
+                    "client"
+                }
+            );
+            self.mouse_mode = mode;
+        }
+
+        let agent = {
+            let seen = self.session_state.agent_connected.borrow_and_update();
+            seen.has_changed().then_some(*seen)
+        };
+        if let Some(connected) = agent {
+            info!("app: vdagent connected={}", connected);
+            self.agent_connected = connected;
+            // Record the agent-state transition. Affects clipboard sync, paste,
+            // and resolution updates — useful for the user to see when those
+            // features come or go.
+            self.push_connection_event(
+                NotifySeverity::Info,
+                if connected {
+                    "Guest agent connected"
+                } else {
+                    "Guest agent disconnected"
+                }
+                .to_string(),
+            );
+        }
     }
 
     /// Clear USB operation-in-progress flags.
