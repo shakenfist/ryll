@@ -2437,14 +2437,28 @@ impl DisplayChannel {
             Some(ImageType::FromCache) => {
                 // Look up in cache
                 if let Some(pixels) = self.image_cache.get(&img_desc.image_id) {
-                    // None when the cached buffer does not fit the
-                    // descriptor's dimensions.
-                    DecompressedImage::new(
+                    // The cache holds pixels without dimensions, so these
+                    // come from the descriptor and the server can name
+                    // any size for a cached id. None when the cached
+                    // buffer does not fit them.
+                    let cached_len = pixels.len();
+                    let image = DecompressedImage::new(
                         img_desc.width,
                         img_desc.height,
                         pixels.clone(),
                         img_desc.image_id,
-                    )
+                    );
+                    if image.is_none() {
+                        warn_once!(
+                            "display:decode_failure:from_cache:size_mismatch",
+                            "display: cached image {} is {} bytes, does not fit {}x{}",
+                            img_desc.image_id,
+                            cached_len,
+                            img_desc.width,
+                            img_desc.height
+                        );
+                    }
+                    image
                 } else {
                     warn_once!(
                         "display:decode_failure:from_cache:miss",
@@ -2631,6 +2645,9 @@ impl DisplayChannel {
                 let right_px = (src_right as usize).min(src_w);
                 let bottom_px = (src_bottom as usize).min(src_h);
 
+                // In bounds for any source rect: DecompressedImage
+                // guarantees out_pixels is src_w * src_h * 4 bytes, and
+                // the rect has just been clamped to src_w x src_h.
                 if right_px > left_px && bottom_px > top_px {
                     let new_w = right_px - left_px;
                     let new_h = bottom_px - top_px;
@@ -2662,6 +2679,10 @@ impl DisplayChannel {
                         continue;
                     }
 
+                    // The intersection lies inside the destination box,
+                    // which is at most out_width x out_height (less where
+                    // saturating_add clipped it), so like the crop above
+                    // the sub-copy stays inside out_pixels.
                     let sub_w = (ir - il) as usize;
                     let sub_h = (ib - it) as usize;
                     let x_off = (il - dest_left) as usize;
@@ -4480,6 +4501,17 @@ mod tests {
         v
     }
 
+    /// A FromCache SpiceImage for `id`, claiming `width` x `height`.
+    ///
+    /// FromCache carries no data after its descriptor, but
+    /// `decode_image_and_emit` refuses an image that ends the payload,
+    /// so this pads it the way a following field would.
+    fn from_cache_image(id: u64, width: u32, height: u32) -> Vec<u8> {
+        let mut v = image_descriptor(id, ImageType::FromCache, 0, width, height);
+        v.extend_from_slice(&[0u8; 4]);
+        v
+    }
+
     /// (left, top, width, height, pixels) of each ImageReady emitted so
     /// far.
     fn drain_image_events(peers: &mut TestChannelPeers) -> Vec<(u32, u32, u32, u32, Vec<u8>)> {
@@ -4543,5 +4575,75 @@ mod tests {
             .expect("a refused pixmap is not an error");
 
         assert!(drain_image_events(&mut peers).is_empty());
+    }
+
+    /// Draw a 2x2 Pixmap with CACHE_ME, so it is cached as `id`. Its
+    /// BGRX bytes are 1 to 16 in order.
+    async fn cache_2x2_pixmap(channel: &mut DisplayChannel, peers: &mut TestChannelPeers, id: u64) {
+        let pixels: Vec<u8> = (1..=16).collect();
+        let image = pixmap_image(id, IMAGE_FLAGS_CACHE_ME, 2, 2, 8, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+        assert_eq!(
+            drain_image_events(peers).len(),
+            1,
+            "the pixmap itself is drawn"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_cache_larger_than_the_cached_image_is_refused() {
+        // #174: cache a 2x2 pixmap as id 42 (16 bytes), then draw it
+        // from the cache claiming 10000x10000 with source rect
+        // (0,0)-(100,1). Before the fix the crop sliced
+        // out_pixels[0..400] out of 16 bytes and panicked. The clip
+        // path indexed the same way, so also try a full-image source
+        // rect, which skips the crop, clipped to that same strip.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(42, 10000, 10000);
+        let strip: WireRect = (0, 0, 1, 100);
+        let whole: WireRect = (0, 0, 10000, 10000);
+        for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
+            channel
+                .handle_message(
+                    display_server::DRAW_COPY,
+                    &draw_copy_payload(src_rect, clip_rects, &image),
+                )
+                .await
+                .expect("a refused cache hit is not an error");
+            assert!(drain_image_events(&mut peers).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn from_cache_crops_a_source_rect_past_the_image_to_the_image() {
+        // The crop clamps the source rect to the image, so a rect
+        // running off the right and bottom yields the part that
+        // exists rather than reading past the cached pixels.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(42, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((1, 1, 100, 100), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, rgba) = &events[0];
+        assert_eq!((*width, *height), (1, 1));
+        // Bottom-right source pixel: BGRX (13, 14, 15, 16) -> RGBA.
+        assert_eq!(rgba, &vec![15, 14, 13, 255]);
     }
 }
