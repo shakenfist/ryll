@@ -1771,22 +1771,30 @@ impl RyllApp {
             NotifySeverity::Error,
             format!("Connection attempt failed: {}", message),
         );
-        self.maybe_write_disconnect_snapshot("connect", &message);
 
         if self.connected || self.awaiting_reconnect_outcome {
             // Either a session was set up before the failure (a
             // secondary channel would not open), so this is a
             // disconnect and the ticket policy applies, or this was an
             // auto-retry, whose budget the state machine keeps.
+            self.maybe_write_disconnect_snapshot("connect", &message);
             self.handle_critical_disconnect(message);
             return;
         }
 
         // A first attempt or a manual Reconnect that never reached a
-        // session. Routing this through `handle_critical_disconnect`
-        // would retry silently in the background and, for a
-        // `delete-this-file=1` ticket, claim the ticket was consumed by
-        // a session that never existed. Say what happened instead.
+        // session. That is usually a mistyped port or a server that is
+        // down rather than a ryll bug, and the zip would hold no
+        // traffic, so only write one when the user asked for bug
+        // reports or a capture.
+        if self.bug_report_dir.is_some() || self.capture.is_some() {
+            self.maybe_write_disconnect_snapshot("connect", &message);
+        }
+
+        // Routing this through `handle_critical_disconnect` would retry
+        // silently in the background and, for a `delete-this-file=1`
+        // ticket, claim the ticket was consumed by a session that never
+        // existed. Say what happened instead.
         self.reconnect_state =
             ReconnectState::Modal(ModalVariant::ConnectFailed { error: message });
         self.last_modal_at = Some(Instant::now());

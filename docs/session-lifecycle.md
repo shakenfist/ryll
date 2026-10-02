@@ -212,7 +212,11 @@ two ways:
 - Otherwise this was a first attempt or a manual Reconnect that never
   reached a session, so it lands in `Modal(ConnectFailed)`. It does not
   retry in the background. With `delete-this-file=1` it also does not
-  claim that a session which never existed consumed the ticket.
+  claim that a session which never existed consumed the ticket. These
+  failures are usually a mistyped port or a server that is down, and
+  there is no traffic to capture. They therefore write a disconnect
+  snapshot only when `--bug-report-dir` or `--capture` is set, whereas
+  the first branch always writes one, as any disconnect does.
 
 ### Modal variants and console.vv ticket keys
 
