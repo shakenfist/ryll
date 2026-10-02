@@ -11,6 +11,8 @@
 //! - A `MockStatusProvider` that returns a configurable `StatusResult`.
 //! - A `tokio::sync::broadcast::Sender<ChannelEvent>` that tests push
 //!   synthetic events onto directly.
+//! - A `tokio::sync::watch::Sender<bool>` standing in for the session's
+//!   published vdagent state.
 //! - A `tokio::sync::mpsc` whose receiver the test inspects to verify
 //!   that `send_key` and `paste` produce the expected `InputEvent`s.
 //! - A `SurfaceMirror` pre-populated via the `with_test_surface` helper
@@ -39,7 +41,7 @@ use base64::Engine as _;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent};
@@ -106,6 +108,9 @@ struct TestInputs {
     /// Push synthetic `ChannelEvent`s here to exercise the event
     /// translator / subscription machinery.
     pub event_tx: broadcast::Sender<ChannelEvent>,
+    /// Publish vdagent state here, as the main channel does through
+    /// `SessionState`, to exercise the `agent_connected` event.
+    pub agent_connected_tx: watch::Sender<bool>,
     /// Read `InputEvent`s emitted by `send_key` / `paste` verbs here.
     pub input_rx: mpsc::Receiver<InputEvent>,
     /// The surface mirror the server reads for `screenshot` verbs.
@@ -133,6 +138,7 @@ async fn spawn_server(
     std::mem::forget(dir);
 
     let (event_tx, _) = broadcast::channel::<ChannelEvent>(1024);
+    let (agent_connected_tx, agent_connected_rx) = watch::channel(false);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
 
     let shutdown = CancellationToken::new();
@@ -140,6 +146,7 @@ async fn spawn_server(
     let task = tokio::spawn(server.run(
         status.clone(),
         event_tx.clone(),
+        agent_connected_rx,
         input_tx,
         mirror.clone(),
         shutdown.clone(),
@@ -153,6 +160,7 @@ async fn spawn_server(
         ServerHandle { shutdown, task },
         TestInputs {
             event_tx,
+            agent_connected_tx,
             input_rx,
             mirror,
             status,
@@ -770,27 +778,20 @@ async fn agent_connected_event_only_on_transition() {
     .await;
     let _sub_resp = recv_line(&mut r).await;
 
-    // First AgentConnected(true) → event delivered.
-    inputs
-        .event_tx
-        .send(ChannelEvent::AgentConnected(true))
-        .expect("broadcast send");
+    // First publish of true → event delivered.
+    inputs.agent_connected_tx.send_replace(true);
     let ev = recv_line(&mut r).await;
     assert_eq!(ev["event"], "agent_connected");
     assert_eq!(ev["data"]["connected"], true);
 
-    // Second AgentConnected(true) → no event (same state, not a transition).
-    // Inject another, then inject AgentConnected(false) to produce a
-    // second observable event.  We use that to confirm there is no
-    // intermediate event for the duplicate true.
-    inputs
-        .event_tx
-        .send(ChannelEvent::AgentConnected(true))
-        .expect("broadcast send (duplicate)");
-    inputs
-        .event_tx
-        .send(ChannelEvent::AgentConnected(false))
-        .expect("broadcast send (false)");
+    // Second publish of true → no event (same state, not a transition).
+    // Publish it, then publish false to produce a second observable
+    // event.  We use that to confirm there is no intermediate event for
+    // the duplicate true.  Yield between the two so the translator sees
+    // the duplicate on its own rather than coalesced into the false.
+    inputs.agent_connected_tx.send_replace(true);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    inputs.agent_connected_tx.send_replace(false);
 
     let ev = recv_line(&mut r).await;
     assert_eq!(ev["event"], "agent_connected");
@@ -1336,6 +1337,44 @@ async fn unknown_method_returns_unknown_method() {
     let resp = recv_line(&mut r).await;
     assert_eq!(resp["ok"], false);
     assert_eq!(resp["error"]["code"], "unknown_method");
+
+    handle.stop().await;
+}
+
+/// 19. An agent transition survives a burst that lags the event bus.
+///
+/// The bus has 1024 slots; a client that falls further behind than that
+/// skips what it lagged past. Agent state used to ride the bus, so a
+/// transition published just before a burst was skipped along with it.
+/// Published through the watch, it is still delivered.
+#[tokio::test]
+async fn agent_transition_survives_a_lagged_event_bus() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["agent_connected"] }),
+    )
+    .await;
+    let _sub_resp = recv_line(&mut r).await;
+
+    // No await between these, so on this single-threaded runtime the
+    // translator cannot run until the burst has overrun its receiver.
+    inputs.agent_connected_tx.send_replace(true);
+    for _ in 0..2048 {
+        let _ = inputs
+            .event_tx
+            .send(ChannelEvent::Latency { sample_ms: 1.0 });
+    }
+
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "agent_connected");
+    assert_eq!(ev["data"]["connected"], true);
 
     handle.stop().await;
 }

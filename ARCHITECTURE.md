@@ -194,6 +194,8 @@ shakenfist-spice-renderer/src/
 ├── usb/                 # USB device backends (RealDevice, VirtualMsc)
 ├── webdav/              # WebDAV mux + embedded server
 ├── session.rs           # run_connection, run_headless orchestrators
+├── session_state.rs     # SessionState: watch channels for mouse mode and
+│                        #   agent state, shared by every frontend
 ├── capture_sink.rs      # CaptureSink trait
 ├── clipboard.rs         # ClipboardBackend trait
 ├── device_config.rs     # Virtual-disk / shared-directory config shapes
@@ -275,7 +277,12 @@ flowchart TB
   left the UI stale with nothing to diagnose; binding them into one type
   makes forgetting impossible rather than merely discouraged. The main
   channel's sink additionally carries `MAIN_EVENT_SEND_TIMEOUT`, so a
-  wedged consumer warns instead of hanging the read loop.
+  wedged consumer warns (and counts the drop) instead of hanging the read
+  loop. Because that sink abandons events, and the web/headless broadcast bus
+  lags, state does not travel on it: mouse mode and agent state are published
+  on `tokio::sync::watch` channels in `SessionState`, which hold only the
+  latest value and cannot be dropped. The session-end event is sent with
+  `emit_terminal`, which never drops.
   This lets egui sleep when nothing is happening rather than polling
   at 60 Hz; idle CPU drops by an order of magnitude on systems without
   GPU acceleration. A 1 Hz `request_repaint_after` fallback covers

@@ -18,8 +18,9 @@
 //! renderer's [`InputsChannel`] expects.
 //!
 //! Which pointer message we then send depends on the negotiated
-//! mouse mode, tracked by [`run_mouse_mode_tracker`]: absolute
-//! positions in client mode, relative deltas in server mode. A
+//! mouse mode, read from the session's `SessionState` watch:
+//! absolute positions in client mode, relative deltas in server
+//! mode. [`run_mouse_mode_tracker`] tells the browser too. A
 //! SPICE server discards the form it did not negotiate without
 //! saying anything, so sending the wrong one presents as a dead
 //! pointer rather than as an error.
@@ -29,15 +30,13 @@
 //! [`KeyUp`]: shakenfist_spice_renderer::InputEvent::KeyUp
 //! [`InputsChannel`]: shakenfist_spice_renderer
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
 use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
-use shakenfist_spice_renderer::{
-    even_dimensions, make_scancode, ChannelEvent, InputEvent, SurfaceMirror,
-};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use shakenfist_spice_renderer::{even_dimensions, make_scancode, InputEvent, SurfaceMirror};
+use tokio::sync::{mpsc, watch, Mutex};
 use tracing::{debug, info, warn};
 
 use super::control::{send_msg, ControlMsg, ControlSink};
@@ -100,48 +99,27 @@ enum BrowserMsg {
     Hello,
 }
 
-/// Track the SPICE session's mouse mode into a shared cell for
-/// [`run_input_relay`] to read.
+/// Tell the browser each time the SPICE session's mouse mode
+/// changes.
 ///
-/// This is a long-lived task spawned once by `run_web`, not per
-/// bridge, because the mode is session state: the server announces
-/// it at session-init, seconds before any browser connects, and a
-/// `broadcast::Receiver` created later would never see that
-/// message. A per-offer subscription would therefore always start
-/// out not knowing the mode.
-pub async fn run_mouse_mode_tracker(
-    mut event_rx: broadcast::Receiver<ChannelEvent>,
-    mouse_mode: Arc<AtomicU32>,
-    control_tx: ControlSink,
-) {
-    loop {
-        match event_rx.recv().await {
-            Ok(ChannelEvent::MouseMode(mode)) => {
-                mouse_mode.store(mode, Ordering::Relaxed);
-                info!("web inputs: mouse mode is now {}", mode);
-                // The browser draws the cursor differently per
-                // mode, so it needs to know too. A browser that
-                // connects after this point is caught up by
-                // `post_offer`, which sends the current mode once
-                // the bridge is installed.
-                send_msg(&control_tx, &ControlMsg::MouseMode { mode });
-            }
-            Ok(_) => {}
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                // A dropped MouseMode would leave us sending the
-                // wrong message type indefinitely, so say so.
-                warn!(
-                    "web inputs: mouse mode tracker lagged by {} events; \
-                     mouse mode may be stale",
-                    n
-                );
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                debug!("web inputs: mouse mode tracker exiting (broadcast closed)");
-                return;
-            }
-        }
+/// The browser draws the cursor differently per mode, so it needs
+/// to know as well as [`run_input_relay`], which reads the same
+/// watch for itself. This is a long-lived task spawned once by
+/// `run_web`, not per bridge: the control queue outlives any one
+/// browser, and a browser that connects later is caught up by its
+/// `hello` rather than by this task.
+///
+/// `mouse_mode` is a `watch`, so several changes made while this
+/// task was not running arrive as the latest of them and none is
+/// ever skipped. Returns when the session's `SessionState` is
+/// dropped, which is when the session ends.
+pub async fn run_mouse_mode_tracker(mut mouse_mode: watch::Receiver<u32>, control_tx: ControlSink) {
+    while mouse_mode.changed().await.is_ok() {
+        let mode = *mouse_mode.borrow_and_update();
+        info!("web inputs: mouse mode is now {}", mode);
+        send_msg(&control_tx, &ControlMsg::MouseMode { mode });
     }
+    debug!("web inputs: mouse mode tracker exiting (session ended)");
 }
 
 /// Spawn-friendly relay. Loops until `control_rx` closes (i.e.
@@ -156,7 +134,7 @@ pub async fn run_input_relay(
     input_tx: mpsc::Sender<InputEvent>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
-    mouse_mode: Arc<AtomicU32>,
+    mouse_mode: watch::Receiver<u32>,
     control_tx: ControlSink,
     no_video_codec: Arc<AtomicBool>,
 ) {
@@ -225,7 +203,10 @@ pub async fn run_input_relay(
                 // server-mode session moves nothing at all, which
                 // is what made this worth fixing rather than
                 // documenting.
-                let event = if mouse_mode.load(Ordering::Relaxed) == MOUSE_MODE_SERVER {
+                // Copied out rather than matched on the borrow, which
+                // holds the watch's read lock.
+                let server_mode = *mouse_mode.borrow() == MOUSE_MODE_SERVER;
+                let event = if server_mode {
                     // First move after connect has no reference
                     // point; treat it as a zero delta rather than
                     // as a jump from the origin.
@@ -305,7 +286,7 @@ pub async fn run_input_relay(
             }
 
             BrowserMsg::Hello => {
-                let mode = mouse_mode.load(Ordering::Relaxed);
+                let mode = *mouse_mode.borrow();
                 debug!("web inputs: hello; replying with mouse mode {}", mode);
                 send_msg(&control_tx, &ControlMsg::MouseMode { mode });
 
@@ -343,6 +324,7 @@ fn denormalise(x_norm: f32, y_norm: f32, w: u32, h: u32) -> (u32, u32) {
 mod tests {
     use super::*;
     use shakenfist_spice_protocol::MOUSE_MODE_CLIENT;
+    use shakenfist_spice_renderer::ChannelEvent;
     use std::time::Duration;
 
     async fn primary_mirror(width: u32, height: u32) -> Arc<Mutex<SurfaceMirror>> {
@@ -384,16 +366,17 @@ mod tests {
         mpsc::Receiver<(u32, u32)>,
         tokio::task::JoinHandle<()>,
     ) {
-        spawn_relay_sharing_mode(mirror, Arc::new(AtomicU32::new(mode)))
+        // The sender is dropped at once; the receiver keeps the value.
+        spawn_relay_sharing_mode(mirror, watch::channel(mode).1)
     }
 
-    /// As [`spawn_relay_in_mode`], but the caller keeps the mode cell
-    /// so it can change the mode while the relay is running — which
-    /// is how the tracker task drives it in production.
+    /// As [`spawn_relay_in_mode`], but the caller keeps the mode's
+    /// sender so it can change the mode while the relay is running —
+    /// which is how the main channel drives it in production.
     #[allow(clippy::type_complexity)]
     fn spawn_relay_sharing_mode(
         mirror: Arc<Mutex<SurfaceMirror>>,
-        mouse_mode: Arc<AtomicU32>,
+        mouse_mode: watch::Receiver<u32>,
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
@@ -410,7 +393,7 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn spawn_relay_watching_outbound(
         mirror: Arc<Mutex<SurfaceMirror>>,
-        mouse_mode: Arc<AtomicU32>,
+        mouse_mode: watch::Receiver<u32>,
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
@@ -662,38 +645,63 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn mouse_mode_tracker_records_the_latest_mode() {
-        let (event_tx, event_rx) = broadcast::channel::<ChannelEvent>(8);
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
-        let (outbound_tx, mut outbound) = crate::web::control::control_queue();
-        let handle = tokio::spawn(run_mouse_mode_tracker(event_rx, mode.clone(), outbound_tx));
-
-        event_tx
-            .send(ChannelEvent::MouseMode(MOUSE_MODE_SERVER))
-            .expect("send");
-
-        // Poll briefly: the tracker is a separate task.
-        for _ in 0..100 {
-            if mode.load(Ordering::Relaxed) == MOUSE_MODE_SERVER {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(mode.load(Ordering::Relaxed), MOUSE_MODE_SERVER);
-
-        // A change is also pushed to any browser already connected —
-        // the pull path only covers a browser that arrives later.
+    /// Read the next browser-bound message, which must be a mouse mode.
+    async fn next_mouse_mode(outbound: &mut mpsc::Receiver<Vec<u8>>) -> serde_json::Value {
         let payload = tokio::time::timeout(Duration::from_secs(1), outbound.recv())
             .await
             .expect("the tracker did not tell the browser within 1s")
             .expect("outbound queue closed");
         let v: serde_json::Value = serde_json::from_slice(&payload).expect("JSON");
         assert_eq!(v["type"], "mouse-mode");
-        assert_eq!(v["mode"], MOUSE_MODE_SERVER);
+        v["mode"].clone()
+    }
 
-        drop(event_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mouse_mode_tracker_tells_the_browser_about_a_change() {
+        let (mode_tx, mode_rx) = watch::channel(MOUSE_MODE_CLIENT);
+        let (outbound_tx, mut outbound) = crate::web::control::control_queue();
+        let handle = tokio::spawn(run_mouse_mode_tracker(mode_rx, outbound_tx));
+
+        // A change is pushed to any browser already connected — the
+        // hello only covers a browser that arrives later.
+        mode_tx.send_replace(MOUSE_MODE_SERVER);
+        assert_eq!(next_mouse_mode(&mut outbound).await, MOUSE_MODE_SERVER);
+
+        // The session ending drops the sender, and the tracker with it.
+        drop(mode_tx);
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("the tracker should exit when the session's state is dropped")
+            .expect("tracker task panicked");
+    }
+
+    /// The defect the tracker used to have. It read the session's
+    /// event bus, a `broadcast` channel of 1024 slots, and a burst
+    /// that overran it skipped whatever mode change was inside: the
+    /// tracker could only warn that the mode "may be stale". The
+    /// watch it reads now coalesces a burst into its last value.
+    #[tokio::test]
+    async fn mouse_mode_tracker_delivers_the_last_of_a_burst() {
+        let (mode_tx, mode_rx) = watch::channel(MOUSE_MODE_CLIENT);
+        let (outbound_tx, mut outbound) = crate::web::control::control_queue();
+        let _handle = tokio::spawn(run_mouse_mode_tracker(mode_rx, outbound_tx));
+
+        // No await in here, so on this single-threaded runtime the
+        // tracker cannot run until the whole burst has been published —
+        // more changes than the old bus could have held.
+        for _ in 0..2048 {
+            mode_tx.send_replace(MOUSE_MODE_SERVER);
+            mode_tx.send_replace(MOUSE_MODE_CLIENT);
+        }
+        mode_tx.send_replace(MOUSE_MODE_SERVER);
+
+        assert_eq!(next_mouse_mode(&mut outbound).await, MOUSE_MODE_SERVER);
+        // One message for the whole burst, not a backlog.
+        tokio::task::yield_now().await;
+        assert!(
+            outbound.try_recv().is_err(),
+            "the burst should have been coalesced into one message"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -790,9 +798,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hello_is_answered_with_the_current_mouse_mode() {
         let mirror = primary_mirror(640, 480).await;
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_SERVER));
+        let (_mode_tx, mode) = watch::channel(MOUSE_MODE_SERVER);
         let (tx, _input_rx, _resize_rx, mut outbound, _h) =
-            spawn_relay_watching_outbound(mirror, mode.clone());
+            spawn_relay_watching_outbound(mirror, mode);
 
         tx.send(br#"{"type":"hello"}"#.to_vec())
             .await
@@ -823,7 +831,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hello_is_answered_with_the_no_video_notice() {
         let mirror = primary_mirror(640, 480).await;
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let (_mode_tx, mode) = watch::channel(MOUSE_MODE_CLIENT);
         let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
         let (input_tx, _input_rx) = mpsc::channel::<InputEvent>(16);
         let (resize_tx, _resize_rx) = mpsc::channel::<(u32, u32)>(4);
@@ -868,7 +876,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_working_viewer_is_told_nothing_about_video() {
         let mirror = primary_mirror(640, 480).await;
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let (_mode_tx, mode) = watch::channel(MOUSE_MODE_CLIENT);
         let (tx, _input_rx, _resize_rx, mut outbound, _h) =
             spawn_relay_watching_outbound(mirror, mode);
 
@@ -899,7 +907,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ordinary_input_produces_no_outbound_traffic() {
         let mirror = primary_mirror(640, 480).await;
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
+        let (_mode_tx, mode) = watch::channel(MOUSE_MODE_CLIENT);
         let (tx, mut input_rx, _resize_rx, mut outbound, _h) =
             spawn_relay_watching_outbound(mirror, mode);
 
@@ -926,8 +934,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_mid_session_mode_change_switches_the_pointer_message() {
         let mirror = primary_mirror(1000, 1000).await;
-        let mode = Arc::new(AtomicU32::new(MOUSE_MODE_CLIENT));
-        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_sharing_mode(mirror, mode.clone());
+        let (mode_tx, mode) = watch::channel(MOUSE_MODE_CLIENT);
+        let (tx, mut input_rx, _resize_rx, _h) = spawn_relay_sharing_mode(mirror, mode);
 
         tx.send(br#"{"type":"pointer-move","x_norm":0.5,"y_norm":0.5}"#.to_vec())
             .await
@@ -937,7 +945,7 @@ mod tests {
             other => panic!("expected MouseMove in client mode, got {:?}", other),
         }
 
-        mode.store(MOUSE_MODE_SERVER, Ordering::Relaxed);
+        mode_tx.send_replace(MOUSE_MODE_SERVER);
 
         tx.send(br#"{"type":"pointer-move","x_norm":0.6,"y_norm":0.5}"#.to_vec())
             .await

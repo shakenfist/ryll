@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
+use crate::session_state::SessionState;
 use crate::snapshots::MainSnapshot;
 use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
@@ -189,6 +190,10 @@ const MAX_OUTSTANDING_AGENT_REQUESTS: u32 = 99;
 pub struct MainChannel {
     stream: SpiceStream,
     events: EventSink,
+    /// Mouse mode and agent state, published as latest values rather
+    /// than as events so a stalled UI cannot lose them; see
+    /// `crate::session_state`.
+    state: SessionState,
     buffer: Vec<u8>,
     session_id: Option<u32>,
     agent_connected: bool,
@@ -236,6 +241,9 @@ pub struct MainChannel {
     /// Count of pcap-capture packets rejected by the writer task's
     /// queue. Mirrored into `MainSnapshot::writer_dropped_count`.
     capture_dropped_count: u64,
+    /// The server's mouse mode as last announced by MAIN_INIT or
+    /// MOUSE_MODE. Mirrored into `MainSnapshot::server_mouse_mode`.
+    server_mouse_mode: Option<u32>,
     /// Bounded per-opcode message counters; flushed to the
     /// snapshot by `update_snapshot`. See `OpcodeCounters`.
     opcodes: OpcodeCounters,
@@ -297,6 +305,7 @@ impl MainChannel {
     pub fn new(
         stream: SpiceStream,
         events: EventSink,
+        state: SessionState,
         capture: Option<Arc<dyn CaptureSink>>,
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
@@ -312,6 +321,7 @@ impl MainChannel {
         MainChannel {
             stream,
             events,
+            state,
             buffer: Vec::with_capacity(65536),
             session_id: None,
             agent_connected: false,
@@ -342,6 +352,7 @@ impl MainChannel {
             session_init_signal: Some(session_init_signal),
             channels_avail_signal: Some(channels_avail_signal),
             capture_dropped_count: 0,
+            server_mouse_mode: None,
             opcodes: OpcodeCounters::new(message_names::main_server, message_names::main_client),
             mm_clock,
             agent_request_send_ts: HashMap::new(),
@@ -508,7 +519,7 @@ impl MainChannel {
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
+                        self.emit_session_ended().await;
                         break;
                     }
 
@@ -572,7 +583,7 @@ impl MainChannel {
                     if let Ok(mut snap) = self.snapshot.lock() {
                         snap.keepalive_timeout_fired = true;
                     }
-                    self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
+                    self.emit_session_ended().await;
                     break;
                 }
                 _ = vdagent_probe.tick() => {
@@ -809,9 +820,9 @@ impl MainChannel {
                 self.events
                     .emit(ChannelEvent::SessionInitialized(init.session_id))
                     .await;
-                self.events
-                    .emit(ChannelEvent::AgentConnected(self.agent_connected))
-                    .await;
+                // Published after the event, as the event it replaced was,
+                // so the GUI announces the session before the agent.
+                self.publish_agent_connected();
                 let mode_name = match init.current_mouse_mode {
                     1 => "server (relative)",
                     2 => "client (absolute)",
@@ -820,13 +831,12 @@ impl MainChannel {
                         "unknown"
                     }
                 };
+                self.server_mouse_mode = Some(init.current_mouse_mode);
                 info!(
                     "main: mouse mode={} ({}), supported_modes={}",
                     init.current_mouse_mode, mode_name, init.supported_mouse_modes
                 );
-                self.events
-                    .emit(ChannelEvent::MouseMode(init.current_mouse_mode))
-                    .await;
+                self.publish_mouse_mode(init.current_mouse_mode);
 
                 // Request client mouse mode (absolute positioning) if
                 // the server supports it. Client mode allows absolute
@@ -855,6 +865,7 @@ impl MainChannel {
                         2 => "client (absolute)",
                         _ => "unknown",
                     };
+                    self.server_mouse_mode = Some(current as u32);
                     info!(
                         "main: mouse mode changed to {} ({}), supported_modes={}",
                         current, mode_name, supported
@@ -866,9 +877,7 @@ impl MainChannel {
                     if current as u32 == MOUSE_MODE_CLIENT {
                         self.mouse_mode_request_pending = false;
                     }
-                    self.events
-                        .emit(ChannelEvent::MouseMode(current as u32))
-                        .await;
+                    self.publish_mouse_mode(current as u32);
 
                     // The server often reverts to SERVER mode after a
                     // guest reboot; re-request CLIENT mode so the
@@ -1027,6 +1036,14 @@ impl MainChannel {
 
             main_server::DISCONNECTING => {
                 info!("main: server sent disconnect notification");
+                // Deliberately `emit`, not `emit_session_ended`: this is
+                // only an announcement, and the read loop carries on, so
+                // blocking here on a stalled UI would stop main answering
+                // PINGs, which is K1. The EOF that follows is what ends
+                // the loop, and it reports the end without the timeout.
+                // spice-server never sends this message anyway (it only
+                // handles the client's `DISCONNECTING`), and spice-gtk
+                // just logs it.
                 self.events
                     .emit(ChannelEvent::Disconnected(ChannelType::Main))
                     .await;
@@ -1035,14 +1052,14 @@ impl MainChannel {
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
                 self.agent_connected = true;
-                self.events.emit(ChannelEvent::AgentConnected(true)).await;
+                self.publish_agent_connected();
                 self.connect_agent().await?;
             }
 
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
-                self.events.emit(ChannelEvent::AgentConnected(false)).await;
+                self.publish_agent_connected();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
                 // Drop probe bookkeeping tied to the previous
@@ -1130,6 +1147,20 @@ impl MainChannel {
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
+        snap.server_mouse_mode = self.server_mouse_mode;
+        // The sink records the drop as an Instant (it has no session
+        // clock); convert to session-relative seconds against the traffic
+        // clock here.
+        let drops = self.events.drop_stats();
+        snap.events_dropped_count = drops.total;
+        snap.events_dropped_by_kind = drops
+            .by_kind
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        snap.last_event_drop_ts_secs = drops
+            .since_last_drop
+            .map(|ago| self.traffic.elapsed().saturating_sub(ago).as_secs_f64());
         // mm_time clock state. `now()` is informational —
         // computed at snapshot time so a bug report shows the
         // server's current millisecond counter.
@@ -1149,6 +1180,55 @@ impl MainChannel {
     async fn request_channels_list(&mut self) -> Result<()> {
         let msg = make_message(main_client::ATTACH_CHANNELS, &[]);
         self.send_with_log(main_client::ATTACH_CHANNELS, &msg).await
+    }
+
+    /// Publish the server's mouse mode to the frontends and wake the
+    /// renderer to read it. Never blocks: unlike an event, this cannot be
+    /// lost to a UI that has stopped draining the queue.
+    fn publish_mouse_mode(&self, mode: u32) {
+        self.state.publish_mouse_mode(mode);
+        self.events.wake();
+    }
+
+    /// Publish `self.agent_connected` to the frontends, as
+    /// `publish_mouse_mode` does for the mouse mode.
+    fn publish_agent_connected(&self) {
+        self.state.publish_agent_connected(self.agent_connected);
+        self.events.wake();
+    }
+
+    /// Tell the frontends the session is over, as the read loop exits.
+    ///
+    /// Sent with `emit_terminal`, not `emit`, because this event must not be
+    /// lost: the GUI's reconnect and disconnect snapshot run from it, and
+    /// when main exits cleanly nothing else reaches the GUI (see
+    /// `EventSink::emit_terminal`). A UI stall that outlasts the 5 s timeout
+    /// and then recovers, as the three-minute one in test session 011 did
+    /// (#430), must still deliver it.
+    ///
+    /// Blocking here cannot recreate K1. K1 was main stuck on a send while
+    /// the session was alive, so it stopped answering PINGs and the server
+    /// ended the session. Both callers have already given the session up
+    /// (EOF, or no data for `keepalive_timeout`) and break straight after,
+    /// so there is nothing left to answer. A dropped receiver (the GUI
+    /// replacing its queue on reconnect, or exiting) ends the wait at once.
+    ///
+    /// The hazard left is a receiver that is alive but never drained, which
+    /// would hold this task here. It is bounded by the per-connection cancel
+    /// flag rather than by a deadline: `run_connection`'s cancel watcher
+    /// aborts every channel task, main included, mid-wait. The GUI raises
+    /// the flag in `reconnect`; headless raises it when its event loop stops
+    /// and aborts the task after `CONNECTION_JOIN_GRACE`; web raises it at
+    /// shutdown. Headless and web also drain this queue through a fan-out
+    /// task into a broadcast bus, so it only fills if their runtime is
+    /// starved. A GUI whose UI thread never drains again cannot act on this
+    /// event however it is sent. A finite deadline would therefore add no
+    /// safety in those cases, and would lose the event in the one that
+    /// matters: a long stall that recovers.
+    async fn emit_session_ended(&self) {
+        self.events
+            .emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports

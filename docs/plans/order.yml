@@ -49,3 +49,4 @@
 - PLAN-pip-distribution.md: Pip-installable ryll
 - PLAN-webrtc-0.20-upgrade.md: webrtc-rs 0.20 upgrade
 - PLAN-two-stage-ci.md: Two-stage CI
+- PLAN-main-event-drops.md: Main-channel event drops

@@ -666,28 +666,32 @@ fn run_web(
         // *before* the session that produces the events is spawned.
         //
         // A `broadcast::Receiver` only sees what is sent after it was
-        // created, and the events these three care about — the first
-        // surface, the first cursor shape, and the negotiated mouse
-        // mode — all arrive during session-init. Subscribing after
-        // the spawn means the ordering is decided by how long a TCP
-        // connect, link handshake and auth take, which is a race that
-        // happens to be won by a wide margin rather than one that
-        // cannot be lost. Losing it would strand the mouse mode at
-        // its default for the whole session with nothing logged.
+        // created, and the events these two care about — the first
+        // surface and the first cursor shape — arrive during
+        // session-init. Subscribing after the spawn means the ordering
+        // is decided by how long a TCP connect, link handshake and
+        // auth take, which is a race that happens to be won by a wide
+        // margin rather than one that cannot be lost.
         let mut event_rx_for_mirror = event_broadcast_tx.subscribe();
         let cursor_event_rx = event_broadcast_tx.subscribe();
-        let mouse_mode_event_rx = event_broadcast_tx.subscribe();
 
-        // Liveness flags for a control socket's `status` verb, the
-        // same pair headless maintains. Conservative in the same way:
-        // `spice_connected` stays true until the connection task
-        // returns, and `agent_connected` is whatever the last
-        // `AgentConnected` event said. Cheap enough to keep updated
-        // unconditionally rather than only when a socket is asked
-        // for, and that avoids a second code path that only runs
-        // under a flag.
+        // Mouse mode and vdagent state are not on the bus at all. The
+        // main channel publishes them through `SessionState`'s watch
+        // channels, which hold the latest value: a reader that arrives
+        // late, or falls behind, still sees the current mode, so
+        // neither this ordering nor a `Lagged` bus can strand the
+        // mouse mode at its default. The tracker below, each bridge's
+        // input relay, and a control socket all read these receivers.
+        let session_state = shakenfist_spice_renderer::SessionState::new();
+        let session_state_rx = session_state.subscribe();
+
+        // Liveness flag for a control socket's `status` verb, the same
+        // one headless maintains, and conservative in the same way: it
+        // stays true until the connection task returns. Cheap enough
+        // to keep updated unconditionally rather than only when a
+        // socket is asked for, and that avoids a second code path that
+        // only runs under a flag.
         let spice_connected = Arc::new(AtomicBool::new(true));
-        let agent_connected = Arc::new(AtomicBool::new(false));
 
         // Spawn the renderer's session orchestrator. The web
         // mode has no clipboard backend (clipboard sync is
@@ -699,6 +703,7 @@ fn run_web(
             let res = shakenfist_spice_renderer::run_connection(
                 connection_config,
                 event_tx_mpsc,
+                session_state,
                 repaint_notify,
                 input_rx,
                 usb_rx,
@@ -733,15 +738,8 @@ fn run_web(
         // The forwarder exits when the renderer drops its sender
         // on session shutdown.
         let event_broadcast_for_forwarder = event_broadcast_tx.clone();
-        let forwarder_agent_connected = agent_connected.clone();
         let forwarder_handle = tokio::spawn(async move {
             while let Some(event) = event_rx_mpsc.recv().await {
-                // Cache the agent state on the way past, as the
-                // headless fan-out does, so `status` reflects reality
-                // without a second subscriber.
-                if let shakenfist_spice_renderer::ChannelEvent::AgentConnected(connected) = &event {
-                    forwarder_agent_connected.store(*connected, Ordering::Relaxed);
-                }
                 let _ = event_broadcast_for_forwarder.send(event);
             }
         });
@@ -784,8 +782,8 @@ fn run_web(
         //
         // The cursor relay runs against the same
         // `bridge_slot` the signalling handler installs into. Its bus
-        // subscription, and the mouse-mode tracker's, were taken
-        // before the session was spawned; see the comment there.
+        // subscription was taken before the session was spawned; see
+        // the comment there.
         // Control socket, when asked for. Web mode can host one for
         // the same reason headless can: everything the server needs
         // -- an event bus, an input sender, the surface mirror --
@@ -800,7 +798,7 @@ fn run_web(
             let status: Arc<dyn shakenfist_spice_renderer::control::StatusProvider> =
                 Arc::new(shakenfist_spice_renderer::SessionStatus::new(
                     spice_connected.clone(),
-                    agent_connected.clone(),
+                    session_state_rx.agent_connected.clone(),
                     surface_mirror.clone(),
                 ));
             info!("web: control socket at {}", sock_path.display());
@@ -825,6 +823,7 @@ fn run_web(
                 sock_path,
                 status,
                 event_broadcast_tx.clone(),
+                session_state_rx.agent_connected.clone(),
                 input_tx_for_control,
                 surface_mirror.clone(),
                 control_cancel.clone(),
@@ -836,6 +835,7 @@ fn run_web(
             input_tx,
             resize_tx,
             event_broadcast_tx,
+            session_state_rx.mouse_mode.clone(),
             surface_mirror,
             active_opus_tx,
             udp_bind,
@@ -860,8 +860,7 @@ fn run_web(
             cursor_mirror,
         ));
         let mouse_mode_handle = tokio::spawn(crate::web::inputs::run_mouse_mode_tracker(
-            mouse_mode_event_rx,
-            state.mouse_mode.clone(),
+            session_state_rx.mouse_mode,
             state.control_tx.clone(),
         ));
 

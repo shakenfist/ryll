@@ -34,7 +34,7 @@ use base64::Engine as _;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -82,6 +82,11 @@ impl Server {
     /// fan-out publishes to.  Each accepted client subscribes a fresh
     /// `broadcast::Receiver` from this sender.
     ///
+    /// `agent_connected` is the session's vdagent state.  The
+    /// `agent_connected` event is translated from this watch rather
+    /// than from the bus, so a client that lags the bus cannot miss a
+    /// transition; each accepted client gets its own clone.
+    ///
     /// `input_tx` is the mpsc sender used by `run_headless` to push
     /// `InputEvent`s to the SPICE inputs channel.  The control server
     /// clones it into each accepted client so `send_key` and `paste`
@@ -95,6 +100,7 @@ impl Server {
         self,
         status_provider: Arc<dyn StatusProvider>,
         event_tx: broadcast::Sender<ChannelEvent>,
+        agent_connected: watch::Receiver<bool>,
         input_tx: mpsc::Sender<InputEvent>,
         surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
         shutdown: CancellationToken,
@@ -156,11 +162,12 @@ impl Server {
                                 let provider = status_provider.clone();
                                 let cancel = shutdown.clone();
                                 let event_rx = event_tx.subscribe();
+                                let agent_rx = agent_connected.clone();
                                 let tx = input_tx.clone();
                                 let mirror = surface_mirror.clone();
                                 tokio::spawn(async move {
                                     handle_client(
-                                        stream, provider, event_rx, tx, mirror, cancel,
+                                        stream, provider, event_rx, agent_rx, tx, mirror, cancel,
                                     )
                                     .await;
                                     flag.store(false, Ordering::Release);
@@ -269,6 +276,7 @@ async fn handle_client(
     stream: tokio::net::UnixStream,
     status_provider: Arc<dyn StatusProvider>,
     event_rx: broadcast::Receiver<ChannelEvent>,
+    agent_connected: watch::Receiver<bool>,
     input_tx: mpsc::Sender<InputEvent>,
     surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     shutdown: CancellationToken,
@@ -297,7 +305,12 @@ async fn handle_client(
     // the queue catches up, emits a single `dropped` event.
     let event_state = client_state.clone();
     let event_out_tx = out_tx.clone();
-    let event_handle = tokio::spawn(event_translator_task(event_rx, event_state, event_out_tx));
+    let event_handle = tokio::spawn(event_translator_task(
+        event_rx,
+        agent_connected,
+        event_state,
+        event_out_tx,
+    ));
 
     // Reader / dispatcher: parses each request line, dispatches to
     // the appropriate verb handler, and queues the response on the
@@ -400,7 +413,8 @@ async fn writer_task(
 /// Translator side of the per-client connection.  Subscribes to the
 /// broadcast bus, filters by the active subscription set, formats
 /// each `ChannelEvent` into a wire `Event`, and `try_send`s the
-/// result onto the outbound mpsc.
+/// result onto the outbound mpsc.  The `agent_connected` event comes
+/// from the session's agent-state watch instead of the bus.
 ///
 /// Backpressure rule: on `try_send` failure (queue full) or on a
 /// broadcast `Lagged(n)` error, increment a local dropped counter.
@@ -408,6 +422,7 @@ async fn writer_task(
 /// `dropped` event with the cumulative count and reset.
 async fn event_translator_task(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
+    mut agent_connected: watch::Receiver<bool>,
     state: Arc<ClientState>,
     out_tx: mpsc::Sender<OutboundMessage>,
 ) {
@@ -416,52 +431,93 @@ async fn event_translator_task(
     let mut dropped_count: u64 = 0;
 
     // Track the previous agent-connected state so we emit only on
-    // transitions, as the protocol doc commits to.  `None` means we
-    // have not yet seen an `AgentConnected` event since the client
-    // connected.
-    let mut last_agent_connected: Option<bool> = None;
+    // transitions, as the protocol doc commits to.  Seeded with the
+    // state at connect, so a client hears about changes rather than
+    // a restatement of where things already stood.
+    let mut last_agent_connected = *agent_connected.borrow_and_update();
+    // Cleared when the session's state senders are dropped, so a
+    // finished session does not spin on a `changed()` that fails at
+    // once.  The bus closing ends the task shortly after.
+    let mut agent_state_open = true;
 
     loop {
-        match event_rx.recv().await {
-            Ok(event) => {
-                // Translate the ChannelEvent into the wire shape.  Any
-                // variant the protocol doesn't care about returns
-                // `None` here and is silently discarded.
-                let translated = translate_event(&event, &state, &mut last_agent_connected);
-                let Some(wire) = translated else {
+        // Translate into the wire shape.  Anything the protocol
+        // doesn't care about, or the client has not subscribed to,
+        // comes back `None` and is silently discarded.
+        let translated = tokio::select! {
+            received = event_rx.recv() => match received {
+                Ok(event) => translate_event(&event, &state),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    dropped_count = dropped_count.saturating_add(n);
                     continue;
-                };
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    return;
+                }
+            },
+            changed = agent_connected.changed(), if agent_state_open => match changed {
+                Ok(()) => {
+                    let connected = *agent_connected.borrow_and_update();
+                    translate_agent_connected(connected, &state, &mut last_agent_connected)
+                }
+                Err(_) => {
+                    agent_state_open = false;
+                    None
+                }
+            },
+        };
+        let Some(wire) = translated else {
+            continue;
+        };
 
-                match out_tx.try_send(OutboundMessage::Event(wire)) {
-                    Ok(()) => {
-                        // If we previously dropped events and the
-                        // queue has now caught up, flush the
-                        // accumulated count.  We approximate
-                        // "caught up" by checking remaining capacity:
-                        // capacity == OUTBOUND_QUEUE_CAPACITY - 1
-                        // immediately after a successful send means
-                        // the queue is essentially empty.
-                        if dropped_count > 0 && out_tx.capacity() >= OUTBOUND_QUEUE_CAPACITY - 1 {
-                            emit_dropped(&out_tx, &mut dropped_count).await;
-                        }
-                    }
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        dropped_count = dropped_count.saturating_add(1);
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        // Writer has gone away; nothing more to do.
-                        return;
-                    }
+        match out_tx.try_send(OutboundMessage::Event(wire)) {
+            Ok(()) => {
+                // If we previously dropped events and the
+                // queue has now caught up, flush the
+                // accumulated count.  We approximate
+                // "caught up" by checking remaining capacity:
+                // capacity == OUTBOUND_QUEUE_CAPACITY - 1
+                // immediately after a successful send means
+                // the queue is essentially empty.
+                if dropped_count > 0 && out_tx.capacity() >= OUTBOUND_QUEUE_CAPACITY - 1 {
+                    emit_dropped(&out_tx, &mut dropped_count).await;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                dropped_count = dropped_count.saturating_add(n);
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                dropped_count = dropped_count.saturating_add(1);
             }
-            Err(broadcast::error::RecvError::Closed) => {
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Writer has gone away; nothing more to do.
                 return;
             }
         }
     }
+}
+
+/// Map a published vdagent state to an `agent_connected` wire event.
+///
+/// The main channel publishes on every report from the server, and
+/// re-announces the same state at session start; the protocol commits
+/// to delivering only transitions, so a value equal to the last one
+/// this client saw is suppressed.  The last value is updated whether
+/// or not the client is subscribed, so subscribing later does not
+/// replay an old transition.
+fn translate_agent_connected(
+    connected: bool,
+    state: &ClientState,
+    last_agent_connected: &mut bool,
+) -> Option<Event> {
+    if *last_agent_connected == connected {
+        return None;
+    }
+    *last_agent_connected = connected;
+    if !state.is_subscribed("agent_connected") {
+        return None;
+    }
+    Some(Event {
+        event: "agent_connected".into(),
+        data: serde_json::json!({ "connected": connected }),
+    })
 }
 
 /// Emit a `dropped` event with the accumulated count and reset the
@@ -485,17 +541,8 @@ async fn emit_dropped(out_tx: &mpsc::Sender<OutboundMessage>, dropped_count: &mu
 ///
 /// Returns `None` for `ChannelEvent` variants that do not correspond
 /// to a v1 event, or for events the client has not subscribed to.
-///
-/// The `last_agent_connected` slot is used to suppress emitting the
-/// `agent_connected` event for non-transitions (the SPICE main
-/// channel can re-announce the same agent-connected state at
-/// session-startup time; the protocol commits to delivering only
-/// transitions).
-fn translate_event(
-    event: &ChannelEvent,
-    state: &ClientState,
-    last_agent_connected: &mut Option<bool>,
-) -> Option<Event> {
+/// `agent_connected` is not here: see `translate_agent_connected`.
+fn translate_event(event: &ChannelEvent, state: &ClientState) -> Option<Event> {
     match event {
         ChannelEvent::Latency { sample_ms } => {
             if !state.is_subscribed("latency") {
@@ -515,21 +562,6 @@ fn translate_event(
                     "sample_ms": *sample_ms as f64,
                     "wallclock_us": wallclock_us,
                 }),
-            })
-        }
-        ChannelEvent::AgentConnected(connected) => {
-            // Transitions-only: suppress if the new state equals the
-            // last one we forwarded to this client.
-            if last_agent_connected.as_ref() == Some(connected) {
-                return None;
-            }
-            *last_agent_connected = Some(*connected);
-            if !state.is_subscribed("agent_connected") {
-                return None;
-            }
-            Some(Event {
-                event: "agent_connected".into(),
-                data: serde_json::json!({ "connected": *connected }),
             })
         }
         ChannelEvent::PasteCompleted {

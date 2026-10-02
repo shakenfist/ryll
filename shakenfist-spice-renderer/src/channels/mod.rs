@@ -20,13 +20,14 @@ pub use usbredir::UsbredirChannel;
 pub use volume::VolumeControl;
 pub use webdav::WebdavChannel;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::notification::NotificationEntry;
 use crate::usb::UsbDeviceInfo;
@@ -56,6 +57,37 @@ pub struct EventSink {
     tx: mpsc::Sender<ChannelEvent>,
     repaint: Arc<Notify>,
     send_timeout: Option<Duration>,
+    /// Shared by every clone of this sink, so the main channel can report
+    /// drops regardless of which clone's `emit` timed out.
+    drops: Arc<EventDropCounter>,
+}
+
+/// Events discarded because a send timed out; see `EventSink::drop_stats`.
+///
+/// The last drop is stored as an `Instant` rather than a session-relative
+/// time: `EventSink` has no access to the traffic recorder's clock, so the
+/// owner converts it (`now - last_drop.elapsed()`) when it builds a snapshot.
+#[derive(Debug, Default)]
+struct EventDropCounter {
+    inner: Mutex<EventDropState>,
+}
+
+#[derive(Debug, Default)]
+struct EventDropState {
+    total: u64,
+    by_kind: BTreeMap<&'static str, u64>,
+    last_drop: Option<Instant>,
+}
+
+/// A point-in-time copy of an `EventSink`'s drop accounting.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventDropStats {
+    /// Total events dropped on send timeout.
+    pub total: u64,
+    /// Drops per `ChannelEvent::kind()`.
+    pub by_kind: BTreeMap<&'static str, u64>,
+    /// How long ago the most recent drop happened, if any.
+    pub since_last_drop: Option<Duration>,
 }
 
 impl EventSink {
@@ -64,6 +96,18 @@ impl EventSink {
             tx,
             repaint,
             send_timeout: None,
+            drops: Arc::new(EventDropCounter::default()),
+        }
+    }
+
+    /// Snapshot of the events this sink (and its clones) dropped on send
+    /// timeout. Always empty unless `with_send_timeout` was used.
+    pub fn drop_stats(&self) -> EventDropStats {
+        let state = self.drops.inner.lock().expect("lock poisoned");
+        EventDropStats {
+            total: state.total,
+            by_kind: state.by_kind.clone(),
+            since_last_drop: state.last_drop.map(|t| t.elapsed()),
         }
     }
 
@@ -83,18 +127,85 @@ impl EventSink {
                 self.tx.send(event).await.ok();
             }
             Some(limit) => {
+                // Computed before `event` is moved into `send`.
+                let kind = event.kind();
                 if tokio::time::timeout(limit, self.tx.send(event))
                     .await
                     .is_err()
                 {
+                    {
+                        let mut state = self.drops.inner.lock().expect("lock poisoned");
+                        state.total = state.total.saturating_add(1);
+                        *state.by_kind.entry(kind).or_insert(0) += 1;
+                        state.last_drop = Some(Instant::now());
+                    }
                     warn!(
-                        "channels: event send timed out after {:?}; \
+                        "channels: {} event dropped: send timed out after {:?}; \
                          renderer event consumer is wedged or starved",
-                        limit
+                        kind, limit
                     );
                 }
             }
         }
+        self.repaint.notify_one();
+    }
+
+    /// Queue an event that ends the session, waiting as long as it takes.
+    ///
+    /// `emit` abandons a send after `send_timeout`, which suits an event the
+    /// next one supersedes but not the one saying the session is over. The
+    /// GUI learns that the main channel has exited cleanly only from
+    /// `Disconnected(Main)`: it drains the queue with `try_recv`, ignores the
+    /// queue closing, and is told nothing when `run_connection` returns. Lose
+    /// that event and the window sits on a dead session with reconnect never
+    /// started.
+    ///
+    /// So here the deadline only decides when to warn, once, that the
+    /// consumer is wedged. A K1-style stall still shows up in the log, which
+    /// is why main has a timeout at all, without costing the session. A closed
+    /// receiver ends the wait at once and, as in `emit`, is not an error. The
+    /// wait has no bound of its own; see the call sites in `main_channel.rs`
+    /// for what bounds it, and use this only where the channel is about to
+    /// stop anyway, so that blocking starves nothing.
+    pub async fn emit_terminal(&self, event: ChannelEvent) {
+        let kind = event.kind();
+        // `reserve` rather than `send`, so that a wait cut short by the
+        // warning deadline does not take the event down with it.
+        let permit = match self.send_timeout {
+            None => self.tx.reserve().await,
+            Some(limit) => {
+                let started = Instant::now();
+                match tokio::time::timeout(limit, self.tx.reserve()).await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "channels: {} event blocked for {:?}; renderer event consumer is \
+                             wedged or starved; still waiting, as this event ends the session",
+                            kind, limit
+                        );
+                        let permit = self.tx.reserve().await;
+                        if permit.is_ok() {
+                            info!(
+                                "channels: {} event queued after waiting {:?}",
+                                kind,
+                                started.elapsed()
+                            );
+                        }
+                        permit
+                    }
+                }
+            }
+        };
+        if let Ok(permit) = permit {
+            permit.send(event);
+        }
+        self.repaint.notify_one();
+    }
+
+    /// Wake the renderer without queueing anything, for state published
+    /// outside the event queue (see `crate::session_state`). Never blocks,
+    /// so it cannot stall the publisher the way a full queue can.
+    pub fn wake(&self) {
         self.repaint.notify_one();
     }
 }
@@ -231,9 +342,6 @@ pub enum ChannelEvent {
     /// Cursor image shape updated
     CursorShape(CursorImage),
 
-    /// Mouse mode from server (1=server, 2=client)
-    MouseMode(u32),
-
     MonitorsConfig {
         width: u32,
         height: u32,
@@ -271,9 +379,6 @@ pub enum ChannelEvent {
         reason: String,
         request_id: Option<RequestId>,
     },
-
-    /// vdagent connection state changed.
-    AgentConnected(bool),
 
     /// Connection error
     Error {
@@ -421,6 +526,47 @@ pub struct CursorImage {
     pub pixels: Vec<u8>, // RGBA
 }
 
+impl ChannelEvent {
+    /// The variant name, for diagnostics that must not carry the payload.
+    /// Exhaustive on purpose: a new variant must be named here.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ChannelEvent::SessionInitialized { .. } => "SessionInitialized",
+            ChannelEvent::ChannelsAvailable { .. } => "ChannelsAvailable",
+            ChannelEvent::SurfaceCreated { .. } => "SurfaceCreated",
+            ChannelEvent::SurfaceDestroyed { .. } => "SurfaceDestroyed",
+            ChannelEvent::ImageReady { .. } => "ImageReady",
+            ChannelEvent::ImageReadyChroma { .. } => "ImageReadyChroma",
+            ChannelEvent::ImageReadyAlpha { .. } => "ImageReadyAlpha",
+            ChannelEvent::FillRect { .. } => "FillRect",
+            ChannelEvent::CopyBits { .. } => "CopyBits",
+            ChannelEvent::Invert { .. } => "Invert",
+            ChannelEvent::DisplayMark { .. } => "DisplayMark",
+            ChannelEvent::CursorPosition { .. } => "CursorPosition",
+            ChannelEvent::CursorShape { .. } => "CursorShape",
+            ChannelEvent::MonitorsConfig { .. } => "MonitorsConfig",
+            ChannelEvent::Statistics { .. } => "Statistics",
+            ChannelEvent::Latency { .. } => "Latency",
+            ChannelEvent::PasteCompleted { .. } => "PasteCompleted",
+            ChannelEvent::PasteFailed { .. } => "PasteFailed",
+            ChannelEvent::Error { .. } => "Error",
+            ChannelEvent::Notification { .. } => "Notification",
+            ChannelEvent::UsbChannelReady => "UsbChannelReady",
+            ChannelEvent::UsbDeviceConnected { .. } => "UsbDeviceConnected",
+            ChannelEvent::UsbDeviceDisconnected => "UsbDeviceDisconnected",
+            ChannelEvent::UsbConnectFailed { .. } => "UsbConnectFailed",
+            ChannelEvent::UsbDevicesChanged { .. } => "UsbDevicesChanged",
+            ChannelEvent::WebdavChannelReady => "WebdavChannelReady",
+            ChannelEvent::WebdavSharingStarted { .. } => "WebdavSharingStarted",
+            ChannelEvent::WebdavSharingStopped => "WebdavSharingStopped",
+            ChannelEvent::WebdavError { .. } => "WebdavError",
+            ChannelEvent::Disconnected { .. } => "Disconnected",
+            #[cfg(feature = "digest-decode")]
+            ChannelEvent::DigestUpdated { .. } => "DigestUpdated",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +659,140 @@ mod tests {
         tokio::time::timeout(Duration::from_millis(100), repaint.notified())
             .await
             .expect("emit must wake the renderer even after the receiver is gone");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_sends_are_counted_by_kind() {
+        let (sink, _rx, _repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        assert_eq!(sink.drop_stats().total, 0);
+
+        // The slot is full and never drained, so this one times out.
+        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+
+        let stats = sink.drop_stats();
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.by_kind.get("Latency"), Some(&1));
+        assert_eq!(stats.by_kind.len(), 1);
+        assert!(stats.since_last_drop.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drops_are_shared_across_sink_clones() {
+        let (sink, _rx, _repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+        let clone = sink.clone();
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        clone.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+
+        // `since_last_drop` is a live elapsed time, so compare the counts.
+        let (a, b) = (sink.drop_stats(), clone.drop_stats());
+        assert_eq!(a.total, 1);
+        assert_eq!(a.total, b.total);
+        assert_eq!(a.by_kind, b.by_kind);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_event_outwaits_the_deadline_and_is_delivered() {
+        let (sink, mut rx, repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        // Consume that emit's wake-up, so the check at the end is about
+        // emit_terminal's.
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit must wake the renderer");
+        let terminal = tokio::spawn({
+            let sink = sink.clone();
+            async move {
+                sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+                    .await
+            }
+        });
+
+        // Far past the 50 ms that would have dropped an ordinary event.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            !terminal.is_finished(),
+            "emit_terminal must keep waiting while the queue is full"
+        );
+        assert_eq!(sink.drop_stats(), EventDropStats::default());
+
+        // The UI recovers and drains the event that was blocking the slot.
+        assert!(matches!(
+            rx.recv().await,
+            Some(ChannelEvent::SessionInitialized(1))
+        ));
+        tokio::time::timeout(Duration::from_secs(5), terminal)
+            .await
+            .expect("emit_terminal must finish once there is room")
+            .expect("emit_terminal task panicked");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+        ));
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit_terminal must wake the renderer");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_event_without_a_deadline_is_delivered() {
+        let (sink, mut rx, _repaint) = sink_pair(1);
+
+        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_event_gives_up_at_once_when_the_receiver_is_gone() {
+        let (sink, rx, repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        drop(rx);
+
+        // A full queue whose receiver has gone must not be waited on: that
+        // is the GUI having replaced its queue on reconnect, or exited.
+        let started = tokio::time::Instant::now();
+        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit_terminal must wake the renderer even after the receiver is gone");
+    }
+
+    #[tokio::test]
+    async fn a_sink_without_a_timeout_never_records_drops() {
+        let (sink, _rx, _repaint) = sink_pair(4);
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        sink.emit(ChannelEvent::Latency { sample_ms: 2.0 }).await;
+
+        assert_eq!(sink.drop_stats(), EventDropStats::default());
+    }
+
+    #[test]
+    fn kind_names_the_variant() {
+        assert_eq!(ChannelEvent::Latency { sample_ms: 2.0 }.kind(), "Latency");
+        assert_eq!(
+            ChannelEvent::SessionInitialized(1).kind(),
+            "SessionInitialized"
+        );
+        assert_eq!(ChannelEvent::UsbChannelReady.kind(), "UsbChannelReady");
+        assert_eq!(
+            ChannelEvent::Disconnected(ChannelType::Main).kind(),
+            "Disconnected"
+        );
     }
 }
