@@ -18,13 +18,13 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, ChannelsList, MainInit, MessageHeader, Notify, Ping, SetAck,
+    make_message, take_message, ChannelsList, MainInit, Notify, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
 };
 
-use super::{ChannelEvent, EventSink};
+use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
 
 /// Parse a SpiceMsgMainMouseMode payload. The SPICE wire format
 /// is two little-endian `uint16`s — `supported_modes` followed by
@@ -726,29 +726,16 @@ impl MainChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while self.buffer.len() >= MessageHeader::SIZE {
-            let header = MessageHeader::read(&self.buffer)?;
-            let total_size = MessageHeader::SIZE + header.message_size as usize;
-
-            if self.buffer.len() < total_size {
-                // Wait for more data
-                break;
-            }
-
-            // Record to ring buffer before draining
-            let raw = self.buffer[..total_size].to_vec();
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "main",
-                header.message_type,
-                message_names::main_server(header.message_type),
-                &raw,
+                msg_type,
+                message_names::main_server(msg_type),
+                &message.raw,
             );
 
-            // Extract message payload
-            let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
-            self.buffer.drain(..total_size);
-
-            self.handle_message(header.message_type, &payload).await?;
+            self.handle_message(msg_type, message.payload()).await?;
         }
 
         self.update_snapshot();

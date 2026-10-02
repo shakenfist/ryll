@@ -24,7 +24,7 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+    make_message, take_message, Notify as NotifyMessage, Ping, SetAck,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 use shakenfist_spice_usbredir::constants::{self, msg_type, msg_type_name, Status, RYLL_CAPS};
@@ -36,7 +36,7 @@ use shakenfist_spice_usbredir::parser::UsbredirParser;
 
 use crate::snapshots::RedirectedDevice;
 
-use super::{ChannelEvent, EventSink, UsbCommand};
+use super::{ChannelEvent, EventSink, UsbCommand, MAX_MESSAGE_BODY};
 
 pub struct UsbredirChannel {
     stream: SpiceStream,
@@ -241,19 +241,11 @@ impl UsbredirChannel {
     // ── SPICE message processing ───────────────────────
 
     async fn process_messages(&mut self) -> Result<()> {
-        while self.buffer.len() >= MessageHeader::SIZE {
-            let header = MessageHeader::read(&self.buffer)?;
-            let total_size = MessageHeader::SIZE + header.message_size as usize;
-
-            if self.buffer.len() < total_size {
-                break;
-            }
-
-            let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
-            self.buffer.drain(..total_size);
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let msg_type = message.header.message_type;
 
             self.message_count += 1;
-            self.handle_message(header.message_type, &payload).await?;
+            self.handle_message(msg_type, message.payload()).await?;
 
             if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
                 self.send_ack().await?;

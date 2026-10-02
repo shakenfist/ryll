@@ -136,6 +136,9 @@ that table is an incomplete change.
 5. Parsers of untrusted wire input use the `BoundedReader`
    in `shakenfist-spice-protocol/src/reader.rs` (bounds- and
    overflow-checked, panic-free) rather than ad-hoc slicing.
+   Channel read loops frame messages with `take_message`
+   and `MAX_MESSAGE_BODY`, never by hand (STYLEGUIDE.md,
+   "Message framing").
    New link/message parsers should ship with a fuzz target
    under `shakenfist-spice-protocol/fuzz/` — see
    shakenfist/ryll#135 (broaden coverage) and #136 (retrofit

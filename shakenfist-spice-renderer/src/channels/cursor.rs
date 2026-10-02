@@ -12,12 +12,12 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, CursorInit, CursorSet, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+    make_message, take_message, CursorInit, CursorSet, Notify as NotifyMessage, Ping, SetAck,
     SpiceCursorHeader,
 };
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
 
-use super::{ChannelEvent, CursorImage, EventSink};
+use super::{ChannelEvent, CursorImage, EventSink, MAX_MESSAGE_BODY};
 
 pub struct CursorChannel {
     stream: SpiceStream,
@@ -149,28 +149,17 @@ impl CursorChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while self.buffer.len() >= MessageHeader::SIZE {
-            let header = MessageHeader::read(&self.buffer)?;
-            let total_size = MessageHeader::SIZE + header.message_size as usize;
-
-            if self.buffer.len() < total_size {
-                break;
-            }
-
-            // Record to ring buffer before draining
-            let raw = self.buffer[..total_size].to_vec();
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "cursor",
-                header.message_type,
-                message_names::cursor_server(header.message_type),
-                &raw,
+                msg_type,
+                message_names::cursor_server(msg_type),
+                &message.raw,
             );
 
-            let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
-            self.buffer.drain(..total_size);
-
             self.message_count += 1;
-            self.handle_message(header.message_type, &payload).await?;
+            self.handle_message(msg_type, message.payload()).await?;
 
             // Send ACK if needed
             if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {

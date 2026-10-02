@@ -23,7 +23,7 @@ use shakenfist_spice_protocol::constants::{image_compression, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, DisplayInit, DrawBase, ImageDescriptor, MessageHeader, Notify as NotifyMessage,
+    make_message, take_message, DisplayInit, DrawBase, ImageDescriptor, Notify as NotifyMessage,
     Ping, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
     SpiceTransparent, SurfaceCreate,
 };
@@ -33,7 +33,14 @@ use shakenfist_spice_protocol::{
     IMAGE_FLAGS_CACHE_ME,
 };
 
-use super::{ChannelEvent, EventSink};
+use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
+
+/// Largest pixmap, in pixels, the display channel will decode: 8192 x 8192,
+/// or 256 MiB of RGBA. No realistic SPICE pixmap draw needs more; a larger
+/// value means the server is malformed or adversarial, and we refuse to
+/// allocate against attacker-controlled dimensions. It also sets the
+/// largest message any channel will buffer, `super::MAX_MESSAGE_BODY`.
+pub(crate) const MAX_PIXMAP_PIXELS: usize = 64 * 1024 * 1024;
 
 struct StreamState {
     surface_id: u32,
@@ -1082,30 +1089,17 @@ impl DisplayChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while self.buffer.len() >= MessageHeader::SIZE {
-            let header = MessageHeader::read(&self.buffer)?;
-            let total_size = MessageHeader::SIZE + header.message_size as usize;
-
-            if self.buffer.len() < total_size {
-                // Wait for more data
-                break;
-            }
-
-            // Record to ring buffer before draining
-            let raw = self.buffer[..total_size].to_vec();
+        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+            let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "display",
-                header.message_type,
-                message_names::display_server(header.message_type),
-                &raw,
+                msg_type,
+                message_names::display_server(msg_type),
+                &message.raw,
             );
 
-            // Extract message payload
-            let payload = self.buffer[MessageHeader::SIZE..total_size].to_vec();
-            self.buffer.drain(..total_size);
-
             self.message_count += 1;
-            self.handle_message(header.message_type, &payload).await?;
+            self.handle_message(msg_type, message.payload()).await?;
 
             // Send ACK if needed
             if self.ack_window > 0 && self.message_count - self.last_ack >= self.ack_window {
@@ -2132,12 +2126,6 @@ impl DisplayChannel {
                         );
                         return Ok(());
                     };
-                    // Cap pixel count at 64M (= 8192 × 8192 worth of RGBA,
-                    // i.e. 256 MiB). No realistic SPICE pixmap draw needs
-                    // more; a larger value means the server is malformed
-                    // or adversarial and we refuse to allocate against
-                    // attacker-controlled dimensions.
-                    const MAX_PIXMAP_PIXELS: usize = 64 * 1024 * 1024;
                     if pixel_count > MAX_PIXMAP_PIXELS {
                         warn_once!(
                             "display:decode_failure:pixmap:too_large",
