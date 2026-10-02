@@ -170,6 +170,17 @@ One pull request, one commit per step.
   back-pressures display reads instead. That is #430's territory.
 - Agent state could carry more than a boolean (capabilities,
   `agent_caps_announced`) once it lives on a watch.
+- Web's control queue to the browser (`CONTROL_QUEUE_DEPTH` 64) still
+  drops when full, so a mid-session mouse-mode push to the browser can
+  be lost. It affects only the browser's local cursor drawing, since
+  server input reads the watch.
+- Headless's stats loop can lag past `Disconnected(Main)` on its
+  broadcast bus; it then falls back on `run_connection` returning.
+- A browser that connects before MAIN_INIT is told mouse mode 0
+  (unknown) and draws no local cursor overlay until the real mode
+  arrives.
+- spice-server never sends `SPICE_MSG_MAIN_DISCONNECTING`, so that
+  handler keeps a timed `emit`.
 
 ### Back brief
 

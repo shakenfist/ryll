@@ -900,6 +900,11 @@ pub struct RyllApp {
     /// paste-as-keystrokes in favour of the clipboard path).
     agent_connected: bool,
 
+    /// `MainSnapshot::events_dropped_count` as of the last frame that
+    /// looked, so a rise can be told apart from a count already
+    /// reported. Reset to zero with the snapshots on reconnect.
+    last_seen_events_dropped: u64,
+
     /// Cached clipboard instance for reading host clipboard.
     cached_clipboard: Option<arboard::Clipboard>,
 
@@ -1338,6 +1343,7 @@ impl RyllApp {
             enable_paste,
             paste_char_delay_ms,
             agent_connected: false,
+            last_seen_events_dropped: 0,
             cached_clipboard: None,
             paste_error_message: None,
             config,
@@ -1436,6 +1442,8 @@ impl RyllApp {
         self.usb_connected_at = None;
         self.traffic = traffic.clone();
         self.channel_snapshots = channel_snapshots;
+        // The new session's drop counter starts at zero.
+        self.last_seen_events_dropped = 0;
         self.webdav_channel_ready = false;
         self.webdav_shared_dir = None;
         self.webdav_sharing_active = false;
@@ -2287,7 +2295,30 @@ impl RyllApp {
         // main channel published after queueing `SessionInitialized` is
         // announced after the session is, as it was when it was an event.
         self.sync_session_state();
+        self.check_event_drops();
         self.update_app_snapshot();
+    }
+
+    /// Warn once when the main channel has started dropping events.
+    ///
+    /// The counter is read from the shared `MainSnapshot`, not through
+    /// the event queue, so it works while the queue is wedged. The
+    /// snapshot is refreshed by the main channel after each read batch
+    /// and each send, so it keeps moving while this thread is stalled.
+    /// `try_lock` keeps the UI from ever waiting on the main channel.
+    fn check_event_drops(&mut self) {
+        let Ok(snap) = self.channel_snapshots.main.try_lock() else {
+            return;
+        };
+        let current = snap.events_dropped_count;
+        drop(snap);
+        let notify = event_drops_need_notice(self.last_seen_events_dropped, current);
+        self.last_seen_events_dropped = current;
+        if notify {
+            // Fixed text: the notification store folds repeats by exact
+            // message match, so no count or time may appear here (#429).
+            self.push_connection_event(NotifySeverity::Warn, EVENT_DROP_NOTICE);
+        }
     }
 
     /// Pick up the mouse mode and agent state the main channel has
@@ -5107,6 +5138,17 @@ fn resolution_notification_due(
     Some(target)
 }
 
+/// Fixed text of the notification raised when the main channel drops
+/// events. It must not vary, or repeats stop coalescing (#429).
+const EVENT_DROP_NOTICE: &str =
+    "The display stalled and missed some updates from the server; details are in the next bug report";
+
+/// Whether the main channel's drop counter has risen since it was last
+/// looked at. Pure for unit-testability.
+fn event_drops_need_notice(last_seen: u64, current: u64) -> bool {
+    current > last_seen
+}
+
 /// Map an auto-reconnect `ModalVariant` to the `(severity,
 /// message)` pair that surfaces in the notification pane when the
 /// state machine lands in Modal. Pure so it can be unit-tested
@@ -5218,6 +5260,16 @@ fn default_arrow_cursor() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_drop_notice_only_when_count_rises() {
+        assert!(!event_drops_need_notice(0, 0));
+        assert!(event_drops_need_notice(0, 1));
+        assert!(event_drops_need_notice(3, 7));
+        assert!(!event_drops_need_notice(7, 7));
+        // A counter that went backwards (new session) is not a drop.
+        assert!(!event_drops_need_notice(7, 0));
+    }
 
     // -------------------------------------------------------------------------
     // SessionInitialized admission
