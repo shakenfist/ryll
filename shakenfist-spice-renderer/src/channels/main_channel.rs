@@ -519,7 +519,7 @@ impl MainChannel {
                     let n = n?;
                     if n == 0 {
                         info!("main: channel disconnected");
-                        self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
+                        self.emit_session_ended().await;
                         break;
                     }
 
@@ -583,7 +583,7 @@ impl MainChannel {
                     if let Ok(mut snap) = self.snapshot.lock() {
                         snap.keepalive_timeout_fired = true;
                     }
-                    self.events.emit(ChannelEvent::Disconnected(ChannelType::Main)).await;
+                    self.emit_session_ended().await;
                     break;
                 }
                 _ = vdagent_probe.tick() => {
@@ -1036,6 +1036,14 @@ impl MainChannel {
 
             main_server::DISCONNECTING => {
                 info!("main: server sent disconnect notification");
+                // Deliberately `emit`, not `emit_session_ended`: this is
+                // only an announcement, and the read loop carries on, so
+                // blocking here on a stalled UI would stop main answering
+                // PINGs, which is K1. The EOF that follows is what ends
+                // the loop, and it reports the end without the timeout.
+                // spice-server never sends this message anyway (it only
+                // handles the client's `DISCONNECTING`), and spice-gtk
+                // just logs it.
                 self.events
                     .emit(ChannelEvent::Disconnected(ChannelType::Main))
                     .await;
@@ -1187,6 +1195,40 @@ impl MainChannel {
     fn publish_agent_connected(&self) {
         self.state.publish_agent_connected(self.agent_connected);
         self.events.wake();
+    }
+
+    /// Tell the frontends the session is over, as the read loop exits.
+    ///
+    /// Sent with `emit_terminal`, not `emit`, because this event must not be
+    /// lost: the GUI's reconnect and disconnect snapshot run from it, and
+    /// when main exits cleanly nothing else reaches the GUI (see
+    /// `EventSink::emit_terminal`). A UI stall that outlasts the 5 s timeout
+    /// and then recovers, as the three-minute one in test session 011 did
+    /// (#430), must still deliver it.
+    ///
+    /// Blocking here cannot recreate K1. K1 was main stuck on a send while
+    /// the session was alive, so it stopped answering PINGs and the server
+    /// ended the session. Both callers have already given the session up
+    /// (EOF, or no data for `keepalive_timeout`) and break straight after,
+    /// so there is nothing left to answer. A dropped receiver (the GUI
+    /// replacing its queue on reconnect, or exiting) ends the wait at once.
+    ///
+    /// The hazard left is a receiver that is alive but never drained, which
+    /// would hold this task here. It is bounded by the per-connection cancel
+    /// flag rather than by a deadline: `run_connection`'s cancel watcher
+    /// aborts every channel task, main included, mid-wait. The GUI raises
+    /// the flag in `reconnect`; headless raises it when its event loop stops
+    /// and aborts the task after `CONNECTION_JOIN_GRACE`; web raises it at
+    /// shutdown. Headless and web also drain this queue through a fan-out
+    /// task into a broadcast bus, so it only fills if their runtime is
+    /// starved. A GUI whose UI thread never drains again cannot act on this
+    /// event however it is sent. A finite deadline would therefore add no
+    /// safety in those cases, and would lose the event in the one that
+    /// matters: a long stall that recovers.
+    async fn emit_session_ended(&self) {
+        self.events
+            .emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
     }
 
     /// Send `MOUSE_MODE_REQUEST(CLIENT)` when the server supports

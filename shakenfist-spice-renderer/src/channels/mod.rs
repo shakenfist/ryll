@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Notify};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::notification::NotificationEntry;
 use crate::usb::UsbDeviceInfo;
@@ -146,6 +146,58 @@ impl EventSink {
                     );
                 }
             }
+        }
+        self.repaint.notify_one();
+    }
+
+    /// Queue an event that ends the session, waiting as long as it takes.
+    ///
+    /// `emit` abandons a send after `send_timeout`, which suits an event the
+    /// next one supersedes but not the one saying the session is over. The
+    /// GUI learns that the main channel has exited cleanly only from
+    /// `Disconnected(Main)`: it drains the queue with `try_recv`, ignores the
+    /// queue closing, and is told nothing when `run_connection` returns. Lose
+    /// that event and the window sits on a dead session with reconnect never
+    /// started.
+    ///
+    /// So here the deadline only decides when to warn, once, that the
+    /// consumer is wedged. A K1-style stall still shows up in the log, which
+    /// is why main has a timeout at all, without costing the session. A closed
+    /// receiver ends the wait at once and, as in `emit`, is not an error. The
+    /// wait has no bound of its own; see the call sites in `main_channel.rs`
+    /// for what bounds it, and use this only where the channel is about to
+    /// stop anyway, so that blocking starves nothing.
+    pub async fn emit_terminal(&self, event: ChannelEvent) {
+        let kind = event.kind();
+        // `reserve` rather than `send`, so that a wait cut short by the
+        // warning deadline does not take the event down with it.
+        let permit = match self.send_timeout {
+            None => self.tx.reserve().await,
+            Some(limit) => {
+                let started = Instant::now();
+                match tokio::time::timeout(limit, self.tx.reserve()).await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        warn!(
+                            "channels: {} event blocked for {:?}; renderer event consumer is \
+                             wedged or starved; still waiting, as this event ends the session",
+                            kind, limit
+                        );
+                        let permit = self.tx.reserve().await;
+                        if permit.is_ok() {
+                            info!(
+                                "channels: {} event queued after waiting {:?}",
+                                kind,
+                                started.elapsed()
+                            );
+                        }
+                        permit
+                    }
+                }
+            }
+        };
+        if let Ok(permit) = permit {
+            permit.send(event);
         }
         self.repaint.notify_one();
     }
@@ -641,6 +693,83 @@ mod tests {
         assert_eq!(a.total, 1);
         assert_eq!(a.total, b.total);
         assert_eq!(a.by_kind, b.by_kind);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_event_outwaits_the_deadline_and_is_delivered() {
+        let (sink, mut rx, repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        // Consume that emit's wake-up, so the check at the end is about
+        // emit_terminal's.
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit must wake the renderer");
+        let terminal = tokio::spawn({
+            let sink = sink.clone();
+            async move {
+                sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+                    .await
+            }
+        });
+
+        // Far past the 50 ms that would have dropped an ordinary event.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            !terminal.is_finished(),
+            "emit_terminal must keep waiting while the queue is full"
+        );
+        assert_eq!(sink.drop_stats(), EventDropStats::default());
+
+        // The UI recovers and drains the event that was blocking the slot.
+        assert!(matches!(
+            rx.recv().await,
+            Some(ChannelEvent::SessionInitialized(1))
+        ));
+        tokio::time::timeout(Duration::from_secs(5), terminal)
+            .await
+            .expect("emit_terminal must finish once there is room")
+            .expect("emit_terminal task panicked");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+        ));
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit_terminal must wake the renderer");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_event_without_a_deadline_is_delivered() {
+        let (sink, mut rx, _repaint) = sink_pair(1);
+
+        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ChannelEvent::Disconnected(ChannelType::Main))
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_event_gives_up_at_once_when_the_receiver_is_gone() {
+        let (sink, rx, repaint) = sink_pair(1);
+        let sink = sink.with_send_timeout(Duration::from_millis(50));
+        sink.emit(ChannelEvent::SessionInitialized(1)).await;
+        drop(rx);
+
+        // A full queue whose receiver has gone must not be waited on: that
+        // is the GUI having replaced its queue on reconnect, or exited.
+        let started = tokio::time::Instant::now();
+        sink.emit_terminal(ChannelEvent::Disconnected(ChannelType::Main))
+            .await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        tokio::time::timeout(Duration::from_millis(100), repaint.notified())
+            .await
+            .expect("emit_terminal must wake the renderer even after the receiver is gone");
     }
 
     #[tokio::test]
