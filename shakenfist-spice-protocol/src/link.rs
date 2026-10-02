@@ -3,6 +3,7 @@ use anyhow::{anyhow, Result};
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use rand::rngs::OsRng;
 use rsa::pkcs8::{DecodePublicKey, EncodePublicKey};
+use rsa::traits::PublicKeyParts;
 use rsa::{Oaep, RsaPrivateKey, RsaPublicKey};
 use sha1::Sha1;
 use std::io::{Cursor, IoSlice, Read};
@@ -26,6 +27,10 @@ pub(crate) const MAX_LINK_MESSAGE_SIZE: usize = 4096;
 /// channel capability arrays. Real implementations send 1 word; 16 is
 /// generous headroom while still bounding a hostile count before allocation.
 pub(crate) const MAX_CAP_WORDS: usize = 16;
+
+/// Width of the RSA-OAEP ticket blob a client sends, which is also the
+/// width of the 1024-bit modulus SPICE uses for it.
+pub(crate) const TICKET_BLOB_BYTES: usize = 128;
 
 /// Either a plain TCP stream or a TLS-wrapped stream (client or server
 /// role). `Tls` is the outbound (client) role used when ryll connects to
@@ -484,7 +489,28 @@ impl SpiceLinkReply {
 /// starting with 0x30). Older descriptions of the protocol mention a raw
 /// format (4-byte BE length-prefixed modulus + exponent), so we try DER
 /// first and fall back to the raw format.
+///
+/// SPICE fixes the ticket at [`TICKET_BLOB_BYTES`] (a 1024-bit key), and an
+/// RSA-OAEP ciphertext is exactly as wide as the modulus, so a key of any
+/// other width is rejected here rather than producing a ticket that does
+/// not fit the fixed-size blob. Both encodings can carry such a key: the
+/// raw format accepts a modulus of up to 256 bytes, and a DER key is not
+/// limited by this function at all.
 fn parse_public_key(pub_key_bytes: &[u8]) -> Result<RsaPublicKey> {
+    let key = decode_public_key(pub_key_bytes)?;
+    if key.size() != TICKET_BLOB_BYTES {
+        return Err(anyhow!(
+            "Unsupported RSA key size: {} bytes, SPICE requires {}",
+            key.size(),
+            TICKET_BLOB_BYTES
+        ));
+    }
+    Ok(key)
+}
+
+/// Decode a public key in either encoding [`parse_public_key`] accepts,
+/// without judging its size.
+fn decode_public_key(pub_key_bytes: &[u8]) -> Result<RsaPublicKey> {
     // DER/SPKI: starts with ASN.1 SEQUENCE tag 0x30
     if pub_key_bytes.first() == Some(&0x30) {
         if let Ok(key) = RsaPublicKey::from_public_key_der(pub_key_bytes) {
@@ -547,12 +573,10 @@ pub fn encrypt_password(pub_key_bytes: &[u8], password: &str) -> Result<Vec<u8>>
     plaintext.push(0);
     let encrypted = pub_key.encrypt(&mut rng, padding, &plaintext)?;
 
-    // Pad to 128 bytes (RSA block size)
-    let mut result = vec![0u8; 128];
-    let start = 128 - encrypted.len();
-    result[start..].copy_from_slice(&encrypted);
-
-    Ok(result)
+    // The ciphertext is exactly as wide as the modulus, which
+    // `parse_public_key` has pinned to the ticket size.
+    debug_assert_eq!(encrypted.len(), TICKET_BLOB_BYTES);
+    Ok(encrypted)
 }
 
 /// Generate a fresh per-connection RSA keypair for SPICE ticket exchange.
@@ -1403,6 +1427,69 @@ mod tests {
     fn der_key_is_162_bytes() {
         let (_private_key, der) = generate_ticket_keypair().expect("keypair generation");
         assert_eq!(der.len(), 162);
+    }
+
+    /// Encode `n` and `e` in the raw SPICE key format `parse_public_key`
+    /// falls back to: a 4-byte BE length and the bytes, for each.
+    fn raw_public_key(n: &[u8], e: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&(n.len() as u32).to_be_bytes());
+        raw.extend_from_slice(n);
+        raw.extend_from_slice(&(e.len() as u32).to_be_bytes());
+        raw.extend_from_slice(e);
+        raw
+    }
+
+    /// shakenfist/ryll#179: a server key wider than the 128-byte ticket
+    /// used to underflow the padding offset and panic before auth. The
+    /// raw format is the reachable case, since a 129-151 byte modulus fits
+    /// the 162-byte wire field; it must now be refused with an error.
+    #[test]
+    fn encrypt_rejects_wide_raw_key() {
+        let mut n = vec![0xFFu8; 129];
+        n[128] = 0xFB; // odd, so RsaPublicKey::new accepts it
+        let raw = raw_public_key(&n, &[0x01, 0x00, 0x01]);
+        assert!(raw.len() <= 162);
+        let err = encrypt_password(&raw, "hunter2").expect_err("wide key must be refused");
+        assert!(
+            err.to_string().contains("Unsupported RSA key size"),
+            "{err}"
+        );
+    }
+
+    /// The DER path is not bounded by the wire field width when
+    /// `encrypt_password` is called directly, so a 2048-bit key must be
+    /// refused too.
+    #[test]
+    fn encrypt_rejects_wide_der_key() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 2048).expect("keypair generation");
+        let der = RsaPublicKey::from(&private_key)
+            .to_public_key_der()
+            .expect("DER encoding");
+        let err =
+            encrypt_password(der.as_bytes(), "hunter2").expect_err("wide key must be refused");
+        assert!(
+            err.to_string().contains("Unsupported RSA key size"),
+            "{err}"
+        );
+    }
+
+    /// A narrower key would produce a ticket the server cannot decrypt
+    /// with its 1024-bit key, so it is refused rather than zero-padded.
+    #[test]
+    fn encrypt_rejects_narrow_der_key() {
+        let mut rng = OsRng;
+        let private_key = RsaPrivateKey::new(&mut rng, 512).expect("keypair generation");
+        let der = RsaPublicKey::from(&private_key)
+            .to_public_key_der()
+            .expect("DER encoding");
+        let err =
+            encrypt_password(der.as_bytes(), "hunter2").expect_err("narrow key must be refused");
+        assert!(
+            err.to_string().contains("Unsupported RSA key size"),
+            "{err}"
+        );
     }
 
     #[test]
