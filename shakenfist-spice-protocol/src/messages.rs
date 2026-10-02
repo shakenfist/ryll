@@ -134,6 +134,20 @@ impl ChannelsList {
         let mut cursor = Cursor::new(data);
         let num_channels = cursor.read_u32::<LittleEndian>()? as usize;
 
+        // Each entry is two bytes, so the body bounds the count. Check it
+        // before reserving: the count is server-supplied, and trusting it
+        // would let a six-byte message reserve gigabytes.
+        let room = (data.len() - 4) / 2;
+        if num_channels > room {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "ChannelsList declares {} channels but the body holds at most {}",
+                    num_channels, room
+                ),
+            ));
+        }
+
         let mut channels = Vec::with_capacity(num_channels);
         for _ in 0..num_channels {
             let channel_type = cursor.read_u8()?;
@@ -1048,6 +1062,29 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ChannelsList tests ---
+
+    #[test]
+    fn channels_list_reads_entries() {
+        let mut data = 2u32.to_le_bytes().to_vec();
+        data.extend_from_slice(&[1, 0, 2, 3]);
+        let list = ChannelsList::read(&data).expect("parse");
+        assert_eq!(list.channels.len(), 2);
+        assert_eq!(list.channels[1].channel_type, 2);
+        assert_eq!(list.channels[1].channel_id, 3);
+    }
+
+    /// shakenfist/ryll#180: the count is checked against the body before
+    /// anything is reserved, so a huge count is an error, not an
+    /// allocation of `count * 2` bytes.
+    #[test]
+    fn channels_list_count_beyond_body_is_error() {
+        let mut data = u32::MAX.to_le_bytes().to_vec();
+        data.extend_from_slice(&[1, 0]);
+        let err = ChannelsList::read(&data).expect_err("count exceeds body");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 
     // --- DrawBase tests ---
 
