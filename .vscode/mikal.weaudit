@@ -364,10 +364,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/control-socket-protocol.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/design-decisions.md",
       "author": "mikal"
     },
@@ -381,10 +377,6 @@
     },
     {
       "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
     {
@@ -420,15 +412,7 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/inputs.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/lifecycle.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/server.rs",
       "author": "mikal"
     },
     {
@@ -500,14 +484,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/playback.rs",
       "author": "mikal"
     },
@@ -524,19 +500,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/control/protocol.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control/server.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control",
       "author": "mikal"
     },
     {
@@ -576,10 +540,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/metrics.rs",
       "author": "mikal"
     },
@@ -592,19 +552,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/snapshots.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/tests/control_socket.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/Cargo.toml",
       "author": "mikal"
     },
     {
@@ -840,15 +788,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/features.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/multi-mode-parity.md",
       "author": "mikal"
     },
     {
@@ -857,14 +797,6 @@
     },
     {
       "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app.rs",
       "author": "mikal"
     },
     {
@@ -877,10 +809,6 @@
     },
     {
       "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
       "author": "mikal"
     },
     {
@@ -948,14 +876,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/session.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src",
-      "author": "mikal"
-    },
-    {
       "path": "tools/proxmox-smoke.py",
       "author": "mikal"
     },
@@ -980,23 +900,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/tests",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/proxy.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-protocol/src",
-      "author": "mikal"
-    },
-    {
-      "path": "ARCHITECTURE.md",
       "author": "mikal"
     },
     {

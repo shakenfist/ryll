@@ -85,10 +85,6 @@
       "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
       "date": "2026-09-23"
     },
-    "ARCHITECTURE.md": {
-      "sha": "0c1a088d685440e734e95039cc3be5830bfaf168",
-      "date": "2026-09-29"
-    },
     "Cargo.toml": {
       "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
       "date": "2026-09-23"
@@ -141,10 +137,6 @@
       "sha": "1243c0f12a31f62a45801bc7cb76fe2e90041361",
       "date": "2026-09-29"
     },
-    "docs/control-socket-protocol.md": {
-      "sha": "790565811c9d129ba254461352d59d1ed7b3968e",
-      "date": "2026-09-17"
-    },
     "docs/design-decisions.md": {
       "sha": "5a943f62bbcdca4aa9dcd631dd629a10a88e0d4f",
       "date": "2026-09-17"
@@ -160,10 +152,6 @@
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
-    },
-    "docs/diagnostics.md": {
-      "sha": "470c4cfcd62ffa2a4dad91edd66a06ce9a290255",
-      "date": "2026-09-27"
     },
     "docs/features.md": {
       "sha": "9cf98a96cb0118d8e4af813b37134b9234e28a31",
@@ -185,10 +173,6 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
-    "docs/multi-mode-parity.md": {
-      "sha": "1b1c53250c7e39067c8ec45001129f1bf91048e3",
-      "date": "2026-09-27"
-    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
@@ -209,16 +193,8 @@
       "sha": "f716591931e0e804168ee023c3cffa53d8f484aa",
       "date": "2026-09-27"
     },
-    "docs/troubleshooting.md": {
-      "sha": "1513e4c97dcb7eac8aa4edb4d70bbbc2210346e1",
-      "date": "2026-09-27"
-    },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
-      "date": "2026-09-17"
-    },
-    "docs/web-mode-internals.md": {
-      "sha": "8fbb7eda083fcd53c61f49c88a83e4b991a9aab8",
       "date": "2026-09-17"
     },
     "examples/control-socket-demo.py": {
@@ -244,10 +220,6 @@
     "ryll/pyproject.toml": {
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
-    },
-    "ryll/src/app.rs": {
-      "sha": "64b0801115cdcb1a918406e9145cb9faed49f39f",
-      "date": "2026-09-27"
     },
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
@@ -276,10 +248,6 @@
     "ryll/src/input_egui.rs": {
       "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
-    },
-    "ryll/src/main.rs": {
-      "sha": "cf47148c8a747303dc1914c4243b515f5c91d3ed",
-      "date": "2026-09-27"
     },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
@@ -321,10 +289,6 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
-    "ryll/src/web/inputs.rs": {
-      "sha": "27508364194805a51621010a8ad75834508a0e2c",
-      "date": "2026-09-18"
-    },
     "ryll/src/web/lifecycle.rs": {
       "sha": "edc8d98358c50af750f3c134e6adacbf63628a03",
       "date": "2026-09-18"
@@ -332,10 +296,6 @@
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "edcf8164820887ad7f917d523ccc977fda842194",
-      "date": "2026-09-18"
     },
     "ryll/src/web/signalling.rs": {
       "sha": "44ae35563974812b068953f94ee67bea51eed186",
@@ -469,10 +429,6 @@
       "sha": "af122c5e1dbce00ff13fc39b48b536e84bcd905c",
       "date": "2026-09-27"
     },
-    "shakenfist-spice-renderer/Cargo.toml": {
-      "sha": "cb76893d6ae3aed847e03a4f4c147ad7e72555dd",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/README.md": {
       "sha": "f26f1d8b76c389c4b6711d7ae1b482fa234326f6",
       "date": "2026-08-02"
@@ -499,14 +455,6 @@
     },
     "shakenfist-spice-renderer/src/channels/inputs.rs": {
       "sha": "727a10c8795165c88f9dbef1b9fcf48c67fae6d2",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
-      "sha": "7251bb844a5a19a4a347c155922378585de7f498",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/mod.rs": {
-      "sha": "2543364a390162c7f14b324b5eddccdf1f58cd2e",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/channels/playback.rs": {
@@ -539,10 +487,6 @@
     },
     "shakenfist-spice-renderer/src/control/protocol.rs": {
       "sha": "3f2f75abfe5ba66229e112df157164a9cc029cf7",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/control/server.rs": {
-      "sha": "a8b05bd233f846833d85e31b6b91bcc38019a3cc",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/device_config.rs": {
@@ -581,10 +525,6 @@
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/lib.rs": {
-      "sha": "7229b3880fd8f9f8256bc0d566310373a8e6d026",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
       "date": "2026-07-21"
@@ -607,14 +547,6 @@
     },
     "shakenfist-spice-renderer/src/opcode_counters.rs": {
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/session.rs": {
-      "sha": "9ccf0393076502dfe38f0684ba79c57d26b34a46",
-      "date": "2026-09-29"
-    },
-    "shakenfist-spice-renderer/src/snapshots.rs": {
-      "sha": "f1f638ea45447f40cc6969ef87852976f1c1a68d",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/surface_mirror.rs": {
@@ -648,10 +580,6 @@
     "shakenfist-spice-renderer/src/webdav/server.rs": {
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/tests/control_socket.rs": {
-      "sha": "187f9bd43eda81119cd4764983a94ed4b7c9fd10",
-      "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
