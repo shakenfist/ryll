@@ -726,6 +726,11 @@ fn run_web(
                 glz_dictionary_cap_bytes,
             )
             .await;
+            // Nothing else reads this result until shutdown, so a
+            // session that never came up would otherwise go unreported.
+            if let Err(e) = &res {
+                tracing::error!("web: connection error: {:#}", e);
+            }
             // `status` should stop claiming a live SPICE session the
             // moment the orchestrator returns.
             spice_connected_for_conn.store(false, Ordering::Relaxed);

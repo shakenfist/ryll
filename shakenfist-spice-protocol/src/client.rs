@@ -1,5 +1,5 @@
 /// SPICE client connection management
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use socket2::SockRef;
 use std::sync::Arc;
 use std::time::Duration;
@@ -266,10 +266,27 @@ fn needs_spice_verifier(
     anchors.private_pki || expected_subject.is_some()
 }
 
+/// How long a channel's TCP dial may take. Without a bound, a dial to an
+/// address that silently drops SYNs waits out the operating system's own
+/// connect timeout (about 75 seconds on macOS, minutes on Linux), during
+/// which a host has nothing to show but "Connecting".
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long each handshake stage of a channel link may take once the
+/// socket is open: the TLS handshake, the SPICE link exchange, and ticket
+/// authentication are each bounded by this separately. TCP keepalive only
+/// notices a dead peer; a live one that accepts the connection and never
+/// answers would otherwise hold the link forever.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// SPICE client for managing connections to channels
 pub struct SpiceClient {
     config: ConnectionConfig,
     tls_connector: Option<TlsConnector>,
+    /// [`DIAL_TIMEOUT`], held per client so tests can shorten it.
+    dial_timeout: Duration,
+    /// [`HANDSHAKE_TIMEOUT`], held per client so tests can shorten it.
+    handshake_timeout: Duration,
 }
 
 impl SpiceClient {
@@ -324,6 +341,8 @@ impl SpiceClient {
         Ok(SpiceClient {
             config,
             tls_connector,
+            dial_timeout: DIAL_TIMEOUT,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
         })
     }
 
@@ -432,15 +451,26 @@ impl SpiceClient {
             channel_id
         );
 
-        let reply = perform_link_with_caps(
-            &mut stream,
-            connection_id,
-            channel_type,
-            channel_id,
-            common_caps,
-            channel_caps,
+        let reply = tokio::time::timeout(
+            self.handshake_timeout,
+            perform_link_with_caps(
+                &mut stream,
+                connection_id,
+                channel_type,
+                channel_id,
+                common_caps,
+                channel_caps,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "{}: SPICE link handshake with {} did not complete within {:?}",
+                channel_type.name(),
+                self.config.display_target(),
+                self.handshake_timeout
+            )
+        })??;
 
         // Check for errors
         match reply.error {
@@ -462,7 +492,19 @@ impl SpiceClient {
 
         // Perform authentication
         info!("{}: authenticating...", channel_type.name());
-        perform_auth(&mut stream, &reply.pub_key, self.config.password.as_deref()).await?;
+        tokio::time::timeout(
+            self.handshake_timeout,
+            perform_auth(&mut stream, &reply.pub_key, self.config.password.as_deref()),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "{}: authentication with {} did not complete within {:?}",
+                channel_type.name(),
+                self.config.display_target(),
+                self.handshake_timeout
+            )
+        })??;
 
         info!("{}: connected successfully", channel_type.name());
 
@@ -497,10 +539,31 @@ impl SpiceClient {
         // "host:port" string, so an IP literal (IPv6 included) is parsed
         // as one rather than split back apart at its last ':' and handed
         // to the resolver.
-        let mut tcp_stream = match proxy {
-            Some(proxy) => TcpStream::connect((proxy.host.as_str(), proxy.port)).await?,
-            None => TcpStream::connect((self.config.host.as_str(), port)).await?,
+        let (dial_host, dial_port, dial_label) = match proxy {
+            Some(proxy) => (
+                proxy.host.as_str(),
+                proxy.port,
+                format!("HTTP proxy {proxy}"),
+            ),
+            None => (
+                self.config.host.as_str(),
+                port,
+                format!("{}:{port}", self.config.host),
+            ),
         };
+        let mut tcp_stream = tokio::time::timeout(
+            self.dial_timeout,
+            TcpStream::connect((dial_host, dial_port)),
+        )
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "timed out after {:?} connecting to {}",
+                self.dial_timeout,
+                dial_label
+            )
+        })?
+        .with_context(|| format!("connecting to {dial_label}"))?;
         tcp_stream.set_nodelay(true)?;
 
         // Enable TCP keepalive to prevent NAT/firewall idle timeouts and
@@ -551,7 +614,19 @@ impl SpiceClient {
                 Some(proxy) => ServerName::try_from(proxy.host.clone())?,
                 None => ServerName::try_from(self.config.host.clone())?,
             };
-            let tls_stream = connector.connect(server_name, tcp_stream).await?;
+            let tls_stream = tokio::time::timeout(
+                self.handshake_timeout,
+                connector.connect(server_name, tcp_stream),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "TLS handshake with {} did not complete within {:?}",
+                    self.config.display_target(),
+                    self.handshake_timeout
+                )
+            })?
+            .with_context(|| format!("TLS handshake with {}", self.config.display_target()))?;
             SpiceStream::Tls(tls_stream)
         } else {
             SpiceStream::Plain(tcp_stream)
@@ -1370,6 +1445,8 @@ mod tests {
                 ..Default::default()
             },
             tls_connector: None,
+            dial_timeout: DIAL_TIMEOUT,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
         };
         let err = match client.open_transport(false, 5900).await {
             Err(e) => e,
@@ -1545,6 +1622,106 @@ mod tests {
                 })
             ),
             "got {err:?}"
+        );
+    }
+
+    // ── Connect timeouts ────────────────────────────────────────────
+
+    /// A server that accepts one connection and never says anything,
+    /// reading and discarding until the client gives up and closes.
+    async fn silent_server(listener: TcpListener) {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = sock.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+        }
+    }
+
+    /// `SpiceClient::new`, with the handshake timeout shortened so a
+    /// test of it does not take [`HANDSHAKE_TIMEOUT`] to run.
+    fn impatient_client(config: ConnectionConfig) -> SpiceClient {
+        let mut client = SpiceClient::new(config).unwrap();
+        client.handshake_timeout = Duration::from_millis(200);
+        client
+    }
+
+    async fn connect_main_err(client: &SpiceClient) -> anyhow::Error {
+        match client.connect_channel(0, ChannelType::Main, 0).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected the connection to fail"),
+        }
+    }
+
+    /// A TLS port that accepts the connection and never answers the
+    /// ClientHello fails the link, naming the stage and the target.
+    #[tokio::test]
+    async fn connect_channel_times_out_a_silent_tls_handshake() {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(silent_server(listener));
+
+        let client = impatient_client(ConnectionConfig {
+            host: "127.0.0.1".into(),
+            tls_port: Some(port),
+            ca_cert: Some(ca.vv_ca_field.clone()),
+            ..Default::default()
+        });
+        let err = connect_main_err(&client).await;
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&format!(
+                "TLS handshake with 127.0.0.1:{port} did not complete"
+            )),
+            "got {message}"
+        );
+
+        drop(client);
+        server.await.unwrap();
+    }
+
+    /// A plaintext port that accepts the connection and never sends a
+    /// link reply fails the link rather than waiting forever.
+    #[tokio::test]
+    async fn connect_channel_times_out_a_silent_link_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(silent_server(listener));
+
+        let client = impatient_client(plain_config(port));
+        let err = connect_main_err(&client).await;
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&format!(
+                "main: SPICE link handshake with 127.0.0.1:{port} did not complete"
+            )),
+            "got {message}"
+        );
+
+        drop(client);
+        server.await.unwrap();
+    }
+
+    /// A refused dial says where it was dialling, so the error means
+    /// something without the startup log line beside it.
+    #[tokio::test]
+    async fn connect_channel_refused_dial_names_the_target() {
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let client = SpiceClient::new(plain_config(port)).unwrap();
+        let err = connect_main_err(&client).await;
+        assert!(
+            format!("{err:#}").starts_with(&format!("connecting to 127.0.0.1:{port}: ")),
+            "got {err:#}"
+        );
+        assert!(
+            err.downcast_ref::<std::io::Error>().is_some(),
+            "the dial's io::Error must stay reachable, got {err:?}"
         );
     }
 
