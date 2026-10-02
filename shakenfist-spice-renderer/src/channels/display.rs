@@ -2233,12 +2233,30 @@ impl DisplayChannel {
                         return Ok(());
                     };
 
+                    // Each row copies width * 4 bytes from a multiple of
+                    // stride, so the needed_bytes check only covers the
+                    // copy when a row fits within its stride. Without
+                    // this a 4-byte stride with a million-pixel width
+                    // passes that check and the row slice runs past the
+                    // pixel data.
+                    let row_fits_stride = width_usize
+                        .checked_mul(4)
+                        .is_some_and(|row_bytes| row_bytes <= stride);
+
                     if needed_bytes > pixel_data.len() {
                         warn_once!(
                             "display:decode_failure:pixmap:short_pixel_data",
                             "display: pixmap data too short (have {}, need {})",
                             pixel_data.len(),
                             needed_bytes
+                        );
+                        None
+                    } else if !row_fits_stride {
+                        warn_once!(
+                            "display:decode_failure:pixmap:stride_too_small",
+                            "display: pixmap stride {} too small for width {}, skipping",
+                            stride,
+                            width
                         );
                         None
                     } else {
@@ -4377,5 +4395,153 @@ mod tests {
             channel.streams_rejected_total, 0,
             "an unsupported codec is not a cap refusal; the counters mean different things"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // DRAW_COPY image decode and placement
+    //
+    // These drive `handle_message` with hand-built DRAW_COPY payloads,
+    // so the whole of `decode_image_and_emit` runs: the decode arm, the
+    // cache, the source-rect crop and the clip-rect split.
+    // -------------------------------------------------------------------------
+
+    /// SpiceRect as (top, left, bottom, right), the wire order.
+    type WireRect = (u32, u32, u32, u32);
+
+    /// A DRAW_COPY payload drawing `image` at (0, 0) from `src_rect`.
+    ///
+    /// `image` is a SpiceImage (an `ImageDescriptor` and its data). An
+    /// empty `clip_rects` sends clip type NONE, otherwise RECTS.
+    fn draw_copy_payload(src_rect: WireRect, clip_rects: &[WireRect], image: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        for edge in [0u32, 0, 1, 1] {
+            v.extend_from_slice(&edge.to_le_bytes()); // dest box: top, left, bottom, right
+        }
+        if clip_rects.is_empty() {
+            v.push(0); // clip_type NONE
+        } else {
+            v.push(1); // clip_type RECTS
+            v.extend_from_slice(&(clip_rects.len() as u32).to_le_bytes());
+            for (top, left, bottom, right) in clip_rects {
+                for edge in [top, left, bottom, right] {
+                    v.extend_from_slice(&edge.to_le_bytes());
+                }
+            }
+        }
+        // SpiceCopy: src_bitmap, src_area, rop(2), scale(1), mask
+        // flags(1), mask pos(8), mask bitmap(4) = 36 bytes, then the
+        // image straight after it.
+        let src_bitmap = (v.len() + 36) as u32;
+        v.extend_from_slice(&src_bitmap.to_le_bytes());
+        let (top, left, bottom, right) = src_rect;
+        for edge in [top, left, bottom, right] {
+            v.extend_from_slice(&edge.to_le_bytes());
+        }
+        v.extend_from_slice(&[0u8; 16]);
+        v.extend_from_slice(image);
+        v
+    }
+
+    /// An `ImageDescriptor` (18 bytes).
+    fn image_descriptor(
+        id: u64,
+        image_type: ImageType,
+        flags: u8,
+        width: u32,
+        height: u32,
+    ) -> Vec<u8> {
+        let mut v = Vec::with_capacity(ImageDescriptor::SIZE);
+        v.extend_from_slice(&id.to_le_bytes());
+        v.push(image_type as u8);
+        v.push(flags);
+        v.extend_from_slice(&width.to_le_bytes());
+        v.extend_from_slice(&height.to_le_bytes());
+        v
+    }
+
+    /// A top-down 32-bit BGRX Pixmap SpiceImage.
+    fn pixmap_image(
+        id: u64,
+        flags: u8,
+        width: u32,
+        height: u32,
+        stride: u32,
+        pixels: &[u8],
+    ) -> Vec<u8> {
+        let mut v = image_descriptor(id, ImageType::Pixmap, flags, width, height);
+        v.push(8); // format: 32-bit BGRX
+        v.push(0x04); // flags: top-down
+        v.extend_from_slice(&width.to_le_bytes());
+        v.extend_from_slice(&height.to_le_bytes());
+        v.extend_from_slice(&stride.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // palette
+        v.extend_from_slice(pixels);
+        v
+    }
+
+    /// (left, top, width, height, pixels) of each ImageReady emitted so
+    /// far.
+    fn drain_image_events(peers: &mut TestChannelPeers) -> Vec<(u32, u32, u32, u32, Vec<u8>)> {
+        let mut out = Vec::new();
+        while let Ok(event) = peers._events.try_recv() {
+            if let ChannelEvent::ImageReady {
+                left,
+                top,
+                width,
+                height,
+                pixels,
+                ..
+            } = event
+            {
+                out.push((left, top, width, height, pixels));
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn pixmap_with_padded_stride_skips_the_padding() {
+        // 2x2, stride 12: each row is 8 bytes of BGRX then 4 of padding.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels = [
+            1, 2, 3, 0, 4, 5, 6, 0, 0xEE, 0xEE, 0xEE, 0xEE, //
+            7, 8, 9, 0, 10, 11, 12, 0, 0xEE, 0xEE, 0xEE, 0xEE,
+        ];
+        let image = pixmap_image(1, 0, 2, 2, 12, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, rgba) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(
+            rgba,
+            &vec![3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255]
+        );
+    }
+
+    #[tokio::test]
+    async fn pixmap_with_stride_narrower_than_a_row_is_refused() {
+        // #173: width 1_000_000 with stride 4 and four bytes of data
+        // passes the stride * height check, and the row copy then
+        // sliced 4_000_000 bytes out of four and panicked.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let image = pixmap_image(1, 0, 1_000_000, 1, 4, &[1, 2, 3, 4]);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 1, 1_000_000), &[], &image),
+            )
+            .await
+            .expect("a refused pixmap is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
     }
 }
