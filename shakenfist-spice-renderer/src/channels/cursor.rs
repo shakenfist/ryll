@@ -9,6 +9,7 @@ use crate::snapshots::{CursorCacheEntry, CursorSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
+use shakenfist_spice_compression::limits;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -511,83 +512,54 @@ impl CursorChannel {
 fn decode_cursor_pixels(header: &SpiceCursorHeader, pixel_data: &[u8]) -> Option<CursorImage> {
     let w = header.width as usize;
     let h = header.height as usize;
-    let pixel_count = w.checked_mul(h)?;
-    let rgba_size = pixel_count.checked_mul(4)?;
 
     if w == 0 || h == 0 {
         return None;
     }
 
-    let mut rgba = vec![0u8; rgba_size];
-
-    match header.cursor_type {
+    // Bytes per source pixel, whether the fourth byte is alpha, and
+    // the format's name for the warnings below.
+    let (src_bpp, has_alpha, format_name) = match header.cursor_type {
         // Alpha: 32-bit ARGB per pixel
-        0 => {
-            let needed = pixel_count * 4;
-            if pixel_data.len() < needed {
-                warn!(
-                    "cursor: alpha data too short (have {}, need {})",
-                    pixel_data.len(),
-                    needed
-                );
-                return None;
-            }
-            for i in 0..pixel_count {
-                let s = i * 4;
-                let d = i * 4;
-                rgba[d] = pixel_data[s + 2]; // R (from BGRA position)
-                rgba[d + 1] = pixel_data[s + 1]; // G
-                rgba[d + 2] = pixel_data[s]; // B
-                rgba[d + 3] = pixel_data[s + 3]; // A
-            }
-        }
-
+        0 => (4, true, "alpha"),
         // Color24: 24-bit BGR per pixel
-        5 => {
-            let needed = pixel_count * 3;
-            if pixel_data.len() < needed {
-                warn!(
-                    "cursor: color24 data too short (have {}, need {})",
-                    pixel_data.len(),
-                    needed
-                );
-                return None;
-            }
-            for i in 0..pixel_count {
-                let s = i * 3;
-                let d = i * 4;
-                rgba[d] = pixel_data[s + 2]; // R
-                rgba[d + 1] = pixel_data[s + 1]; // G
-                rgba[d + 2] = pixel_data[s]; // B
-                rgba[d + 3] = 255; // A
-            }
-        }
-
+        5 => (3, false, "color24"),
         // Color32: 32-bit xRGB per pixel (x is padding, not alpha)
-        6 => {
-            let needed = pixel_count * 4;
-            if pixel_data.len() < needed {
-                warn!(
-                    "cursor: color32 data too short (have {}, need {})",
-                    pixel_data.len(),
-                    needed
-                );
-                return None;
-            }
-            for i in 0..pixel_count {
-                let s = i * 4;
-                let d = i * 4;
-                rgba[d] = pixel_data[s + 2]; // R (from BGRX position)
-                rgba[d + 1] = pixel_data[s + 1]; // G
-                rgba[d + 2] = pixel_data[s]; // B
-                rgba[d + 3] = 255; // A
-            }
-        }
-
+        6 => (4, false, "color32"),
         other => {
             warn!("cursor: unsupported cursor type {} ({}x{})", other, w, h);
             return None;
         }
+    };
+
+    // The dimensions are server-chosen u16s, so size the buffer with
+    // the shared limit, and refuse a short message before allocating
+    // anything: a 65535x65535 header with no pixel data must not cost
+    // 16 GiB.
+    let Some(rgba_size) = limits::rgba_len(w, h) else {
+        warn!("cursor: dimensions refused: {}x{}", w, h);
+        return None;
+    };
+    let pixel_count = rgba_size / 4;
+    let needed = pixel_count * src_bpp;
+    if pixel_data.len() < needed {
+        warn!(
+            "cursor: {} data too short (have {}, need {})",
+            format_name,
+            pixel_data.len(),
+            needed
+        );
+        return None;
+    }
+
+    let mut rgba = vec![0u8; rgba_size];
+    let (dst_pixels, _) = rgba.as_chunks_mut::<4>();
+    for (src, dst) in pixel_data.chunks_exact(src_bpp).zip(dst_pixels) {
+        // BGR(A/X) -> RGBA
+        dst[0] = src[2]; // R
+        dst[1] = src[1]; // G
+        dst[2] = src[0]; // B
+        dst[3] = if has_alpha { src[3] } else { 255 }; // A
     }
 
     Some(CursorImage {
@@ -670,6 +642,65 @@ mod tests {
 
         let img = result.unwrap();
         assert_eq!(img.pixels, vec![0xCC, 0xBB, 0xAA, 0xFF]); // RGBA with A=255
+    }
+
+    #[test]
+    fn test_color24_cursor_bgr_to_rgba() {
+        let pixels: Vec<u8> = vec![
+            0x11, 0x22, 0x33, // B=11, G=22, R=33
+            0x44, 0x55, 0x66, // B=44, G=55, R=66
+        ];
+        let data = build_cursor_payload(5, 2, 1, 0, &pixels);
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+        let img = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).unwrap();
+        assert_eq!(
+            img.pixels,
+            vec![0x33, 0x22, 0x11, 0xFF, 0x66, 0x55, 0x44, 0xFF]
+        );
+    }
+
+    #[test]
+    fn test_short_cursor_data_returns_none() {
+        // One byte short of a 2x2 cursor, for each format.
+        for (cursor_type, bpp) in [(0u8, 4usize), (5, 3), (6, 4)] {
+            let pixels = vec![0u8; 2 * 2 * bpp - 1];
+            let data = build_cursor_payload(cursor_type, 2, 2, 0, &pixels);
+            let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+            assert!(
+                decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none(),
+                "cursor type {} with short data must be refused",
+                cursor_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_huge_cursor_with_short_data_returns_none() {
+        // #177: a 65535x65535 header with four bytes of pixel data.
+        // Before the fix this allocated 16 GiB of RGBA and only then
+        // noticed the data was short.
+        for cursor_type in [0u8, 5, 6] {
+            let data = build_cursor_payload(cursor_type, 65535, 65535, 0, &[0u8; 4]);
+            let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+            assert!(decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none());
+        }
+    }
+
+    #[test]
+    fn test_cursor_over_dimension_cap_returns_none() {
+        // Full pixel data does not rescue a cursor over the shared
+        // per-side limit; one at the limit still decodes.
+        let max = limits::MAX_IMAGE_DIMENSION as u16;
+        let pixels = vec![0u8; (max as usize + 1) * 4];
+
+        let data = build_cursor_payload(0, max + 1, 1, 0, &pixels);
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+        assert!(decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none());
+
+        let data = build_cursor_payload(0, max, 1, 0, &pixels);
+        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+        let img = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).unwrap();
+        assert_eq!(img.pixels.len(), max as usize * 4);
     }
 
     #[test]
