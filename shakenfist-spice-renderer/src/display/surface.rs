@@ -64,21 +64,27 @@ impl DisplaySurface {
 
     /// Blit pixel data onto the surface at the given position
     pub fn blit(&mut self, left: u32, top: u32, width: u32, height: u32, pixels: &[u8]) {
-        let src_stride = (width * 4) as usize;
-        let dst_stride = (self.width * 4) as usize;
+        // The origin comes from the server's draw. Off the surface there
+        // is nothing to copy, and left * 4 past dst_stride would
+        // underflow the copy width below.
+        if left >= self.width || top >= self.height {
+            return;
+        }
 
-        for y in 0..height {
-            let src_y = y as usize;
-            let dst_y = (top + y) as usize;
+        let src_stride = (width as usize) * 4;
+        let dst_stride = (self.width as usize) * 4;
+        let dst_left = (left as usize) * 4;
+        let copy_width = src_stride.min(dst_stride.saturating_sub(dst_left));
+
+        for y in 0..height as usize {
+            let dst_y = (top as usize) + y;
 
             if dst_y >= self.height as usize {
                 break;
             }
 
-            let src_start = src_y * src_stride;
-            let dst_start = dst_y * dst_stride + (left * 4) as usize;
-
-            let copy_width = src_stride.min(dst_stride - (left * 4) as usize);
+            let src_start = y * src_stride;
+            let dst_start = dst_y * dst_stride + dst_left;
 
             if src_start + copy_width <= pixels.len() && dst_start + copy_width <= self.pixels.len()
             {
@@ -514,6 +520,46 @@ mod tests {
         let p = (y as usize) * stride + (x as usize) * 4;
         let px = &s.pixels()[p..p + 4];
         [px[0], px[1], px[2], px[3]]
+    }
+
+    /// A surface whose pixels are 0, 1, 2, ... (mod 256), not dirty.
+    fn numbered_surface(width: u32, height: u32) -> DisplaySurface {
+        let mut s = DisplaySurface::new(0, width, height);
+        for (i, byte) in s.pixels.iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        s.consume_dirty();
+        s
+    }
+
+    #[test]
+    fn blit_clipped_to_surface() {
+        let mut s = numbered_surface(2, 2);
+        let before = s.pixels().to_vec();
+        // A 2x2 red source at (1, 1): only (1, 1) is on the surface.
+        let src = [255u8, 0, 0, 255].repeat(4);
+        s.blit(1, 1, 2, 2, &src);
+        assert_eq!(pixel_at(&s, 1, 1), [255, 0, 0, 255]);
+        assert_eq!(s.pixels()[..12], before[..12]);
+        assert!(s.is_dirty());
+    }
+
+    #[test]
+    fn blit_with_origin_off_the_surface_changes_nothing() {
+        // #182: left past the width underflowed dst_stride - left * 4,
+        // and a huge left overflowed left * 4, both of which panic in a
+        // debug build; at exactly the width or height nothing was
+        // copied but the surface was still marked dirty. An origin off
+        // the right or bottom edge must neither write nor mark dirty.
+        let src = [255u8, 0, 0, 255].repeat(4);
+        let origins = [(4, 0), (0, 4), (4, 4), (5, 0), (u32::MAX, 0), (0, u32::MAX)];
+        for (left, top) in origins {
+            let mut s = numbered_surface(4, 4);
+            let before = s.pixels().to_vec();
+            s.blit(left, top, 2, 2, &src);
+            assert_eq!(s.pixels(), &before[..], "blit at ({left}, {top})");
+            assert!(!s.is_dirty(), "blit at ({left}, {top})");
+        }
     }
 
     #[test]
