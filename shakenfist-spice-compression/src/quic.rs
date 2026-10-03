@@ -2,6 +2,8 @@
 
 use tracing::{debug, warn};
 
+use crate::limits;
+
 const QUIC_IMAGE_TYPE_INVALID: u32 = 0;
 const QUIC_IMAGE_TYPE_GRAY: u32 = 1;
 const QUIC_IMAGE_TYPE_RGB16: u32 = 2;
@@ -34,7 +36,10 @@ const BESTTRIGTAB: [[u32; 11]; 3] = [
     [100, 120, 550, 900, 700, 500, 400, 300, 220, 250, 160],
 ];
 
-const J: [u8; 32] = [
+/// Number of MELCODE run-length states, and so the length of `J`.
+const MELCSTATES: usize = 32;
+
+const J: [u8; MELCSTATES] = [
     0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 9, 10, 11, 12, 13,
     14, 15,
 ];
@@ -477,6 +482,9 @@ struct QuicDecoder {
     image_type: u32,
     width: usize,
     height: usize,
+    /// Byte length of the RGBA image, from `limits::rgba_len`. Set
+    /// once `quic_decode_begin` has accepted the dimensions.
+    output_len: usize,
     io_idx: usize,
     io_available_bits: u32,
     io_word: u32,
@@ -520,6 +528,7 @@ impl QuicDecoder {
             image_type: QUIC_IMAGE_TYPE_INVALID,
             width: 0,
             height: 0,
+            output_len: 0,
             io_idx: 0,
             io_available_bits: 0,
             io_word: 0,
@@ -547,6 +556,7 @@ impl QuicDecoder {
         self.io_end = self.io_now.len();
         self.io_idx = 0;
         self.rows_completed = 0;
+        self.output_len = 0;
     }
 
     fn read_io_word(&mut self) -> bool {
@@ -631,6 +641,16 @@ impl QuicDecoder {
             return false;
         }
 
+        // The dimensions come from the server. Refuse them before
+        // reset_channels sizes each channel's row buffer from the
+        // width, or a header claiming a 4 Gi pixel row allocates
+        // 16 GiB per channel before any pixel data is read.
+        let Some(output_len) = limits::rgba_len(self.width, self.height) else {
+            warn!("quic: dimensions refused: {}x{}", self.width, self.height);
+            return false;
+        };
+        self.output_len = output_len;
+
         let bpc = quic_image_bpc(self.image_type);
         self.reset_channels(bpc)
     }
@@ -643,7 +663,11 @@ impl QuicDecoder {
 
             for _ in 1..=temp {
                 runlen += state.melcorder;
-                if state.melcstate < 32 {
+                // J has MELCSTATES entries, so the last state is
+                // MELCSTATES - 1. Stop there, as upstream does
+                // (quic.c decode_state_run); incrementing past it
+                // would index one beyond the end of J.
+                if state.melcstate < MELCSTATES - 1 {
                     state.melcstate += 1;
                     state.melclen = J[state.melcstate] as usize;
                     state.melcorder = 1usize << state.melclen;
@@ -920,6 +944,12 @@ impl QuicDecoder {
                             Some(v) => v,
                             None => return false,
                         };
+                        // The run length comes from the server; one
+                        // that reaches past this segment is corrupt
+                        // (upstream quic_tmpl.c reports "wrong RLE").
+                        if run > end - i {
+                            return false;
+                        }
                         let run_end = i + run;
 
                         while i < run_end {
@@ -998,6 +1028,12 @@ impl QuicDecoder {
                         Some(v) => v,
                         None => return false,
                     };
+                    // The run length comes from the server; one
+                    // that reaches past this segment is corrupt
+                    // (upstream quic_tmpl.c reports "wrong RLE").
+                    if run > end - i {
+                        return false;
+                    }
                     let run_end = i + run;
 
                     while i < run_end {
@@ -1309,6 +1345,12 @@ impl QuicDecoder {
                             Some(v) => v,
                             None => return false,
                         };
+                        // The run length comes from the server; one
+                        // that reaches past this segment is corrupt
+                        // (upstream quic_tmpl.c reports "wrong RLE").
+                        if run > end - i {
+                            return false;
+                        }
                         let run_end = i + run;
                         while i < run_end {
                             let p = i * RGB32_PIXEL_SIZE;
@@ -1376,6 +1418,12 @@ impl QuicDecoder {
                         Some(v) => v,
                         None => return false,
                     };
+                    // The run length comes from the server; one
+                    // that reaches past this segment is corrupt
+                    // (upstream quic_tmpl.c reports "wrong RLE").
+                    if run > end - i {
+                        return false;
+                    }
                     let run_end = i + run;
                     while i < run_end {
                         let p = i * RGB32_PIXEL_SIZE;
@@ -1569,18 +1617,10 @@ pub fn quic_decode(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Reject unreasonable dimensions to prevent huge allocations
-    // from a malicious server (16384x16384 = 1 GiB at 4 bpp).
-    if decoder.width > 16384 || decoder.height > 16384 {
-        warn!(
-            "quic: dimensions too large: {}x{}",
-            decoder.width, decoder.height
-        );
-        return None;
-    }
-
-    let stride = decoder.width.checked_mul(4)?;
-    let total = decoder.height.checked_mul(stride)?;
+    // quic_decode_begin has checked the dimensions with rgba_len, so
+    // the width is bounded and the stride cannot overflow.
+    let total = decoder.output_len;
+    let stride = decoder.width * RGB32_PIXEL_SIZE;
     let mut native = vec![0u8; total];
     if !decoder.quic_decode(&mut native, stride) {
         warn!("quic: decode failed");
@@ -1665,5 +1705,165 @@ mod tests {
         // The header is valid but there is no compressed data, so decoding
         // the first row should fail and return None.
         assert_eq!(quic_decode(&data, 8, 8), None);
+    }
+
+    /// Pack a string of '0' and '1' characters into the words the
+    /// decoder reads. The decoder consumes each little-endian u32
+    /// from its most significant bit down, so bits are packed
+    /// MSB-first. Spaces are ignored, so callers can group bits.
+    fn pack_bits(bits: &str) -> Vec<u8> {
+        let bits: Vec<bool> = bits
+            .chars()
+            .filter(|c| *c != ' ')
+            .map(|c| c == '1')
+            .collect();
+        let mut out = Vec::new();
+        for chunk in bits.chunks(32) {
+            let mut word = 0u32;
+            for (n, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    word |= 1 << (31 - n);
+                }
+            }
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        // The decoder reads a word ahead of the bits it is consuming,
+        // so trail some zero words to keep it fed.
+        out.extend_from_slice(&[0u8; 16]);
+        out
+    }
+
+    #[test]
+    fn oversized_width_is_refused_before_allocating() {
+        // Issue #172: the per-channel row buffers used to be sized
+        // from the wire width before the dimension check ran, so this
+        // header asked for four 16 GiB buffers.
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, u32::MAX, 1, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(!decoder.quic_decode_begin(&data));
+        for channel in &decoder.channels {
+            assert_eq!(channel.correlate_row.row.capacity(), 0);
+        }
+
+        assert_eq!(quic_decode(&data, u32::MAX, 1), None);
+    }
+
+    #[test]
+    fn oversized_height_is_refused() {
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, 1, u32::MAX, "");
+        let mut decoder = QuicDecoder::new();
+        assert!(!decoder.quic_decode_begin(&data));
+        assert_eq!(quic_decode(&data, 1, u32::MAX), None);
+    }
+
+    /// A QUIC header (magic, version, type, width, height) followed
+    /// by `bits` packed as the compressed image data.
+    fn quic_stream(image_type: u32, width: u32, height: u32, bits: &str) -> Vec<u8> {
+        let mut data = Vec::new();
+        for word in [0x4349_5551, 0, image_type, width, height] {
+            data.extend_from_slice(&u32::to_le_bytes(word));
+        }
+        data.extend_from_slice(&pack_bits(bits));
+        data
+    }
+
+    // The streams below describe 8x2 all-black images. With every
+    // residual zero, every pixel of a channel uses bucket 0. Its
+    // initial Golomb code is 7, so a channel's first pixel is the
+    // eight bits "10000000". The model update after that pixel
+    // makes code 0 the best, and then each later pixel is the one
+    // bit "1". The update interval is zero for the first 2048
+    // pixels, so the model is updated after every pixel and that
+    // choice never changes.
+
+    /// Row 0 of an RGB image: first pixel of three channels, then
+    /// seven more pixels of three channels each.
+    fn rgb_row0() -> String {
+        format!("{}{}", "10000000".repeat(3), "1".repeat(21))
+    }
+
+    /// Row 0 of the alpha channel of an RGBA image.
+    fn alpha_row0() -> String {
+        format!("10000000{}", "1".repeat(7))
+    }
+
+    // On row 1, pixels 0 to 2 decode normally. At pixel 3 the
+    // pixels above match and the two to the left match, so the
+    // decoder switches to run-length mode and the next bits are a
+    // MELCODE run. Five pixels remain in the row.
+    //
+    // A run is a series of one bits, each adding the current
+    // state's order (1 for states 0 to 3, 2 for states 4 to 7)
+    // and moving to the next state, then a zero, then J[state]
+    // literal bits added to the total.
+
+    /// A run of exactly five, to the end of the row: four hits
+    /// (1 + 1 + 1 + 1), the terminator, then one literal bit of 1.
+    const RUN_TO_ROW_END: &str = "11110 1";
+
+    /// A run of six, one past the end of the row: five hits
+    /// (1 + 1 + 1 + 1 + 2), the terminator, then a literal 0.
+    const RUN_PAST_ROW_END: &str = "111110 0";
+
+    #[test]
+    fn run_to_row_end_decodes() {
+        // The boundary case for the run-length check: a run that
+        // ends exactly at the row end is legal.
+        let bits = format!("{} {} {}", rgb_row0(), "1".repeat(9), RUN_TO_ROW_END);
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, 8, 2, &bits);
+        let black: Vec<u8> = [0, 0, 0, 255].repeat(16);
+        assert_eq!(quic_decode(&data, 8, 2), Some(black));
+    }
+
+    #[test]
+    fn rgb_run_past_row_end_returns_none() {
+        // Issue #171: before the run length was checked, this run
+        // wrote a pixel past the end of the row and panicked.
+        let bits = format!("{} {} {}", rgb_row0(), "1".repeat(9), RUN_PAST_ROW_END);
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGB32, 8, 2, &bits);
+        assert_eq!(quic_decode(&data, 8, 2), None);
+    }
+
+    #[test]
+    fn alpha_run_past_row_end_returns_none() {
+        // As above for the alpha channel, which has its own copy of
+        // the run loop. Row 1's colour channels end in a legal run
+        // so that decoding reaches the alpha channel's.
+        let bits = format!(
+            "{} {} {} {} {} {}",
+            rgb_row0(),
+            alpha_row0(),
+            "1".repeat(9),
+            RUN_TO_ROW_END,
+            "1".repeat(3),
+            RUN_PAST_ROW_END
+        );
+        let data = quic_stream(QUIC_IMAGE_TYPE_RGBA, 8, 2, &bits);
+        assert_eq!(quic_decode(&data, 8, 2), None);
+    }
+
+    #[test]
+    fn melcode_state_stops_at_last_state() {
+        // Issue #171: 40 consecutive hits are more than there are
+        // MELCODE states. Before the state was capped at
+        // MELCSTATES - 1, the 32nd hit indexed J[32] and panicked.
+        // The terminator follows, then J[31] = 15 literal bits.
+        let bits = format!("{}0{}", "1".repeat(40), "0".repeat(15));
+        let mut decoder = QuicDecoder::new();
+        decoder.reset(&pack_bits(&bits));
+        assert!(decoder.read_io_word());
+        decoder.io_word = decoder.io_next_word;
+        decoder.io_available_bits = 0;
+
+        let mut state = CommonState::new();
+        let run = decoder.decode_run(&mut state);
+
+        // The first 32 hits each add the order of one state; the
+        // remaining eight stay in the last state.
+        let orders: usize = J.iter().map(|&j| 1usize << j).sum();
+        let last_order = 1usize << J[MELCSTATES - 1];
+        assert_eq!(run, Some(orders + 8 * last_order));
+        // The run ends by stepping the state back down by one.
+        assert_eq!(state.melcstate, MELCSTATES - 2);
     }
 }

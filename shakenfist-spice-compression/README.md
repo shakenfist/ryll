@@ -29,7 +29,17 @@ exception: it returns `Option<Vec<u8>>` and leaves the
 dimension wrapping to the caller. The struct is
 `#[non_exhaustive]`; construct via `DecompressedImage::new(...)`
 (sets `win_head_dist` to 0) or `DecompressedImage::new_glz(...)`
-for GLZ images.
+for GLZ images. Both return `Option<DecompressedImage>`, and
+return `None` unless `pixels.len()` equals
+`limits::rgba_len(width, height)`.
+
+## Limits
+
+The `limits` module holds `MAX_IMAGE_DIMENSION`,
+`MAX_IMAGE_PIXELS` and `rgba_len(width, height)`. Image
+dimensions on the wire are attacker-controlled, so every decoder
+checks them against these caps before allocating, and `rgba_len`
+is the checked way to size an RGBA buffer.
 
 ## Usage
 

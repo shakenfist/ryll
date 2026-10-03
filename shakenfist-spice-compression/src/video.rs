@@ -44,12 +44,13 @@ pub const SPICE_VIDEO_CODEC_TYPE_H264: u8 = 3;
 /// A decoded frame costs the same allocation whichever codec
 /// produced it, so the cap has to be identical across backends: if
 /// the H.264 path were looser than the MJPEG one a hostile server
-/// would simply announce an H.264 stream. Aliased to
-/// [`crate::jpeg::MAX_DECODED_JPEG_DIMENSION`] rather than restated
-/// so the two cannot drift apart; see that constant for why 16384
-/// is the number (1 GiB of RGBA at the limit, with headroom for
-/// displays beyond 8K).
-pub const MAX_DECODED_VIDEO_DIMENSION: u32 = crate::jpeg::MAX_DECODED_JPEG_DIMENSION;
+/// would simply announce an H.264 stream. Aliased to the shared
+/// [`crate::limits::MAX_IMAGE_DIMENSION`] rather than restated so
+/// it cannot drift from the other decoders; see that constant for
+/// why it is the number. Frames are also held to
+/// [`crate::limits::MAX_IMAGE_PIXELS`], because both backends size
+/// their output with [`crate::limits::rgba_len`].
+pub const MAX_DECODED_VIDEO_DIMENSION: u32 = crate::limits::MAX_IMAGE_DIMENSION;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -439,28 +440,22 @@ impl VideoDecoder for H264VideoDecoder {
                 // wrapping — it still admits any allocation short of
                 // `usize::MAX` — so cap the frame the way the JPEG
                 // backends do before sizing the scratch buffer.
-                let cap = MAX_DECODED_VIDEO_DIMENSION as usize;
-                if w == 0 || h == 0 || w > cap || h > cap {
-                    Err(format!(
-                        "H264 implausible decoded dimensions {w}x{h} (cap {cap} per side)"
-                    ))
-                } else {
-                    // The cap already rules the overflow out; the
-                    // checked multiply is kept so the guard survives a
-                    // future change to the cap.
-                    match w.checked_mul(h).and_then(|n| n.checked_mul(4)) {
-                        None => Err(format!("H264 decoded frame dimensions overflow: {w}x{h}")),
-                        Some(buf_len) => {
-                            if self.rgba_scratch.len() != buf_len {
-                                self.rgba_scratch.resize(buf_len, 0);
-                            }
-                            yuv.write_rgba8(&mut self.rgba_scratch);
-                            Ok(Some(DecodedFrame {
-                                rgba: self.rgba_scratch.clone(),
-                                width: u32::try_from(w).unwrap_or(u32::MAX),
-                                height: u32::try_from(h).unwrap_or(u32::MAX),
-                            }))
+                match crate::limits::rgba_len(w, h) {
+                    None => Err(format!(
+                        "H264 implausible decoded dimensions {w}x{h} (caps {} per side, {} pixels)",
+                        MAX_DECODED_VIDEO_DIMENSION,
+                        crate::limits::MAX_IMAGE_PIXELS
+                    )),
+                    Some(buf_len) => {
+                        if self.rgba_scratch.len() != buf_len {
+                            self.rgba_scratch.resize(buf_len, 0);
                         }
+                        yuv.write_rgba8(&mut self.rgba_scratch);
+                        Ok(Some(DecodedFrame {
+                            rgba: self.rgba_scratch.clone(),
+                            width: u32::try_from(w).unwrap_or(u32::MAX),
+                            height: u32::try_from(h).unwrap_or(u32::MAX),
+                        }))
                     }
                 }
             }

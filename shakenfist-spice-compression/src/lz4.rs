@@ -5,7 +5,7 @@
 /// compressed row data. Returns RGBA pixels.
 use tracing::{debug, warn};
 
-use crate::DecompressedImage;
+use crate::{limits, DecompressedImage};
 
 /// Decompress a SPICE LZ4 image.
 ///
@@ -45,13 +45,18 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     };
 
-    // All three of these are checked. `width` and `bpp` both reach
-    // here from the wire, and leaving one unchecked multiply among
-    // three checked ones invites the next reader to assume it was
-    // considered and rejected.
+    // `rgba_len` refuses a zero side, an over-large side and an
+    // over-large pixel count before anything is allocated. `bpp`
+    // varies by format, so the per-row byte count still needs its
+    // own checked multiply: `width` reaches here from the wire.
+    let Some(rgba_size) = limits::rgba_len(width, height) else {
+        warn!(
+            "display: LZ4 image dimensions refused: {}x{}",
+            width, height
+        );
+        return None;
+    };
     let row_bytes = width.checked_mul(bpp)?;
-    let total_pixels = width.checked_mul(height)?;
-    let rgba_size = total_pixels.checked_mul(4)?;
     let mut rgba = vec![0u8; rgba_size];
 
     let mut offset = 2usize; // skip top_down + format bytes
@@ -127,7 +132,17 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     }
 
-    Some(DecompressedImage::new(width as u32, height as u32, rgba, 0))
+    // `rgba` was sized from these dimensions above, so this only
+    // refuses dimensions outside the shared limits. A side too wide
+    // for `u32` is refused rather than truncated.
+    let image = u32::try_from(width)
+        .ok()
+        .zip(u32::try_from(height).ok())
+        .and_then(|(w, h)| DecompressedImage::new(w, h, rgba, 0));
+    if image.is_none() {
+        warn!("display: LZ4 dimensions {}x{} refused", width, height);
+    }
+    image
 }
 
 #[cfg(test)]
@@ -442,5 +457,19 @@ mod tests {
             decompress_spice_lz4(&data, usize::MAX, 1).is_none(),
             "width * bpp overflow must return None, not panic"
         );
+    }
+
+    // The overflow guards above pass for 65535 x 65535 on a 64-bit
+    // target: the product is representable, it is just 17 GiB. Only
+    // the shared `rgba_len` cap refuses it, before the allocation.
+    #[test]
+    fn decompress_spice_lz4_oversized_but_representable_returns_none() {
+        let data = vec![1u8, 4, 0, 0, 0, 0];
+        assert!(
+            decompress_spice_lz4(&data, 65535, 65535).is_none(),
+            "65535x65535 must be refused by the shared cap"
+        );
+        // Just over the total-pixel cap with both sides legal.
+        assert!(decompress_spice_lz4(&data, 16384, 16385).is_none());
     }
 }
