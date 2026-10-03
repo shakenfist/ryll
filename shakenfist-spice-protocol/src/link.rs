@@ -707,7 +707,8 @@ pub fn default_channel_caps(channel_type: ChannelType) -> u32 {
     match channel_type {
         ChannelType::Display => capabilities::DEFAULT_DISPLAY,
         ChannelType::Usbredir => capabilities::DEFAULT_SPICEVMC,
-        _ => capabilities::DEFAULT_MAIN,
+        ChannelType::Main => capabilities::DEFAULT_MAIN,
+        _ => capabilities::DEFAULT_OTHER,
     }
 }
 
@@ -1951,8 +1952,24 @@ mod tests {
             default_channel_caps(ChannelType::Usbredir),
             capabilities::DEFAULT_SPICEVMC
         );
-        for other in [ChannelType::Main, ChannelType::Inputs, ChannelType::Cursor] {
-            assert_eq!(default_channel_caps(other), capabilities::DEFAULT_MAIN);
+        assert_eq!(
+            default_channel_caps(ChannelType::Main),
+            capabilities::DEFAULT_MAIN
+        );
+        assert_ne!(
+            capabilities::DEFAULT_MAIN & capabilities::MAIN_AGENT_CONNECTED_TOKENS,
+            0,
+            "main must advertise AGENT_CONNECTED_TOKENS (#452)"
+        );
+        // The other channels keep the word they advertised before #452:
+        // bit 2 is PLAYBACK_CAP_LATENCY on playback, so it must not leak.
+        for other in [
+            ChannelType::Inputs,
+            ChannelType::Cursor,
+            ChannelType::Playback,
+        ] {
+            assert_eq!(default_channel_caps(other), capabilities::DEFAULT_OTHER);
         }
+        assert_eq!(capabilities::DEFAULT_OTHER, 0b1001);
     }
 }
