@@ -24,6 +24,7 @@ use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
 };
 
+use super::agent_queue::AgentSendQueue;
 use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
 
 /// Parse a SpiceMsgMainMouseMode payload. The SPICE wire format
@@ -198,6 +199,8 @@ pub struct MainChannel {
     session_id: Option<u32>,
     agent_connected: bool,
     agent_tokens: u32,
+    /// Agent messages waiting for `agent_tokens`; see `agent_queue`.
+    agent_queue: AgentSendQueue,
     agent_caps_announced: bool,
     guest_caps_received: bool,
     channels_requested: bool,
@@ -326,6 +329,7 @@ impl MainChannel {
             session_id: None,
             agent_connected: false,
             agent_tokens: 0,
+            agent_queue: AgentSendQueue::default(),
             agent_caps_announced: false,
             monitors,
             monitors_config_rx,
@@ -593,11 +597,14 @@ impl MainChannel {
                     if self.guest_caps_received {
                         // Check suppression: if a real monitors-config send
                         // happened recently, skip the probe — that send is its
-                        // own liveness signal.
+                        // own liveness signal. Also skip while agent messages
+                        // are waiting for tokens: a probe queued behind them
+                        // would measure the backlog, not the agent.
                         let should_probe = match self.last_monitors_config_sent_at {
                             None => false,
                             Some(sent_at) => {
                                 sent_at.elapsed() >= VDAGENT_PROBE_INTERVAL
+                                    && self.agent_queue.is_empty()
                             }
                         };
                         if should_probe {
@@ -608,11 +615,10 @@ impl MainChannel {
                                 // Propagate IO errors via `?` so a socket
                                 // failure during the probe surfaces
                                 // immediately (matches every other send-site
-                                // in this file); `Ok(false)` means we ran out
-                                // of agent tokens, which is a transient and
-                                // expected condition — log and try the next
-                                // tick. Only refresh the send timestamp on a
-                                // confirmed Ok(true) send.
+                                // in this file); `Ok(false)` means the agent
+                                // send queue is full — log and try the next
+                                // tick. Only refresh the send timestamp once
+                                // the probe is accepted (Ok(true)).
                                 let sent = self.send_agent_data_message(
                                     VD_AGENT_MONITORS_CONFIG,
                                     &payload,
@@ -620,7 +626,7 @@ impl MainChannel {
                                 if sent {
                                     self.last_monitors_config_sent_at = Some(Instant::now());
                                 } else {
-                                    debug!("main: vdagent probe skipped, no agent tokens");
+                                    debug!("main: vdagent probe skipped, agent send queue full");
                                 }
                                 last_arm = "vdagent_probe+send_done";
                             }
@@ -1068,6 +1074,8 @@ impl MainChannel {
                 // up) will re-populate the cache from current state.
                 self.agent_request_send_ts.clear();
                 self.outstanding_agent_request_count = 0;
+                // Queued messages were meant for the agent that just left.
+                self.agent_queue.discard_unstarted();
                 self.last_monitors_config = None;
                 self.last_monitors_config_sent_at = None;
                 self.last_stuck_agent_notification_at = None;
@@ -1104,6 +1112,8 @@ impl MainChannel {
                     self.agent_tokens = self.agent_tokens.saturating_add(1);
                     warn!("main: short AGENT_TOKEN payload ({} bytes)", payload.len());
                 }
+
+                self.flush_agent_queue().await?;
 
                 self.maybe_send_announce_capabilities().await?;
             }
@@ -1312,7 +1322,7 @@ impl MainChannel {
             self.last_sent_monitors_config = Some((width, height));
             self.pending_monitors_config = None;
         } else {
-            debug!("main: monitors config: no agent tokens");
+            debug!("main: monitors config: agent send queue full");
         }
 
         Ok(())
@@ -1358,10 +1368,10 @@ impl MainChannel {
             active, flags
         );
 
-        // Send first; only refresh the probe cache if the send actually went
-        // on the wire (Ok(true)). Caching before the send would defer the next
-        // probe by one interval after an Ok(false) "no tokens" outcome,
-        // suppressing the probe even though no message left the client.
+        // Send first; only refresh the probe cache if the message was accepted
+        // (Ok(true)). Caching before the send would defer the next probe by
+        // one interval after an Ok(false) "queue full" outcome, suppressing
+        // the probe even though the message was never queued.
         let sent = self
             .send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await?;
@@ -1372,11 +1382,11 @@ impl MainChannel {
         Ok(sent)
     }
 
+    /// Queue a guest-agent message and send as much of it as the server's
+    /// tokens allow; the rest follows from `flush_agent_queue` as
+    /// `AGENT_TOKEN`s arrive. Returns `Ok(false)`, sending nothing, only
+    /// when the queue is full, which means the agent has stopped reading.
     async fn send_agent_data_message(&mut self, ty: u32, payload: &[u8]) -> Result<bool> {
-        if self.agent_tokens == 0 {
-            return Ok(false);
-        }
-
         let mut agent = Vec::with_capacity(20 + payload.len());
         agent.write_u32::<LittleEndian>(VD_AGENT_PROTOCOL)?;
         agent.write_u32::<LittleEndian>(ty)?;
@@ -1384,21 +1394,20 @@ impl MainChannel {
         agent.write_u32::<LittleEndian>(payload.len() as u32)?;
         agent.extend_from_slice(payload);
 
-        const MAX_CHUNK: usize = 2048 - 6;
-        let mut offset = 0;
-        while offset < agent.len() {
-            if self.agent_tokens == 0 {
-                return Ok(false);
-            }
-            let end = (offset + MAX_CHUNK).min(agent.len());
-            let msg = make_message(main_client::AGENT_DATA, &agent[offset..end]);
-            self.send_with_log(main_client::AGENT_DATA, &msg).await?;
-            self.agent_tokens = self.agent_tokens.saturating_sub(1);
-            offset = end;
+        if !self.agent_queue.push(agent) {
+            warn!(
+                "main: agent message type={} dropped: {} messages already waiting for tokens",
+                ty,
+                self.agent_queue.len()
+            );
+            return Ok(false);
         }
+        self.flush_agent_queue().await?;
 
         // Track send time for REPLY-eligible request types so we
-        // can compute reply lag when VD_AGENT_REPLY arrives.
+        // can compute reply lag when VD_AGENT_REPLY arrives. This is
+        // the time the message was queued; for these small messages
+        // that is also when it went out, unless tokens ran short.
         //
         // Overwriting any prior entry for `ty` is intentional —
         // VD_AGENT_REPLY has no request id, only a request type,
@@ -1419,6 +1428,19 @@ impl MainChannel {
         }
 
         Ok(true)
+    }
+
+    /// Send queued agent chunks, one per token, until either runs out.
+    async fn flush_agent_queue(&mut self) -> Result<()> {
+        while self.agent_tokens > 0 {
+            let Some(chunk) = self.agent_queue.next_chunk() else {
+                break;
+            };
+            let msg = make_message(main_client::AGENT_DATA, &chunk);
+            self.send_with_log(main_client::AGENT_DATA, &msg).await?;
+            self.agent_tokens -= 1;
+        }
+        Ok(())
     }
 
     async fn handle_agent_message(&mut self, agent_type: u32, payload: &[u8]) -> Result<()> {
