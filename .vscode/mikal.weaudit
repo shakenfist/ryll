@@ -284,10 +284,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/rendering-pipeline.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/macos-metrics-verification.md",
       "author": "mikal"
     },
@@ -725,10 +721,6 @@
     },
     {
       "path": "shakenfist-spice-webrtc",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/session-lifecycle.md",
       "author": "mikal"
     },
     {

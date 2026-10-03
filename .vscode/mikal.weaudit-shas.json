@@ -137,14 +137,6 @@
       "sha": "738d24db111f6a1261fae44356a20c8c83a308e0",
       "date": "2026-08-17"
     },
-    "docs/rendering-pipeline.md": {
-      "sha": "bbbcf12a3d24790696d0718797e9e354b913039c",
-      "date": "2026-08-17"
-    },
-    "docs/session-lifecycle.md": {
-      "sha": "b47afd6f9fd96952573ba228948006093daa4c59",
-      "date": "2026-09-27"
-    },
     "docs/spice-protocol.md": {
       "sha": "f716591931e0e804168ee023c3cffa53d8f484aa",
       "date": "2026-09-27"
