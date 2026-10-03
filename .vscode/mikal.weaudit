@@ -168,10 +168,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/input_egui.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/settings.rs",
       "author": "mikal"
     },
@@ -785,10 +781,6 @@
     },
     {
       "path": "renovate.json",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
       "author": "mikal"
     },
     {

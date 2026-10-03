@@ -153,10 +153,6 @@
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
     },
-    "docs/features.md": {
-      "sha": "9cf98a96cb0118d8e4af813b37134b9234e28a31",
-      "date": "2026-09-27"
-    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -243,10 +239,6 @@
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
-      "date": "2026-07-26"
-    },
-    "ryll/src/input_egui.rs": {
-      "sha": "9174c7236dc116cc3f86dc0a4a7726d24556e1fa",
       "date": "2026-07-26"
     },
     "ryll/src/notifications.rs": {
