@@ -13,7 +13,11 @@ use tracing::warn;
 /// `width * height * 4` from overflowing `usize` (which on 64-bit
 /// would still allocate an absurd buffer even without overflow;
 /// 16 384 × 16 384 × 4 = 1 GiB — already past any real display).
-pub const MAX_SURFACE_DIMENSION: u32 = 16_384;
+///
+/// This is the shared per-side decode limit, so a surface is never
+/// smaller than the largest image that can be drawn onto it. Surfaces
+/// clamp to it rather than refusing, which is why it keeps its own name.
+pub const MAX_SURFACE_DIMENSION: u32 = shakenfist_spice_compression::limits::MAX_IMAGE_DIMENSION;
 
 /// A display surface that holds RGBA pixel data and tracks
 /// whether it has been mutated since the last consumer read.

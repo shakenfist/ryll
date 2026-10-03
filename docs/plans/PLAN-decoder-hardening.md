@@ -191,9 +191,10 @@ commit each).**
 - Point `MAX_DECODED_JPEG_DIMENSION` at `MAX_IMAGE_DIMENSION`, and
   route its byte ceiling through `rgba_len`. Replace the literal at
   `quic.rs:1574`.
-- Step 1b only: have the renderer's `MAX_PIXMAP_PIXELS` (module
-  scope in `display.rs` once #437 has landed) become a re-export of
-  `MAX_IMAGE_PIXELS`. `MAX_SURFACE_DIMENSION` in `surface.rs:16`
+- Step 1b only: the renderer's `MAX_PIXMAP_PIXELS` (module
+  scope in `display.rs` once #437 has landed) is deleted, and
+  `MAX_MESSAGE_BODY` and the Pixmap arm use `MAX_IMAGE_PIXELS` and
+  `rgba_len` directly. `MAX_SURFACE_DIMENSION` in `surface.rs:16`
   becomes `MAX_IMAGE_DIMENSION`.
 - Make `DecompressedImage::new` and `new_glz` return `Option`,
   refusing a pixel buffer whose length is not `rgba_len(width,
@@ -332,7 +333,7 @@ pull request.
   `SpiceImage` has no bytes after its descriptor, so if it is the
   last pointed-to data in a DRAW_COPY (no mask), every such draw
   would be dropped. Found during Step 4; not yet confirmed against
-  spice-server's marshalling or a capture; needs an issue.
+  spice-server's marshalling or a capture; tracked as #442.
 * Fuzz targets for the compression crate's decoders (#135). The
   helper makes "never allocates past the cap" a property a fuzzer
   can assert.

@@ -35,13 +35,6 @@ use shakenfist_spice_protocol::{
 
 use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
 
-/// Largest pixmap, in pixels, the display channel will decode: 8192 x 8192,
-/// or 256 MiB of RGBA. No realistic SPICE pixmap draw needs more; a larger
-/// value means the server is malformed or adversarial, and we refuse to
-/// allocate against attacker-controlled dimensions. It also sets the
-/// largest message any channel will buffer, `super::MAX_MESSAGE_BODY`.
-pub(crate) const MAX_PIXMAP_PIXELS: usize = 64 * 1024 * 1024;
-
 struct StreamState {
     surface_id: u32,
     codec_type: u8,
@@ -2190,36 +2183,21 @@ impl DisplayChannel {
                     let width_usize = width as usize;
                     let height_usize = height as usize;
 
-                    // Guard every width/height/stride multiplication against
-                    // overflow — a malicious server can send u32::MAX on
-                    // any of these, and unchecked arithmetic on usize would
-                    // either panic (debug) or wrap silently (release) and
-                    // allow the short-data check below to pass before we
-                    // index out-of-bounds in the blit loop.
-                    let Some(pixel_count) = width_usize.checked_mul(height_usize) else {
-                        warn_once!(
-                            "display:decode_failure:pixmap:dimension_overflow",
-                            "display: pixmap dimensions overflow ({} × {}), skipping",
-                            width,
-                            height
-                        );
-                        return Ok(());
-                    };
-                    if pixel_count > MAX_PIXMAP_PIXELS {
+                    // A malicious server can send u32::MAX on any of these.
+                    // `rgba_len` refuses a zero side, a side over the shared
+                    // per-side limit and a pixel count over the shared cap,
+                    // and so also bounds the allocation below; the
+                    // stride * height product is guarded separately so the
+                    // short-data check cannot pass on a wrapped value and
+                    // let the blit loop index out of bounds.
+                    let Some(expected_pixels) = limits::rgba_len(width_usize, height_usize) else {
                         warn_once!(
                             "display:decode_failure:pixmap:too_large",
-                            "display: pixmap {} pixels exceeds {} cap, skipping",
-                            pixel_count,
-                            MAX_PIXMAP_PIXELS
-                        );
-                        return Ok(());
-                    }
-                    let Some(expected_pixels) = pixel_count.checked_mul(4) else {
-                        warn_once!(
-                            "display:decode_failure:pixmap:dimension_overflow",
-                            "display: pixmap pixel bytes overflow ({} × {} × 4), skipping",
+                            "display: pixmap {} x {} outside the {} pixel / {} per-side limits, skipping",
                             width,
-                            height
+                            height,
+                            limits::MAX_IMAGE_PIXELS,
+                            limits::MAX_IMAGE_DIMENSION
                         );
                         return Ok(());
                     };
