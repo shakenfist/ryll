@@ -1404,6 +1404,15 @@ impl DisplayChannel {
                 self.glz_dictionary.clear();
             }
 
+            // Palettes are only used by the 1/4/8-bit bitmap formats and
+            // LZ_PLT images, none of which we decode, so there is no palette
+            // cache to invalidate. spice-server sends INVAL_ALL_PALETTES on
+            // every connect; handling it here keeps it out of the unknown-
+            // opcode path, which raised a Gap warning each time (#446).
+            display_server::INVAL_PALETTE | display_server::INVAL_ALL_PALETTES => {
+                debug!("display: palette invalidation (no palette cache), ignoring");
+            }
+
             display_server::RESET => {
                 info!("display: reset");
                 self.image_cache.clear();
@@ -3981,6 +3990,28 @@ mod tests {
                 _events: rx,
             },
         )
+    }
+
+    // spice-server sends INVAL_ALL_PALETTES on every connect (#446). With
+    // no palette cache it is a no-op, and must not be treated as an
+    // unknown message, which raised a Gap warning.
+    #[tokio::test]
+    async fn palette_invalidations_are_handled_not_unknown() {
+        let (mut channel, _peer) = test_display_channel().await;
+
+        channel
+            .handle_message(display_server::INVAL_ALL_PALETTES, &[])
+            .await
+            .expect("inval_all_palettes must not error");
+        channel
+            .handle_message(display_server::INVAL_PALETTE, &0u64.to_le_bytes())
+            .await
+            .expect("inval_palette must not error");
+
+        assert_eq!(channel.opcodes.unknown_count(), 0);
+        let keys = logging::warn_once_keys();
+        assert!(!keys.contains(&"display:hexdump:107"));
+        assert!(!keys.contains(&"display:hexdump:108"));
     }
 
     /// Minimum-length `SpiceMsgDisplayStreamCreate` payload.
