@@ -30,7 +30,7 @@ use shakenfist_spice_protocol::messages::{
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
-    IMAGE_FLAGS_CACHE_ME,
+    IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME,
 };
 
 use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
@@ -2110,16 +2110,12 @@ impl DisplayChannel {
         let img_desc = ImageDescriptor::read(&payload[image_start..])?;
         let image_type = ImageType::from_u8(img_desc.image_type);
 
-        let image_data_start = image_start + ImageDescriptor::SIZE;
-        if image_data_start >= payload.len() {
-            logging::warn_once_impl(
-                logging::intern_key(format!("display:decode_failure:{}:no_image_data", op_name)),
-                &format!("display: {}: no image data", op_name),
-            );
-            return Ok(());
-        }
-
-        let image_data = &payload[image_data_start..];
+        // May be empty. A FromCache image is only its descriptor, and
+        // spice-server marshals the source image after the draw's fixed
+        // fields and before any mask, so a cache hit on a draw without a
+        // mask ends the payload. Each arm below checks the length of the
+        // data it reads.
+        let image_data = &payload[image_start + ImageDescriptor::SIZE..];
 
         debug!(
             "display: {}: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
@@ -2412,8 +2408,10 @@ impl DisplayChannel {
                 let height = img_desc.height as usize;
                 decompress_spice_lz4(image_data, width, height)
             }
-            Some(ImageType::FromCache) => {
-                // Look up in cache
+            Some(ImageType::FromCache) | Some(ImageType::FromCacheLossless) => {
+                // FromCacheLossless names an entry the server knows is
+                // lossless, either sent that way or since replaced through
+                // CACHE_REPLACE_ME, so it is the same lookup.
                 if let Some(pixels) = self.image_cache.get(&img_desc.image_id) {
                     // The cache holds pixels without dimensions, so these
                     // come from the descriptor and the server can name
@@ -2520,14 +2518,6 @@ impl DisplayChannel {
                 );
                 None
             }
-            Some(ImageType::FromCacheLossless) => {
-                warn_once!(
-                    "display:decode_failure:from_cache_lossless:unsupported",
-                    "display: FromCacheLossless (not yet implemented), id={}",
-                    img_desc.image_id
-                );
-                None
-            }
             Some(ImageType::JpegAlpha) => {
                 warn_once!(
                     "display:decode_failure:jpeg_alpha:unsupported",
@@ -2548,7 +2538,10 @@ impl DisplayChannel {
         };
 
         // Record this decode attempt in the snapshot history.
-        let is_from_cache = matches!(image_type, Some(ImageType::FromCache));
+        let is_from_cache = matches!(
+            image_type,
+            Some(ImageType::FromCache) | Some(ImageType::FromCacheLossless)
+        );
         let decode_duration_us = if is_from_cache {
             0
         } else {
@@ -2601,8 +2594,11 @@ impl DisplayChannel {
                         );
                     }
                 }
-            } else if (img_desc.flags & IMAGE_FLAGS_CACHE_ME) != 0 {
+            } else if (img_desc.flags & (IMAGE_FLAGS_CACHE_ME | IMAGE_FLAGS_CACHE_REPLACE_ME)) != 0
+            {
                 // Only cache non-GLZ images when the server requests it.
+                // insert() replaces an existing entry, which is all
+                // CACHE_REPLACE_ME asks for.
                 let _ = self.image_cache.insert(img.image_id, img.pixels.clone());
             }
 
@@ -4481,13 +4477,11 @@ mod tests {
 
     /// A FromCache SpiceImage for `id`, claiming `width` x `height`.
     ///
-    /// FromCache carries no data after its descriptor, but
-    /// `decode_image_and_emit` refuses an image that ends the payload,
-    /// so this pads it the way a following field would.
+    /// Only the descriptor: FromCache carries no data after it, so with
+    /// no mask following, the image ends the payload as it does on the
+    /// wire.
     fn from_cache_image(id: u64, width: u32, height: u32) -> Vec<u8> {
-        let mut v = image_descriptor(id, ImageType::FromCache, 0, width, height);
-        v.extend_from_slice(&[0u8; 4]);
-        v
+        image_descriptor(id, ImageType::FromCache, 0, width, height)
     }
 
     /// (left, top, width, height, pixels) of each ImageReady emitted so
@@ -4623,5 +4617,124 @@ mod tests {
         assert_eq!((*width, *height), (1, 1));
         // Bottom-right source pixel: BGRX (13, 14, 15, 16) -> RGBA.
         assert_eq!(rgba, &vec![15, 14, 13, 255]);
+    }
+
+    #[tokio::test]
+    async fn from_cache_ending_the_payload_is_drawn() {
+        // #442: spice-server marshals a cache hit as the bare
+        // descriptor, after the draw's fixed fields and before the
+        // (here absent) mask, so it ends the payload. A guard that
+        // wanted data after the descriptor dropped every such draw.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(42, 2, 2);
+        let payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
+        assert!(payload.ends_with(&image));
+        channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, rgba) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(
+            rgba,
+            &vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255]
+        );
+    }
+
+    #[tokio::test]
+    async fn from_cache_ending_a_draw_transparent_payload_is_drawn() {
+        // DRAW_TRANSPARENT has no mask, so its source image always ends
+        // the payload and every cache hit on it hit the #442 guard.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0u32.to_le_bytes()); // surface_id
+        for edge in [0u32, 0, 2, 2] {
+            payload.extend_from_slice(&edge.to_le_bytes()); // dest box
+        }
+        payload.push(0); // clip_type NONE
+
+        // SpiceTransparent: src_bitmap, src_area, src_color, true_color
+        // = 28 bytes, then the image.
+        let src_bitmap = (payload.len() + 28) as u32;
+        payload.extend_from_slice(&src_bitmap.to_le_bytes());
+        for edge in [0u32, 0, 2, 2] {
+            payload.extend_from_slice(&edge.to_le_bytes()); // src_area
+        }
+        payload.extend_from_slice(&[0u8; 8]);
+        payload.extend_from_slice(&from_cache_image(42, 2, 2));
+        channel
+            .handle_message(display_server::DRAW_TRANSPARENT, &payload)
+            .await
+            .expect("draw_transparent must not error");
+
+        let mut chroma_draws = 0;
+        while let Ok(event) = peers._events.try_recv() {
+            if matches!(event, ChannelEvent::ImageReadyChroma { .. }) {
+                chroma_draws += 1;
+            }
+        }
+        assert_eq!(chroma_draws, 1);
+    }
+
+    #[tokio::test]
+    async fn from_cache_lossless_reads_the_image_cache() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((1, 1, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, _, _, rgba) = &events[0];
+        // Bottom-right source pixel: BGRX (13, 14, 15, 16) -> RGBA.
+        assert_eq!(rgba, &vec![15, 14, 13, 255]);
+    }
+
+    #[tokio::test]
+    async fn cache_replace_me_replaces_the_cached_image() {
+        // spice-server resends a lossy cached image losslessly with
+        // CACHE_REPLACE_ME (not CACHE_ME) before it names it with
+        // FromCacheLossless, so the resend must overwrite the entry.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let replacement: Vec<u8> = (101..=116).collect();
+        let image = pixmap_image(42, IMAGE_FLAGS_CACHE_REPLACE_ME, 2, 2, 8, &replacement);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+        assert_eq!(drain_image_events(&mut peers).len(), 1);
+
+        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((1, 1, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, _, _, rgba) = &events[0];
+        assert_eq!(rgba, &vec![115, 114, 113, 255]);
     }
 }
