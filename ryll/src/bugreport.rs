@@ -2418,6 +2418,11 @@ mod tests {
             last_agent_reply_ts_secs: Some(30.5),
             last_agent_reply_lag_us: Some(850),
             outstanding_agent_request_count: 1,
+            // Agent token starvation.
+            agent_tokens: 3,
+            queued_agent_message_count: 2,
+            agent_starved_since_ts_secs: Some(41.25),
+            agent_stall_count: 1,
             ..Default::default()
         };
         snap.messages_recv_by_opcode.insert(10, 3);
@@ -2443,6 +2448,11 @@ mod tests {
         assert_eq!(v["last_agent_reply_lag_us"], json!(850));
         assert_eq!(v["outstanding_agent_request_count"], json!(1));
         assert_eq!(v["recent_agent_reply_lag_us"], json!([820, 850]));
+        // Agent token starvation fields.
+        assert_eq!(v["agent_tokens"], json!(3));
+        assert_eq!(v["queued_agent_message_count"], json!(2));
+        assert_eq!(v["agent_starved_since_ts_secs"], json!(41.25));
+        assert_eq!(v["agent_stall_count"], json!(1));
     }
 
     #[test]

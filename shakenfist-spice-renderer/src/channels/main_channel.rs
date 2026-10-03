@@ -151,42 +151,70 @@ const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 /// side.
 const REPLY_ELIGIBLE_AGENT_REQUEST_TYPES: &[u32] = &[VD_AGENT_MONITORS_CONFIG];
 
-/// Maximum entries retained in the recent-reply-lag ring. 16
-/// entries at the 30 s probe cadence covers 8 minutes of
-/// agent history in a bug report.
+/// Maximum entries retained in the recent-reply-lag ring.
 const MAX_RECENT_AGENT_REPLIES: usize = 16;
 
-/// Cadence for the vdagent liveness probe. 30 s is chosen so the
-/// snapshot ring (cap 16) covers ~8 minutes of agent history in a
-/// bug report — long enough to characterise an intermittent stall
-/// without burning bandwidth on a working agent. The probe re-sends
-/// the most recent monitors config (treated by the guest agent as a
-/// no-op when unchanged), so the lag of the resulting
-/// VD_AGENT_REPLY is a clean liveness measurement.
-const VDAGENT_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// How long `outstanding_agent_request_count` may stay > 0
-/// before we consider the agent stuck and push a Warn
-/// notification. Conservative; healthy replies arrive in
-/// well under 100 ms.
+/// How long the client may sit at zero agent tokens with agent messages
+/// still queued before we call the agent stalled and push a Warn
+/// notification.
+///
+/// spice-server hands tokens back as the guest consumes client data, in
+/// batches of `REDS_TOKENS_TO_SEND` (5) out of a window of
+/// `REDS_AGENT_WINDOW_SIZE` (10), so a client at zero tokens has at least
+/// six chunks the guest has not read yet. A reading agent clears that
+/// in milliseconds; five seconds of it is a guest that has stopped
+/// reading. Messages the server consumes itself (MONITORS_CONFIG on QXL
+/// guests) return their tokens without involving the agent, so this
+/// cannot misfire the way waiting for VD_AGENT_REPLY did (#429).
 const STUCK_AGENT_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Minimum interval between consecutive stuck-agent
-/// notifications, to keep the notification panel quiet during
-/// a sustained stall.
-const STUCK_AGENT_NOTIFY_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often a continuing stall repeats its Warn notification.
+///
+/// The notification text never changes, so each repeat folds into the
+/// first entry and raises its `count`, as long as repeats land inside
+/// the GUI's dedup window (`NOTIFICATION_DEDUP_WINDOW`, 30 s, in
+/// `ryll/src/notifications.rs`). Keep this shorter than that window, or
+/// a long stall becomes one panel entry per repeat again.
+const STUCK_AGENT_NOTIFY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Stable text of the stalled-agent notification; see
+/// `STUCK_AGENT_NOTIFY_INTERVAL` for why it must not vary.
+const STUCK_AGENT_MESSAGE: &str =
+    "Guest agent is not accepting messages (clipboard and display resize are on hold)";
 
 /// Ceiling for `outstanding_agent_request_count`.
 ///
-/// A guest agent that never replies leaves the count climbing one per
-/// `VDAGENT_PROBE_INTERVAL` for as long as the session lasts, and the
-/// exact number stops carrying information long before it stops
-/// growing: past this point "the agent is not replying, and has not
-/// for a long time" is the whole message, and the stall duration in
-/// the same notification says how long. 99 probes at 30 s apart is
-/// just under 50 minutes, and keeps both the notification text and the
-/// bug-report field a readable two digits.
+/// On QXL guests spice-server hands MONITORS_CONFIG to the display
+/// device instead of the agent, so no VD_AGENT_REPLY ever comes and the
+/// count grows by one per monitors-config send for the whole session.
+/// Past this point the exact number carries no information, and it keeps
+/// the bug-report field a readable two digits.
 const MAX_OUTSTANDING_AGENT_REQUESTS: u32 = 99;
+
+/// Whether the agent is holding the client up: connected, no tokens left,
+/// and messages still waiting to go.
+fn agent_starved(agent_connected: bool, agent_tokens: u32, messages_queued: bool) -> bool {
+    agent_connected && agent_tokens == 0 && messages_queued
+}
+
+/// Whether to push the stalled-agent notification now.
+///
+/// `starved_since` is when the current starvation began, if it has;
+/// `last_notified` is when this starvation episode last notified, reset
+/// to `None` when the episode ends.
+fn should_warn_agent_stalled(
+    starved_since: Option<Instant>,
+    last_notified: Option<Instant>,
+    now: Instant,
+) -> bool {
+    let Some(since) = starved_since else {
+        return false;
+    };
+    if now.saturating_duration_since(since) < STUCK_AGENT_THRESHOLD {
+        return false;
+    }
+    last_notified.is_none_or(|t| now.saturating_duration_since(t) >= STUCK_AGENT_NOTIFY_INTERVAL)
+}
 
 pub struct MainChannel {
     stream: SpiceStream,
@@ -289,17 +317,15 @@ pub struct MainChannel {
     /// REPLY yet. Increments on send; decrements (saturating)
     /// on every REPLY received.
     outstanding_agent_request_count: u32,
-    /// Most recent monitors config payload sent to the agent.
-    /// Cached in `send_agent_monitors_config` so the probe
-    /// can re-send without recomputing. None if we haven't sent
-    /// a config yet.
-    last_monitors_config: Option<Vec<u8>>,
-    /// Timestamp of the most recent monitors config send (for
-    /// real or probe). Updated in `send_agent_monitors_config`.
-    /// Used to suppress probes if a real send happened within the
-    /// probe interval.
-    last_monitors_config_sent_at: Option<Instant>,
-    /// Most recent stuck-agent notification time, for 60 s cool-down.
+    /// When the client last ran out of agent tokens with messages still
+    /// queued, if it has not had tokens back since. See `agent_starved`.
+    agent_starved_since: Option<Instant>,
+    /// `agent_starved_since` as session-relative seconds, for snapshots.
+    agent_starved_since_ts_secs: Option<f64>,
+    /// Starvation episodes that lasted past `STUCK_AGENT_THRESHOLD`.
+    agent_stall_count: u32,
+    /// When the current starvation episode last notified; `None` outside
+    /// an episode, or before its first notification.
     last_stuck_agent_notification_at: Option<Instant>,
 }
 
@@ -367,8 +393,9 @@ impl MainChannel {
             last_agent_reply_lag_us: None,
             recent_agent_reply_lag_us: VecDeque::new(),
             outstanding_agent_request_count: 0,
-            last_monitors_config: None,
-            last_monitors_config_sent_at: None,
+            agent_starved_since: None,
+            agent_starved_since_ts_secs: None,
+            agent_stall_count: 0,
             last_stuck_agent_notification_at: None,
         }
     }
@@ -461,12 +488,8 @@ impl MainChannel {
         // path. Removing this when K1 is closed.
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
         heartbeat.tick().await;
-        // Vdagent liveness probe. Fires every 30 s (VDAGENT_PROBE_INTERVAL). Skip the
-        // first immediate tick so we don't probe before the agent even attaches.
-        let mut vdagent_probe = tokio::time::interval(VDAGENT_PROBE_INTERVAL);
-        vdagent_probe.tick().await;
-        // Stuck-agent warning. Polls every 5 s to detect stalled agent requests
-        // and emit notifications with cool-down.
+        // Stalled-agent warning. Polls every 5 s for agent token starvation
+        // (see `STUCK_AGENT_THRESHOLD`).
         let mut stuck_agent_check = tokio::time::interval(std::time::Duration::from_secs(5));
         stuck_agent_check.tick().await;
         let mut last_arm: &'static str = "startup";
@@ -590,122 +613,39 @@ impl MainChannel {
                     self.emit_session_ended().await;
                     break;
                 }
-                _ = vdagent_probe.tick() => {
-                    last_arm = "vdagent_probe";
-                    // Send a liveness probe if conditions are met. Skip if
-                    // agent not connected or no agent caps received yet.
-                    if self.guest_caps_received {
-                        // Check suppression: if a real monitors-config send
-                        // happened recently, skip the probe — that send is its
-                        // own liveness signal. Also skip while agent messages
-                        // are waiting for tokens: a probe queued behind them
-                        // would measure the backlog, not the agent.
-                        let should_probe = match self.last_monitors_config_sent_at {
-                            None => false,
-                            Some(sent_at) => {
-                                sent_at.elapsed() >= VDAGENT_PROBE_INTERVAL
-                                    && self.agent_queue.is_empty()
-                            }
-                        };
-                        if should_probe {
-                            if let Some(payload) = self.last_monitors_config.clone() {
-                                // Re-send the cached payload. The guest treats
-                                // an unchanged config as a no-op, so this is safe.
-                                last_arm = "vdagent_probe+send";
-                                // Propagate IO errors via `?` so a socket
-                                // failure during the probe surfaces
-                                // immediately (matches every other send-site
-                                // in this file); `Ok(false)` means the agent
-                                // send queue is full — log and try the next
-                                // tick. Only refresh the send timestamp once
-                                // the probe is accepted (Ok(true)).
-                                let sent = self.send_agent_data_message(
-                                    VD_AGENT_MONITORS_CONFIG,
-                                    &payload,
-                                ).await?;
-                                if sent {
-                                    self.last_monitors_config_sent_at = Some(Instant::now());
-                                } else {
-                                    debug!("main: vdagent probe skipped, agent send queue full");
-                                }
-                                last_arm = "vdagent_probe+send_done";
-                            }
-                        }
-                    }
-                }
                 _ = stuck_agent_check.tick() => {
                     last_arm = "stuck_agent_check";
-                    // Check if agent requests are stuck and emit
-                    // Warn notification if conditions are met.
-                    //
-                    // NOTE for future maintainers: this check anchors on
-                    // `last_monitors_config_sent_at`, which is only refreshed
-                    // for VD_AGENT_MONITORS_CONFIG sends. When DISPLAY_CONFIG
-                    // (or any further type) is added to
-                    // REPLY_ELIGIBLE_AGENT_REQUEST_TYPES, this anchor must be
-                    // generalised — e.g. replaced with a
-                    // `last_reply_eligible_request_sent_at` field updated in
-                    // `send_agent_data_message` whenever the type matches.
-                    // Otherwise stuck-DISPLAY_CONFIG requests will never trip
-                    // this notification.
-                    if self.outstanding_agent_request_count == 0 {
-                        // No outstanding requests; healthy state.
-                        last_arm = "stuck_agent_check+no_outstanding";
-                    } else if let Some(sent_at) = self.last_monitors_config_sent_at {
-                        // Check if enough time has passed since the last send
-                        // to consider this a stuck state.
-                        if sent_at.elapsed() < STUCK_AGENT_THRESHOLD {
-                            // Too soon since the last send; not yet considered stuck.
-                            last_arm = "stuck_agent_check+too_soon";
-                        } else {
-                            // outstanding > 0 and the threshold has been exceeded.
-                            // Check the notification cool-down.
-                            let should_notify = self
-                                .last_stuck_agent_notification_at
-                                .map(|t| t.elapsed() >= STUCK_AGENT_NOTIFY_COOLDOWN)
-                                .unwrap_or(true);
-                            if should_notify {
-                                last_arm = "stuck_agent_check+notify";
-                                let elapsed_secs =
-                                    sent_at.elapsed().as_secs_f64();
-                                let count = self.outstanding_agent_request_count;
-                                let noun = if count == 1 { "request" } else { "requests" };
-                                // The count saturates at
-                                // MAX_OUTSTANDING_AGENT_REQUESTS; say so
-                                // rather than reporting the ceiling as if
-                                // it were an exact tally.
-                                let at_least = if count >= MAX_OUTSTANDING_AGENT_REQUESTS {
-                                    "at least "
-                                } else {
-                                    ""
-                                };
-                                // "last send was Xs ago" rather than "last
-                                // probe sent Xs ago" — outstanding may
-                                // include requests older than the most
-                                // recent send (we only track the most
-                                // recent send_at), so the anchor is the
-                                // most recent send, not the oldest
-                                // unanswered one.
-                                let message = format!(
-                                    "Guest agent is not replying — last send was {:.1}s ago, \
-                                     {}{} {} outstanding",
-                                    elapsed_secs, at_least, count, noun
-                                );
-                                let entry = NotificationEntry::new(
-                                    NotifySeverity::Warn,
-                                    NotificationSource::Internal,
-                                    message,
-                                );
-                                self.events.emit(ChannelEvent::Notification(entry)).await;
-                                self.last_stuck_agent_notification_at = Some(Instant::now());
-                                last_arm = "stuck_agent_check+notify_done";
-                            } else {
-                                last_arm = "stuck_agent_check+cooldown";
-                            }
+                    let now = Instant::now();
+                    if should_warn_agent_stalled(
+                        self.agent_starved_since,
+                        self.last_stuck_agent_notification_at,
+                        now,
+                    ) {
+                        last_arm = "stuck_agent_check+notify";
+                        if self.last_stuck_agent_notification_at.is_none() {
+                            self.agent_stall_count = self.agent_stall_count.saturating_add(1);
                         }
-                    } else {
-                        // No send timestamp yet, so can't determine if stuck.
-                        last_arm = "stuck_agent_check+no_timestamp";
+                        // The varying detail goes to the log and the
+                        // snapshot; the notification text stays fixed so
+                        // repeats coalesce.
+                        let starved_secs = self
+                            .agent_starved_since
+                            .map(|t| now.saturating_duration_since(t).as_secs_f64())
+                            .unwrap_or_default();
+                        warn!(
+                            "main: guest agent stalled: no agent tokens for {:.1}s, \
+                             {} message(s) queued",
+                            starved_secs,
+                            self.agent_queue.len()
+                        );
+                        let entry = NotificationEntry::new(
+                            NotifySeverity::Warn,
+                            NotificationSource::Internal,
+                            STUCK_AGENT_MESSAGE.to_string(),
+                        );
+                        self.events.emit(ChannelEvent::Notification(entry)).await;
+                        self.last_stuck_agent_notification_at = Some(now);
+                        last_arm = "stuck_agent_check+notify_done";
                     }
                 }
                 _ = heartbeat.tick() => {
@@ -1055,30 +995,16 @@ impl MainChannel {
                 self.publish_agent_connected();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
-                // Drop probe bookkeeping tied to the previous
-                // agent instance. Without this, after the next
-                // agent reconnect:
-                //   - outstanding_agent_request_count would still
-                //     count requests the old agent will never reply
-                //     to (spurious stuck-agent Warn notification),
-                //   - a stale entry in agent_request_send_ts would
-                //     match the next REPLY and yield a multi-minute
-                //     lag measurement that pollutes recent_*_lag_us,
-                //   - the cool-down timer would suppress a real
-                //     new-agent stuck notification,
-                //   - a cached monitors-config from the prior
-                //     session could be re-sent by the probe to the
-                //     new agent, potentially with stale geometry.
-                // Clear all of them; the new session's first real
-                // monitors-config send (on resize or session bring-
-                // up) will re-populate the cache from current state.
+                // Drop reply bookkeeping tied to the previous agent
+                // instance, so a stale entry in agent_request_send_ts
+                // cannot match the next agent's REPLY and record a
+                // multi-minute lag.
                 self.agent_request_send_ts.clear();
                 self.outstanding_agent_request_count = 0;
                 // Queued messages were meant for the agent that just left.
                 self.agent_queue.discard_unstarted();
-                self.last_monitors_config = None;
-                self.last_monitors_config_sent_at = None;
-                self.last_stuck_agent_notification_at = None;
+                // Not connected, so this ends any starvation episode.
+                self.note_agent_starvation();
             }
 
             main_server::AGENT_DATA => {
@@ -1172,6 +1098,10 @@ impl MainChannel {
         snap.last_agent_reply_lag_us = self.last_agent_reply_lag_us;
         snap.recent_agent_reply_lag_us = self.recent_agent_reply_lag_us.clone();
         snap.outstanding_agent_request_count = self.outstanding_agent_request_count;
+        snap.agent_tokens = self.agent_tokens;
+        snap.queued_agent_message_count = self.agent_queue.len() as u32;
+        snap.agent_starved_since_ts_secs = self.agent_starved_since_ts_secs;
+        snap.agent_stall_count = self.agent_stall_count;
     }
 
     async fn request_channels_list(&mut self) -> Result<()> {
@@ -1368,18 +1298,8 @@ impl MainChannel {
             active, flags
         );
 
-        // Send first; only refresh the probe cache if the message was accepted
-        // (Ok(true)). Caching before the send would defer the next probe by
-        // one interval after an Ok(false) "queue full" outcome, suppressing
-        // the probe even though the message was never queued.
-        let sent = self
-            .send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
-            .await?;
-        if sent {
-            self.last_monitors_config = Some(payload);
-            self.last_monitors_config_sent_at = Some(Instant::now());
-        }
-        Ok(sent)
+        self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
+            .await
     }
 
     /// Queue a guest-agent message and send as much of it as the server's
@@ -1411,7 +1331,7 @@ impl MainChannel {
         //
         // Overwriting any prior entry for `ty` is intentional —
         // VD_AGENT_REPLY has no request id, only a request type,
-        // so two sends within a probe interval cannot be
+        // so two sends in quick succession cannot be
         // distinguished individually. We measure lag against the
         // most recent send and accept that the in-flight earlier
         // REPLY (if any) will skip the lag-update branch when it
@@ -1440,7 +1360,36 @@ impl MainChannel {
             self.send_with_log(main_client::AGENT_DATA, &msg).await?;
             self.agent_tokens -= 1;
         }
+        self.note_agent_starvation();
         Ok(())
+    }
+
+    /// Start or end a starvation episode to match the current token and
+    /// queue state. Called wherever either can change.
+    fn note_agent_starvation(&mut self) {
+        let starved = agent_starved(
+            self.agent_connected,
+            self.agent_tokens,
+            !self.agent_queue.is_empty(),
+        );
+        match (starved, self.agent_starved_since) {
+            (true, None) => {
+                self.agent_starved_since = Some(Instant::now());
+                self.agent_starved_since_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
+            }
+            (false, Some(since)) => {
+                if self.last_stuck_agent_notification_at.is_some() {
+                    info!(
+                        "main: guest agent accepting messages again after {:.1}s",
+                        since.elapsed().as_secs_f64()
+                    );
+                }
+                self.agent_starved_since = None;
+                self.agent_starved_since_ts_secs = None;
+                self.last_stuck_agent_notification_at = None;
+            }
+            _ => {}
+        }
     }
 
     async fn handle_agent_message(&mut self, agent_type: u32, payload: &[u8]) -> Result<()> {
@@ -1559,9 +1508,8 @@ impl MainChannel {
                     // decrement outstanding_agent_request_count when we
                     // find a matching send — a REPLY for a type we did
                     // NOT send (server bug, or our map was cleared on
-                    // agent disconnect) would otherwise mask a real
-                    // stuck-agent symptom by dropping the outstanding
-                    // count to zero.
+                    // agent disconnect) would otherwise understate the
+                    // outstanding count.
                     if let Some(sent) = self.agent_request_send_ts.remove(&reply_type) {
                         let lag_us = sent.elapsed().as_micros().try_into().unwrap_or(u32::MAX);
                         self.last_agent_reply_lag_us = Some(lag_us);
@@ -1717,8 +1665,9 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
+        agent_starved, build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
         parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
+        should_warn_agent_stalled, STUCK_AGENT_NOTIFY_INTERVAL, STUCK_AGENT_THRESHOLD,
         VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
         VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG,
         VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
@@ -1919,5 +1868,54 @@ mod tests {
         let sample = ping_interval_ms(Some(last), now).expect("previous ping present");
         assert!(sample.is_finite());
         assert!((sample - 86_400_000.0).abs() < 1.0, "sample was {}", sample);
+    }
+    #[test]
+    fn agent_starved_needs_connection_zero_tokens_and_a_queue() {
+        assert!(agent_starved(true, 0, true));
+        // Tokens in hand: the queue drains on the next flush.
+        assert!(!agent_starved(true, 1, true));
+        // Nothing waiting: zero tokens holds nothing up.
+        assert!(!agent_starved(true, 0, false));
+        // No agent: the server discards client data, so its tokens say
+        // nothing about a guest that is not there.
+        assert!(!agent_starved(false, 0, true));
+    }
+
+    #[test]
+    fn stall_warning_waits_for_the_threshold() {
+        let since = Instant::now();
+        assert!(!should_warn_agent_stalled(None, None, since));
+        assert!(!should_warn_agent_stalled(Some(since), None, since));
+        let almost = since + STUCK_AGENT_THRESHOLD - std::time::Duration::from_millis(1);
+        assert!(!should_warn_agent_stalled(Some(since), None, almost));
+        assert!(should_warn_agent_stalled(
+            Some(since),
+            None,
+            since + STUCK_AGENT_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn stall_warning_repeats_at_the_notify_interval() {
+        let since = Instant::now();
+        let first = since + STUCK_AGENT_THRESHOLD;
+        assert!(!should_warn_agent_stalled(
+            Some(since),
+            Some(first),
+            first + STUCK_AGENT_NOTIFY_INTERVAL - std::time::Duration::from_millis(1)
+        ));
+        assert!(should_warn_agent_stalled(
+            Some(since),
+            Some(first),
+            first + STUCK_AGENT_NOTIFY_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn stall_repeats_fall_inside_the_notification_dedup_window() {
+        // ryll's NotificationStore folds an identical entry only if it
+        // arrives within NOTIFICATION_DEDUP_WINDOW (30 s) of the last one.
+        // Repeats further apart would list a long stall once per repeat.
+        assert!(STUCK_AGENT_NOTIFY_INTERVAL < std::time::Duration::from_secs(30));
     }
 }
