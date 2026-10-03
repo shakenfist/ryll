@@ -571,11 +571,27 @@ pub struct MainSnapshot {
     pub recent_agent_reply_lag_us: VecDeque<u32>,
     /// Number of REPLY-eligible requests sent without a matching
     /// REPLY yet. Increments on send; decrements (saturating)
-    /// on REPLY receipt. Persistently > 0 means the agent is
-    /// wedged. Saturates at `MAX_OUTSTANDING_AGENT_REQUESTS`
-    /// (see the main channel), so the ceiling value means "at
-    /// least that many", not exactly that many.
+    /// on REPLY receipt. Not a stall signal: on QXL guests
+    /// spice-server hands MONITORS_CONFIG to the display device,
+    /// the agent never sees it, and this grows by one per send.
+    /// Saturates at `MAX_OUTSTANDING_AGENT_REQUESTS` (see the
+    /// main channel), so the ceiling value means "at least that
+    /// many", not exactly that many.
     pub outstanding_agent_request_count: u32,
+    /// Agent tokens the client holds: `AGENT_DATA` chunks it may
+    /// send before the server returns more.
+    pub agent_tokens: u32,
+    /// Agent messages waiting for tokens, including one that is
+    /// partly sent.
+    pub queued_agent_message_count: u32,
+    /// Session-relative seconds at which the client ran out of
+    /// agent tokens with messages still queued, if it has not had
+    /// tokens back since. Set means the guest is not reading
+    /// client data right now.
+    pub agent_starved_since_ts_secs: Option<f64>,
+    /// Token-starvation episodes that lasted long enough to raise
+    /// the "not accepting messages" notification. Cumulative.
+    pub agent_stall_count: u32,
 }
 
 /// SPICE playback audio codec, as inferred from the most
