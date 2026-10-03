@@ -41,6 +41,10 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
+    ".github/workflows/prune-reviews.yml": {
+      "sha": "7fc119ce46252ba56037d99ddf90ea9dc180e3b8",
+      "date": "2026-10-04"
+    },
     ".github/workflows/release.yml": {
       "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
       "date": "2026-09-26"
@@ -85,6 +89,10 @@
       "sha": "c952afb188490748898188583f4e7413fa43077a",
       "date": "2026-09-23"
     },
+    "docs/control-socket-protocol.md": {
+      "sha": "0ea0323dfedd1af2f8b26336cf5d104261472f91",
+      "date": "2026-10-04"
+    },
     "docs/design-decisions.md": {
       "sha": "5a943f62bbcdca4aa9dcd631dd629a10a88e0d4f",
       "date": "2026-09-17"
@@ -100,6 +108,10 @@
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
+    },
+    "docs/diagnostics.md": {
+      "sha": "20397327cc7cdcf832db892f79aa0b14191f26be",
+      "date": "2026-10-04"
     },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
