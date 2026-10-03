@@ -81,10 +81,6 @@
       "sha": "ffe8de823db6e869d1ca3791caad48ee60e3384b",
       "date": "2026-09-27"
     },
-    "AGENTS.md": {
-      "sha": "3eb2b7c759bdbbe96cf9c6925dcc71cee8162da7",
-      "date": "2026-09-23"
-    },
     "Cargo.toml": {
       "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
       "date": "2026-09-23"
@@ -112,10 +108,6 @@
     "REVIEW-STATE-TEMPLATE.md": {
       "sha": "6a462431712cca819d2b86ac012a8b3d9d10ae1a",
       "date": "2026-07-29"
-    },
-    "STYLEGUIDE.md": {
-      "sha": "be48e5589ef58b982d67ddc079086dea20048ca9",
-      "date": "2026-08-18"
     },
     "clippy.toml": {
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
@@ -397,16 +389,8 @@
       "sha": "477de37d6221e452f67d23ef1a525a2d51e0693b",
       "date": "2026-09-27"
     },
-    "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "dc07ef80e6f6d1c9b134f2117d0d1349f4aa33e4",
-      "date": "2026-09-27"
-    },
     "shakenfist-spice-protocol/src/logging.rs": {
       "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
-      "date": "2026-09-18"
-    },
-    "shakenfist-spice-protocol/src/messages.rs": {
-      "sha": "58555e0a32da442a72ffa3b8b997d8a5b28f0dac",
       "date": "2026-09-18"
     },
     "shakenfist-spice-protocol/src/parse.rs": {
@@ -437,36 +421,12 @@
       "sha": "8f8879516aee5d1f6b534c06f5a2d92a2b55af20",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/channels/cursor.rs": {
-      "sha": "81760b7b44c0fc0bdc87669d4ca2266f39ff2bfc",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/display.rs": {
-      "sha": "d7b6065c3871fdcff9c9dd7108fc7821dc3370c6",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/inputs.rs": {
-      "sha": "727a10c8795165c88f9dbef1b9fcf48c67fae6d2",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/playback.rs": {
-      "sha": "4c1a812f6eef7374b47717d285d0aa77eb281691",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/usbredir.rs": {
-      "sha": "2a036b63bcb07b2f7e9092dd041e1634703b50d9",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/src/channels/volume.rs": {
       "sha": "7bdfcb6c3add013748b3df150f799b169c7c65c8",
       "date": "2026-07-19"
     },
     "shakenfist-spice-renderer/src/channels/watchdog.rs": {
       "sha": "f5a71924c175312fc6ee96cd5e23f99703596048",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/channels/webdav.rs": {
-      "sha": "e7ddb70b9843562001aeb5f0a1c755c5e0054e2e",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/clipboard.rs": {

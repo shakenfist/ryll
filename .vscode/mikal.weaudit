@@ -300,10 +300,6 @@
       "author": "mikal"
     },
     {
-      "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/cursor.rs",
       "author": "mikal"
     },
@@ -464,35 +460,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/messages.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/display.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/watchdog.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/webdav.rs",
       "author": "mikal"
     },
     {
@@ -704,10 +672,6 @@
       "author": "mikal"
     },
     {
-      "path": "AGENTS.md",
-      "author": "mikal"
-    },
-    {
       "path": "Cargo.toml",
       "author": "mikal"
     },
@@ -836,10 +800,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/reader.rs",
       "author": "mikal"
     },
@@ -893,10 +853,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/proxy.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
     },
     {
