@@ -3216,26 +3216,37 @@ impl RyllApp {
     }
 }
 
+/// Whether the window has keyboard focus, read so that it is current in a
+/// logic-only pass too.
+///
+/// While the window is hidden eframe calls `App::logic` without running an
+/// egui pass, so `InputState::focused` keeps the value from the last frame
+/// that was drawn. `Context::run_logic` does refresh the raw input's focus,
+/// which is what `InputState::focused` is built from in a normal pass.
+fn window_focused(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.raw.focused)
+}
+
 impl eframe::App for RyllApp {
-    // eframe's App entry point: it hands us a root `&mut Ui`
-    // filling the viewport, which the panels below borrow.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // egui 0.35 unified the panel types and made every panel's
-        // `show` take `&mut Ui` instead of `&Context`. We own a
-        // cloned `Context` (cheap: it is `Arc`-backed) and bind
-        // `ctx` to a borrow of it, rather than to `ui.ctx()`. That
-        // keeps `ctx: &Context` — so all the existing `ctx.method()`
-        // and `Window::show(ctx, …)` calls are unchanged — while
-        // leaving `ui` free to be borrowed mutably by the panels.
-        let ctx_owned = ui.ctx().clone();
-        let ctx = &ctx_owned;
-        // Mirror egui's per-frame focus state into the shared
+    // Work that must keep ticking whether or not the window is drawn.
+    //
+    // eframe calls this before every `ui` pass, and on its own when the
+    // window is minimised or occluded (behind other windows, on another
+    // Space, or under the macOS lock screen): then it runs no egui pass at
+    // all, so `ui` is never called. Everything that drains the channel-event
+    // queue or advances a timer lives here, or a hidden window stops
+    // reading the queue, the renderer's producers back up behind it, and
+    // the main channel starts dropping events (issue #444). Anything that
+    // needs a `Ui`, or this pass's keyboard and pointer input (stale while
+    // hidden), stays in `ui`.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Mirror the window's focus state into the shared
         // AtomicBool that the FocusGatedClipboard reads. The
-        // value flips on the same frame egui sees the
+        // value flips on the same pass egui sees the
         // platform-level focus event, so the next 500 ms
         // clipboard tick on the renderer side will see the
         // updated state.
-        let focused = ctx.input(|i| i.focused);
+        let focused = window_focused(ctx);
         self.app_focused
             .store(focused, std::sync::atomic::Ordering::Relaxed);
 
@@ -3332,29 +3343,6 @@ impl eframe::App for RyllApp {
             }
         }
 
-        // Resize viewport to match the remote surface (plus stats
-        // bar) whenever a new primary surface differs from the
-        // size we last fitted to. Maximised/fullscreen windows
-        // are left alone — we cannot meaningfully change their
-        // inner size, and the surface will render at native size
-        // inside the available area.
-        let pending = self.pending_resize.take();
-        let is_max = ctx.input(|i| {
-            i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
-        });
-        if let Some((w, h, aw, ah)) =
-            compute_auto_resize(pending, self.last_auto_resize, is_max, self.obey_guest_size)
-        {
-            let total_h = h + STATS_BAR_HEIGHT;
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
-            // Seed last_sent_resize so maybe_send_monitors_resize
-            // doesn't echo our own resize back to the guest as a
-            // VDAgentMonitorsConfig change.
-            self.last_sent_resize = Some((aw, ah));
-            self.last_auto_resize = Some((aw, ah));
-            info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
-        }
-
         let now = Instant::now();
         if let Some((w, h)) = resolution_notification_due(
             self.pending_resolution_notify,
@@ -3384,12 +3372,67 @@ impl eframe::App for RyllApp {
             }
         }
 
-        self.maybe_send_monitors_resize(ctx);
-
         // Tick the bandwidth tracker
         self.bandwidth.tick();
 
         self.poll_pending_bug_report();
+
+        // Handle cadence mode
+        self.handle_cadence();
+
+        // Repaint when channel events arrive; 1s fallback for time-based UI
+        // (bandwidth/latency sparklines, status-message expiry, cadence-mode
+        // keystroke injection).  The bridge task wakes us immediately when
+        // an event arrives via the Arc<Notify>; this fallback only ensures
+        // anything that polls Instant::elapsed() updates roughly once a
+        // second. While the window is hidden eframe answers both with a
+        // logic-only pass, so the reconnect and debounce timers above keep
+        // firing.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
+    // eframe's App entry point: it hands us a root `&mut Ui`
+    // filling the viewport, which the panels below borrow.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // egui 0.35 unified the panel types and made every panel's
+        // `show` take `&mut Ui` instead of `&Context`. We own a
+        // cloned `Context` (cheap: it is `Arc`-backed) and bind
+        // `ctx` to a borrow of it, rather than to `ui.ctx()`. That
+        // keeps `ctx: &Context` — so all the existing `ctx.method()`
+        // and `Window::show(ctx, …)` calls are unchanged — while
+        // leaving `ui` free to be borrowed mutably by the panels.
+        let ctx_owned = ui.ctx().clone();
+        let ctx = &ctx_owned;
+        // `logic` has already started the Ctrl+C shutdown; draw nothing
+        // while the close goes through.
+        if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+
+        // Resize viewport to match the remote surface (plus stats
+        // bar) whenever a new primary surface differs from the
+        // size we last fitted to. Maximised/fullscreen windows
+        // are left alone — we cannot meaningfully change their
+        // inner size, and the surface will render at native size
+        // inside the available area.
+        let pending = self.pending_resize.take();
+        let is_max = ctx.input(|i| {
+            i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+        });
+        if let Some((w, h, aw, ah)) =
+            compute_auto_resize(pending, self.last_auto_resize, is_max, self.obey_guest_size)
+        {
+            let total_h = h + STATS_BAR_HEIGHT;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
+            // Seed last_sent_resize so maybe_send_monitors_resize
+            // doesn't echo our own resize back to the guest as a
+            // VDAgentMonitorsConfig change.
+            self.last_sent_resize = Some((aw, ah));
+            self.last_auto_resize = Some((aw, ah));
+            info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
+        }
+
+        self.maybe_send_monitors_resize(ctx);
 
         // Escape during region selection: skip and generate without region
         if self.region_select_active {
@@ -3461,9 +3504,6 @@ impl eframe::App for RyllApp {
         if !paste_triggered {
             self.handle_input(ctx);
         }
-
-        // Handle cadence mode
-        self.handle_cadence();
 
         // Refresh traffic viewer entries periodically
         if self.show_traffic_viewer
@@ -4960,14 +5000,6 @@ impl eframe::App for RyllApp {
         {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
         }
-
-        // Repaint when channel events arrive; 1s fallback for time-based UI
-        // (bandwidth/latency sparklines, status-message expiry, cadence-mode
-        // keystroke injection).  The bridge task wakes us immediately when
-        // an event arrives via the Arc<Notify>; this fallback only ensures
-        // anything that polls Instant::elapsed() updates roughly once a
-        // second.
-        ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
 }
 
@@ -5258,6 +5290,66 @@ mod tests {
         assert!(!event_drops_need_notice(7, 7));
         // A counter that went backwards (new session) is not a drop.
         assert!(!event_drops_need_notice(7, 0));
+    }
+
+    // -------------------------------------------------------------------------
+    // Hidden-window logic passes (issue #444)
+    //
+    // While the window is minimised or occluded, eframe runs `App::logic`
+    // through `Context::run_logic` and never calls `ui`. These pin the egui
+    // behaviour `RyllApp::logic` relies on to keep draining events then.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn logic_only_passes_keep_answering_repaint_requests() {
+        let ctx = egui::Context::default();
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = wakes.clone();
+        ctx.set_request_repaint_callback(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let wakes_now = || wakes.load(Ordering::SeqCst);
+
+        // The repaint bridge wakes egui for each burst of channel events.
+        // With no pass in between, repeat requests are already covered.
+        ctx.request_repaint();
+        let after_first = wakes_now();
+        assert!(after_first > 0);
+        ctx.request_repaint();
+        assert_eq!(wakes_now(), after_first);
+
+        // eframe serves the wake-ups with logic-only passes. Once they have
+        // consumed the request, the next burst must reach eframe again, or a
+        // hidden window would drain the queue once and then never again.
+        for _ in 0..3 {
+            let _ = ctx.run_logic(&egui::RawInput::default(), |_| {});
+        }
+        let before = wakes_now();
+        ctx.request_repaint();
+        assert!(wakes_now() > before);
+    }
+
+    #[test]
+    fn window_focused_is_current_in_a_logic_only_pass() {
+        let ctx = egui::Context::default();
+        let focused = egui::RawInput {
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(focused, |ui| assert!(window_focused(ui.ctx())))
+            .drop_without_applying_deltas();
+
+        // The window loses focus as it is hidden. `InputState::focused`
+        // still says true, from the last drawn frame; `window_focused` must
+        // not, or the clipboard poll keeps running for an unfocused window.
+        let blurred = egui::RawInput {
+            focused: false,
+            ..Default::default()
+        };
+        let _ = ctx.run_logic(&blurred, |ctx| {
+            assert!(ctx.input(|i| i.focused));
+            assert!(!window_focused(ctx));
+        });
     }
 
     // -------------------------------------------------------------------------

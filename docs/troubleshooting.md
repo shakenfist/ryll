@@ -276,8 +276,17 @@ are not: they travel on `watch` channels or a non-dropping send.
 say what was dropped and when. To rule out a stale mouse mode, compare the
 app's `mouse_mode` with main's `server_mouse_mode`.
 
-**Cause:** The stall itself, usually during a guest reboot, is tracked as
-issue #430.
+**Causes:**
+- The window was hidden: minimised, behind other windows, on another
+  Space, or under the macOS lock screen. eframe does not draw a hidden
+  window, and builds without the fix for issue #444 only drained the queue
+  while drawing, so the queue filled within seconds and stayed full until
+  the window was shown again. In a bug report this shows as hours of drops
+  (mostly `Latency`) with healthy PING/PONG counts throughout. ryll now
+  drains the queue from `App::logic`, which eframe keeps calling for hidden
+  windows.
+- A UI-thread stall while the window is visible, usually during a guest
+  reboot, tracked as issue #430.
 
 ### Session becomes unresponsive after idle period
 
