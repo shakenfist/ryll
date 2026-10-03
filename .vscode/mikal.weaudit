@@ -292,10 +292,6 @@
       "author": "mikal"
     },
     {
-      "path": "MERGE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
       "path": "README.md",
       "author": "mikal"
     },
@@ -325,10 +321,6 @@
     },
     {
       "path": ".github/actions",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/codeql-analysis.yml",
       "author": "mikal"
     },
     {
@@ -600,10 +592,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/mermaid-lint.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/propose-release.sh",
       "author": "mikal"
     },
@@ -688,10 +676,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/mermaid-lint.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/fuzz.yml",
       "author": "mikal"
     },
@@ -741,10 +725,6 @@
     },
     {
       "path": "shakenfist-spice-webrtc",
-      "author": "mikal"
-    },
-    {
-      "path": "renovate.json",
       "author": "mikal"
     },
     {
@@ -812,19 +792,7 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/export-repo-config.yml",
-      "author": "mikal"
-    },
-    {
       "path": "PUSH-AUDIT.md",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/pr-re-review.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/pr-retest.yml",
       "author": "mikal"
     },
     {
@@ -844,10 +812,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/ci.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/headless_connect_failure.rs",
       "author": "mikal"
     },
@@ -857,10 +821,6 @@
     },
     {
       "path": ".github/workflows/proxmox-functional.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/renovate.yml",
       "author": "mikal"
     }
   ],

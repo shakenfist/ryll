@@ -29,14 +29,6 @@
       "sha": "60103e7f1e33648189cdf21cb5cd174f4c7d125e",
       "date": "2026-09-26"
     },
-    ".github/workflows/codeql-analysis.yml": {
-      "sha": "f0d5443811bf485dd7c7d9491b39fb0b7464f1ee",
-      "date": "2026-08-24"
-    },
-    ".github/workflows/export-repo-config.yml": {
-      "sha": "d199e4e868917440bb6f783e6c7036d94897c662",
-      "date": "2026-09-28"
-    },
     ".github/workflows/fuzz.yml": {
       "sha": "2f83d312b9fd3bc5399aa16e1ddea91ae68d3337",
       "date": "2026-09-26"
@@ -45,18 +37,6 @@
       "sha": "c37b7ded5e75f0b8a130441b000b2edfcf015be3",
       "date": "2026-09-26"
     },
-    ".github/workflows/mermaid-lint.yml": {
-      "sha": "97eb7ba192f93c0fa7379d5635b4d89f6a41c6ad",
-      "date": "2026-09-26"
-    },
-    ".github/workflows/pr-re-review.yml": {
-      "sha": "72059c8c57e2111baa5004d517d5ec188e960be3",
-      "date": "2026-09-28"
-    },
-    ".github/workflows/pr-retest.yml": {
-      "sha": "60d01c0ee9cc8b8beb826b6ff3afc2b346a45bb4",
-      "date": "2026-09-28"
-    },
     ".github/workflows/proxmox-functional.yml": {
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
@@ -64,10 +44,6 @@
     ".github/workflows/release.yml": {
       "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
       "date": "2026-09-26"
-    },
-    ".github/workflows/renovate.yml": {
-      "sha": "d06ac9796fe262ae1531bbf77703bfe6f085deda",
-      "date": "2026-09-30"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
@@ -84,10 +60,6 @@
     "Cargo.toml": {
       "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
       "date": "2026-09-23"
-    },
-    "MERGE-TEMPLATE.md": {
-      "sha": "c022cc88de86a135201e25f3cb94c4041db29f9b",
-      "date": "2026-08-18"
     },
     "Makefile": {
       "sha": "a8b2f3ecfb2f257e114d4553cb948456b262410b",
@@ -120,10 +92,6 @@
     "docs/channel-diagnostics-audit.md": {
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
-    },
-    "docs/ci.md": {
-      "sha": "b8f6a55d6c1ac27240be07b0b04023f4404326f5",
-      "date": "2026-09-29"
     },
     "docs/configuration.md": {
       "sha": "1243c0f12a31f62a45801bc7cb76fe2e90041361",
@@ -192,10 +160,6 @@
     "examples/ryll-web.service": {
       "sha": "ffeba1d4155450125fa098094f1167ed0cdbc9d2",
       "date": "2026-09-17"
-    },
-    "renovate.json": {
-      "sha": "f22c6f9e0c0d8763ade5e4a2c5399fca647a7963",
-      "date": "2026-09-26"
     },
     "ryll/Cargo.toml": {
       "sha": "fe0de5138b83c0e9947c95a2e4649f77552772f9",
@@ -671,10 +635,6 @@
     },
     "tools/measure-idle-cpu.sh": {
       "sha": "a6196c07d0d66927322893b62791a8d8f9425506",
-      "date": "2026-09-23"
-    },
-    "tools/mermaid-lint.sh": {
-      "sha": "67eb5c5100835cf244b9d8e905bfc7d31896399e",
       "date": "2026-09-23"
     },
     "tools/pcap-inspect.py": {
