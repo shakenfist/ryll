@@ -119,6 +119,66 @@ fn parse_vd_agent_reply(payload: &[u8]) -> Option<(u32, u32)> {
     Some((reply_type, error))
 }
 
+/// True when a `VD_AGENT_ANNOUNCE_CAPABILITIES` body (`request` then
+/// a little-endian `u32` capability bitmap) sets bit `cap`.
+fn agent_caps_has(payload: &[u8], cap: u32) -> bool {
+    let word = 4 + (cap as usize / 32) * 4;
+    payload
+        .get(word..word + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & (1 << (cap % 32)) != 0)
+        .unwrap_or(false)
+}
+
+/// Split the selection header off a clipboard message body.
+///
+/// When the guest agent has announced `VD_AGENT_CAP_CLIPBOARD_SELECTION`,
+/// every `VDAgentClipboard*` message starts with a `uint8_t selection`
+/// and three reserved bytes (`vd_agent.h`). spice-vdagentd adds the header
+/// only when its peer announced the capability, and spice-gtk reads it only
+/// when the agent did. Without it the selection is implicitly CLIPBOARD.
+/// Returns `None` if the header is expected but the body is too short.
+fn split_clipboard_selection(payload: &[u8], has_selection: bool) -> Option<(u8, &[u8])> {
+    if !has_selection {
+        return Some((VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, payload));
+    }
+    if payload.len() < 4 {
+        return None;
+    }
+    Some((payload[0], &payload[4..]))
+}
+
+/// Read the leading `uint32_t type` of a `VDAgentClipboard` or
+/// `VDAgentClipboardRequest` body (selection header already removed),
+/// returning it with the data that follows.
+fn split_clipboard_type(body: &[u8]) -> Option<(u32, &[u8])> {
+    let ty = body.get(..4)?;
+    Some((u32::from_le_bytes([ty[0], ty[1], ty[2], ty[3]]), &body[4..]))
+}
+
+/// True when a `VDAgentClipboardGrab` type list (selection header
+/// already removed) offers `ty` anywhere, not only first.
+fn clipboard_grab_offers(types: &[u8], ty: u32) -> bool {
+    types
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|t| u32::from_le_bytes(*t) == ty)
+}
+
+/// Build a clipboard message body: the selection header when negotiated,
+/// then a `uint32_t` type, then `data`. A one-type grab, a request and a
+/// `VDAgentClipboard` all share this layout. ryll does not announce
+/// `VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL`, so a grab carries no serial.
+fn build_clipboard_payload(has_selection: bool, selection: u8, ty: u32, data: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + data.len());
+    if has_selection {
+        payload.extend_from_slice(&[selection, 0, 0, 0]);
+    }
+    payload.extend_from_slice(&ty.to_le_bytes());
+    payload.extend_from_slice(data);
+    payload
+}
+
 const VD_AGENT_PROTOCOL: u32 = 1;
 
 // VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
@@ -135,7 +195,12 @@ const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8;
 const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9;
 
 // Clipboard format types
+const VD_AGENT_CLIPBOARD_NONE: u32 = 0;
 const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1;
+
+// Clipboard selections. ryll only syncs CLIPBOARD; PRIMARY and
+// SECONDARY are X11 concepts with no equivalent on macOS or Windows.
+const VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD: u8 = 0;
 
 const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
 const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1;
@@ -200,6 +265,11 @@ pub struct MainChannel {
     agent_tokens: u32,
     agent_caps_announced: bool,
     guest_caps_received: bool,
+    /// Whether the guest agent announced `VD_AGENT_CAP_CLIPBOARD_SELECTION`,
+    /// so that clipboard messages in both directions carry a selection
+    /// header. `None` until the guest's capabilities arrive: the layout is
+    /// unknown before then, so no clipboard traffic is sent or parsed.
+    guest_clipboard_selection: Option<bool>,
     channels_requested: bool,
     monitors: u8,
     monitors_config_rx: mpsc::Receiver<(u32, u32)>,
@@ -332,6 +402,7 @@ impl MainChannel {
             pending_monitors_config: None,
             last_sent_monitors_config: None,
             guest_caps_received: false,
+            guest_clipboard_selection: None,
             channels_requested: false,
             last_clipboard_hash: None,
             clipboard,
@@ -568,7 +639,10 @@ impl MainChannel {
                     }
                 } => {
                     last_arm = "clipboard_interval";
-                    if self.agent_connected && self.agent_caps_announced {
+                    if self.agent_connected
+                        && self.agent_caps_announced
+                        && self.guest_clipboard_selection.is_some()
+                    {
                         last_arm = "clipboard_interval+poll";
                         self.poll_host_clipboard().await?;
                         last_arm = "clipboard_interval+poll_done";
@@ -1049,6 +1123,7 @@ impl MainChannel {
                 self.publish_agent_connected();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
+                self.guest_clipboard_selection = None;
                 // Drop probe bookkeeping tied to the previous
                 // agent instance. Without this, after the next
                 // agent reconnect:
@@ -1427,94 +1502,38 @@ impl MainChannel {
             debug!("main: guest agent active");
         }
         match agent_type {
-            VD_AGENT_CLIPBOARD_GRAB => {
-                if payload.len() >= 8 {
-                    let format =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
-                        debug!("main: guest clipboard grab, requesting data");
-                        self.send_clipboard_request().await?;
-                    }
-                }
-            }
-            VD_AGENT_CLIPBOARD => {
-                // payload: selection(u32) + format(u32) + data
-                let offset = 4;
-                if payload.len() > offset + 4 {
-                    let data = &payload[offset + 4..];
-                    if !data.is_empty() {
-                        let text = String::from_utf8_lossy(data).to_string();
-                        // Log byte count only — clipboard content may contain
-                        // passwords or sensitive data.
-                        info!("main: clipboard from guest ({} bytes)", text.len());
-                        if let Some(cb) = &self.clipboard {
-                            match cb.set_text(&text) {
-                                Ok(()) => debug!("main: host clipboard updated"),
-                                Err(e) => {
-                                    debug!("main: clipboard set failed: {}", e);
-                                }
-                            }
-                        }
-                        // Record so poll_host_clipboard won't re-grab what we just set.
-                        // Storing the normalised hash makes the dedup
-                        // invariant under CRLF / LF and trailing-whitespace
-                        // munging during the host clipboard round trip.
-                        self.last_clipboard_hash = Some(hash_clipboard(&text));
-                    }
-                }
-            }
-            VD_AGENT_CLIPBOARD_REQUEST => {
-                info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
-                // payload: selection(u32) + format(u32)
-                if payload.len() >= 8 {
-                    let format =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    if format == VD_AGENT_CLIPBOARD_UTF8_TEXT {
-                        debug!("main: clipboard request from guest");
-                        // Same spawn_blocking + timeout shape as
-                        // poll_host_clipboard: cb.get_text() can
-                        // hang macOS NSPasteboard when ryll is
-                        // backgrounded.
-                        let text = match self.clipboard.as_ref() {
-                            Some(c) => {
-                                let cb = c.clone();
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(1),
-                                    tokio::task::spawn_blocking(move || cb.get_text()),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(opt)) => opt,
-                                    Ok(Err(e)) => {
-                                        warn!("main: clipboard request task panicked: {}", e);
-                                        None
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            "main: clipboard request timed out (1 s), \
-                                             ignoring guest request"
-                                        );
-                                        None
-                                    }
-                                }
-                            }
-                            None => None,
-                        };
-                        if let Some(text) = text {
-                            // Log byte count only — clipboard content may contain
-                            // passwords or sensitive data.
-                            info!("main: clipboard to guest ({} bytes)", text.len());
-                            self.send_clipboard_data(&text).await?;
-                        }
-                    }
-                }
-            }
-            VD_AGENT_CLIPBOARD_RELEASE => {
-                debug!("main: clipboard release from guest");
+            VD_AGENT_CLIPBOARD_GRAB
+            | VD_AGENT_CLIPBOARD
+            | VD_AGENT_CLIPBOARD_REQUEST
+            | VD_AGENT_CLIPBOARD_RELEASE => {
+                let Some(has_selection) = self.guest_clipboard_selection else {
+                    debug!(
+                        "main: ignoring agent clipboard message type={} before the guest's \
+                         capabilities",
+                        agent_type
+                    );
+                    return Ok(());
+                };
+                let Some((selection, body)) = split_clipboard_selection(payload, has_selection)
+                else {
+                    debug!(
+                        "main: agent clipboard message type={} too short ({} bytes)",
+                        agent_type,
+                        payload.len()
+                    );
+                    return Ok(());
+                };
+                self.handle_guest_clipboard(agent_type, selection, body)
+                    .await?;
             }
             VD_AGENT_ANNOUNCE_CAPABILITIES => {
                 self.guest_caps_received = true;
-                debug!("main: received agent capabilities from guest");
+                let has_selection = agent_caps_has(payload, VD_AGENT_CAP_CLIPBOARD_SELECTION);
+                self.guest_clipboard_selection = Some(has_selection);
+                debug!(
+                    "main: received agent capabilities from guest (clipboard selection: {})",
+                    has_selection
+                );
                 if payload.len() >= 4 {
                     let request =
                         u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
@@ -1569,6 +1588,129 @@ impl MainChannel {
             }
         }
         Ok(())
+    }
+
+    /// Handle a guest clipboard message whose selection header has been
+    /// removed.
+    ///
+    /// Only the CLIPBOARD selection is synced. A PRIMARY grab only means
+    /// text was selected in the guest: requesting CLIPBOARD in reply gets
+    /// an empty answer, and copying PRIMARY to the host would clobber the
+    /// host clipboard on every selection. spice-gtk likewise forwards only
+    /// CLIPBOARD to its legacy single-clipboard signals (`channel-main.c`).
+    async fn handle_guest_clipboard(
+        &mut self,
+        agent_type: u32,
+        selection: u8,
+        body: &[u8],
+    ) -> Result<()> {
+        if agent_type == VD_AGENT_CLIPBOARD_REQUEST {
+            info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
+        }
+        if selection != VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD {
+            debug!(
+                "main: ignoring guest clipboard message type={} for selection {}",
+                agent_type, selection
+            );
+            if agent_type == VD_AGENT_CLIPBOARD_REQUEST {
+                // We never grab other selections, so a request for one is
+                // unexpected; answer NONE as spice-vdagent does for a
+                // selection it does not own, so the requester stops waiting.
+                self.send_clipboard_none(selection).await?;
+            }
+            return Ok(());
+        }
+
+        match agent_type {
+            VD_AGENT_CLIPBOARD_GRAB => {
+                if clipboard_grab_offers(body, VD_AGENT_CLIPBOARD_UTF8_TEXT) {
+                    debug!("main: guest clipboard grab, requesting data");
+                    self.send_clipboard_request().await?;
+                } else {
+                    debug!("main: guest clipboard grab offers no UTF-8 text");
+                }
+            }
+            VD_AGENT_CLIPBOARD => {
+                let Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, data)) = split_clipboard_type(body) else {
+                    debug!("main: guest clipboard data is not UTF-8 text");
+                    return Ok(());
+                };
+                if data.is_empty() {
+                    return Ok(());
+                }
+                let text = String::from_utf8_lossy(data).to_string();
+                // Log byte count only — clipboard content may contain
+                // passwords or sensitive data.
+                info!("main: clipboard from guest ({} bytes)", text.len());
+                if let Some(cb) = &self.clipboard {
+                    match cb.set_text(&text) {
+                        Ok(()) => debug!("main: host clipboard updated"),
+                        Err(e) => {
+                            debug!("main: clipboard set failed: {}", e);
+                        }
+                    }
+                }
+                // Record so poll_host_clipboard won't re-grab what we just set.
+                // Storing the normalised hash makes the dedup
+                // invariant under CRLF / LF and trailing-whitespace
+                // munging during the host clipboard round trip.
+                self.last_clipboard_hash = Some(hash_clipboard(&text));
+            }
+            VD_AGENT_CLIPBOARD_REQUEST => {
+                let text = match split_clipboard_type(body) {
+                    Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, _)) => {
+                        debug!("main: clipboard request from guest");
+                        self.read_host_clipboard_for_guest().await
+                    }
+                    _ => {
+                        debug!("main: guest requested a clipboard type other than UTF-8 text");
+                        None
+                    }
+                };
+                match text {
+                    Some(text) => {
+                        // Log byte count only — clipboard content may contain
+                        // passwords or sensitive data.
+                        info!("main: clipboard to guest ({} bytes)", text.len());
+                        self.send_clipboard_data(&text).await?;
+                    }
+                    // Answer anyway, so the guest application asking for the
+                    // paste is not left waiting on a reply that never comes.
+                    None => {
+                        self.send_clipboard_none(selection).await?;
+                    }
+                }
+            }
+            _ => {
+                debug!("main: clipboard release from guest");
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the host clipboard to answer a guest request.
+    ///
+    /// Same spawn_blocking + timeout shape as poll_host_clipboard:
+    /// cb.get_text() can hang macOS NSPasteboard when ryll is
+    /// backgrounded.
+    async fn read_host_clipboard_for_guest(&self) -> Option<String> {
+        let cb = self.clipboard.as_ref()?.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tokio::task::spawn_blocking(move || cb.get_text()),
+        )
+        .await
+        {
+            Ok(Ok(opt)) => opt,
+            Ok(Err(e)) => {
+                warn!("main: clipboard request task panicked: {}", e);
+                None
+            }
+            Err(_) => {
+                warn!("main: clipboard request timed out (1 s), ignoring guest request");
+                None
+            }
+        }
     }
 
     async fn poll_host_clipboard(&mut self) -> Result<()> {
@@ -1636,28 +1778,59 @@ impl MainChannel {
         Ok(())
     }
 
+    /// A clipboard message body for the negotiated layout, or `None` (and
+    /// nothing should be sent) before the guest's capabilities arrive.
+    fn clipboard_payload(&self, selection: u8, ty: u32, data: &[u8]) -> Option<Vec<u8>> {
+        let Some(has_selection) = self.guest_clipboard_selection else {
+            debug!("main: clipboard message not sent: guest capabilities not yet received");
+            return None;
+        };
+        Some(build_clipboard_payload(has_selection, selection, ty, data))
+    }
+
     async fn send_clipboard_grab(&mut self) -> Result<bool> {
-        let mut payload = Vec::with_capacity(8);
-        payload.write_u32::<LittleEndian>(0)?;
-        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
+        let Some(payload) = self.clipboard_payload(
+            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            VD_AGENT_CLIPBOARD_UTF8_TEXT,
+            &[],
+        ) else {
+            return Ok(false);
+        };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload)
             .await
     }
 
     async fn send_clipboard_request(&mut self) -> Result<bool> {
-        let mut payload = Vec::with_capacity(8);
-        payload.write_u32::<LittleEndian>(0)?;
-        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
+        let Some(payload) = self.clipboard_payload(
+            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            VD_AGENT_CLIPBOARD_UTF8_TEXT,
+            &[],
+        ) else {
+            return Ok(false);
+        };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload)
             .await
     }
 
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
-        let text_bytes = text.as_bytes();
-        let mut payload = Vec::with_capacity(8 + text_bytes.len());
-        payload.write_u32::<LittleEndian>(0)?;
-        payload.write_u32::<LittleEndian>(VD_AGENT_CLIPBOARD_UTF8_TEXT)?;
-        payload.extend_from_slice(text_bytes);
+        let Some(payload) = self.clipboard_payload(
+            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            VD_AGENT_CLIPBOARD_UTF8_TEXT,
+            text.as_bytes(),
+        ) else {
+            return Ok(false);
+        };
+        self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
+            .await
+    }
+
+    /// Tell the guest we have no data for `selection`: a `VDAgentClipboard`
+    /// of type NONE, which spice-vdagent turns into a failed selection
+    /// request for the waiting application, or ignores if none is waiting.
+    async fn send_clipboard_none(&mut self, selection: u8) -> Result<bool> {
+        let Some(payload) = self.clipboard_payload(selection, VD_AGENT_CLIPBOARD_NONE, &[]) else {
+            return Ok(false);
+        };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
             .await
     }
@@ -1695,11 +1868,14 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
-        parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
-        VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
-        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG,
-        VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        agent_caps_has, build_clipboard_payload, build_mouse_mode_request_payload,
+        clipboard_grab_offers, hash_clipboard, parse_mouse_mode_payload, parse_vd_agent_reply,
+        ping_interval_ms, should_request_client_mouse_mode, split_clipboard_selection,
+        split_clipboard_type, VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CAP_CLIPBOARD_SELECTION,
+        VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_NONE,
+        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
+        VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, VD_AGENT_CLIPBOARD_UTF8_TEXT,
+        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1897,5 +2073,115 @@ mod tests {
         let sample = ping_interval_ms(Some(last), now).expect("previous ping present");
         assert!(sample.is_finite());
         assert!((sample - 86_400_000.0).abs() < 1.0, "sample was {}", sample);
+    }
+
+    // Guest ANNOUNCE_CAPABILITIES body from test sessions 013-015:
+    // request=0, caps=0x00038de7 (bit 6, CLIPBOARD_SELECTION, set).
+    const GUEST_CAPS: [u8; 8] = [0, 0, 0, 0, 0xe7, 0x8d, 0x03, 0x00];
+
+    #[test]
+    fn agent_caps_has_reads_the_bitmap_after_the_request_word() {
+        assert!(agent_caps_has(
+            &GUEST_CAPS,
+            VD_AGENT_CAP_CLIPBOARD_SELECTION
+        ));
+        // Bit 3 (CLIPBOARD, the pre-by-demand protocol) is clear.
+        assert!(!agent_caps_has(&GUEST_CAPS, 3));
+        // ryll's own caps, 0x67, also carry CLIPBOARD_SELECTION.
+        assert!(agent_caps_has(&[1, 0, 0, 0, 0x67, 0, 0, 0], 6));
+        // A bit in a word the agent did not send is clear, not a panic.
+        assert!(!agent_caps_has(&GUEST_CAPS, 40));
+        assert!(!agent_caps_has(&[0, 0], 0));
+    }
+
+    #[test]
+    fn guest_primary_grab_from_sessions_013_014_is_not_clipboard() {
+        // Wire bytes of the guest grab ryll answered with a CLIPBOARD
+        // request: selection=PRIMARY (1), types=[UTF8_TEXT].
+        let grab = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
+        let (selection, types) = split_clipboard_selection(&grab, true).unwrap();
+        assert_eq!(selection, 1);
+        assert_ne!(selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
+        assert!(clipboard_grab_offers(types, VD_AGENT_CLIPBOARD_UTF8_TEXT));
+    }
+
+    #[test]
+    fn split_clipboard_selection_reads_a_u8_and_skips_reserved_bytes() {
+        // Reserved bytes are not part of the selection, whatever they hold.
+        let msg = [0x00, 0xaa, 0xbb, 0xcc, 0x01, 0x00, 0x00, 0x00];
+        let (selection, body) = split_clipboard_selection(&msg, true).unwrap();
+        assert_eq!(selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
+        assert_eq!(body, &msg[4..]);
+        assert_eq!(split_clipboard_selection(&[0x00, 0x00, 0x00], true), None);
+    }
+
+    #[test]
+    fn split_clipboard_selection_without_the_cap_is_implicitly_clipboard() {
+        let msg = [0x01, 0x00, 0x00, 0x00];
+        assert_eq!(
+            split_clipboard_selection(&msg, false),
+            Some((VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, &msg[..]))
+        );
+    }
+
+    #[test]
+    fn clipboard_grab_offers_finds_text_anywhere_in_the_type_list() {
+        // types = [IMAGE_PNG (2), UTF8_TEXT (1)]
+        let types = [0x02, 0, 0, 0, 0x01, 0, 0, 0];
+        assert!(clipboard_grab_offers(&types, VD_AGENT_CLIPBOARD_UTF8_TEXT));
+        assert!(!clipboard_grab_offers(
+            &types[..4],
+            VD_AGENT_CLIPBOARD_UTF8_TEXT
+        ));
+        // A trailing partial type is ignored rather than misread.
+        assert!(!clipboard_grab_offers(
+            &[0x01, 0, 0],
+            VD_AGENT_CLIPBOARD_UTF8_TEXT
+        ));
+    }
+
+    #[test]
+    fn split_clipboard_type_returns_type_and_data() {
+        let body = [0x01, 0, 0, 0, b'h', b'i'];
+        assert_eq!(
+            split_clipboard_type(&body),
+            Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, &b"hi"[..]))
+        );
+        // The empty NONE reply the guest sends for a selection it does
+        // not own (sessions 013 and 014).
+        assert_eq!(
+            split_clipboard_type(&[0, 0, 0, 0]),
+            Some((VD_AGENT_CLIPBOARD_NONE, &[][..]))
+        );
+        assert_eq!(split_clipboard_type(&[0x01, 0]), None);
+    }
+
+    #[test]
+    fn build_clipboard_payload_matches_the_wire_layout() {
+        // The CLIPBOARD request ryll sent in sessions 013 and 014.
+        assert_eq!(
+            build_clipboard_payload(
+                true,
+                VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+                VD_AGENT_CLIPBOARD_UTF8_TEXT,
+                &[]
+            ),
+            vec![0, 0, 0, 0, 1, 0, 0, 0]
+        );
+        // A NONE answer for PRIMARY carries that selection back.
+        assert_eq!(
+            build_clipboard_payload(true, 1, VD_AGENT_CLIPBOARD_NONE, &[]),
+            vec![1, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // Without the cap there is no selection header at all.
+        assert_eq!(
+            build_clipboard_payload(
+                false,
+                VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+                VD_AGENT_CLIPBOARD_UTF8_TEXT,
+                b"x"
+            ),
+            vec![1, 0, 0, 0, b'x']
+        );
     }
 }
