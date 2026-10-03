@@ -168,14 +168,28 @@ This phase is a single pull request with one commit per step
 below, except Steps 2 to 4, which commit once per issue. Every
 commit builds and passes `make test` on its own.
 
-| Step | Effort | Model | Isolation | Brief for sub-agent |
-|------|--------|-------|-----------|---------------------|
-| 1a | high | opus | none | Shared limit, helper and `DecompressedImage` invariant. See brief 1, except its renderer-constant bullet. |
-| 1b | low | sonnet | none | After #437 merges and the branch is rebased: the renderer-constant bullet of brief 1. |
-| 2 | high | opus | none | QUIC: #171 then #172, as two commits. See brief 2. |
-| 3 | medium | sonnet | none | LZ, GLZ, LZ4 and zlib-GLZ: #175 then #176, as two commits. See brief 3. |
-| 4 | medium | opus | none | Renderer: #177, #173, #174, #182, as four commits. See brief 4. |
-| 5 | medium | sonnet | none | Documentation. See brief 5. |
+| Step | Effort | Model | Isolation | Status | Brief for sub-agent |
+|------|--------|-------|-----------|--------|---------------------|
+| 1a | high | opus | none | Complete | Shared limit, helper and `DecompressedImage` invariant. See brief 1, except its renderer-constant bullet. |
+| 1b | low | sonnet | none | Complete | After #437 merges and the branch is rebased: the renderer-constant bullet of brief 1. |
+| 2 | high | opus | none | Complete | QUIC: #171 then #172, as two commits. See brief 2. |
+| 3 | medium | sonnet | none | Complete | LZ, GLZ, LZ4 and zlib-GLZ: #175 then #176, as two commits. See brief 3. |
+| 4 | medium | opus | none | Complete | Renderer: #177, #173, #174, #182, as four commits. See brief 4. |
+| 5 | medium | sonnet | none | Complete | Documentation. See brief 5. |
+
+All six steps are complete on the `decoder-hardening` branch (PR
+#443); Step 1b ran after the branch was rebased onto #437. The phase
+stays `In progress` until the PR merges and its merge commit is
+recorded.
+
+Because `DecompressedImage::new`/`new_glz` now return `Option` and
+`MAX_DECODED_RGBA_BYTES` dropped from 1 GiB to 256 MiB, the next
+release must be a minor bump (0.2.0), not a patch; see
+[Choosing the version](../releasing.md#choosing-the-version).
+The kerbside proxy needs no bump: it depends only on
+`shakenfist-spice-protocol`, at a pinned git revision, and the only
+change to that crate on this branch is an added constant
+(`IMAGE_FLAGS_CACHE_REPLACE_ME`, from #457).
 
 **Brief 1: shared limit and helper (Step 1a and Step 1b, one
 commit each).**
@@ -332,19 +346,17 @@ pull request.
   descriptor ends exactly at the end of the payload. A FromCache
   `SpiceImage` has no bytes after its descriptor, so if it is the
   last pointed-to data in a DRAW_COPY (no mask), every such draw
-  would be dropped. Found during Step 4; not yet confirmed against
-  spice-server's marshalling or a capture; tracked as #442.
+  would be dropped. Found during Step 4 and tracked as #442; fixed
+  by #457, which merged into this branch.
 * Fuzz targets for the compression crate's decoders (#135). The
   helper makes "never allocates past the cap" a property a fuzzer
   can assert.
 * Per-channel message size caps (#436).
-* The kerbside proxy depends on ryll crates. Check whether it
-  depends on `shakenfist-spice-compression`, and if it does, it
-  needs a pinned-revision bump once this lands.
 
 ### Bugs fixed during this work
 
-Issues #171, #172, #173, #174, #175, #176, #177 and #182.
+Issues #171, #172, #173, #174, #175, #176, #177 and #182, plus #442
+(found here, fixed by #457, which merged into this branch).
 
 ### Back brief
 

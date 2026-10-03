@@ -2415,15 +2415,23 @@ impl DisplayChannel {
                 if let Some(pixels) = self.image_cache.get(&img_desc.image_id) {
                     // The cache holds pixels without dimensions, so these
                     // come from the descriptor and the server can name
-                    // any size for a cached id. None when the cached
-                    // buffer does not fit them.
+                    // any size for a cached id. Check the fit before
+                    // cloning, so a mismatched id cannot make every draw
+                    // copy a large buffer only to throw it away; the
+                    // constructor's own check stays as the backstop.
                     let cached_len = pixels.len();
-                    let image = DecompressedImage::new(
-                        img_desc.width,
-                        img_desc.height,
-                        pixels.clone(),
-                        img_desc.image_id,
-                    );
+                    let fits = limits::rgba_len(img_desc.width as usize, img_desc.height as usize)
+                        == Some(cached_len);
+                    let image = if fits {
+                        DecompressedImage::new(
+                            img_desc.width,
+                            img_desc.height,
+                            pixels.clone(),
+                            img_desc.image_id,
+                        )
+                    } else {
+                        None
+                    };
                     if image.is_none() {
                         warn_once!(
                             "display:decode_failure:from_cache:size_mismatch",
@@ -2463,6 +2471,9 @@ impl DisplayChannel {
                     let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
                         DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
                     });
+                    // `DecodedJpeg`'s constructors already apply
+                    // `rgba_len`, so `new` refusing here is a backstop,
+                    // not a distinct failure worth its own key.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:jpeg:decode_failed",
@@ -2492,6 +2503,10 @@ impl DisplayChannel {
                                 img_desc.image_id,
                             )
                         });
+                    // `quic_decode` checks the header against these
+                    // dimensions and sizes its output with `rgba_len`,
+                    // so `new` refusing here is a backstop, not a
+                    // distinct failure worth its own key.
                     if decoded.is_none() {
                         warn_once!(
                             "display:decode_failure:quic:decode_failed",
@@ -3246,71 +3261,6 @@ impl DisplayChannel {
 
 #[cfg(test)]
 mod tests {
-
-    // ZLIB_GLZ_RGB inflate bounds (#176).
-    fn deflate(data: &[u8]) -> Vec<u8> {
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
-        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-        enc.write_all(data).unwrap();
-        enc.finish().unwrap()
-    }
-
-    #[test]
-    fn inflate_glz_stream_refuses_bomb_past_limit() {
-        // A 1x1 image has a limit of 4 + 1 + 64 bytes. 1 MiB of zeros
-        // deflates to about a kilobyte and must be refused, whatever
-        // size the header claims.
-        let zlib = deflate(&vec![0u8; 1024 * 1024]);
-        assert!(zlib.len() < 4096);
-        let limit = glz_stream_limit(1, 1).unwrap();
-        assert!(matches!(
-            inflate_glz_stream(&zlib, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
-        ));
-    }
-
-    #[test]
-    fn inflate_glz_stream_accepts_limit_refuses_one_over() {
-        // The boundary: a stream exactly at the limit is accepted, one
-        // byte over it is refused.
-        let limit = glz_stream_limit(1, 1).unwrap();
-        let ok = deflate(&vec![7u8; limit]);
-        assert_eq!(inflate_glz_stream(&ok, limit, 1, 1).unwrap().len(), limit);
-        let over = deflate(&vec![7u8; limit + 1]);
-        assert!(matches!(
-            inflate_glz_stream(&over, limit, 1, 1),
-            Err(InflateGlzError::TooLarge)
-        ));
-    }
-
-    #[test]
-    fn inflate_glz_stream_refuses_oversized_declared_size() {
-        let zlib = deflate(&[1, 2, 3]);
-        assert!(matches!(
-            inflate_glz_stream(&zlib, usize::MAX, 2, 2),
-            Err(InflateGlzError::DeclaredTooLarge)
-        ));
-    }
-
-    #[test]
-    fn inflate_glz_stream_refuses_declared_size_mismatch() {
-        let zlib = deflate(&[1, 2, 3]);
-        assert!(matches!(
-            inflate_glz_stream(&zlib, 4, 2, 2),
-            Err(InflateGlzError::SizeMismatch { inflated: 3 })
-        ));
-        assert_eq!(inflate_glz_stream(&zlib, 3, 2, 2).unwrap(), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn inflate_glz_stream_refuses_absurd_dimensions() {
-        let zlib = deflate(&[1, 2, 3]);
-        assert!(matches!(
-            inflate_glz_stream(&zlib, 3, 65535, 65535),
-            Err(InflateGlzError::DimensionsRefused)
-        ));
-    }
     use super::*;
 
     // -------------------------------------------------------------------------
@@ -4390,6 +4340,74 @@ mod tests {
             channel.streams_rejected_total, 0,
             "an unsupported codec is not a cap refusal; the counters mean different things"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // ZLIB_GLZ_RGB inflate bounds (#176)
+    // -------------------------------------------------------------------------
+
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_bomb_past_limit() {
+        // A 1x1 image has a limit of 4 + 1 + 64 bytes. 1 MiB of zeros
+        // deflates to about a kilobyte and must be refused, whatever
+        // size the header claims.
+        let zlib = deflate(&vec![0u8; 1024 * 1024]);
+        assert!(zlib.len() < 4096);
+        let limit = glz_stream_limit(1, 1).unwrap();
+        assert!(matches!(
+            inflate_glz_stream(&zlib, limit, 1, 1),
+            Err(InflateGlzError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_accepts_limit_refuses_one_over() {
+        // The boundary: a stream exactly at the limit is accepted, one
+        // byte over it is refused.
+        let limit = glz_stream_limit(1, 1).unwrap();
+        let ok = deflate(&vec![7u8; limit]);
+        assert_eq!(inflate_glz_stream(&ok, limit, 1, 1).unwrap().len(), limit);
+        let over = deflate(&vec![7u8; limit + 1]);
+        assert!(matches!(
+            inflate_glz_stream(&over, limit, 1, 1),
+            Err(InflateGlzError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_oversized_declared_size() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, usize::MAX, 2, 2),
+            Err(InflateGlzError::DeclaredTooLarge)
+        ));
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_declared_size_mismatch() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 4, 2, 2),
+            Err(InflateGlzError::SizeMismatch { inflated: 3 })
+        ));
+        assert_eq!(inflate_glz_stream(&zlib, 3, 2, 2).unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn inflate_glz_stream_refuses_absurd_dimensions() {
+        let zlib = deflate(&[1, 2, 3]);
+        assert!(matches!(
+            inflate_glz_stream(&zlib, 3, 65535, 65535),
+            Err(InflateGlzError::DimensionsRefused)
+        ));
     }
 
     // -------------------------------------------------------------------------

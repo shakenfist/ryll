@@ -38,8 +38,11 @@ return `None` unless `pixels.len()` equals
 The `limits` module holds `MAX_IMAGE_DIMENSION`,
 `MAX_IMAGE_PIXELS` and `rgba_len(width, height)`. Image
 dimensions on the wire are attacker-controlled, so every decoder
-checks them against these caps before allocating, and `rgba_len`
-is the checked way to size an RGBA buffer.
+checks them against these caps before allocating its RGBA output,
+and `rgba_len` is the checked way to size an RGBA buffer. Decoders
+that wrap a codec library (H.264, and the WIC and ImageIO JPEG
+backends) only learn the dimensions after the library has parsed
+the frame, so its intermediate buffers rely on its own limits.
 
 ## Usage
 

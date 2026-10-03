@@ -132,17 +132,10 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         }
     }
 
-    // `rgba` was sized from these dimensions above, so this only
-    // refuses dimensions outside the shared limits. A side too wide
-    // for `u32` is refused rather than truncated.
-    let image = u32::try_from(width)
-        .ok()
-        .zip(u32::try_from(height).ok())
-        .and_then(|(w, h)| DecompressedImage::new(w, h, rgba, 0));
-    if image.is_none() {
-        warn!("display: LZ4 dimensions {}x{} refused", width, height);
-    }
-    image
+    // `rgba_len` accepted these dimensions above, which caps each side
+    // at `MAX_IMAGE_DIMENSION`, so the casts cannot truncate and `new`
+    // cannot refuse a buffer it sized.
+    DecompressedImage::new(width as u32, height as u32, rgba, 0)
 }
 
 #[cfg(test)]
