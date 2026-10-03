@@ -482,10 +482,30 @@ impl Config {
         Self::parse_vv_content(&content)
     }
 
-    /// Parse local .vv file
+    /// Parse local .vv file, then remove it if it set
+    /// `delete-this-file=1`.
+    ///
+    /// The removal matches remote-viewer: the file is deleted as
+    /// soon as it has been read, whether or not the connection
+    /// that follows succeeds, because the ticket inside it is
+    /// single-use and the file is a credential left lying in the
+    /// downloads directory. A file that fails to parse is kept so
+    /// the user can see what was wrong with it. A failed removal
+    /// is logged and does not stop the connection.
     fn from_vv_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
         let content = fs::read_to_string(path)?;
-        Self::parse_vv_content(&content)
+        let config = Self::parse_vv_content(&content)?;
+        if config.ticket_is_single_use {
+            if let Err(e) = fs::remove_file(path) {
+                warn!(
+                    ".vv: delete-this-file=1 but removing {} failed: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+        Ok(config)
     }
 
     /// Parse direct connection string
@@ -785,6 +805,40 @@ mod tests {
     fn vv_delete_this_file_0_leaves_single_use_off() {
         let cfg = parse("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=0\n");
         assert!(!cfg.ticket_is_single_use);
+    }
+
+    /// Write `content` to a .vv file in a fresh temp dir, load it
+    /// through `from_vv_file`, and report whether the file still
+    /// exists afterwards.
+    fn load_vv_file(content: &str) -> (Result<Config>, bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("console.vv");
+        fs::write(&path, content).unwrap();
+        let result = Config::from_vv_file(&path);
+        (result, path.exists())
+    }
+
+    #[test]
+    fn vv_file_with_delete_this_file_1_is_removed() {
+        let (cfg, exists) = load_vv_file("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=1\n");
+        assert!(cfg.expect("parse").ticket_is_single_use);
+        assert!(!exists);
+    }
+
+    #[test]
+    fn vv_file_without_delete_this_file_is_kept() {
+        let (cfg, exists) = load_vv_file("[virt-viewer]\nhost=h\nport=5900\ndelete-this-file=0\n");
+        cfg.expect("parse");
+        assert!(exists);
+    }
+
+    #[test]
+    fn vv_file_that_fails_to_parse_is_kept() {
+        // No host: the load fails, and the file survives so the
+        // user can inspect it.
+        let (cfg, exists) = load_vv_file("[virt-viewer]\nport=5900\ndelete-this-file=1\n");
+        assert!(cfg.is_err());
+        assert!(exists);
     }
 
     #[test]
