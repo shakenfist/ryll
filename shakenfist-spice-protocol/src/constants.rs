@@ -447,6 +447,11 @@ pub enum ImageType {
 #[allow(dead_code)]
 pub const IMAGE_FLAGS_CACHE_ME: u8 = 1 << 0;
 
+/// The image replaces a lossy entry already cached under its id with
+/// this lossless copy. spice-server sets it instead of CACHE_ME when a
+/// draw needs lossless pixels and the cached ones are lossy.
+pub const IMAGE_FLAGS_CACHE_REPLACE_ME: u8 = 1 << 2;
+
 impl ImageType {
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
