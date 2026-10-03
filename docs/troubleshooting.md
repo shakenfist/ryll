@@ -91,7 +91,7 @@ Error: Authentication failed: PermissionDenied
 
 **Symptom:**
 ```
-Error: invalid peer certificate: UnknownIssuer
+Error: TLS handshake with <host>:<port>: invalid peer certificate: UnknownIssuer
 ```
 
 **Cause:** Server's TLS certificate isn't trusted.

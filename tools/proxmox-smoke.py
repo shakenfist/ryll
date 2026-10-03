@@ -162,8 +162,13 @@ EXPIRED_RE = re.compile(
         'Proxmox tickets are valid for about 30 seconds'))
 
 # rustls' Display for Error::InvalidCertificate, which is what
-# SpiceCaVerifier's rejection reaches the connection task as.
-TLS_FAILURE = CONNECT_FAILED + 'invalid peer certificate'
+# SpiceCaVerifier's rejection reaches the connection task as, under the
+# "TLS handshake with {display_target}" context that open_stream (client.rs)
+# adds. The wrong-pin check always tunnels, so the target is the proxy's,
+# redacted.
+TLS_FAILURE_RE = re.compile(
+    re.escape(CONNECT_FAILED) + r'TLS handshake with \S+ ' + re.escape(TUNNELLED)
+    + re.escape(': invalid peer certificate'))
 
 # SpiceCaVerifier::check_subject's warning (client.rs), whose second half is
 # HostSubjectError::Mismatch (shakenfist-spice-protocol/src/host_subject.rs):
@@ -737,10 +742,10 @@ def wrong_pin_verify(check, lines, context):
     else:
         check.fail('no "TLS: rejecting certificate: pinned host_subject ..." warning naming both the '
                    'altered pin and the presented CN')
-    if contains(lines, TLS_FAILURE):
+    if any_line(lines, TLS_FAILURE_RE):
         check.note('TLS handshake refused')
     else:
-        check.fail(f'no "{TLS_FAILURE}" error')
+        check.fail(f'no "{CONNECT_FAILED}TLS handshake with ... {TUNNELLED}: invalid peer certificate" error')
     targets = dial_targets(lines)
     if not targets:
         check.fail('ryll never dialled the proxy')
