@@ -443,6 +443,11 @@ Once CI passes and triage is complete:
    in Step 6.
 3. Assistant is available for CI babysitting if needed
    (see `/loop` skill) but does not open the PR.
+4. Check the CodeQL run on the post-merge push to
+   `develop`. CodeQL skips pull requests from forks (autobuild
+   would run untrusted code on the static runners), so the
+   contributor's change is first scanned there; the pull
+   request's green `Analyze` only means the job was skipped.
 
 ## Step 9: Maintain `REVIEW-STATE.md`
 
