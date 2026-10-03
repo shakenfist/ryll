@@ -101,6 +101,13 @@ fn build_mouse_mode_request_payload(mode: u32) -> Vec<u8> {
     payload
 }
 
+/// Parse a SpiceMsgMainAgentConnectedTokens payload: one little-endian
+/// `uint32` giving the client's new agent token window.
+fn parse_agent_connected_tokens(payload: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = payload.get(..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(bytes))
+}
+
 /// Decode the body of a `VD_AGENT_REPLY`.
 ///
 /// `vd_agent.h` declares `VDAgentReply` as a packed struct of
@@ -1049,6 +1056,31 @@ impl MainChannel {
                 self.connect_agent().await?;
             }
 
+            // Sent instead of AGENT_CONNECTED because we advertise
+            // MAIN_AGENT_CONNECTED_TOKENS. spice-server reset its token
+            // accounting when the previous agent detached, so adopt its new
+            // window rather than carrying our old count forward (#452). As in
+            // spice-gtk, tokens are not zeroed on AGENT_DISCONNECTED: the
+            // server still expects the tail of a part-sent message.
+            main_server::AGENT_CONNECTED_TOKENS => {
+                match parse_agent_connected_tokens(payload) {
+                    Some(tokens) => {
+                        info!("main: vdagent connected with {} agent tokens", tokens);
+                        self.agent_tokens = tokens;
+                    }
+                    None => warn!(
+                        "main: short AGENT_CONNECTED_TOKENS payload ({} bytes), \
+                         keeping {} agent tokens",
+                        payload.len(),
+                        self.agent_tokens
+                    ),
+                }
+                self.agent_connected = true;
+                self.publish_agent_connected();
+                self.connect_agent().await?;
+                self.flush_agent_queue().await?;
+            }
+
             main_server::AGENT_DISCONNECTED => {
                 info!("main: vdagent disconnected");
                 self.agent_connected = false;
@@ -1717,11 +1749,11 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        build_mouse_mode_request_payload, hash_clipboard, parse_mouse_mode_payload,
-        parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
-        VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
-        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_DISPLAY_CONFIG,
-        VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        build_mouse_mode_request_payload, hash_clipboard, parse_agent_connected_tokens,
+        parse_mouse_mode_payload, parse_vd_agent_reply, ping_interval_ms,
+        should_request_client_mouse_mode, VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CLIPBOARD,
+        VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
+        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1749,6 +1781,19 @@ mod tests {
             parse_mouse_mode_payload(&[0x03, 0x00, 0x01, 0x00]),
             Some((3, 1))
         );
+    }
+
+    // SpiceMsgMainAgentConnectedTokens carries spice-server's
+    // REDS_AGENT_WINDOW_SIZE (10) as a little-endian u32.
+    #[test]
+    fn parse_agent_connected_tokens_reads_window() {
+        assert_eq!(parse_agent_connected_tokens(&[0x0a, 0, 0, 0]), Some(10));
+        assert_eq!(
+            parse_agent_connected_tokens(&[0x0a, 0, 0, 0, 0xff]),
+            Some(10)
+        );
+        assert_eq!(parse_agent_connected_tokens(&[0x0a, 0, 0]), None);
+        assert_eq!(parse_agent_connected_tokens(&[]), None);
     }
 
     #[test]
