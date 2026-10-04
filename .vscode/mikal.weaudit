@@ -1018,6 +1018,18 @@
     {
       "path": "ryll/src/web/server.rs",
       "author": "mikal"
+    },
+    {
+      "path": "ARCHITECTURE.md",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src/limits.rs",
+      "author": "mikal"
+    },
+    {
+      "path": "shakenfist-spice-compression/src",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
