@@ -764,10 +764,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/client.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/lib.rs",
       "author": "mikal"
     },
@@ -785,14 +781,6 @@
     },
     {
       "path": "PUSH-AUDIT.md",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/proxmox-smoke.py",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/test-proxmox-smoke.sh",
       "author": "mikal"
     },
     {

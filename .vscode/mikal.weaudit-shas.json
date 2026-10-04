@@ -329,10 +329,6 @@
       "sha": "4fe7778cc81abf246495fb0aa741089f99d66238",
       "date": "2026-09-27"
     },
-    "shakenfist-spice-protocol/src/client.rs": {
-      "sha": "b9d70e6ece8e54b8bdecc0e0810cddb0156cc672",
-      "date": "2026-09-27"
-    },
     "shakenfist-spice-protocol/src/constants.rs": {
       "sha": "d26af989a6313ca989bc1cf7cb2d6e33e32c9719",
       "date": "2026-09-18"
@@ -637,10 +633,6 @@
       "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
       "date": "2026-09-23"
     },
-    "tools/proxmox-smoke.py": {
-      "sha": "300be1d1024dd5adea9c281ea4e540fcf9f77d77",
-      "date": "2026-09-29"
-    },
     "tools/publish-crates.sh": {
       "sha": "f9979a0b78225bd283b4433499aaa196a3d533f8",
       "date": "2026-07-26"
@@ -676,10 +668,6 @@
     "tools/test-k1-idle.sh": {
       "sha": "f95880c02af176f074d563b4db7cf48aea3c5ad4",
       "date": "2026-07-26"
-    },
-    "tools/test-proxmox-smoke.sh": {
-      "sha": "b3da597816448acb8796d905b79b98769d447bde",
-      "date": "2026-09-29"
     },
     "tools/test-report-fuzz-failure.sh": {
       "sha": "ba73b4de0f35e2c98b37fc9c2e7e7fcf23c3b60f",
