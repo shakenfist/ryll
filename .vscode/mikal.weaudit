@@ -718,6 +718,18 @@
     {
       "path": ".github/workflows/proxmox-functional.yml",
       "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/prune-reviews.yml",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/control-socket-protocol.md",
+      "author": "mikal"
+    },
+    {
+      "path": "docs/diagnostics.md",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
