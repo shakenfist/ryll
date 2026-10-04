@@ -312,19 +312,11 @@
       "author": "mikal"
     },
     {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/design-decisions.md",
       "author": "mikal"
     },
     {
       "path": "docs/development-macos.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/libvirt-spice-recommendations.md",
       "author": "mikal"
     },
     {
@@ -673,10 +665,6 @@
     },
     {
       "path": "ryll/src/auto_snapshot.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
     {
