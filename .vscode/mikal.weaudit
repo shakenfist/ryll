@@ -60,22 +60,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lib.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/lz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/quic.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/README.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/parse.rs",
       "author": "mikal"
     },
@@ -93,14 +77,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/display/mod.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/display/surface.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/display",
       "author": "mikal"
     },
     {
@@ -272,10 +248,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/releasing.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/device-redirection.md",
       "author": "mikal"
     },
@@ -416,31 +388,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/glz.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/jpeg.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/lz4.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/constants.rs",
       "author": "mikal"
     },
     {
@@ -724,10 +672,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/auto_snapshot.rs",
       "author": "mikal"
     },
@@ -761,10 +705,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
       "author": "mikal"
     },
     {
