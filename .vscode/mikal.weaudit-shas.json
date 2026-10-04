@@ -245,6 +245,10 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "52a286cab97ba18d253f497684f280bdfacedc98",
+      "date": "2026-10-05"
+    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
       "date": "2026-09-27"
@@ -271,6 +275,10 @@
     },
     "ryll/src/input_egui.rs": {
       "sha": "8b5c2d7a86274f4dc6895bdebeb1668aa9622e58",
+      "date": "2026-10-05"
+    },
+    "ryll/src/main.rs": {
+      "sha": "5e3bf79c1b6f979f1860bc4caf89aea55458574c",
       "date": "2026-10-05"
     },
     "ryll/src/notifications.rs": {
@@ -313,6 +321,10 @@
       "sha": "d90e2349477fd7aabd3e8f299acb6b09821fb867",
       "date": "2026-08-18"
     },
+    "ryll/src/web/inputs.rs": {
+      "sha": "56bf5a6fb02e85b24479135e3bf8605b292629ad",
+      "date": "2026-10-05"
+    },
     "ryll/src/web/lifecycle.rs": {
       "sha": "edc8d98358c50af750f3c134e6adacbf63628a03",
       "date": "2026-09-18"
@@ -320,6 +332,10 @@
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
+    },
+    "ryll/src/web/server.rs": {
+      "sha": "551e4b082b1d9f20c755bc84f26333244693efa9",
+      "date": "2026-10-05"
     },
     "ryll/src/web/signalling.rs": {
       "sha": "44ae35563974812b068953f94ee67bea51eed186",
