@@ -285,16 +285,29 @@ magic).
 
 ### Dimension safety
 
-Always use checked arithmetic for `width * height * 4` calculations.
-A malicious server could send extreme dimensions to cause panics or
-multi-gigabyte allocations:
+Image dimensions come off the wire, so a malicious server chooses
+them. It can claim a size that overflows `width * height * 4`, or one
+that does not overflow but still asks for gigabytes. Checked
+multiplication stops the first and not the second.
+
+Size every decoded-image buffer with
+`shakenfist_spice_compression::limits::rgba_len`, and refuse the
+image when it returns `None`. Do not hand-roll the checked multiply
+or pick a local cap: `rgba_len` applies the shared per-side and
+total-pixel limits in one place, so every decoder refuses the same
+images. Call it before the allocation, not after:
 
 ```rust
-let output_size = (width as usize)
-    .checked_mul(height as usize)
-    .and_then(|n| n.checked_mul(4))
-    .ok_or_else(|| anyhow!("dimensions overflow: {}x{}", width, height))?;
+let Some(output_size) = limits::rgba_len(width as usize, height as usize) else {
+    return Err(anyhow!("image dimensions refused: {}x{}", width, height));
+};
+let mut output = vec![0u8; output_size];
 ```
+
+`DecompressedImage::new` and `new_glz` apply the same check to the
+buffer they are given and return `None` when its length disagrees
+with the dimensions, so a decoder's result is never paired with the
+wrong geometry downstream. Treat that `None` as a decode failure.
 
 ### Message framing
 
