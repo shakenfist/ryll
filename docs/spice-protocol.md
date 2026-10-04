@@ -157,15 +157,26 @@ byte-shape assertion respectively — so a regression in
 either the negotiation logic or the wire format fails
 loudly during `cargo test`.
 
-#### Agent reply-lag tracking
+#### Agent flow control and stall detection
 
-The main channel tracks guest agent responsiveness by measuring the round-trip
-time of `VD_AGENT_REPLY` messages to periodic `VD_AGENT_MONITORS_CONFIG`
-probes. Reply-lag fields (`agent_request_count`, `agent_reply_count`,
-`last_agent_reply_lag_us`, `recent_agent_reply_lag_us`, and
-`outstanding_agent_request_count`) are exposed on `MainSnapshot` for
-bug reports and diagnostics. See the "Guest agent diagnostics" section
-in [troubleshooting.md](troubleshooting.md) for interpretation.
+Each `AGENT_DATA` chunk the client sends costs one agent token. MAIN_INIT
+grants `REDS_AGENT_WINDOW_SIZE` (10), and spice-server returns them in
+batches of `REDS_TOKENS_TO_SEND` (5) as the guest consumes the data, or at
+once for data the server consumes itself. ryll queues agent messages
+(`channels/agent_queue.rs`), sends one chunk per token, and never abandons
+a message part-way: spice-server reassembles messages by byte count and
+disconnects a client whose next message overruns the one it is still
+expecting.
+
+A client at zero tokens with messages queued has at least six chunks the
+guest has not read, so the main channel treats 5 seconds of that as a
+stalled agent. Replies are not used for this. On QXL guests spice-server
+diverts `VD_AGENT_MONITORS_CONFIG` to the display device
+(`agent-msg-filter.c`, `reds_on_main_agent_monitors_config`), so the agent
+never sees it and never sends `VD_AGENT_REPLY`. Reply counts and lags are
+still recorded on `MainSnapshot` as passive diagnostics, next to the token
+and queue fields; the "Guest agent diagnostics" section in
+[troubleshooting.md](troubleshooting.md) explains each one.
 
 ## Image Types and Compression
 
