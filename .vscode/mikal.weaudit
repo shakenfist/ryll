@@ -724,14 +724,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/headless_connect_failure.rs",
       "author": "mikal"
     },

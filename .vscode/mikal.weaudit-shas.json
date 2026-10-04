@@ -93,10 +93,6 @@
       "sha": "25ef87907ea9c083db170813a839e5517ade9ab7",
       "date": "2026-09-14"
     },
-    "docs/configuration.md": {
-      "sha": "1243c0f12a31f62a45801bc7cb76fe2e90041361",
-      "date": "2026-09-29"
-    },
     "docs/design-decisions.md": {
       "sha": "5a943f62bbcdca4aa9dcd631dd629a10a88e0d4f",
       "date": "2026-09-17"
@@ -172,10 +168,6 @@
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
-    },
-    "ryll/src/config.rs": {
-      "sha": "d282f2ed0ef98bad17ee5e48187754f6cafb5c98",
-      "date": "2026-09-29"
     },
     "ryll/src/display_gui.rs": {
       "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
