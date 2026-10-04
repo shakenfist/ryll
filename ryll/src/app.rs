@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::auto_snapshot::AutoSnapshotState;
@@ -343,6 +343,14 @@ enum ModalVariant {
     /// server will reject any link from now on; auto-reconnect
     /// is suppressed and the modal explains why.
     TicketExpired { expired_at: SystemTime },
+    /// A connection attempt that was not an auto-retry failed
+    /// before it established a session: the dial, TLS, link or
+    /// authentication failed or timed out. Nothing was lost, so
+    /// this is not a disconnect and does not consume the
+    /// auto-reconnect budget; whether a retry can succeed is the
+    /// user's call, so the Reconnect button is offered whatever
+    /// the ticket policy says.
+    ConnectFailed { error: String },
 }
 
 /// Auto-reconnect state machine. Replaces the implicit
@@ -930,6 +938,18 @@ pub struct RyllApp {
     /// `SHUTDOWN_REQUESTED` flag, scoped per attempt.
     connection_cancel: Option<Arc<AtomicBool>>,
 
+    /// Where the current attempt's connection thread reports an
+    /// error from `run_connection`. That function returns an error
+    /// only when it could not set a session up (after setup, channel
+    /// failures arrive as `ChannelEvent::Error`), and nothing else
+    /// tells the UI about it. Replaced per attempt like `event_rx`,
+    /// so a superseded attempt's failure goes nowhere.
+    connection_failure_rx: Option<oneshot::Receiver<String>>,
+    /// A failure taken from `connection_failure_rx` but not yet
+    /// acted on, because `event_rx` still held events the attempt
+    /// sent before it failed. See `process_events`.
+    pending_connection_failure: Option<String>,
+
     /// True while ryll's window is focused. Updated on every `update()`
     /// call from `ctx.input(|i| i.focused)`. Read by the
     /// `FocusGatedClipboard` decorator so the host pasteboard is only
@@ -1199,6 +1219,7 @@ impl RyllApp {
         let app_focused = Arc::new(AtomicBool::new(true));
         let focused_for_conn = app_focused.clone();
         let single_thread_for_conn = debug_single_thread_runtime;
+        let (failure_tx, failure_rx) = oneshot::channel();
         std::thread::spawn(move || {
             let runtime = build_connection_runtime(single_thread_for_conn);
             runtime.block_on(async {
@@ -1244,7 +1265,13 @@ impl RyllApp {
                 )
                 .await
                 {
-                    error!("app: connection error: {}", e);
+                    // `{:#}`: the dial and TLS errors carry their
+                    // cause as anyhow context, which `{}` drops.
+                    let message = format!("{e:#}");
+                    error!("app: connection error: {}", message);
+                    // The receiver is gone if a newer attempt has
+                    // superseded this one, which is fine.
+                    let _ = failure_tx.send(message);
                 }
             });
             ctx.request_repaint();
@@ -1357,6 +1384,8 @@ impl RyllApp {
             reconnect_share_dir: share_dir,
             egui_ctx: cc.egui_ctx.clone(),
             connection_cancel: Some(connection_cancel),
+            connection_failure_rx: Some(failure_rx),
+            pending_connection_failure: None,
             app_focused,
             debug_single_thread_runtime,
             image_cache_cap_bytes,
@@ -1490,6 +1519,9 @@ impl RyllApp {
         let single_thread_for_conn = self.debug_single_thread_runtime;
         let image_cache_cap_bytes = self.image_cache_cap_bytes;
         let glz_dictionary_cap_bytes = self.glz_dictionary_cap_bytes;
+        let (failure_tx, failure_rx) = oneshot::channel();
+        self.connection_failure_rx = Some(failure_rx);
+        self.pending_connection_failure = None;
 
         std::thread::spawn(move || {
             let runtime = build_connection_runtime(single_thread_for_conn);
@@ -1536,7 +1568,13 @@ impl RyllApp {
                 )
                 .await
                 {
-                    error!("app: connection error: {}", e);
+                    // `{:#}`: the dial and TLS errors carry their
+                    // cause as anyhow context, which `{}` drops.
+                    let message = format!("{e:#}");
+                    error!("app: connection error: {}", message);
+                    // The receiver is gone if a newer attempt has
+                    // superseded this one, which is fine.
+                    let _ = failure_tx.send(message);
                 }
             });
             ctx.request_repaint();
@@ -1727,6 +1765,45 @@ impl RyllApp {
             ticket_is_single_use: self.config.ticket_is_single_use,
             ticket_valid_until: self.config.ticket_valid_until,
         }
+    }
+
+    /// The current attempt's connection task returned an error: it
+    /// could not set a session up. Before this existed the error was
+    /// only logged, which left a failed first connect showing
+    /// "Connecting..." and a failed auto-retry showing "Reconnecting…"
+    /// for as long as ryll stayed open.
+    fn handle_connection_failed(&mut self, message: String) {
+        self.push_connection_event(
+            NotifySeverity::Error,
+            format!("Connection attempt failed: {}", message),
+        );
+
+        if self.connected || self.awaiting_reconnect_outcome {
+            // Either a session was set up before the failure (a
+            // secondary channel would not open), so this is a
+            // disconnect and the ticket policy applies, or this was an
+            // auto-retry, whose budget the state machine keeps.
+            self.maybe_write_disconnect_snapshot("connect", &message);
+            self.handle_critical_disconnect(message);
+            return;
+        }
+
+        // A first attempt or a manual Reconnect that never reached a
+        // session. That is usually a mistyped port or a server that is
+        // down rather than a ryll bug, and the zip would hold no
+        // traffic, so only write one when the user asked for bug
+        // reports or a capture.
+        if self.bug_report_dir.is_some() || self.capture.is_some() {
+            self.maybe_write_disconnect_snapshot("connect", &message);
+        }
+
+        // Routing this through `handle_critical_disconnect` would retry
+        // silently in the background and, for a `delete-this-file=1`
+        // ticket, claim the ticket was consumed by a session that never
+        // existed. Say what happened instead.
+        self.reconnect_state =
+            ReconnectState::Modal(ModalVariant::ConnectFailed { error: message });
+        self.last_modal_at = Some(Instant::now());
     }
 
     fn process_events(&mut self) {
@@ -2302,6 +2379,33 @@ impl RyllApp {
         // announced after the session is, as it was when it was an event.
         self.sync_session_state();
         self.check_event_drops();
+
+        // Act on a connection failure only once `event_rx` is empty.
+        // The failure travels on its own channel, so it can be seen
+        // before events the attempt sent ahead of it; a
+        // `SessionInitialized` among those decides how the failure is
+        // handled. Anything still queued here is drained next frame.
+        if self.pending_connection_failure.is_none() {
+            if let Some(rx) = self.connection_failure_rx.as_mut() {
+                match rx.try_recv() {
+                    Ok(message) => {
+                        self.pending_connection_failure = Some(message);
+                        self.connection_failure_rx = None;
+                    }
+                    Err(oneshot::error::TryRecvError::Empty) => {}
+                    // The attempt ended without failing.
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        self.connection_failure_rx = None;
+                    }
+                }
+            }
+        }
+        if self.pending_connection_failure.is_some() && self.event_rx.is_empty() {
+            if let Some(message) = self.pending_connection_failure.take() {
+                self.handle_connection_failed(message);
+            }
+        }
+
         self.update_app_snapshot();
     }
 
@@ -4963,6 +5067,11 @@ impl eframe::App for RyllApp {
                     ),
                     false,
                 ),
+                ModalVariant::ConnectFailed { error } => (
+                    "Could not connect",
+                    format!("Could not connect to {}.\n\n{}", self.target, error),
+                    true,
+                ),
             };
             egui::Window::new(title)
                 .collapsible(false)
@@ -5187,6 +5296,10 @@ fn modal_variant_notification(variant: &ModalVariant) -> (NotifySeverity, String
         ModalVariant::TicketExpired { .. } => (
             NotifySeverity::Error,
             "Connection ended — ticket expired".to_string(),
+        ),
+        ModalVariant::ConnectFailed { .. } => (
+            NotifySeverity::Error,
+            "Connection attempt failed".to_string(),
         ),
     }
 }

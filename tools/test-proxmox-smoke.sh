@@ -126,7 +126,8 @@ if cn != 'pve1.test':
     presented = 'someone-else.test' if fault == 'wrong-presented' else 'pve1.test'
     log('WARN', 'TLS: rejecting certificate: pinned host_subject %s: certificate subject does not match '
         'expected "%s": attribute 2 (CN) value "%s" does not match' % (subject, subject, presented))
-    log('ERROR', 'Connection task failed: invalid peer certificate: NotValidForName')
+    log('ERROR', 'Connection task failed: TLS handshake with %s: invalid peer certificate: NotValidForName'
+        % target)
     sys.exit(failed_rc)
 
 stop = threading.Event()

@@ -4,11 +4,37 @@ Common issues and how to resolve them.
 
 ## Connection Issues
 
+### "Could not connect"
+
+In GUI mode a connection attempt that fails before a session exists
+opens a "Could not connect" dialog naming the target and the error,
+with Reconnect and Close buttons. Every stage of opening a channel is
+bounded: the TCP dial by 15 seconds, then the TLS handshake, the SPICE
+link exchange and authentication by 15 seconds each. A peer that never
+answers therefore fails in at most about a minute rather than hanging.
+The error names the stage that failed, which tells you where to look:
+
+- `connecting to <host>:<port>: ...` or `timed out after 15s connecting
+  to ...`: nothing answered on that port. See "Connection refused"
+  below. A timeout rather than a refusal usually means packets are being
+  dropped silently, by a firewall or a missing route.
+- `TLS handshake with ... did not complete within 15s`: something
+  accepted the TCP connection but did not answer the TLS handshake. Test
+  the port with
+  `openssl s_client -connect <host>:<tls-port> -CAfile ca.pem`.
+- `SPICE link handshake ... did not complete`: the transport opened but
+  no SPICE server replied on it.
+
+On macOS 15 and later a process that has not been granted Local Network
+access gets `No route to host` when it connects to a LAN address. Check
+System Settings > Privacy & Security > Local Network for the terminal
+you launched ryll from.
+
 ### "Connection refused"
 
 **Symptom:**
 ```
-Error: Connection refused (os error 111)
+Error: connecting to <host>:<port>: Connection refused (os error 111)
 ```
 
 **Causes:**
@@ -65,7 +91,7 @@ Error: Authentication failed: PermissionDenied
 
 **Symptom:**
 ```
-Error: invalid peer certificate: UnknownIssuer
+Error: TLS handshake with <host>:<port>: invalid peer certificate: UnknownIssuer
 ```
 
 **Cause:** Server's TLS certificate isn't trusted.
