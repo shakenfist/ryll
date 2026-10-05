@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -362,6 +362,30 @@ impl CallbackState {
         self.drain_ring();
         self.local_buf.clear();
     }
+
+    /// Take the lock from the device callback, which must never
+    /// block. Only one stream exists at a time, so the lock is
+    /// only contended if a dying stream's last callback overlaps
+    /// its replacement; that callback gets `None`, hands the
+    /// device silence, and is counted as an underrun. A poisoned
+    /// lock is recovered rather than refused: the ring and buffer
+    /// are still valid, and refusing would play silence for the
+    /// rest of the session with nothing recorded.
+    fn lock_for_callback<'a>(
+        state: &'a Mutex<CallbackState>,
+        counters: &AudioCounters,
+    ) -> Option<MutexGuard<'a, CallbackState>> {
+        match state.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                counters
+                    .device_underrun_count
+                    .fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
+    }
 }
 
 /// Human-readable name for an output device, for logs,
@@ -443,9 +467,10 @@ impl AudioThread {
 
         while !shutdown.load(Ordering::Relaxed) {
             if failed {
-                if let Ok(mut st) = state.lock() {
-                    st.discard();
-                }
+                state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .discard();
             }
             // Errors queued by a stream that has since been
             // dropped say nothing about the next one.
@@ -603,11 +628,8 @@ impl AudioThread {
                 data_counters
                     .device_callbacks_total
                     .fetch_add(1, Ordering::Relaxed);
-                // Only one stream exists at a time, so this only
-                // fails if a dying stream's last callback overlaps
-                // its replacement. Never block the device thread:
-                // hand it silence instead.
-                let Ok(mut guard) = state.try_lock() else {
+                let Some(mut guard) = CallbackState::lock_for_callback(&state, &data_counters)
+                else {
                     data.fill(T::EQUILIBRIUM);
                     return;
                 };
@@ -783,6 +805,10 @@ pub struct PlaybackChannel {
     /// DATA packets dropped because MODE named a codec we
     /// cannot play.
     data_packets_unsupported_codec: u64,
+    /// The unsupported mode most recently warned about, so the
+    /// per-packet path only reaches `warn_once!` when the mode
+    /// changes.
+    unsupported_mode_warned: Option<u16>,
     /// Whether this audio session has already logged an Opus
     /// decode failure at warn; later ones go to debug.
     decode_failure_logged: bool,
@@ -849,6 +875,7 @@ impl PlaybackChannel {
             last_mute: None,
             last_latency_ms: None,
             data_packets_unsupported_codec: 0,
+            unsupported_mode_warned: None,
             decode_failure_logged: false,
             output_status: OutputStatus::default(),
         }
@@ -1130,15 +1157,18 @@ impl PlaybackChannel {
                             // instead of dropping it silently.
                             self.data_packets_unsupported_codec =
                                 self.data_packets_unsupported_codec.saturating_add(1);
-                            warn_once!(
-                                logging::intern_key(format!(
-                                    "playback:unsupported_mode:{}",
+                            if self.unsupported_mode_warned != Some(self.audio_mode) {
+                                self.unsupported_mode_warned = Some(self.audio_mode);
+                                warn_once!(
+                                    logging::intern_key(format!(
+                                        "playback:unsupported_mode:{}",
+                                        self.audio_mode
+                                    )),
+                                    "playback: dropping audio: server negotiated mode {}, \
+                                     which ryll cannot play (only raw PCM and Opus)",
                                     self.audio_mode
-                                )),
-                                "playback: dropping audio: server negotiated mode {}, \
-                                 which ryll cannot play (only raw PCM and Opus)",
-                                self.audio_mode
-                            );
+                                );
+                            }
                         }
                     }
                 }
@@ -1450,12 +1480,87 @@ fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
 #[cfg(test)]
 mod tests {
     use super::{
-        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, AudioOutputEvent,
-        OutputStatus, Resampler,
+        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, AudioCounters,
+        AudioOutputEvent, AudioThread, CallbackState, OutputStatus, Resampler,
     };
     use crate::snapshots::PlaybackOutputInfo;
     use shakenfist_spice_protocol::NotifySeverity;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // --- CallbackState and audio-thread helper tests ---
+
+    fn callback_state(queued: &[i16], buffered: &[i16]) -> CallbackState {
+        let (mut producer, consumer) = rtrb::RingBuffer::new(64);
+        for &sample in queued {
+            producer.push(sample).unwrap();
+        }
+        CallbackState {
+            consumer,
+            local_buf: buffered.iter().copied().collect(),
+        }
+    }
+
+    #[test]
+    fn callback_state_discard_empties_ring_and_local_buf() {
+        let mut st = callback_state(&[1, 2, 3, 4], &[5, 6]);
+        st.discard();
+        assert_eq!(st.consumer.slots(), 0, "ring must be drained");
+        assert!(st.local_buf.is_empty(), "local buffer must be cleared");
+    }
+
+    #[test]
+    fn callback_state_drain_ring_appends_in_order() {
+        let mut st = callback_state(&[3, 4], &[1, 2]);
+        st.drain_ring();
+        assert_eq!(st.consumer.slots(), 0);
+        assert_eq!(st.local_buf, VecDeque::from(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn lock_for_callback_recovers_a_poisoned_lock() {
+        let state = Arc::new(Mutex::new(callback_state(&[7], &[])));
+        let poisoner = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the callback lock");
+        })
+        .join();
+        assert!(state.is_poisoned());
+
+        let counters = AudioCounters::new();
+        let guard = CallbackState::lock_for_callback(&state, &counters)
+            .expect("a poisoned lock must still yield the state");
+        assert_eq!(guard.consumer.slots(), 1);
+        assert_eq!(counters.device_underrun_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn lock_for_callback_counts_contention_as_underrun() {
+        let state = Mutex::new(callback_state(&[], &[]));
+        let counters = AudioCounters::new();
+        let _held = state.lock().unwrap();
+        assert!(CallbackState::lock_for_callback(&state, &counters).is_none());
+        assert_eq!(counters.device_underrun_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn sleep_unless_shutdown_returns_promptly_on_shutdown() {
+        let shutdown = AtomicBool::new(true);
+        let start = Instant::now();
+        AudioThread::sleep_unless_shutdown(Duration::from_secs(10), &shutdown);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn sleep_unless_shutdown_sleeps_for_the_delay() {
+        let shutdown = AtomicBool::new(false);
+        let start = Instant::now();
+        AudioThread::sleep_unless_shutdown(Duration::from_millis(50), &shutdown);
+        assert!(start.elapsed() >= Duration::from_millis(50));
+    }
 
     // --- OutputStatus tests ---
 

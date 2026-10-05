@@ -217,7 +217,9 @@ snapshot surfaces:
   the most recent device open (proves the audio device is pulling)
 - `device_underrun_count` — callbacks where the ring buffer had zero
   ready samples at entry: true underruns where we handed the device
-  silence
+  silence. A callback that found the consumer state locked by a
+  dying stream's last callback also hands over silence and is counted
+  here
 - `ring_overflow_count` — decoded samples dropped because the ring
   buffer was full (decoder running ahead of the device clock)
 - `samples_consumed_total` — samples consumed by the device since the
@@ -240,10 +242,11 @@ snapshot surfaces:
 
 Together these answer: "did the server send audio? did we decode it?
 did the device pull it, and which device was it?" — the questions an
-audio-silence bug report needs. ryll's own volume slider and mute
-button are recorded in `session.json` (`audio_volume_percent`,
-`audio_muted`), since they apply on top of anything the guest sends, verified against a live session to confirm the
-instrumentation distinguishes the failure modes as designed.
+audio-silence bug report needs, verified against a live session to
+confirm the instrumentation distinguishes the failure modes as
+designed. ryll's own volume slider and mute button are recorded in
+`session.json` (`audio_volume_percent`, `audio_muted`), since they
+apply on top of anything the guest sends.
 
 ### usbredir
 

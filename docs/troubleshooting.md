@@ -722,6 +722,14 @@ not help here. Use the snapshot to answer "where did the audio go?"
   backoff of up to 30 seconds, and raises one notification when output is
   lost and another when it is restored.
 
+- **`--web` mode**: The `output*` fields describe the stream ryll opens
+  on the host it runs on, not what the browser hears; browser audio is
+  forwarded before that stream. On a server with no audio device,
+  `output: null`, an `output_error` of "no audio output device found"
+  and an `output_failure_count` that climbs every 30 seconds are
+  expected and harmless. The notifications are suppressed in this mode
+  for the same reason.
+
 - **`audio_volume_percent` / `audio_muted` in `session.json`**: ryll's own
   status-bar volume and mute, applied on top of the guest's volume. Check
   these first.
