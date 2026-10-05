@@ -209,10 +209,6 @@
       "sha": "0ef7cd691c1a103460a8df67847c6af16b532aee",
       "date": "2026-10-05"
     },
-    "docs/spice-protocol.md": {
-      "sha": "c7862e4047f61d98eca60518b7bf5353c40b3663",
-      "date": "2026-10-05"
-    },
     "docs/troubleshooting.md": {
       "sha": "f2680a1d9d09e2220cbefb28b6a384ea972c1000",
       "date": "2026-10-05"
@@ -441,20 +437,12 @@
       "sha": "ac8b284bb00979be81ac2dc0dca9edbfd5311282",
       "date": "2026-10-05"
     },
-    "shakenfist-spice-protocol/src/constants.rs": {
-      "sha": "fb403b6ebd7115a8b3a6ba743b218ccb177d1bae",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
     },
     "shakenfist-spice-protocol/src/lib.rs": {
       "sha": "425ca4a5d0ccf636ac164b84f609c323c5795fb8",
-      "date": "2026-10-05"
-    },
-    "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "833792c7d975864232746f18b09963bd9dfe9cf7",
       "date": "2026-10-05"
     },
     "shakenfist-spice-protocol/src/logging.rs": {
@@ -511,10 +499,6 @@
     },
     "shakenfist-spice-renderer/src/channels/inputs.rs": {
       "sha": "201ecf164a67a99ee7f509c79d87e06ddde28cb9",
-      "date": "2026-10-05"
-    },
-    "shakenfist-spice-renderer/src/channels/main_channel.rs": {
-      "sha": "ba262dc9804a036842d22a7bcc08930142e6a480",
       "date": "2026-10-05"
     },
     "shakenfist-spice-renderer/src/channels/mod.rs": {

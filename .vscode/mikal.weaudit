@@ -808,10 +808,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/constants.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/messages.rs",
       "author": "mikal"
     },
@@ -864,10 +860,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
@@ -877,10 +869,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/link.rs",
       "author": "mikal"
     },
     {
@@ -920,10 +908,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/renovate.yml",
       "author": "mikal"
     },
@@ -948,15 +932,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/mod.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels",
       "author": "mikal"
     },
     {
@@ -984,10 +960,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
@@ -997,10 +969,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer",
       "author": "mikal"
     },
     {
