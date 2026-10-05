@@ -118,7 +118,21 @@ pub mod capabilities {
     pub const MAIN_AGENT_CONNECTED_TOKENS: u32 = 1 << 2;
     pub const MAIN_SEAMLESS_MIGRATE: u32 = 1 << 3;
 
-    pub const DEFAULT_MAIN: u32 = MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_SEAMLESS_MIGRATE;
+    // AGENT_CONNECTED_TOKENS makes the server announce a fresh agent token
+    // window when the guest agent (re)connects. spice-server resets its
+    // token accounting whenever the agent detaches (reds_reset_vdp), so a
+    // client without it drifts out of step and can stall for good (#452).
+    // spice-server also only tries seamless migration with clients that
+    // have it.
+    pub const DEFAULT_MAIN: u32 =
+        MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_AGENT_CONNECTED_TOKENS | MAIN_SEAMLESS_MIGRATE;
+
+    // The word every channel without its own default advertises: the main
+    // channel's caps as they were before AGENT_CONNECTED_TOKENS. Capability
+    // bits are per channel type, so on those channels these bits mean
+    // something else (bit 0 is KEY_SCANCODE on inputs, CELT_0_5_1 on
+    // playback; bit 3 is OPUS on playback) and are kept unchanged here.
+    pub const DEFAULT_OTHER: u32 = MAIN_SEMI_SEAMLESS_MIGRATE | MAIN_SEAMLESS_MIGRATE;
 
     // Display channel capabilities (SPICE_DISPLAY_CAP_*)
     pub const DISPLAY_SIZED_STREAM: u32 = 1 << 0;
