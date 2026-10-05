@@ -2598,6 +2598,8 @@ impl RyllApp {
         snap.uptime_secs = self.traffic.elapsed().as_secs_f64();
         snap.auto_reconnect_count = self.auto_reconnect_count;
         snap.video_drop_count = self.video_drop_count;
+        snap.audio_volume_percent = Some(self.volume_control.volume());
+        snap.audio_muted = Some(self.volume_control.muted());
 
         // Render-side latency aggregates.
         let (img_min, img_max, img_mean) = recent_lag_stats(&self.recent_image_ready_lag_us);
@@ -4760,6 +4762,11 @@ impl eframe::App for RyllApp {
                         &mut self.bug_report_type,
                         BugReportType::Usb,
                         "USB (usbredir channel + device state)",
+                    );
+                    ui.radio_value(
+                        &mut self.bug_report_type,
+                        BugReportType::Audio,
+                        "Audio (playback channel + output device)",
                     );
 
                     ui.add_space(4.0);

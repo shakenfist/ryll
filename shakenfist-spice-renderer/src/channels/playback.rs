@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -16,7 +16,9 @@ use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, take_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
 };
-use shakenfist_spice_protocol::{main_client, playback_server, ChannelType, NotifySeverity};
+use shakenfist_spice_protocol::{
+    main_client, playback_server, warn_once, ChannelType, NotifySeverity,
+};
 
 use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
 
@@ -49,6 +51,10 @@ struct AudioCounters {
     device_underrun_count: AtomicU64,
     ring_overflow_count: AtomicU64,
     samples_consumed_total: AtomicU64,
+    /// Platform-reported xruns. Written from the cpal error
+    /// callback, which for xruns runs on the device's real-time
+    /// thread — hence an atomic rather than a log line.
+    device_xrun_count: AtomicU64,
 }
 
 impl AudioCounters {
@@ -58,7 +64,110 @@ impl AudioCounters {
             device_underrun_count: AtomicU64::new(0),
             ring_overflow_count: AtomicU64::new(0),
             samples_consumed_total: AtomicU64::new(0),
+            device_xrun_count: AtomicU64::new(0),
         })
+    }
+}
+
+/// First delay before retrying a failed output stream.
+const OUTPUT_RETRY_INITIAL: Duration = Duration::from_secs(1);
+
+/// Cap on the doubling retry delay. Long enough that a machine
+/// with no output device at all is not busy-looping, short
+/// enough that plugging headphones back in is noticed promptly.
+const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// How often the audio thread wakes to check for shutdown while
+/// it is watching a stream or waiting to retry.
+const AUDIO_THREAD_POLL: Duration = Duration::from_millis(50);
+
+/// What the audio thread reports about the output stream. It
+/// has no async context to emit channel events from, so it
+/// sends these to the playback channel, which folds them into
+/// the snapshot and raises notifications (see [`OutputStatus`]).
+#[derive(Debug)]
+enum AudioOutputEvent {
+    /// An output stream is playing.
+    Started(crate::snapshots::PlaybackOutputInfo),
+    /// No stream is playing: opening one failed, or a running
+    /// one died. The thread retries with backoff until STOP.
+    Failed(String),
+    /// The platform moved a default-device stream to another
+    /// device without a rebuild (cpal `ErrorKind::DeviceChanged`).
+    Rerouted(String),
+}
+
+/// The playback channel's view of the output stream, built from
+/// [`AudioOutputEvent`]s. Kept apart from `PlaybackChannel` so
+/// the state machine can be unit-tested without a SPICE stream.
+#[derive(Debug, Default)]
+struct OutputStatus {
+    output: Option<crate::snapshots::PlaybackOutputInfo>,
+    error: Option<String>,
+    /// True from the first failure until a stream starts again;
+    /// a failure streak raises one notification, not one per
+    /// retry.
+    failing: bool,
+    streams_started: u64,
+    failure_count: u64,
+    reroute_count: u64,
+}
+
+impl OutputStatus {
+    /// Fold one event into the status. Returns the notification
+    /// the operator should see, if any: the first failure of a
+    /// streak, the recovery that ends it, and reroutes. A
+    /// routine start on PLAYBACK_START is silent.
+    fn apply(&mut self, event: AudioOutputEvent) -> Option<NotificationEntry> {
+        match event {
+            AudioOutputEvent::Started(output) => {
+                self.streams_started = self.streams_started.saturating_add(1);
+                self.error = None;
+                let note = self.failing.then(|| {
+                    NotificationEntry::new(
+                        NotifySeverity::Info,
+                        NotificationSource::Internal,
+                        format!("Audio output restored on {}", output.device),
+                    )
+                });
+                self.failing = false;
+                self.output = Some(output);
+                note
+            }
+            AudioOutputEvent::Failed(reason) => {
+                self.failure_count = self.failure_count.saturating_add(1);
+                self.output = None;
+                let note = (!self.failing).then(|| {
+                    NotificationEntry::new(
+                        NotifySeverity::Warn,
+                        NotificationSource::Internal,
+                        format!("Audio output unavailable ({}); retrying", reason),
+                    )
+                });
+                self.failing = true;
+                self.error = Some(reason);
+                note
+            }
+            AudioOutputEvent::Rerouted(device) => {
+                self.reroute_count = self.reroute_count.saturating_add(1);
+                if let Some(ref mut output) = self.output {
+                    output.device = device.clone();
+                }
+                Some(NotificationEntry::new(
+                    NotifySeverity::Info,
+                    NotificationSource::Internal,
+                    format!("Audio output moved to {}", device),
+                ))
+            }
+        }
+    }
+
+    /// The audio session ended (STOP or disconnect). The last
+    /// error is kept for bug reports; the cumulative counters
+    /// survive.
+    fn session_ended(&mut self) {
+        self.output = None;
+        self.failing = false;
     }
 }
 
@@ -220,10 +329,56 @@ fn samples_per_frame_48k(toc: u8) -> usize {
     }
 }
 
+/// Consumer-side state that has to outlive any one cpal stream,
+/// so a stream rebuilt after a failure carries on from the same
+/// ring buffer.
+struct CallbackState {
+    consumer: rtrb::Consumer<i16>,
+    local_buf: VecDeque<i16>,
+}
+
+impl CallbackState {
+    /// Drain available samples from the ring buffer into the
+    /// local VecDeque so the resampler can use random access.
+    fn drain_ring(&mut self) {
+        let available = self.consumer.slots();
+        if available > 0 {
+            let chunk = self
+                .consumer
+                .read_chunk(available)
+                .expect("read_chunk of slots() cannot fail");
+            let (first, second) = chunk.as_slices();
+            self.local_buf.extend(first.iter().copied());
+            self.local_buf.extend(second.iter().copied());
+            chunk.commit_all();
+        }
+    }
+
+    /// Throw away everything queued. While no stream is playing
+    /// the producer fills the ring and then drops the *newest*
+    /// samples, so a rebuilt stream would otherwise open with up
+    /// to two seconds of stale audio.
+    fn discard(&mut self) {
+        self.drain_ring();
+        self.local_buf.clear();
+    }
+}
+
+/// Human-readable name for an output device, for logs,
+/// notifications and the snapshot.
+fn device_name(device: &cpal::Device) -> String {
+    use cpal::traits::DeviceTrait;
+    device
+        .description()
+        .map(|d| d.name().to_string())
+        .unwrap_or_else(|_| "unknown device".to_string())
+}
+
 /// State for the dedicated audio output thread.
 struct AudioThread {
     handle: JoinHandle<()>,
     shutdown: Arc<AtomicBool>,
+    events: mpsc::Receiver<AudioOutputEvent>,
 }
 
 impl AudioThread {
@@ -238,50 +393,134 @@ impl AudioThread {
     ) -> Option<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_flag = shutdown.clone();
+        let (events_tx, events) = mpsc::channel();
+        let state = Arc::new(Mutex::new(CallbackState {
+            consumer,
+            local_buf: VecDeque::with_capacity(8192),
+        }));
 
         let handle = std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
                 Self::run_audio(
-                    consumer,
+                    state,
                     vol,
                     source_rate,
                     source_channels,
                     shutdown_flag,
                     counters,
+                    events_tx,
                 );
             })
             .ok()?;
 
-        Some(AudioThread { handle, shutdown })
+        Some(AudioThread {
+            handle,
+            shutdown,
+            events,
+        })
     }
 
+    /// Keep an output stream playing until shutdown. A stream
+    /// that cannot be opened, or that dies (device unplugged,
+    /// sample rate changed under it, audio server restarted), is
+    /// rebuilt with a doubling backoff rather than leaving the
+    /// session silent until the next PLAYBACK_START.
     fn run_audio(
-        mut consumer: rtrb::Consumer<i16>,
+        state: Arc<Mutex<CallbackState>>,
         vol: Arc<VolumeControl>,
         source_rate: u32,
         source_channels: u32,
         shutdown: Arc<AtomicBool>,
         counters: Arc<AudioCounters>,
+        events: mpsc::Sender<AudioOutputEvent>,
     ) {
+        // Held here as well as in each stream's error callback,
+        // so `err_rx` never reports a disconnect.
+        let (err_tx, err_rx) = mpsc::channel::<cpal::Error>();
+        let mut backoff = OUTPUT_RETRY_INITIAL;
+        let mut failed = false;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            if failed {
+                if let Ok(mut st) = state.lock() {
+                    st.discard();
+                }
+            }
+            // Errors queued by a stream that has since been
+            // dropped say nothing about the next one.
+            while err_rx.try_recv().is_ok() {}
+
+            match Self::open_stream(
+                &state,
+                &vol,
+                source_rate,
+                source_channels,
+                &counters,
+                &err_tx,
+            ) {
+                Ok((stream, output)) => {
+                    info!(
+                        "playback: audio output started on {} ({}Hz {} ch {})",
+                        output.device, output.sample_rate_hz, output.channels, output.sample_format
+                    );
+                    let _ = events.send(AudioOutputEvent::Started(output));
+                    backoff = OUTPUT_RETRY_INITIAL;
+
+                    let died = Self::watch_stream(&err_rx, &shutdown, &events);
+                    // Dropping the stream releases the device.
+                    drop(stream);
+                    match died {
+                        Some(reason) => {
+                            warn!("playback: audio output stream failed: {}", reason);
+                            let _ = events.send(AudioOutputEvent::Failed(reason));
+                            failed = true;
+                        }
+                        None => break,
+                    }
+                }
+                Err(reason) => {
+                    // Retries repeat the same failure; log the
+                    // first loudly and the rest quietly.
+                    if failed {
+                        debug!("playback: audio output still unavailable: {}", reason);
+                    } else {
+                        warn!("playback: audio output unavailable: {}", reason);
+                    }
+                    let _ = events.send(AudioOutputEvent::Failed(reason));
+                    failed = true;
+                }
+            }
+
+            Self::sleep_unless_shutdown(backoff, &shutdown);
+            backoff = (backoff * 2).min(OUTPUT_RETRY_MAX);
+        }
+
+        info!("playback: audio thread shutting down");
+    }
+
+    /// Open and start an output stream on the current default
+    /// device. Returns the stream and a description of it, or a
+    /// human-readable reason it could not be opened.
+    fn open_stream(
+        state: &Arc<Mutex<CallbackState>>,
+        vol: &Arc<VolumeControl>,
+        source_rate: u32,
+        source_channels: u32,
+        counters: &Arc<AudioCounters>,
+        err_tx: &mpsc::Sender<cpal::Error>,
+    ) -> Result<(cpal::Stream, crate::snapshots::PlaybackOutputInfo), String> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
         let host = cpal::default_host();
-        let device = match host.default_output_device() {
-            Some(d) => d,
-            None => {
-                warn!("playback: no audio output device found");
-                return;
-            }
-        };
-        let default_config = match device.default_output_config() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("playback: failed to get default output config: {}", e);
-                return;
-            }
-        };
-        info!(
+        let device = host
+            .default_output_device()
+            .ok_or_else(|| "no audio output device found".to_string())?;
+        let name = device_name(&device);
+        let default_config = device
+            .default_output_config()
+            .map_err(|e| format!("cannot read output config of {}: {}", name, e))?;
+        debug!(
             "playback: device config: {}Hz, {} ch, {:?}",
             default_config.sample_rate(),
             default_config.channels(),
@@ -294,114 +533,177 @@ impl AudioThread {
         };
         let device_rate = config.sample_rate;
 
-        // Build the callback state. The resampler and local buffer
-        // live in the callback closure -- no mutex needed since the
-        // cpal callback is the sole consumer.
-        let mut resampler = Resampler::new(source_rate, device_rate, source_channels);
-        let mut local_buf: VecDeque<i16> = VecDeque::with_capacity(8192);
-
-        // Drain available samples from the ring buffer into the
-        // local VecDeque so the resampler can use random access.
-        let drain_ring = move |consumer: &mut rtrb::Consumer<i16>, local: &mut VecDeque<i16>| {
-            let available = consumer.slots();
-            if available > 0 {
-                let chunk = consumer
-                    .read_chunk(available)
-                    .expect("read_chunk of slots() cannot fail");
-                let (first, second) = chunk.as_slices();
-                local.extend(first.iter().copied());
-                local.extend(second.iter().copied());
-                chunk.commit_all();
-            }
-        };
-
-        // Clone the per-format counter Arcs once so each closure captures
-        // its own handle. The authoritative underrun signal is
-        // `consumer.slots() == 0` at the top of the callback — checked here
-        // before draining.
         let stream = match default_config.sample_format() {
-            cpal::SampleFormat::I16 => {
-                let vol = vol.clone();
-                let counters = counters.clone();
-                device.build_output_stream(
-                    config,
-                    move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-                        counters
-                            .device_callbacks_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        if consumer.slots() == 0 {
-                            counters
-                                .device_underrun_count
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        drain_ring(&mut consumer, &mut local_buf);
-                        write_samples_i16(data, &mut local_buf, &vol, &mut resampler);
-                        counters
-                            .samples_consumed_total
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
-            cpal::SampleFormat::F32 => {
-                let vol = vol.clone();
-                let counters = counters.clone();
-                device.build_output_stream(
-                    config,
-                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                        counters
-                            .device_callbacks_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        if consumer.slots() == 0 {
-                            counters
-                                .device_underrun_count
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        drain_ring(&mut consumer, &mut local_buf);
-                        write_samples_f32(data, &mut local_buf, &vol, &mut resampler);
-                        counters
-                            .samples_consumed_total
-                            .fetch_add(data.len() as u64, Ordering::Relaxed);
-                    },
-                    |err| warn!("playback: audio stream error: {}", err),
-                    None,
-                )
-            }
+            cpal::SampleFormat::I16 => Self::build_stream::<i16>(
+                &device,
+                config,
+                state,
+                vol,
+                Resampler::new(source_rate, device_rate, source_channels),
+                counters,
+                err_tx,
+                write_samples_i16,
+            ),
+            cpal::SampleFormat::F32 => Self::build_stream::<f32>(
+                &device,
+                config,
+                state,
+                vol,
+                Resampler::new(source_rate, device_rate, source_channels),
+                counters,
+                err_tx,
+                write_samples_f32,
+            ),
             fmt => {
-                warn!("playback: unsupported sample format: {:?}", fmt);
-                return;
+                return Err(format!(
+                    "{} wants unsupported sample format {:?}",
+                    name, fmt
+                ))
             }
-        };
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("playback: failed to create audio stream: {}", e);
-                return;
-            }
-        };
-        if let Err(e) = stream.play() {
-            warn!("playback: failed to start audio stream: {}", e);
-            return;
         }
-        info!(
-            "playback: audio output started ({}Hz {} ch)",
-            device_rate, source_channels
-        );
+        .map_err(|e| format!("cannot open stream on {}: {}", name, e))?;
+        stream
+            .play()
+            .map_err(|e| format!("cannot start stream on {}: {}", name, e))?;
 
-        // Keep the stream alive until shutdown is requested.
+        Ok((
+            stream,
+            crate::snapshots::PlaybackOutputInfo {
+                device: name,
+                sample_rate_hz: device_rate,
+                channels: source_channels as u16,
+                sample_format: default_config.sample_format().to_string(),
+            },
+        ))
+    }
+
+    /// Build a cpal output stream for sample type `T`, with
+    /// `write` converting the resampled i16 frames into `T`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_stream<T: cpal::SizedSample + 'static>(
+        device: &cpal::Device,
+        config: cpal::StreamConfig,
+        state: &Arc<Mutex<CallbackState>>,
+        vol: &Arc<VolumeControl>,
+        mut resampler: Resampler,
+        counters: &Arc<AudioCounters>,
+        err_tx: &mpsc::Sender<cpal::Error>,
+        write: fn(&mut [T], &mut VecDeque<i16>, &Arc<VolumeControl>, &mut Resampler),
+    ) -> Result<cpal::Stream, cpal::Error> {
+        use cpal::traits::DeviceTrait;
+
+        let state = state.clone();
+        let vol = vol.clone();
+        let data_counters = counters.clone();
+        let err_counters = counters.clone();
+        let err_tx = err_tx.clone();
+        device.build_output_stream(
+            config,
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                data_counters
+                    .device_callbacks_total
+                    .fetch_add(1, Ordering::Relaxed);
+                // Only one stream exists at a time, so this only
+                // fails if a dying stream's last callback overlaps
+                // its replacement. Never block the device thread:
+                // hand it silence instead.
+                let Ok(mut guard) = state.try_lock() else {
+                    data.fill(T::EQUILIBRIUM);
+                    return;
+                };
+                let st = &mut *guard;
+                // The authoritative underrun signal is an empty
+                // ring at the top of the callback, before draining.
+                if st.consumer.slots() == 0 {
+                    data_counters
+                        .device_underrun_count
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                st.drain_ring();
+                write(data, &mut st.local_buf, &vol, &mut resampler);
+                data_counters
+                    .samples_consumed_total
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+            },
+            move |err: cpal::Error| {
+                if err.kind() == cpal::ErrorKind::Xrun {
+                    // Xruns are reported from the real-time
+                    // thread: count them, never log or allocate.
+                    err_counters
+                        .device_xrun_count
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    let _ = err_tx.send(err);
+                }
+            },
+            None,
+        )
+    }
+
+    /// Block until the stream dies or shutdown is requested.
+    /// Returns why the stream died, or `None` on shutdown.
+    fn watch_stream(
+        err_rx: &mpsc::Receiver<cpal::Error>,
+        shutdown: &AtomicBool,
+        events: &mpsc::Sender<AudioOutputEvent>,
+    ) -> Option<String> {
+        use cpal::traits::HostTrait;
+
+        let mut realtime_denied_logged = false;
         while !shutdown.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(50));
+            let err = match err_rx.recv_timeout(AUDIO_THREAD_POLL) {
+                Ok(err) => err,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Some("audio error channel closed".to_string());
+                }
+            };
+            match err.kind() {
+                // The stream followed the new default device by
+                // itself; record where the sound is going now.
+                cpal::ErrorKind::DeviceChanged => {
+                    let device = cpal::default_host()
+                        .default_output_device()
+                        .map(|d| device_name(&d))
+                        .unwrap_or_else(|| "unknown device".to_string());
+                    info!("playback: audio output rerouted to {}", device);
+                    let _ = events.send(AudioOutputEvent::Rerouted(device));
+                }
+                // Audio still plays, just without real-time
+                // scheduling.
+                cpal::ErrorKind::RealtimeDenied => {
+                    if !realtime_denied_logged {
+                        info!("playback: real-time scheduling denied for audio output");
+                        realtime_denied_logged = true;
+                    }
+                }
+                // Anything else means the stream is no longer
+                // producing sound, or may not be: rebuild it.
+                _ => return Some(err.to_string()),
+            }
         }
+        None
+    }
 
-        // stream is dropped here, releasing the audio device.
-        info!("playback: audio thread shutting down");
+    /// Sleep for `delay`, waking early if shutdown is requested.
+    fn sleep_unless_shutdown(delay: Duration, shutdown: &AtomicBool) {
+        let deadline = Instant::now() + delay;
+        while !shutdown.load(Ordering::Relaxed) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(AUDIO_THREAD_POLL.min(deadline - now));
+        }
     }
 
     /// Signal the audio thread to stop and wait for it to finish.
-    fn stop(self) {
+    /// Returns any output events it sent that were not yet
+    /// drained, so the final state still reaches the snapshot.
+    fn stop(self) -> Vec<AudioOutputEvent> {
         self.shutdown.store(true, Ordering::Relaxed);
         let _ = self.handle.join();
+        self.events.try_iter().collect()
     }
 }
 
@@ -478,6 +780,14 @@ pub struct PlaybackChannel {
     last_mute: Option<bool>,
     /// Most recent LATENCY value in milliseconds.
     last_latency_ms: Option<u32>,
+    /// DATA packets dropped because MODE named a codec we
+    /// cannot play.
+    data_packets_unsupported_codec: u64,
+    /// Whether this audio session has already logged an Opus
+    /// decode failure at warn; later ones go to debug.
+    decode_failure_logged: bool,
+    /// Output-stream state reported by the audio thread.
+    output_status: OutputStatus,
 }
 
 impl PlaybackChannel {
@@ -538,6 +848,9 @@ impl PlaybackChannel {
             last_volume_per_channel: Vec::new(),
             last_mute: None,
             last_latency_ms: None,
+            data_packets_unsupported_codec: 0,
+            decode_failure_logged: false,
+            output_status: OutputStatus::default(),
         }
     }
 
@@ -557,6 +870,7 @@ impl PlaybackChannel {
     async fn run_loop(&mut self) -> Result<()> {
         info!("playback: channel started");
         loop {
+            self.drain_output_events().await;
             let mut chunk = [0u8; 65536];
             let stream = &mut self.stream;
             let read_result = tokio::select! {
@@ -595,7 +909,15 @@ impl PlaybackChannel {
                 }
                 Some(Ok(n)) => n,
                 Some(Err(e)) => return Err(e.into()),
-                None => continue, // timeout, no data yet
+                None => {
+                    // Timeout, no data yet. Refresh the snapshot
+                    // anyway: the device-side counters keep moving
+                    // while the server is silent, and "the device is
+                    // pulling but no DATA arrives" is exactly what a
+                    // silent-audio report needs to show.
+                    self.update_snapshot();
+                    continue;
+                }
             };
 
             self.byte_counter.add(n as u64);
@@ -720,6 +1042,7 @@ impl PlaybackChannel {
                             self.sample_rate, self.channels, format, time
                         );
                         self.start_count = self.start_count.saturating_add(1);
+                        self.decode_failure_logged = false;
                         self.current_session = Some(crate::snapshots::PlaybackSessionInfo {
                             started_at_secs: self.traffic.elapsed().as_secs_f64(),
                             mm_time_at_start: time,
@@ -800,6 +1123,22 @@ impl PlaybackChannel {
                                         self.data_packets_decode_failed.saturating_add(1);
                                 }
                             }
+                        } else {
+                            // The guest is producing sound we cannot
+                            // play. Registering it as a gap raises a
+                            // notification (and a --pedantic report)
+                            // instead of dropping it silently.
+                            self.data_packets_unsupported_codec =
+                                self.data_packets_unsupported_codec.saturating_add(1);
+                            warn_once!(
+                                logging::intern_key(format!(
+                                    "playback:unsupported_mode:{}",
+                                    self.audio_mode
+                                )),
+                                "playback: dropping audio: server negotiated mode {}, \
+                                 which ryll cannot play (only raw PCM and Opus)",
+                                self.audio_mode
+                            );
                         }
                     }
                 }
@@ -900,7 +1239,16 @@ impl PlaybackChannel {
                 Some((total as u64).saturating_mul(2))
             }
             Err(e) => {
-                debug!("playback: Opus decode error: {}", e);
+                if self.decode_failure_logged {
+                    debug!("playback: Opus decode error: {}", e);
+                } else {
+                    warn!(
+                        "playback: Opus decode error: {} (further failures this \
+                         session are counted in data_packets_decode_failed)",
+                        e
+                    );
+                    self.decode_failure_logged = true;
+                }
                 None
             }
         }
@@ -948,8 +1296,36 @@ impl PlaybackChannel {
     fn stop_audio(&mut self) {
         self.audio_producer = None;
         if let Some(thread) = self.audio_thread.take() {
-            thread.stop();
+            // Fold in whatever the thread reported since the last
+            // drain so the snapshot keeps the final error. The
+            // session is over, so nothing is worth notifying.
+            for event in thread.stop() {
+                let _ = self.output_status.apply(event);
+            }
         }
+        self.output_status.session_ended();
+    }
+
+    /// Fold output-stream events from the audio thread into the
+    /// status and raise the notifications they call for.
+    async fn drain_output_events(&mut self) {
+        let Some(thread) = self.audio_thread.as_ref() else {
+            return;
+        };
+        let events: Vec<AudioOutputEvent> = thread.events.try_iter().collect();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let note = self.output_status.apply(event);
+            // In web mode the operator hears audio through the
+            // browser, not this host's speakers, so local output
+            // trouble is diagnostic detail, not news.
+            if let (Some(note), None) = (note, self.opus_sink.as_ref()) {
+                self.events.emit(ChannelEvent::Notification(note)).await;
+            }
+        }
+        self.update_snapshot();
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
@@ -1017,6 +1393,14 @@ impl PlaybackChannel {
             snap.data_bytes_received = self.data_bytes_received;
             snap.pcm_bytes_produced = self.pcm_bytes_produced;
             snap.recent_decode_durations_us = self.recent_decode_durations_us.clone();
+            snap.data_packets_unsupported_codec = self.data_packets_unsupported_codec;
+
+            // Local output stream state.
+            snap.output = self.output_status.output.clone();
+            snap.output_error = self.output_status.error.clone();
+            snap.output_streams_started = self.output_status.streams_started;
+            snap.output_failure_count = self.output_status.failure_count;
+            snap.output_reroute_count = self.output_status.reroute_count;
 
             // Device-side counters from the audio thread atomics.
             // `load` and `fetch_add(0, ..)` are equivalent for
@@ -1036,6 +1420,10 @@ impl PlaybackChannel {
             snap.samples_consumed_total = self
                 .audio_counters
                 .samples_consumed_total
+                .load(Ordering::Relaxed);
+            snap.device_xrun_count = self
+                .audio_counters
+                .device_xrun_count
                 .load(Ordering::Relaxed);
 
             // Last server-controlled audio params.
@@ -1061,8 +1449,99 @@ fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
 
 #[cfg(test)]
 mod tests {
-    use super::{opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, Resampler};
+    use super::{
+        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, AudioOutputEvent,
+        OutputStatus, Resampler,
+    };
+    use crate::snapshots::PlaybackOutputInfo;
+    use shakenfist_spice_protocol::NotifySeverity;
     use std::collections::VecDeque;
+
+    // --- OutputStatus tests ---
+
+    fn output(device: &str) -> PlaybackOutputInfo {
+        PlaybackOutputInfo {
+            device: device.to_string(),
+            sample_rate_hz: 48000,
+            channels: 2,
+            sample_format: "f32".to_string(),
+        }
+    }
+
+    #[test]
+    fn output_status_routine_start_is_silent() {
+        let mut status = OutputStatus::default();
+        let note = status.apply(AudioOutputEvent::Started(output("Speakers")));
+        assert!(note.is_none(), "a normal START must not notify");
+        assert_eq!(status.output, Some(output("Speakers")));
+        assert_eq!(status.streams_started, 1);
+        assert!(status.error.is_none());
+    }
+
+    #[test]
+    fn output_status_failure_streak_notifies_once_then_recovery() {
+        let mut status = OutputStatus::default();
+        status.apply(AudioOutputEvent::Started(output("Headphones")));
+
+        let first = status.apply(AudioOutputEvent::Failed("device unplugged".to_string()));
+        let first = first.expect("first failure must notify");
+        assert_eq!(first.severity, NotifySeverity::Warn);
+        assert!(first.message.contains("device unplugged"));
+        assert!(status.output.is_none());
+
+        // Retries during the same streak are counted, not announced.
+        let retry = status.apply(AudioOutputEvent::Failed(
+            "no audio output device found".to_string(),
+        ));
+        assert!(retry.is_none());
+        assert_eq!(status.failure_count, 2);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("no audio output device found")
+        );
+
+        let restored = status
+            .apply(AudioOutputEvent::Started(output("Speakers")))
+            .expect("recovery must notify");
+        assert_eq!(restored.severity, NotifySeverity::Info);
+        assert!(restored.message.contains("Speakers"));
+        assert!(status.error.is_none());
+        assert_eq!(status.streams_started, 2);
+    }
+
+    #[test]
+    fn output_status_reroute_updates_device_and_notifies() {
+        let mut status = OutputStatus::default();
+        status.apply(AudioOutputEvent::Started(output("Speakers")));
+        let note = status
+            .apply(AudioOutputEvent::Rerouted("AirPods".to_string()))
+            .expect("reroute must notify");
+        assert!(note.message.contains("AirPods"));
+        assert_eq!(
+            status.output.as_ref().map(|o| o.device.as_str()),
+            Some("AirPods")
+        );
+        assert_eq!(status.reroute_count, 1);
+    }
+
+    #[test]
+    fn output_status_session_end_keeps_error_and_rearms_notification() {
+        let mut status = OutputStatus::default();
+        status.apply(AudioOutputEvent::Failed(
+            "no audio output device found".to_string(),
+        ));
+        status.session_ended();
+        assert!(status.output.is_none());
+        assert_eq!(
+            status.error.as_deref(),
+            Some("no audio output device found")
+        );
+        // A failure in the next session is news again.
+        let note = status.apply(AudioOutputEvent::Failed(
+            "no audio output device found".to_string(),
+        ));
+        assert!(note.is_some());
+    }
 
     // --- Resampler tests ---
 
