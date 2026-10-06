@@ -3404,7 +3404,7 @@ mod tests {
         assert_eq!(BugReportType::Audio.channel_name(), "playback");
         assert_eq!(
             BugReportType::Pedantic {
-                gap_key: "playback:unsupported_mode:2".to_string()
+                gap_key: "playback:unsupported_mode".to_string()
             }
             .channel_name(),
             "playback"

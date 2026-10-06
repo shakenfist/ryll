@@ -734,8 +734,10 @@ pub struct PlaybackSnapshot {
     pub output: Option<PlaybackOutputInfo>,
     /// Why the most recent attempt to open an output stream, or
     /// to keep one running, failed. Cleared when a stream
-    /// starts, so a value here alongside `output: None` means
-    /// the session is currently silent and retrying.
+    /// starts. Alongside `output: None` and a non-null
+    /// `current_session`, it means the session is silent and
+    /// retrying; with no `current_session` it is the last error
+    /// of an earlier session, kept for the report.
     pub output_error: Option<String>,
     /// Output streams opened, including rebuilds after a
     /// failure. Cumulative across audio-session restarts.

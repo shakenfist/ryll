@@ -716,11 +716,19 @@ not help here. Use the snapshot to answer "where did the audio go?"
   guest. On a platform that moves default-device streams by itself (macOS),
   `output_reroute_count` counts those moves.
 
-- **`output: null` with `output_error` set**: ryll has no working output
-  stream — no device, or the stream died (device unplugged, sample rate
-  changed underneath it, audio server restarted). ryll retries with a
-  backoff of up to 30 seconds, and raises one notification when output is
-  lost and another when it is restored.
+- **`output: null` with `output_error` set, during a session**: ryll has
+  no working output stream — no device, or the stream died (device
+  unplugged, sample rate changed underneath it, audio server restarted).
+  ryll retries with a backoff of up to 30 seconds, and raises one
+  notification when output is lost and another once a new stream has
+  played for 10 seconds. If `current_session` is null, nothing is
+  retrying: `output_error` is the last error of an earlier session, kept
+  for the report.
+
+- **`output_streams_started` climbing in step with `output_failure_count`**:
+  the device opens and then dies straight away. ryll keeps doubling the
+  backoff for a stream that dies within 10 seconds, so this settles at
+  one attempt every 30 seconds, inside a single notified failure streak.
 
 - **`--web` mode**: The `output*` fields describe the stream ryll opens
   on the host it runs on, not what the browser hears; browser audio is

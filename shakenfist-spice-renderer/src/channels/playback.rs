@@ -77,6 +77,14 @@ const OUTPUT_RETRY_INITIAL: Duration = Duration::from_secs(1);
 /// enough that plugging headphones back in is noticed promptly.
 const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
 
+/// How long a stream must keep playing before it counts as
+/// recovered. Until then a failure keeps doubling the backoff
+/// and continues the failure streak, so a device that dies
+/// straight after opening is retried quietly, at most every
+/// `OUTPUT_RETRY_MAX`, rather than rebuilt every second with a
+/// "restored" and an "unavailable" notification each time.
+const OUTPUT_STABLE_AFTER: Duration = Duration::from_secs(10);
+
 /// How often the audio thread wakes to check for shutdown while
 /// it is watching a stream or waiting to retry.
 const AUDIO_THREAD_POLL: Duration = Duration::from_millis(50);
@@ -89,6 +97,9 @@ const AUDIO_THREAD_POLL: Duration = Duration::from_millis(50);
 enum AudioOutputEvent {
     /// An output stream is playing.
     Started(crate::snapshots::PlaybackOutputInfo),
+    /// The stream from the last `Started` has played for
+    /// `OUTPUT_STABLE_AFTER`, which ends a failure streak.
+    Stable,
     /// No stream is playing: opening one failed, or a running
     /// one died. The thread retries with backoff until STOP.
     Failed(String),
@@ -104,9 +115,10 @@ enum AudioOutputEvent {
 struct OutputStatus {
     output: Option<crate::snapshots::PlaybackOutputInfo>,
     error: Option<String>,
-    /// True from the first failure until a stream starts again;
-    /// a failure streak raises one notification, not one per
-    /// retry.
+    /// True from the first failure until a stream has played for
+    /// `OUTPUT_STABLE_AFTER`; a failure streak raises one
+    /// notification, not one per retry, however often a flapping
+    /// device opens and dies within it.
     failing: bool,
     streams_started: u64,
     failure_count: u64,
@@ -116,22 +128,29 @@ struct OutputStatus {
 impl OutputStatus {
     /// Fold one event into the status. Returns the notification
     /// the operator should see, if any: the first failure of a
-    /// streak, the recovery that ends it, and reroutes. A
+    /// streak, the stable stream that ends it, and reroutes. A
     /// routine start on PLAYBACK_START is silent.
     fn apply(&mut self, event: AudioOutputEvent) -> Option<NotificationEntry> {
         match event {
             AudioOutputEvent::Started(output) => {
                 self.streams_started = self.streams_started.saturating_add(1);
                 self.error = None;
+                self.output = Some(output);
+                None
+            }
+            AudioOutputEvent::Stable => {
                 let note = self.failing.then(|| {
+                    let device = self
+                        .output
+                        .as_ref()
+                        .map_or("unknown device", |o| o.device.as_str());
                     NotificationEntry::new(
                         NotifySeverity::Info,
                         NotificationSource::Internal,
-                        format!("Audio output restored on {}", output.device),
+                        format!("Audio output restored on {}", device),
                     )
                 });
                 self.failing = false;
-                self.output = Some(output);
                 note
             }
             AudioOutputEvent::Failed(reason) => {
@@ -388,6 +407,18 @@ impl CallbackState {
     }
 }
 
+/// The retry delay to carry on with after a stream that started
+/// and then ended. Only a stream that reached `Stable` resets the
+/// backoff; one that died sooner keeps doubling it, so a device
+/// that dies straight after opening is not rebuilt every second.
+fn backoff_after_stream(backoff: Duration, stable: bool) -> Duration {
+    if stable {
+        OUTPUT_RETRY_INITIAL
+    } else {
+        backoff
+    }
+}
+
 /// Human-readable name for an output device, for logs,
 /// notifications and the snapshot.
 fn device_name(device: &cpal::Device) -> String {
@@ -463,10 +494,13 @@ impl AudioThread {
         // so `err_rx` never reports a disconnect.
         let (err_tx, err_rx) = mpsc::channel::<cpal::Error>();
         let mut backoff = OUTPUT_RETRY_INITIAL;
-        let mut failed = false;
+        // Set by the first failure. Every later pass of the loop
+        // is a retry: there is stale audio to discard, and the
+        // failure being retried has already been logged loudly.
+        let mut retrying = false;
 
         while !shutdown.load(Ordering::Relaxed) {
-            if failed {
+            if retrying {
                 state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -490,16 +524,16 @@ impl AudioThread {
                         output.device, output.sample_rate_hz, output.channels, output.sample_format
                     );
                     let _ = events.send(AudioOutputEvent::Started(output));
-                    backoff = OUTPUT_RETRY_INITIAL;
 
-                    let died = Self::watch_stream(&err_rx, &shutdown, &events);
+                    let (died, stable) = Self::watch_stream(&err_rx, &shutdown, &events);
                     // Dropping the stream releases the device.
                     drop(stream);
+                    backoff = backoff_after_stream(backoff, stable);
                     match died {
                         Some(reason) => {
                             warn!("playback: audio output stream failed: {}", reason);
                             let _ = events.send(AudioOutputEvent::Failed(reason));
-                            failed = true;
+                            retrying = true;
                         }
                         None => break,
                     }
@@ -507,13 +541,13 @@ impl AudioThread {
                 Err(reason) => {
                     // Retries repeat the same failure; log the
                     // first loudly and the rest quietly.
-                    if failed {
+                    if retrying {
                         debug!("playback: audio output still unavailable: {}", reason);
                     } else {
                         warn!("playback: audio output unavailable: {}", reason);
                     }
                     let _ = events.send(AudioOutputEvent::Failed(reason));
-                    failed = true;
+                    retrying = true;
                 }
             }
 
@@ -662,22 +696,30 @@ impl AudioThread {
         )
     }
 
-    /// Block until the stream dies or shutdown is requested.
-    /// Returns why the stream died, or `None` on shutdown.
+    /// Block until the stream dies or shutdown is requested,
+    /// sending `Stable` once it has played for
+    /// `OUTPUT_STABLE_AFTER`. Returns why the stream died (`None`
+    /// on shutdown), and whether it got as far as `Stable`.
     fn watch_stream(
         err_rx: &mpsc::Receiver<cpal::Error>,
         shutdown: &AtomicBool,
         events: &mpsc::Sender<AudioOutputEvent>,
-    ) -> Option<String> {
+    ) -> (Option<String>, bool) {
         use cpal::traits::HostTrait;
 
+        let started = Instant::now();
+        let mut stable = false;
         let mut realtime_denied_logged = false;
         while !shutdown.load(Ordering::Relaxed) {
+            if !stable && started.elapsed() >= OUTPUT_STABLE_AFTER {
+                stable = true;
+                let _ = events.send(AudioOutputEvent::Stable);
+            }
             let err = match err_rx.recv_timeout(AUDIO_THREAD_POLL) {
                 Ok(err) => err,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Some("audio error channel closed".to_string());
+                    return (Some("audio error channel closed".to_string()), stable);
                 }
             };
             match err.kind() {
@@ -701,10 +743,10 @@ impl AudioThread {
                 }
                 // Anything else means the stream is no longer
                 // producing sound, or may not be: rebuild it.
-                _ => return Some(err.to_string()),
+                _ => return (Some(err.to_string()), stable),
             }
         }
-        None
+        (None, stable)
     }
 
     /// Sleep for `delay`, waking early if shutdown is requested.
@@ -761,7 +803,9 @@ pub struct PlaybackChannel {
     /// cpal path runs. The web frontend uses this to forward
     /// Opus packets straight to a WebRTC audio track without
     /// re-encoding; GUI / headless modes pass `None` and see
-    /// the existing decode path unchanged.
+    /// the existing decode path unchanged. It doubles as the
+    /// web-mode signal: `drain_output_events` suppresses local
+    /// output notifications while it is set.
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
     /// Per-connection cancel flag. The 100 ms select branch in
     /// the read loop polls this so the channel exits cleanly when
@@ -805,10 +849,9 @@ pub struct PlaybackChannel {
     /// DATA packets dropped because MODE named a codec we
     /// cannot play.
     data_packets_unsupported_codec: u64,
-    /// The unsupported mode most recently warned about, so the
-    /// per-packet path only reaches `warn_once!` when the mode
-    /// changes.
-    unsupported_mode_warned: Option<u16>,
+    /// Whether an unsupported mode has been warned about, so the
+    /// per-packet path only reaches `warn_once!` once.
+    unsupported_mode_warned: bool,
     /// Whether this audio session has already logged an Opus
     /// decode failure at warn; later ones go to debug.
     decode_failure_logged: bool,
@@ -875,7 +918,7 @@ impl PlaybackChannel {
             last_mute: None,
             last_latency_ms: None,
             data_packets_unsupported_codec: 0,
-            unsupported_mode_warned: None,
+            unsupported_mode_warned: false,
             decode_failure_logged: false,
             output_status: OutputStatus::default(),
         }
@@ -1157,13 +1200,14 @@ impl PlaybackChannel {
                             // instead of dropping it silently.
                             self.data_packets_unsupported_codec =
                                 self.data_packets_unsupported_codec.saturating_add(1);
-                            if self.unsupported_mode_warned != Some(self.audio_mode) {
-                                self.unsupported_mode_warned = Some(self.audio_mode);
+                            // The key is fixed: the mode is a server-
+                            // chosen u16, so a key per mode would let a
+                            // server leak an interned key, and write a
+                            // --pedantic report, for each value it sends.
+                            if !self.unsupported_mode_warned {
+                                self.unsupported_mode_warned = true;
                                 warn_once!(
-                                    logging::intern_key(format!(
-                                        "playback:unsupported_mode:{}",
-                                        self.audio_mode
-                                    )),
+                                    "playback:unsupported_mode",
                                     "playback: dropping audio: server negotiated mode {}, \
                                      which ryll cannot play (only raw PCM and Opus)",
                                     self.audio_mode
@@ -1480,8 +1524,9 @@ fn codec_from_mode(mode: u16) -> crate::snapshots::PlaybackCodec {
 #[cfg(test)]
 mod tests {
     use super::{
-        opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k, AudioCounters,
-        AudioOutputEvent, AudioThread, CallbackState, OutputStatus, Resampler,
+        backoff_after_stream, opus_packet_samples_48k, pcm_bytes_to_i16, samples_per_frame_48k,
+        AudioCounters, AudioOutputEvent, AudioThread, CallbackState, OutputStatus, Resampler,
+        OUTPUT_RETRY_INITIAL,
     };
     use crate::snapshots::PlaybackOutputInfo;
     use shakenfist_spice_protocol::NotifySeverity;
@@ -1581,6 +1626,8 @@ mod tests {
         assert_eq!(status.output, Some(output("Speakers")));
         assert_eq!(status.streams_started, 1);
         assert!(status.error.is_none());
+        let note = status.apply(AudioOutputEvent::Stable);
+        assert!(note.is_none(), "a normal stream settling must not notify");
     }
 
     #[test]
@@ -1605,13 +1652,51 @@ mod tests {
             Some("no audio output device found")
         );
 
+        // A stream starting is not yet a recovery...
+        let started = status.apply(AudioOutputEvent::Started(output("Speakers")));
+        assert!(started.is_none());
+        assert!(status.error.is_none());
+        assert_eq!(status.streams_started, 2);
+
+        // ...one that stays up is.
         let restored = status
-            .apply(AudioOutputEvent::Started(output("Speakers")))
+            .apply(AudioOutputEvent::Stable)
             .expect("recovery must notify");
         assert_eq!(restored.severity, NotifySeverity::Info);
         assert!(restored.message.contains("Speakers"));
-        assert!(status.error.is_none());
-        assert_eq!(status.streams_started, 2);
+
+        // The streak is over, so the next failure is news.
+        assert!(status
+            .apply(AudioOutputEvent::Failed("device unplugged".to_string()))
+            .is_some());
+    }
+
+    #[test]
+    fn output_status_flapping_device_stays_in_one_streak() {
+        let mut status = OutputStatus::default();
+        assert!(status
+            .apply(AudioOutputEvent::Failed("device unplugged".to_string()))
+            .is_some());
+        // A device that opens and dies before `Stable` must not
+        // raise a restored/unavailable pair per cycle.
+        for _ in 0..5 {
+            assert!(status
+                .apply(AudioOutputEvent::Started(output("Broken")))
+                .is_none());
+            assert!(status
+                .apply(AudioOutputEvent::Failed("stream died".to_string()))
+                .is_none());
+        }
+        assert_eq!(status.streams_started, 5);
+        assert_eq!(status.failure_count, 6);
+        assert!(status.output.is_none());
+    }
+
+    #[test]
+    fn backoff_resets_only_after_a_stable_stream() {
+        let backoff = Duration::from_secs(8);
+        assert_eq!(backoff_after_stream(backoff, true), OUTPUT_RETRY_INITIAL);
+        assert_eq!(backoff_after_stream(backoff, false), backoff);
     }
 
     #[test]
