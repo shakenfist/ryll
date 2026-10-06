@@ -728,10 +728,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lib.rs",
       "author": "mikal"
     },
@@ -764,10 +760,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/rendering-pipeline.md",
-      "author": "mikal"
-    },
-    {
       "path": "MERGE-TEMPLATE.md",
       "author": "mikal"
     },
@@ -777,10 +769,6 @@
     },
     {
       "path": ".github/workflows/codeql-analysis.yml",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/channel-diagnostics-audit.md",
       "author": "mikal"
     },
     {
@@ -824,10 +812,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
       "author": "mikal"
     },
@@ -857,10 +841,6 @@
     },
     {
       "path": "docs/session-lifecycle.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     },
     {
@@ -916,14 +896,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/multi-mode-parity.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
@@ -956,10 +928,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/snapshots.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
@@ -973,10 +941,6 @@
     },
     {
       "path": "ryll/src/main.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app.rs",
       "author": "mikal"
     },
     {
@@ -1009,18 +973,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer",
       "author": "mikal"
     },
     {
