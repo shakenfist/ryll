@@ -634,6 +634,25 @@ pub struct PlaybackSessionInfo {
     pub codec: PlaybackCodec,
 }
 
+/// The local output stream a playback session is playing
+/// through. Lets a bug report answer "where was the sound
+/// going?" — the device can differ from the one the operator
+/// is listening to, and the platform can move a default-device
+/// stream without ryll rebuilding it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlaybackOutputInfo {
+    /// Human-readable name of the output device.
+    pub device: String,
+    /// Sample rate the stream was opened at (the device's
+    /// default rate; the resampler converts to it).
+    pub sample_rate_hz: u32,
+    /// Channel count the stream was opened with (the source
+    /// channel count from START).
+    pub channels: u16,
+    /// Sample format the device asked for, e.g. "f32".
+    pub sample_format: String,
+}
+
 /// Snapshot of the playback (audio) channel's mutable state.
 ///
 /// Counters in the `device_*` / `ring_overflow_count` /
@@ -702,6 +721,35 @@ pub struct PlaybackSnapshot {
     pub pcm_bytes_produced: u64,
     /// Recent decode-duration ring (microseconds, cap 64).
     pub recent_decode_durations_us: VecDeque<u32>,
+    /// Count of DATA packets dropped unplayed because the codec
+    /// the server negotiated via MODE is neither raw PCM nor
+    /// Opus. Non-zero means the guest is producing sound that
+    /// ryll cannot play at all.
+    pub data_packets_unsupported_codec: u64,
+
+    // --- local output stream state ---
+    /// The output stream currently playing. `None` when no
+    /// audio session is active, or when the session has no
+    /// working stream (see `output_error`).
+    pub output: Option<PlaybackOutputInfo>,
+    /// Why the most recent attempt to open an output stream, or
+    /// to keep one running, failed. Cleared when a stream
+    /// starts. Alongside `output: None` and a non-null
+    /// `current_session`, it means the session is silent and
+    /// retrying; with no `current_session` it is the last error
+    /// of an earlier session, kept for the report.
+    pub output_error: Option<String>,
+    /// Output streams opened, including rebuilds after a
+    /// failure. Cumulative across audio-session restarts.
+    pub output_streams_started: u64,
+    /// Failed attempts to open an output stream plus streams
+    /// that died while playing. Cumulative across audio-session
+    /// restarts.
+    pub output_failure_count: u64,
+    /// Times the platform moved a default-device stream to a
+    /// different device without a rebuild (cpal
+    /// `ErrorKind::DeviceChanged`). Cumulative.
+    pub output_reroute_count: u64,
 
     // --- device-side pipeline counters (from audio thread atomics) ---
     /// Count of cpal output callbacks invoked since the ryll
@@ -723,6 +771,12 @@ pub struct PlaybackSnapshot {
     /// started (per-channel count; multiply by channel count
     /// for frames). Cumulative across audio-session restarts.
     pub samples_consumed_total: u64,
+    /// Buffer under- or overruns the platform reported on the
+    /// output stream (cpal `ErrorKind::Xrun`), as opposed to
+    /// `device_underrun_count`, which counts callbacks where
+    /// ryll had no samples to give. Cumulative across
+    /// audio-session restarts.
+    pub device_xrun_count: u64,
 
     // --- last server-controlled audio params we got ---
     /// Most recent per-channel volume vector from
