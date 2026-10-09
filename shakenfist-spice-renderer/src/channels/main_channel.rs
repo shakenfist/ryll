@@ -83,21 +83,6 @@ fn hash_clipboard(text: &str) -> u64 {
     h.finish()
 }
 
-/// Decode the body of a `VD_AGENT_REPLY`.
-///
-/// `vd_agent.h` declares `VDAgentReply` as a packed struct of
-/// two little-endian `u32`s: `{ type, error }`. `type` echoes
-/// the opcode of the request being acknowledged; `error` is
-/// `VD_AGENT_SUCCESS` (0) on success or a failure code.
-///
-/// Returns `None` if `payload` is shorter than 8 bytes —
-/// caller logs and skips. Pure function so the parse logic is
-/// unit-testable without standing up a `MainChannel`.
-fn parse_vd_agent_reply(payload: &[u8]) -> Option<(u32, u32)> {
-    let reply = VdAgentReply::decode(payload).ok()?;
-    Some((reply.reply_type, reply.error))
-}
-
 /// The capabilities ryll announces to the guest agent: a request for the
 /// agent's own, and the features ryll implements.
 fn client_agent_capabilities() -> AnnounceCapabilities {
@@ -360,8 +345,8 @@ pub struct MainChannel {
     agent_request_count: u32,
     /// Cumulative count of VD_AGENT_REPLY messages received.
     agent_reply_count: u32,
-    /// Cumulative count of REPLY messages with non-zero `error`
-    /// (anything other than VD_AGENT_SUCCESS = 0).
+    /// Cumulative count of REPLY messages whose `error` is not
+    /// VD_AGENT_SUCCESS (1).
     agent_reply_error_count: u32,
     /// Session-relative seconds at the most recent REPLY
     /// receipt.
@@ -1539,11 +1524,15 @@ impl MainChannel {
                     self.maybe_send_announce_capabilities().await?;
                 }
             }
-            VD_AGENT_REPLY => match parse_vd_agent_reply(payload) {
-                Some((reply_type, error)) => {
-                    debug!("main: VD_AGENT_REPLY type={} error={}", reply_type, error);
+            VD_AGENT_REPLY => match VdAgentReply::decode(payload) {
+                Ok(reply) => {
+                    let reply_type = reply.reply_type;
+                    debug!(
+                        "main: VD_AGENT_REPLY type={} error={}",
+                        reply_type, reply.error
+                    );
                     self.agent_reply_count = self.agent_reply_count.saturating_add(1);
-                    if error != 0 {
+                    if !reply.is_success() {
                         self.agent_reply_error_count =
                             self.agent_reply_error_count.saturating_add(1);
                     }
@@ -1571,7 +1560,7 @@ impl MainChannel {
                         );
                     }
                 }
-                None => {
+                Err(_) => {
                     debug!(
                         "main: VD_AGENT_REPLY payload too short ({} bytes)",
                         payload.len()
@@ -1863,13 +1852,15 @@ mod tests {
 
     use super::{
         agent_message, agent_monitors_config, agent_starved, client_agent_capabilities,
-        hash_clipboard, parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
+        hash_clipboard, ping_interval_ms, should_request_client_mouse_mode,
         should_warn_agent_stalled, GuestClipboard, STUCK_AGENT_NOTIFY_INTERVAL,
         STUCK_AGENT_THRESHOLD, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
         VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
         VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, VD_AGENT_CLIPBOARD_UTF8_TEXT,
         VD_AGENT_MONITORS_CONFIG,
     };
+    use shakenfist_spice_protocol::constants::vd_agent::{VD_AGENT_ERROR, VD_AGENT_SUCCESS};
+    use shakenfist_spice_protocol::messages::vd_agent::VdAgentReply;
     use shakenfist_spice_protocol::messages::WireType;
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
@@ -1923,48 +1914,35 @@ mod tests {
         assert_ne!(hash_clipboard("foo\nbar"), hash_clipboard("foo\nbaz"));
     }
 
-    // ── VD_AGENT_REPLY parser ───────────────────────────────
+    // ── VD_AGENT_REPLY success decision ─────────────────────
 
     #[test]
-    fn parse_vd_agent_reply_decodes_valid_payload() {
-        // VD_AGENT_MONITORS_CONFIG (type=2), VD_AGENT_SUCCESS (error=0).
-        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
+    fn vd_agent_reply_success_is_one() {
+        // type=2 (MONITORS_CONFIG), error=VD_AGENT_SUCCESS (1).
+        let mut payload = vec![0x02, 0x00, 0x00, 0x00];
+        payload.extend_from_slice(&VD_AGENT_SUCCESS.to_le_bytes());
+        let reply = VdAgentReply::decode(&payload).unwrap();
+        assert_eq!(reply.reply_type, 2);
+        assert!(reply.is_success());
     }
 
     #[test]
-    fn parse_vd_agent_reply_decodes_error_bit() {
-        // type=2 (MONITORS_CONFIG), error=42 (anything non-zero is failure).
-        let payload = [0x02, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00];
-        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 42)));
+    fn vd_agent_reply_non_success_values_are_failures() {
+        // VD_AGENT_ERROR (2), zero (not success), and arbitrary values.
+        for error in [VD_AGENT_ERROR, 0, 42, u32::MAX] {
+            let mut payload = vec![0x02, 0x00, 0x00, 0x00];
+            payload.extend_from_slice(&error.to_le_bytes());
+            let reply = VdAgentReply::decode(&payload).unwrap();
+            assert!(!reply.is_success(), "error={error} must be a failure");
+        }
     }
 
     #[test]
-    fn parse_vd_agent_reply_handles_max_values() {
-        // u32::MAX in both fields — confirms little-endian decode width.
-        let payload = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-        assert_eq!(parse_vd_agent_reply(&payload), Some((u32::MAX, u32::MAX)));
-    }
-
-    #[test]
-    fn parse_vd_agent_reply_rejects_short_payload() {
+    fn vd_agent_reply_rejects_short_payload() {
         // 7 bytes — one short of the required 8.
-        let payload = [0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        assert_eq!(parse_vd_agent_reply(&payload), None);
-        // Empty payload.
-        assert_eq!(parse_vd_agent_reply(&[]), None);
-    }
-
-    #[test]
-    fn parse_vd_agent_reply_ignores_trailing_bytes() {
-        // Server is permitted to send additional bytes after the
-        // documented 8 — we should decode the first 8 and ignore the
-        // rest rather than reject.
-        let payload = [
-            0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // valid {2, 0}
-            0xff, 0xff, // trailing garbage
-        ];
-        assert_eq!(parse_vd_agent_reply(&payload), Some((2, 0)));
+        let payload = [0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00];
+        assert!(VdAgentReply::decode(&payload).is_err());
+        assert!(VdAgentReply::decode(&[]).is_err());
     }
 
     #[test]
