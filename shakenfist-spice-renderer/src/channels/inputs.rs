@@ -503,8 +503,9 @@ impl InputsChannel {
                 // ACK_SYNC is opcode 1 (common across all channels)
                 let mut ack_payload = Vec::new();
                 SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
-                let response = make_message(1, &ack_payload);
-                self.send_with_log(1, &response).await?;
+                let response = make_message(inputs_client::ACK_SYNC, &ack_payload);
+                self.send_with_log(inputs_client::ACK_SYNC, &response)
+                    .await?;
             }
 
             inputs_server::PING => {
@@ -523,8 +524,8 @@ impl InputsChannel {
                 let mut pong_payload = Vec::new();
                 ping.write_pong(&mut pong_payload)?;
                 // Inputs channel uses same message type for pong
-                let response = make_message(3, &pong_payload); // PONG
-                self.send_with_log(3, &response).await?;
+                let response = make_message(inputs_client::PONG, &pong_payload);
+                self.send_with_log(inputs_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 

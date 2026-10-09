@@ -372,6 +372,11 @@ pub mod inputs_client {
     pub const MOUSE_POSITION: u16 = 112;
     pub const MOUSE_PRESS: u16 = 113;
     pub const MOUSE_RELEASE: u16 = 114;
+    // Common-channel client messages, enums.h:436-438 (SPICE_MSGC_ACK_SYNC
+    // onwards). These are the same on every channel.
+    pub const ACK_SYNC: u16 = 1;
+    pub const ACK: u16 = 2;
+    pub const PONG: u16 = 3;
 }
 
 /// Input channel message types (server -> client)
@@ -529,6 +534,69 @@ pub mod brush {
     pub const PATTERN: u8 = 2;
 }
 
+/// Clip type (SPICE_CLIP_TYPE_* in enums.h:130-136).
+pub mod clip_type {
+    pub const NONE: u8 = 0;
+    pub const RECTS: u8 = 1;
+}
+
+/// Bitmap pixel format (SPICE_BITMAP_FMT_* in enums.h:216-229).
+pub mod bitmap_fmt {
+    pub const INVALID: u8 = 0;
+    pub const BIT1_LE: u8 = 1;
+    pub const BIT1_BE: u8 = 2;
+    pub const BIT4_LE: u8 = 3;
+    pub const BIT4_BE: u8 = 4;
+    pub const BIT8: u8 = 5;
+    pub const BIT16: u8 = 6;
+    pub const BIT24: u8 = 7;
+    pub const BIT32: u8 = 8;
+    pub const RGBA: u8 = 9;
+    pub const BIT8_A: u8 = 10;
+}
+
+/// Bitmap flags (SPICE_BITMAP_FLAGS_* in enums.h:232-237).
+pub mod bitmap_flags {
+    pub const PAL_CACHE_ME: u8 = 1 << 0;
+    pub const PAL_FROM_CACHE: u8 = 1 << 1;
+    pub const TOP_DOWN: u8 = 1 << 2;
+    pub const MASK: u8 = 0x7;
+}
+
+/// Surface pixel format (SPICE_SURFACE_FMT_* in enums.h:292-301).
+pub mod surface_fmt {
+    pub const INVALID: u32 = 0;
+    pub const FMT_1_A: u32 = 1;
+    pub const FMT_8_A: u32 = 8;
+    pub const FMT_16_555: u32 = 16;
+    pub const FMT_32_XRGB: u32 = 32;
+    pub const FMT_16_565: u32 = 80;
+    pub const FMT_32_ARGB: u32 = 96;
+}
+
+/// Stream flags (SPICE_STREAM_FLAGS_* in enums.h:157-160).
+pub mod stream_flags {
+    pub const TOP_DOWN: u8 = 1 << 0;
+    pub const MASK: u8 = 0x1;
+}
+
+/// Mask flags (SPICE_MASK_FLAGS_* in enums.h:171-174).
+pub mod mask_flags {
+    pub const INVERS: u8 = 1 << 0;
+    pub const MASK: u8 = 0x1;
+}
+
+/// Cursor type (SPICE_CURSOR_TYPE_* in enums.h:357-366).
+pub mod cursor_type {
+    pub const ALPHA: u8 = 0;
+    pub const MONO: u8 = 1;
+    pub const COLOR4: u8 = 2;
+    pub const COLOR8: u8 = 3;
+    pub const COLOR16: u8 = 4;
+    pub const COLOR24: u8 = 5;
+    pub const COLOR32: u8 = 6;
+}
+
 /// Notify severity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u32)]
@@ -586,6 +654,20 @@ impl SpiceVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitmap_fmt_values_match_enums_h() {
+        // enums.h:225-226. Easy to misread: 8 is 32BIT and 9 is RGBA.
+        assert_eq!(bitmap_fmt::BIT32, 8);
+        assert_eq!(bitmap_fmt::RGBA, 9);
+    }
+
+    #[test]
+    fn common_client_message_values_match_enums_h() {
+        assert_eq!(inputs_client::ACK_SYNC, 1);
+        assert_eq!(inputs_client::ACK, 2);
+        assert_eq!(inputs_client::PONG, 3);
+    }
 
     #[test]
     fn spice_error_to_u32_round_trips() {
