@@ -597,6 +597,80 @@ pub mod cursor_type {
     pub const COLOR32: u8 = 6;
 }
 
+/// Guest agent (vdagent) protocol constants, from spice-protocol's
+/// `spice/vd_agent.h`. Each value cites its line there.
+///
+/// These keep their C names: the header's message types, capability bits
+/// and clipboard types share words (`CLIPBOARD` is a message, a capability
+/// and a family of types), and the prefixes keep them apart.
+pub mod vd_agent {
+    /// `VDAgentMessage.protocol` (vd_agent.h:60).
+    pub const VD_AGENT_PROTOCOL: u32 = 1;
+    /// Largest agent data chunk (vd_agent.h:61).
+    pub const VD_AGENT_MAX_DATA_SIZE: u32 = 2048;
+
+    // `VDAgentMessage.type` (vd_agent.h:69-123).
+    pub const VD_AGENT_MOUSE_STATE: u32 = 1; // vd_agent.h:73
+    pub const VD_AGENT_MONITORS_CONFIG: u32 = 2; // vd_agent.h:78
+    pub const VD_AGENT_REPLY: u32 = 3; // vd_agent.h:82
+    pub const VD_AGENT_CLIPBOARD: u32 = 4; // vd_agent.h:87
+    pub const VD_AGENT_DISPLAY_CONFIG: u32 = 5; // vd_agent.h:92
+    pub const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 6; // vd_agent.h:94
+    pub const VD_AGENT_CLIPBOARD_GRAB: u32 = 7; // vd_agent.h:100
+    pub const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8; // vd_agent.h:105
+    pub const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9; // vd_agent.h:107
+    pub const VD_AGENT_FILE_XFER_START: u32 = 10; // vd_agent.h:109
+    pub const VD_AGENT_FILE_XFER_STATUS: u32 = 11; // vd_agent.h:111
+    pub const VD_AGENT_FILE_XFER_DATA: u32 = 12; // vd_agent.h:113
+    pub const VD_AGENT_CLIENT_DISCONNECTED: u32 = 13; // vd_agent.h:115
+    pub const VD_AGENT_MAX_CLIPBOARD: u32 = 14; // vd_agent.h:117
+    pub const VD_AGENT_AUDIO_VOLUME_SYNC: u32 = 15; // vd_agent.h:119
+    pub const VD_AGENT_GRAPHICS_DEVICE_INFO: u32 = 16; // vd_agent.h:121
+
+    // `VDAgentMonitorsConfig.flags` (vd_agent.h:206-209).
+    pub const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1 << 0; // vd_agent.h:207
+    pub const VD_AGENT_CONFIG_MONITORS_FLAG_PHYSICAL_SIZE: u32 = 1 << 1; // vd_agent.h:208
+
+    // `VDAgentReply.error` (vd_agent.h:266-269). Success is 1, not 0.
+    pub const VD_AGENT_SUCCESS: u32 = 1; // vd_agent.h:267
+    pub const VD_AGENT_ERROR: u32 = 2; // vd_agent.h:268
+
+    // Clipboard data types (vd_agent.h:280-293).
+    pub const VD_AGENT_CLIPBOARD_NONE: u32 = 0; // vd_agent.h:281
+    pub const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1; // vd_agent.h:282
+    pub const VD_AGENT_CLIPBOARD_IMAGE_PNG: u32 = 2; // vd_agent.h:283
+    pub const VD_AGENT_CLIPBOARD_IMAGE_BMP: u32 = 3; // vd_agent.h:284
+    pub const VD_AGENT_CLIPBOARD_IMAGE_TIFF: u32 = 4; // vd_agent.h:285
+    pub const VD_AGENT_CLIPBOARD_IMAGE_JPG: u32 = 5; // vd_agent.h:286
+    pub const VD_AGENT_CLIPBOARD_FILE_LIST: u32 = 6; // vd_agent.h:292
+
+    // Clipboard selections, a `uint8_t` on the wire (vd_agent.h:295-299).
+    pub const VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD: u8 = 0; // vd_agent.h:296
+    pub const VD_AGENT_CLIPBOARD_SELECTION_PRIMARY: u8 = 1; // vd_agent.h:297
+    pub const VD_AGENT_CLIPBOARD_SELECTION_SECONDARY: u8 = 2; // vd_agent.h:298
+
+    // Capability bit indices (vd_agent.h:367-397).
+    pub const VD_AGENT_CAP_MOUSE_STATE: u32 = 0; // vd_agent.h:368
+    pub const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1; // vd_agent.h:369
+    pub const VD_AGENT_CAP_REPLY: u32 = 2; // vd_agent.h:370
+    pub const VD_AGENT_CAP_CLIPBOARD: u32 = 3; // vd_agent.h:371
+    pub const VD_AGENT_CAP_DISPLAY_CONFIG: u32 = 4; // vd_agent.h:372
+    pub const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5; // vd_agent.h:373
+    pub const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6; // vd_agent.h:374
+    pub const VD_AGENT_CAP_SPARSE_MONITORS_CONFIG: u32 = 7; // vd_agent.h:375
+    pub const VD_AGENT_CAP_GUEST_LINEEND_LF: u32 = 8; // vd_agent.h:376
+    pub const VD_AGENT_CAP_GUEST_LINEEND_CRLF: u32 = 9; // vd_agent.h:377
+    pub const VD_AGENT_CAP_MAX_CLIPBOARD: u32 = 10; // vd_agent.h:378
+    pub const VD_AGENT_CAP_AUDIO_VOLUME_SYNC: u32 = 11; // vd_agent.h:379
+    pub const VD_AGENT_CAP_MONITORS_CONFIG_POSITION: u32 = 12; // vd_agent.h:380
+    pub const VD_AGENT_CAP_FILE_XFER_DISABLED: u32 = 13; // vd_agent.h:381
+    pub const VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS: u32 = 14; // vd_agent.h:382
+    pub const VD_AGENT_CAP_GRAPHICS_DEVICE_INFO: u32 = 15; // vd_agent.h:383
+    pub const VD_AGENT_CAP_CLIPBOARD_NO_RELEASE_ON_REGRAB: u32 = 16; // vd_agent.h:384
+    pub const VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL: u32 = 17; // vd_agent.h:385
+    pub const VD_AGENT_CAP_MONITORS_PHYSICAL_SIZE: u32 = 18; // vd_agent.h:395
+}
+
 /// Notify severity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u32)]
@@ -660,6 +734,46 @@ mod tests {
         // enums.h:225-226. Easy to misread: 8 is 32BIT and 9 is RGBA.
         assert_eq!(bitmap_fmt::BIT32, 8);
         assert_eq!(bitmap_fmt::RGBA, 9);
+    }
+
+    #[test]
+    fn vd_agent_reply_values_match_vd_agent_h() {
+        // vd_agent.h:266-269. Success is 1: ryll#473 treated 0 as success.
+        assert_eq!(vd_agent::VD_AGENT_SUCCESS, 1);
+        assert_eq!(vd_agent::VD_AGENT_ERROR, 2);
+    }
+
+    #[test]
+    fn vd_agent_message_types_match_vd_agent_h() {
+        use vd_agent::*;
+        // vd_agent.h:69-123, numbered from VD_AGENT_MOUSE_STATE = 1.
+        assert_eq!(VD_AGENT_MOUSE_STATE, 1);
+        assert_eq!(VD_AGENT_MONITORS_CONFIG, 2);
+        assert_eq!(VD_AGENT_REPLY, 3);
+        assert_eq!(VD_AGENT_CLIPBOARD, 4);
+        assert_eq!(VD_AGENT_DISPLAY_CONFIG, 5);
+        assert_eq!(VD_AGENT_ANNOUNCE_CAPABILITIES, 6);
+        assert_eq!(VD_AGENT_CLIPBOARD_GRAB, 7);
+        assert_eq!(VD_AGENT_CLIPBOARD_REQUEST, 8);
+        assert_eq!(VD_AGENT_CLIPBOARD_RELEASE, 9);
+
+        // Regression for PR 31: ANNOUNCE_CAPABILITIES used to be 1,
+        // which collided with VD_AGENT_MOUSE_STATE. The server would
+        // dispatch our capabilities announcement to its mouse-state
+        // handler.
+        assert_ne!(
+            VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_MOUSE_STATE,
+            "ANNOUNCE_CAPABILITIES (6) must not collide with MOUSE_STATE (1)"
+        );
+    }
+
+    #[test]
+    fn vd_agent_capability_bits_match_vd_agent_h() {
+        // vd_agent.h:367-397, numbered from VD_AGENT_CAP_MOUSE_STATE = 0.
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_BY_DEMAND, 5);
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_SELECTION, 6);
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL, 17);
+        assert_eq!(vd_agent::VD_AGENT_CAP_MONITORS_PHYSICAL_SIZE, 18);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 /// Main channel handler - session management, ping/pong, channel list
 use anyhow::{Context, Result};
-use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -15,12 +14,25 @@ use crate::{
     ByteCounter, CaptureSink, ClipboardBackend, LogConfig, NotificationEntry, NotificationSource,
     TrafficSink,
 };
+use shakenfist_spice_protocol::constants::vd_agent::{
+    VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CAP_CLIPBOARD_BY_DEMAND,
+    VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CAP_MONITORS_CONFIG, VD_AGENT_CAP_MOUSE_STATE,
+    VD_AGENT_CAP_REPLY, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_NONE,
+    VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+    VD_AGENT_CLIPBOARD_UTF8_TEXT, VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS, VD_AGENT_MONITORS_CONFIG,
+    VD_AGENT_REPLY,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::vd_agent::{
+    AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
+    ClipboardWireType, MonConfig, MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
+};
 use shakenfist_spice_protocol::messages::{
     make_message, take_message, AgentDisconnected, AgentTokens, ChannelsList, Disconnecting,
     MainInit, MainMouseMode, MouseModeRequest, MultiMediaTime, Notify, Ping, SetAck, WireType,
 };
+use shakenfist_spice_protocol::reader::LinkError;
 use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
 };
@@ -82,103 +94,110 @@ fn hash_clipboard(text: &str) -> u64 {
 /// caller logs and skips. Pure function so the parse logic is
 /// unit-testable without standing up a `MainChannel`.
 fn parse_vd_agent_reply(payload: &[u8]) -> Option<(u32, u32)> {
-    if payload.len() < 8 {
-        return None;
+    let reply = VdAgentReply::decode(payload).ok()?;
+    Some((reply.reply_type, reply.error))
+}
+
+/// The capabilities ryll announces to the guest agent: a request for the
+/// agent's own, and the features ryll implements.
+fn client_agent_capabilities() -> AnnounceCapabilities {
+    let mut caps = AnnounceCapabilities {
+        request: 1,
+        caps: Vec::new(),
+    };
+    for cap in [
+        VD_AGENT_CAP_MOUSE_STATE,
+        VD_AGENT_CAP_MONITORS_CONFIG,
+        VD_AGENT_CAP_REPLY,
+        VD_AGENT_CAP_CLIPBOARD_BY_DEMAND,
+        VD_AGENT_CAP_CLIPBOARD_SELECTION,
+    ] {
+        caps.set_capability(cap);
     }
-    let reply_type = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-    let error = u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-    Some((reply_type, error))
+    caps
 }
 
-/// True when a `VD_AGENT_ANNOUNCE_CAPABILITIES` body (`request` then
-/// a little-endian `u32` capability bitmap) sets bit `cap`.
-fn agent_caps_has(payload: &[u8], cap: u32) -> bool {
-    let word = 4 + (cap as usize / 32) * 4;
-    payload
-        .get(word..word + 4)
-        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & (1 << (cap % 32)) != 0)
-        .unwrap_or(false)
-}
-
-/// Split the selection header off a clipboard message body.
-///
-/// When the guest agent has announced `VD_AGENT_CAP_CLIPBOARD_SELECTION`,
-/// every `VDAgentClipboard*` message starts with a `uint8_t selection`
-/// and three reserved bytes (`vd_agent.h`). spice-vdagentd adds the header
-/// only when its peer announced the capability, and spice-gtk reads it only
-/// when the agent did. Without it the selection is implicitly CLIPBOARD.
-/// Returns `None` if the header is expected but the body is too short.
-fn split_clipboard_selection(payload: &[u8], has_selection: bool) -> Option<(u8, &[u8])> {
-    if !has_selection {
-        return Some((VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, payload));
+/// The `VD_AGENT_MONITORS_CONFIG` ryll sends for a `width`x`height`
+/// window: `monitors` identical 32-bit monitors (one if `monitors` is 0),
+/// laid side by side and positioned only when there is more than one.
+fn agent_monitors_config(monitors: u8, width: u32, height: u32) -> MonitorsConfig {
+    let active = if monitors == 0 { 1 } else { monitors as u32 };
+    let flags = if active > 1 {
+        VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS
+    } else {
+        0
+    };
+    let monitors = (0..active)
+        .map(|i| MonConfig {
+            height,
+            width,
+            depth: 32,
+            // The wire field is an int32. ryll has always computed the
+            // position as a u32, and a cast keeps its bits.
+            x: if active > 1 { (width * i) as i32 } else { 0 },
+            y: 0,
+        })
+        .collect();
+    MonitorsConfig {
+        flags,
+        monitors,
+        physical_sizes: Vec::new(),
     }
-    if payload.len() < 4 {
-        return None;
+}
+
+/// A complete guest agent message: the `VDAgentMessage` header, then
+/// `payload`.
+fn agent_message(ty: u32, payload: &[u8]) -> Vec<u8> {
+    let mut agent = Vec::with_capacity(VdAgentMessageHeader::SIZE + payload.len());
+    VdAgentMessageHeader::new(ty, payload.len() as u32).write(&mut agent);
+    agent.extend_from_slice(payload);
+    agent
+}
+
+/// A guest clipboard message, parsed for the negotiated layout.
+enum GuestClipboard {
+    Grab(ClipboardGrab),
+    Data(Clipboard),
+    Request(ClipboardRequest),
+    Release(ClipboardRelease),
+}
+
+impl GuestClipboard {
+    /// Parse a clipboard message of `agent_type`, which must be one of the
+    /// four clipboard message types.
+    fn decode(agent_type: u32, payload: &[u8], has_selection: bool) -> Result<Self, LinkError> {
+        Ok(match agent_type {
+            VD_AGENT_CLIPBOARD_GRAB => {
+                GuestClipboard::Grab(ClipboardGrab::decode_with(payload, has_selection)?)
+            }
+            VD_AGENT_CLIPBOARD => {
+                GuestClipboard::Data(Clipboard::decode_with(payload, has_selection)?)
+            }
+            VD_AGENT_CLIPBOARD_REQUEST => {
+                GuestClipboard::Request(ClipboardRequest::decode_with(payload, has_selection)?)
+            }
+            _ => GuestClipboard::Release(ClipboardRelease::decode_with(payload, has_selection)?),
+        })
     }
-    Some((payload[0], &payload[4..]))
-}
 
-/// Read the leading `uint32_t type` of a `VDAgentClipboard` or
-/// `VDAgentClipboardRequest` body (selection header already removed),
-/// returning it with the data that follows.
-fn split_clipboard_type(body: &[u8]) -> Option<(u32, &[u8])> {
-    let ty = body.get(..4)?;
-    Some((u32::from_le_bytes([ty[0], ty[1], ty[2], ty[3]]), &body[4..]))
-}
-
-/// True when a `VDAgentClipboardGrab` type list (selection header
-/// already removed) offers `ty` anywhere, not only first.
-fn clipboard_grab_offers(types: &[u8], ty: u32) -> bool {
-    types
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .any(|t| u32::from_le_bytes(*t) == ty)
-}
-
-/// Build a clipboard message body: the selection header when negotiated,
-/// then a `uint32_t` type, then `data`. A one-type grab, a request and a
-/// `VDAgentClipboard` all share this layout. ryll does not announce
-/// `VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL`, so a grab carries no serial.
-fn build_clipboard_payload(has_selection: bool, selection: u8, ty: u32, data: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(8 + data.len());
-    if has_selection {
-        payload.extend_from_slice(&[selection, 0, 0, 0]);
+    fn selection(&self) -> u8 {
+        match self {
+            GuestClipboard::Grab(m) => m.selection,
+            GuestClipboard::Data(m) => m.selection,
+            GuestClipboard::Request(m) => m.selection,
+            GuestClipboard::Release(m) => m.selection,
+        }
     }
-    payload.extend_from_slice(&ty.to_le_bytes());
-    payload.extend_from_slice(data);
-    payload
+
+    fn agent_type(&self) -> u32 {
+        match self {
+            GuestClipboard::Grab(_) => VD_AGENT_CLIPBOARD_GRAB,
+            GuestClipboard::Data(_) => VD_AGENT_CLIPBOARD,
+            GuestClipboard::Request(_) => VD_AGENT_CLIPBOARD_REQUEST,
+            GuestClipboard::Release(_) => VD_AGENT_CLIPBOARD_RELEASE,
+        }
+    }
 }
-
-const VD_AGENT_PROTOCOL: u32 = 1;
-
-// VDAgentMessage type values — must match spice-protocol/spice/vd_agent.h
-#[allow(dead_code)]
-const VD_AGENT_MOUSE_STATE: u32 = 1;
-const VD_AGENT_MONITORS_CONFIG: u32 = 2;
-const VD_AGENT_REPLY: u32 = 3;
-const VD_AGENT_CLIPBOARD: u32 = 4;
-#[allow(dead_code)]
-const VD_AGENT_DISPLAY_CONFIG: u32 = 5;
-const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 6;
-const VD_AGENT_CLIPBOARD_GRAB: u32 = 7;
-const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8;
-const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9;
-
-// Clipboard format types
-const VD_AGENT_CLIPBOARD_NONE: u32 = 0;
-const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1;
-
-// Clipboard selections. ryll only syncs CLIPBOARD; PRIMARY and
-// SECONDARY are X11 concepts with no equivalent on macOS or Windows.
-const VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD: u8 = 0;
-
-const VD_AGENT_CAP_MOUSE_STATE: u32 = 0;
-const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1;
-const VD_AGENT_CAP_REPLY: u32 = 2;
-const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5;
-const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6;
-const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1;
 
 /// Request opcodes that the guest agent acknowledges with a
 /// `VD_AGENT_REPLY` message. To add another type, append its
@@ -1099,24 +1118,30 @@ impl MainChannel {
             }
 
             main_server::AGENT_DATA => {
-                if payload.len() >= 20 {
-                    let agent_type =
-                        u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]);
-                    let agent_size =
-                        u32::from_le_bytes([payload[16], payload[17], payload[18], payload[19]])
-                            as usize;
-                    let agent_payload = &payload[20..20 + agent_size.min(payload.len() - 20)];
-                    debug!(
-                        "main: agent_data from server: type={}, size={}",
-                        agent_type, agent_size
-                    );
-                    self.handle_agent_message(agent_type, agent_payload).await?;
-                } else {
-                    debug!(
-                        "main: agent_data from server: {} bytes: {:02x?}",
-                        payload.len(),
-                        payload
-                    );
+                // Each AGENT_DATA is taken to start a new agent message, and
+                // the body is cut to what this one carries. That is wrong
+                // for messages spice-server splits across several
+                // AGENT_DATAs (ryll#474), and is kept as it is until that
+                // is fixed.
+                match VdAgentMessageHeader::decode(payload) {
+                    Ok(header) => {
+                        let agent_type = header.message_type;
+                        let agent_size = header.size as usize;
+                        let body = &payload[VdAgentMessageHeader::SIZE..];
+                        let agent_payload = &body[..agent_size.min(body.len())];
+                        debug!(
+                            "main: agent_data from server: type={}, size={}",
+                            agent_type, agent_size
+                        );
+                        self.handle_agent_message(agent_type, agent_payload).await?;
+                    }
+                    Err(_) => {
+                        debug!(
+                            "main: agent_data from server: {} bytes: {:02x?}",
+                            payload.len(),
+                            payload
+                        );
+                    }
                 }
             }
 
@@ -1313,14 +1338,8 @@ impl MainChannel {
             return Ok(());
         }
 
-        let caps = (1u32 << VD_AGENT_CAP_MOUSE_STATE)
-            | (1u32 << VD_AGENT_CAP_MONITORS_CONFIG)
-            | (1u32 << VD_AGENT_CAP_REPLY)
-            | (1u32 << VD_AGENT_CAP_CLIPBOARD_BY_DEMAND)
-            | (1u32 << VD_AGENT_CAP_CLIPBOARD_SELECTION);
-        let mut payload = Vec::with_capacity(8);
-        payload.write_u32::<LittleEndian>(1)?;
-        payload.write_u32::<LittleEndian>(caps)?;
+        let mut payload = Vec::new();
+        client_agent_capabilities().write(&mut payload);
 
         if self
             .send_agent_data_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload)
@@ -1364,44 +1383,21 @@ impl MainChannel {
     }
 
     async fn send_agent_monitors_config(&mut self, width: u32, height: u32) -> Result<bool> {
-        let active = if self.monitors == 0 {
-            1
-        } else {
-            self.monitors as u32
-        };
-        let flags = if active > 1 {
-            VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS
-        } else {
-            0
-        };
-
-        let mut payload = Vec::with_capacity(8 + active as usize * 20);
-        payload.write_u32::<LittleEndian>(active)?;
-        payload.write_u32::<LittleEndian>(flags)?;
-
-        for i in 0..active {
+        let config = agent_monitors_config(self.monitors, width, height);
+        for (i, m) in config.monitors.iter().enumerate() {
             info!(
-                "main: monitors config[{}]: {}x{} pos=({},0) depth=32",
-                i,
-                width,
-                height,
-                width * i
+                "main: monitors config[{}]: {}x{} pos=({},{}) depth={}",
+                i, m.width, m.height, m.x, m.y, m.depth
             );
-            payload.write_u32::<LittleEndian>(height)?;
-            payload.write_u32::<LittleEndian>(width)?;
-            payload.write_u32::<LittleEndian>(32)?;
-            if active > 1 {
-                payload.write_u32::<LittleEndian>(width * i)?;
-            } else {
-                payload.write_u32::<LittleEndian>(0)?;
-            }
-            payload.write_u32::<LittleEndian>(0)?;
         }
-
         info!(
             "main: agent monitors config: num_mon={}, flags={}",
-            active, flags
+            config.monitors.len(),
+            config.flags
         );
+
+        let mut payload = Vec::new();
+        config.write(&mut payload);
 
         self.send_agent_data_message(VD_AGENT_MONITORS_CONFIG, &payload)
             .await
@@ -1412,14 +1408,7 @@ impl MainChannel {
     /// `AGENT_TOKEN`s arrive. Returns `Ok(false)`, sending nothing, only
     /// when the queue is full, which means the agent has stopped reading.
     async fn send_agent_data_message(&mut self, ty: u32, payload: &[u8]) -> Result<bool> {
-        let mut agent = Vec::with_capacity(20 + payload.len());
-        agent.write_u32::<LittleEndian>(VD_AGENT_PROTOCOL)?;
-        agent.write_u32::<LittleEndian>(ty)?;
-        agent.write_u64::<LittleEndian>(0)?;
-        agent.write_u32::<LittleEndian>(payload.len() as u32)?;
-        agent.extend_from_slice(payload);
-
-        if !self.agent_queue.push(agent) {
+        if !self.agent_queue.push(agent_message(ty, payload)) {
             warn!(
                 "main: agent message type={} dropped: {} messages already waiting for tokens",
                 ty,
@@ -1515,33 +1504,39 @@ impl MainChannel {
                     );
                     return Ok(());
                 };
-                let Some((selection, body)) = split_clipboard_selection(payload, has_selection)
-                else {
-                    debug!(
-                        "main: agent clipboard message type={} too short ({} bytes)",
-                        agent_type,
-                        payload.len()
-                    );
-                    return Ok(());
+                // A message too short for its layout is malformed and
+                // skipped. That includes a request whose type is missing,
+                // which therefore gets no NONE answer.
+                let msg = match GuestClipboard::decode(agent_type, payload, has_selection) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        debug!(
+                            "main: agent clipboard message type={} malformed ({} bytes): {}",
+                            agent_type,
+                            payload.len(),
+                            e
+                        );
+                        return Ok(());
+                    }
                 };
-                self.handle_guest_clipboard(agent_type, selection, body)
-                    .await?;
+                self.handle_guest_clipboard(msg).await?;
             }
             VD_AGENT_ANNOUNCE_CAPABILITIES => {
                 self.guest_caps_received = true;
-                let has_selection = agent_caps_has(payload, VD_AGENT_CAP_CLIPBOARD_SELECTION);
+                // A body too short for even the request word announces
+                // nothing, so the guest has no selection header.
+                let caps = AnnounceCapabilities::decode(payload).ok();
+                let has_selection = caps
+                    .as_ref()
+                    .is_some_and(|c| c.has_capability(VD_AGENT_CAP_CLIPBOARD_SELECTION));
                 self.guest_clipboard_selection = Some(has_selection);
                 debug!(
                     "main: received agent capabilities from guest (clipboard selection: {})",
                     has_selection
                 );
-                if payload.len() >= 4 {
-                    let request =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    if request == 1 {
-                        self.agent_caps_announced = false;
-                        self.maybe_send_announce_capabilities().await?;
-                    }
+                if caps.is_some_and(|c| c.request == 1) {
+                    self.agent_caps_announced = false;
+                    self.maybe_send_announce_capabilities().await?;
                 }
             }
             VD_AGENT_REPLY => match parse_vd_agent_reply(payload) {
@@ -1590,20 +1585,16 @@ impl MainChannel {
         Ok(())
     }
 
-    /// Handle a guest clipboard message whose selection header has been
-    /// removed.
+    /// Handle a guest clipboard message.
     ///
     /// Only the CLIPBOARD selection is synced. A PRIMARY grab only means
     /// text was selected in the guest: requesting CLIPBOARD in reply gets
     /// an empty answer, and copying PRIMARY to the host would clobber the
     /// host clipboard on every selection. spice-gtk likewise forwards only
     /// CLIPBOARD to its legacy single-clipboard signals (`channel-main.c`).
-    async fn handle_guest_clipboard(
-        &mut self,
-        agent_type: u32,
-        selection: u8,
-        body: &[u8],
-    ) -> Result<()> {
+    async fn handle_guest_clipboard(&mut self, msg: GuestClipboard) -> Result<()> {
+        let agent_type = msg.agent_type();
+        let selection = msg.selection();
         if agent_type == VD_AGENT_CLIPBOARD_REQUEST {
             info!("main: VD_AGENT_CLIPBOARD_REQUEST received");
         }
@@ -1621,24 +1612,24 @@ impl MainChannel {
             return Ok(());
         }
 
-        match agent_type {
-            VD_AGENT_CLIPBOARD_GRAB => {
-                if clipboard_grab_offers(body, VD_AGENT_CLIPBOARD_UTF8_TEXT) {
+        match msg {
+            GuestClipboard::Grab(grab) => {
+                if grab.offers(VD_AGENT_CLIPBOARD_UTF8_TEXT) {
                     debug!("main: guest clipboard grab, requesting data");
                     self.send_clipboard_request().await?;
                 } else {
                     debug!("main: guest clipboard grab offers no UTF-8 text");
                 }
             }
-            VD_AGENT_CLIPBOARD => {
-                let Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, data)) = split_clipboard_type(body) else {
+            GuestClipboard::Data(clipboard) => {
+                if clipboard.clipboard_type != VD_AGENT_CLIPBOARD_UTF8_TEXT {
                     debug!("main: guest clipboard data is not UTF-8 text");
                     return Ok(());
-                };
-                if data.is_empty() {
+                }
+                if clipboard.data.is_empty() {
                     return Ok(());
                 }
-                let text = String::from_utf8_lossy(data).to_string();
+                let text = String::from_utf8_lossy(&clipboard.data).to_string();
                 // Log byte count only — clipboard content may contain
                 // passwords or sensitive data.
                 info!("main: clipboard from guest ({} bytes)", text.len());
@@ -1656,16 +1647,13 @@ impl MainChannel {
                 // munging during the host clipboard round trip.
                 self.last_clipboard_hash = Some(hash_clipboard(&text));
             }
-            VD_AGENT_CLIPBOARD_REQUEST => {
-                let text = match split_clipboard_type(body) {
-                    Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, _)) => {
-                        debug!("main: clipboard request from guest");
-                        self.read_host_clipboard_for_guest().await
-                    }
-                    _ => {
-                        debug!("main: guest requested a clipboard type other than UTF-8 text");
-                        None
-                    }
+            GuestClipboard::Request(request) => {
+                let text = if request.clipboard_type == VD_AGENT_CLIPBOARD_UTF8_TEXT {
+                    debug!("main: clipboard request from guest");
+                    self.read_host_clipboard_for_guest().await
+                } else {
+                    debug!("main: guest requested a clipboard type other than UTF-8 text");
+                    None
                 };
                 match text {
                     Some(text) => {
@@ -1681,7 +1669,7 @@ impl MainChannel {
                     }
                 }
             }
-            _ => {
+            GuestClipboard::Release(_) => {
                 debug!("main: clipboard release from guest");
             }
         }
@@ -1780,20 +1768,23 @@ impl MainChannel {
 
     /// A clipboard message body for the negotiated layout, or `None` (and
     /// nothing should be sent) before the guest's capabilities arrive.
-    fn clipboard_payload(&self, selection: u8, ty: u32, data: &[u8]) -> Option<Vec<u8>> {
+    fn clipboard_payload(&self, msg: &impl ClipboardWireType) -> Option<Vec<u8>> {
         let Some(has_selection) = self.guest_clipboard_selection else {
             debug!("main: clipboard message not sent: guest capabilities not yet received");
             return None;
         };
-        Some(build_clipboard_payload(has_selection, selection, ty, data))
+        let mut payload = Vec::new();
+        msg.write_with(&mut payload, has_selection);
+        Some(payload)
     }
 
+    /// ryll does not announce `VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL`, so a
+    /// grab carries no serial.
     async fn send_clipboard_grab(&mut self) -> Result<bool> {
-        let Some(payload) = self.clipboard_payload(
-            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-            VD_AGENT_CLIPBOARD_UTF8_TEXT,
-            &[],
-        ) else {
+        let Some(payload) = self.clipboard_payload(&ClipboardGrab {
+            selection: VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            types: vec![VD_AGENT_CLIPBOARD_UTF8_TEXT],
+        }) else {
             return Ok(false);
         };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD_GRAB, &payload)
@@ -1801,11 +1792,10 @@ impl MainChannel {
     }
 
     async fn send_clipboard_request(&mut self) -> Result<bool> {
-        let Some(payload) = self.clipboard_payload(
-            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-            VD_AGENT_CLIPBOARD_UTF8_TEXT,
-            &[],
-        ) else {
+        let Some(payload) = self.clipboard_payload(&ClipboardRequest {
+            selection: VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            clipboard_type: VD_AGENT_CLIPBOARD_UTF8_TEXT,
+        }) else {
             return Ok(false);
         };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD_REQUEST, &payload)
@@ -1813,11 +1803,11 @@ impl MainChannel {
     }
 
     async fn send_clipboard_data(&mut self, text: &str) -> Result<bool> {
-        let Some(payload) = self.clipboard_payload(
-            VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-            VD_AGENT_CLIPBOARD_UTF8_TEXT,
-            text.as_bytes(),
-        ) else {
+        let Some(payload) = self.clipboard_payload(&Clipboard {
+            selection: VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
+            clipboard_type: VD_AGENT_CLIPBOARD_UTF8_TEXT,
+            data: text.as_bytes().to_vec(),
+        }) else {
             return Ok(false);
         };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
@@ -1828,7 +1818,11 @@ impl MainChannel {
     /// of type NONE, which spice-vdagent turns into a failed selection
     /// request for the waiting application, or ignores if none is waiting.
     async fn send_clipboard_none(&mut self, selection: u8) -> Result<bool> {
-        let Some(payload) = self.clipboard_payload(selection, VD_AGENT_CLIPBOARD_NONE, &[]) else {
+        let Some(payload) = self.clipboard_payload(&Clipboard {
+            selection,
+            clipboard_type: VD_AGENT_CLIPBOARD_NONE,
+            data: Vec::new(),
+        }) else {
             return Ok(false);
         };
         self.send_agent_data_message(VD_AGENT_CLIPBOARD, &payload)
@@ -1868,15 +1862,15 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        agent_caps_has, agent_starved, build_clipboard_payload, clipboard_grab_offers,
+        agent_message, agent_monitors_config, agent_starved, client_agent_capabilities,
         hash_clipboard, parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
-        should_warn_agent_stalled, split_clipboard_selection, split_clipboard_type,
-        STUCK_AGENT_NOTIFY_INTERVAL, STUCK_AGENT_THRESHOLD, VD_AGENT_ANNOUNCE_CAPABILITIES,
-        VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
-        VD_AGENT_CLIPBOARD_NONE, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
+        should_warn_agent_stalled, GuestClipboard, STUCK_AGENT_NOTIFY_INTERVAL,
+        STUCK_AGENT_THRESHOLD, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
+        VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
         VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, VD_AGENT_CLIPBOARD_UTF8_TEXT,
-        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        VD_AGENT_MONITORS_CONFIG,
     };
+    use shakenfist_spice_protocol::messages::WireType;
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
     #[test]
@@ -1899,30 +1893,6 @@ mod tests {
             MOUSE_MODE_SERVER,
             MOUSE_MODE_SERVER
         ));
-    }
-
-    #[test]
-    fn vd_agent_constants_match_spice_protocol() {
-        // Values from spice-protocol/spice/vd_agent.h
-        // (VDAgentMessage type discriminants).
-        assert_eq!(VD_AGENT_MOUSE_STATE, 1);
-        assert_eq!(VD_AGENT_MONITORS_CONFIG, 2);
-        assert_eq!(VD_AGENT_REPLY, 3);
-        assert_eq!(VD_AGENT_CLIPBOARD, 4);
-        assert_eq!(VD_AGENT_DISPLAY_CONFIG, 5);
-        assert_eq!(VD_AGENT_ANNOUNCE_CAPABILITIES, 6);
-        assert_eq!(VD_AGENT_CLIPBOARD_GRAB, 7);
-        assert_eq!(VD_AGENT_CLIPBOARD_REQUEST, 8);
-        assert_eq!(VD_AGENT_CLIPBOARD_RELEASE, 9);
-
-        // Regression for PR 31: ANNOUNCE_CAPABILITIES used to be 1,
-        // which collided with VD_AGENT_MOUSE_STATE. The server would
-        // dispatch our capabilities announcement to its mouse-state
-        // handler.
-        assert_ne!(
-            VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_MOUSE_STATE,
-            "ANNOUNCE_CAPABILITIES (6) must not collide with MOUSE_STATE (1)"
-        );
     }
 
     #[test]
@@ -2021,114 +1991,100 @@ mod tests {
         assert!((sample - 86_400_000.0).abs() < 1.0, "sample was {}", sample);
     }
 
-    // Guest ANNOUNCE_CAPABILITIES body from test sessions 013-015:
-    // request=0, caps=0x00038de7 (bit 6, CLIPBOARD_SELECTION, set).
-    const GUEST_CAPS: [u8; 8] = [0, 0, 0, 0, 0xe7, 0x8d, 0x03, 0x00];
-
     #[test]
-    fn agent_caps_has_reads_the_bitmap_after_the_request_word() {
-        assert!(agent_caps_has(
-            &GUEST_CAPS,
-            VD_AGENT_CAP_CLIPBOARD_SELECTION
-        ));
-        // Bit 3 (CLIPBOARD, the pre-by-demand protocol) is clear.
-        assert!(!agent_caps_has(&GUEST_CAPS, 3));
-        // ryll's own caps, 0x67, also carry CLIPBOARD_SELECTION.
-        assert!(agent_caps_has(&[1, 0, 0, 0, 0x67, 0, 0, 0], 6));
-        // A bit in a word the agent did not send is clear, not a panic.
-        assert!(!agent_caps_has(&GUEST_CAPS, 40));
-        assert!(!agent_caps_has(&[0, 0], 0));
+    fn client_agent_capabilities_are_the_bytes_ryll_sends() {
+        // request=1, then one word: MOUSE_STATE, MONITORS_CONFIG, REPLY,
+        // CLIPBOARD_BY_DEMAND and CLIPBOARD_SELECTION (bits 0-2, 5, 6).
+        let mut payload = Vec::new();
+        client_agent_capabilities().write(&mut payload);
+        assert_eq!(payload, vec![1, 0, 0, 0, 0x67, 0, 0, 0]);
+    }
+
+    fn monitors_config_bytes(monitors: u8, width: u32, height: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        agent_monitors_config(monitors, width, height).write(&mut payload);
+        payload
+    }
+
+    // These bytes are what ryll sent before the protocol crate had a
+    // MONITORS_CONFIG writer; the writer was checked against that builder
+    // over these cases before it was removed.
+    #[test]
+    fn agent_monitors_config_is_the_bytes_ryll_sends() {
+        // No monitor count yet: one 1024x768x32 monitor, no flags.
+        #[rustfmt::skip]
+        let one = vec![
+            1, 0, 0, 0,  // num_of_monitors
+            0, 0, 0, 0,  // flags
+            0x00, 0x03, 0, 0,  // height 768
+            0x00, 0x04, 0, 0,  // width 1024
+            32, 0, 0, 0,  // depth
+            0, 0, 0, 0,  // x
+            0, 0, 0, 0,  // y
+        ];
+        assert_eq!(monitors_config_bytes(0, 1024, 768), one);
+        assert_eq!(monitors_config_bytes(1, 1024, 768), one);
+
+        // Two monitors side by side, with USE_POS.
+        #[rustfmt::skip]
+        let two = vec![
+            2, 0, 0, 0,
+            1, 0, 0, 0,
+            0x38, 0x04, 0, 0,  0x80, 0x07, 0, 0,  32, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
+            0x38, 0x04, 0, 0,  0x80, 0x07, 0, 0,  32, 0, 0, 0,  0x80, 0x07, 0, 0,  0, 0, 0, 0,
+        ];
+        assert_eq!(monitors_config_bytes(2, 1920, 1080), two);
+
+        // ryll computes positions as u32. One past i32::MAX keeps its bits
+        // in the int32 field rather than saturating.
+        #[rustfmt::skip]
+        let wide = vec![
+            2, 0, 0, 0,
+            1, 0, 0, 0,
+            1, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  32, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
+            1, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  32, 0, 0, 0,  0x00, 0x5e, 0xd0, 0xb2,  0, 0, 0, 0,
+        ];
+        assert_eq!(monitors_config_bytes(2, 3_000_000_000, 1), wide);
     }
 
     #[test]
-    fn guest_primary_grab_from_sessions_013_014_is_not_clipboard() {
-        // Wire bytes of the guest grab ryll answered with a CLIPBOARD
-        // request: selection=PRIMARY (1), types=[UTF8_TEXT].
-        let grab = [0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
-        let (selection, types) = split_clipboard_selection(&grab, true).unwrap();
-        assert_eq!(selection, 1);
-        assert_ne!(selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
-        assert!(clipboard_grab_offers(types, VD_AGENT_CLIPBOARD_UTF8_TEXT));
-    }
-
-    #[test]
-    fn split_clipboard_selection_reads_a_u8_and_skips_reserved_bytes() {
-        // Reserved bytes are not part of the selection, whatever they hold.
-        let msg = [0x00, 0xaa, 0xbb, 0xcc, 0x01, 0x00, 0x00, 0x00];
-        let (selection, body) = split_clipboard_selection(&msg, true).unwrap();
-        assert_eq!(selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
-        assert_eq!(body, &msg[4..]);
-        assert_eq!(split_clipboard_selection(&[0x00, 0x00, 0x00], true), None);
-    }
-
-    #[test]
-    fn split_clipboard_selection_without_the_cap_is_implicitly_clipboard() {
-        let msg = [0x01, 0x00, 0x00, 0x00];
+    fn agent_message_prefixes_the_vd_agent_header() {
         assert_eq!(
-            split_clipboard_selection(&msg, false),
-            Some((VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, &msg[..]))
+            agent_message(VD_AGENT_MONITORS_CONFIG, &[0xaa, 0xbb]),
+            vec![
+                1, 0, 0, 0, // protocol
+                2, 0, 0, 0, // type
+                0, 0, 0, 0, 0, 0, 0, 0, // opaque
+                2, 0, 0, 0, // size
+                0xaa, 0xbb,
+            ]
         );
     }
 
     #[test]
-    fn clipboard_grab_offers_finds_text_anywhere_in_the_type_list() {
-        // types = [IMAGE_PNG (2), UTF8_TEXT (1)]
-        let types = [0x02, 0, 0, 0, 0x01, 0, 0, 0];
-        assert!(clipboard_grab_offers(&types, VD_AGENT_CLIPBOARD_UTF8_TEXT));
-        assert!(!clipboard_grab_offers(
-            &types[..4],
-            VD_AGENT_CLIPBOARD_UTF8_TEXT
-        ));
-        // A trailing partial type is ignored rather than misread.
-        assert!(!clipboard_grab_offers(
-            &[0x01, 0, 0],
-            VD_AGENT_CLIPBOARD_UTF8_TEXT
-        ));
-    }
-
-    #[test]
-    fn split_clipboard_type_returns_type_and_data() {
-        let body = [0x01, 0, 0, 0, b'h', b'i'];
-        assert_eq!(
-            split_clipboard_type(&body),
-            Some((VD_AGENT_CLIPBOARD_UTF8_TEXT, &b"hi"[..]))
-        );
-        // The empty NONE reply the guest sends for a selection it does
-        // not own (sessions 013 and 014).
-        assert_eq!(
-            split_clipboard_type(&[0, 0, 0, 0]),
-            Some((VD_AGENT_CLIPBOARD_NONE, &[][..]))
-        );
-        assert_eq!(split_clipboard_type(&[0x01, 0]), None);
-    }
-
-    #[test]
-    fn build_clipboard_payload_matches_the_wire_layout() {
-        // The CLIPBOARD request ryll sent in sessions 013 and 014.
-        assert_eq!(
-            build_clipboard_payload(
-                true,
-                VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-                VD_AGENT_CLIPBOARD_UTF8_TEXT,
-                &[]
-            ),
-            vec![0, 0, 0, 0, 1, 0, 0, 0]
-        );
-        // A NONE answer for PRIMARY carries that selection back.
-        assert_eq!(
-            build_clipboard_payload(true, 1, VD_AGENT_CLIPBOARD_NONE, &[]),
-            vec![1, 0, 0, 0, 0, 0, 0, 0]
-        );
-        // Without the cap there is no selection header at all.
-        assert_eq!(
-            build_clipboard_payload(
-                false,
-                VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-                VD_AGENT_CLIPBOARD_UTF8_TEXT,
-                b"x"
-            ),
-            vec![1, 0, 0, 0, b'x']
-        );
+    fn guest_clipboard_dispatches_on_the_agent_type() {
+        // A PRIMARY grab offering UTF-8 text, as in sessions 013 and 014.
+        let body = [0x01, 0, 0, 0, 0x01, 0, 0, 0];
+        for ty in [
+            VD_AGENT_CLIPBOARD_GRAB,
+            VD_AGENT_CLIPBOARD,
+            VD_AGENT_CLIPBOARD_REQUEST,
+            VD_AGENT_CLIPBOARD_RELEASE,
+        ] {
+            let msg = GuestClipboard::decode(ty, &body, true).unwrap();
+            assert_eq!(msg.agent_type(), ty);
+            assert_eq!(msg.selection(), 1);
+        }
+        // Without the cap, the same bytes are a CLIPBOARD-selection grab of
+        // two types.
+        let GuestClipboard::Grab(grab) =
+            GuestClipboard::decode(VD_AGENT_CLIPBOARD_GRAB, &body, false).unwrap()
+        else {
+            panic!("a grab decodes as a grab");
+        };
+        assert_eq!(grab.selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
+        assert!(grab.offers(VD_AGENT_CLIPBOARD_UTF8_TEXT));
+        assert!(GuestClipboard::decode(VD_AGENT_CLIPBOARD, &body[..3], true).is_err());
     }
 
     #[test]
