@@ -10,7 +10,7 @@ needed to implement a SPICE client, server, or proxy in Rust:
 - **`messages`** — wire-format structs with `read`/`write`
   methods for every SPICE message type ryll knows about,
   including the input event types (`KeyEvent`,
-  `MousePosition`, `MouseButton`, `InputsKeyModifiers`).
+  `MousePosition`, `MouseButton`, `KeyModifiers`).
 - **`link`** — SPICE link handshake (`SpiceLinkMess`,
   `SpiceLinkReply`, `perform_link`, `perform_auth`, and
   `perform_link_with_caps` to advertise caller-chosen,

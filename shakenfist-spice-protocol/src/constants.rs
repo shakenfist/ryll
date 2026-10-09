@@ -499,6 +499,20 @@ pub mod keyboard_modifiers {
     pub const CAPS_LOCK: u16 = 1 << 2;
 }
 
+/// Mouse button ids (SPICE_MOUSE_BUTTON_* in enums.h:332-343): the
+/// `button` of `MOUSE_PRESS` and `MOUSE_RELEASE`. Not the masks in
+/// [`mouse_buttons`], which the `buttons_state` fields carry.
+pub mod mouse_button_id {
+    pub const INVALID: u8 = 0;
+    pub const LEFT: u8 = 1;
+    pub const MIDDLE: u8 = 2;
+    pub const RIGHT: u8 = 3;
+    pub const UP: u8 = 4;
+    pub const DOWN: u8 = 5;
+    pub const SIDE: u8 = 6;
+    pub const EXTRA: u8 = 7;
+}
+
 /// Mouse button flags
 pub mod mouse_buttons {
     pub const LEFT: u32 = 1 << 0;
@@ -595,6 +609,15 @@ pub mod cursor_type {
     pub const COLOR16: u8 = 4;
     pub const COLOR24: u8 = 5;
     pub const COLOR32: u8 = 6;
+}
+
+/// Cursor flags (SPICE_CURSOR_FLAGS_* in enums.h:369-375).
+pub mod cursor_flags {
+    /// There is no cursor shape; no `CursorHeader` follows.
+    pub const NONE: u16 = 1 << 0;
+    pub const CACHE_ME: u16 = 1 << 1;
+    pub const FROM_CACHE: u16 = 1 << 2;
+    pub const MASK: u16 = 0x7;
 }
 
 /// Guest agent (vdagent) protocol constants, from spice-protocol's
@@ -774,6 +797,19 @@ mod tests {
         assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_SELECTION, 6);
         assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL, 17);
         assert_eq!(vd_agent::VD_AGENT_CAP_MONITORS_PHYSICAL_SIZE, 18);
+    }
+
+    #[test]
+    fn cursor_and_mouse_values_match_enums_h() {
+        assert_eq!(cursor_type::ALPHA, 0);
+        assert_eq!(cursor_type::COLOR24, 5);
+        assert_eq!(cursor_type::COLOR32, 6);
+        assert_eq!(cursor_flags::NONE, 1);
+        assert_eq!(cursor_flags::CACHE_ME, 2);
+        assert_eq!(cursor_flags::FROM_CACHE, 4);
+        assert_eq!(mouse_button_id::LEFT, 1);
+        assert_eq!(mouse_button_id::RIGHT, 3);
+        assert_eq!(mouse_button_id::DOWN, 5);
     }
 
     #[test]

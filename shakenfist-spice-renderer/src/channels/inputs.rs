@@ -12,14 +12,15 @@ use crate::snapshots::{InputEventRecord, InputsSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
+use shakenfist_spice_protocol::constants::mouse_button_id;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, InputsKeyModifiers, KeyEvent, MouseButton, MouseMotion,
+    make_message, take_message, InputsInit, KeyEvent, KeyModifiers, MouseButton, MouseMotion,
     MousePosition, Notify as NotifyMessage, Ping, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
-    inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
+    inputs_client, inputs_server, keyboard_modifiers, mouse_buttons, ChannelType, NotifySeverity,
 };
 
 use super::{ChannelEvent, EventSink, InputEvent, MAX_MESSAGE_BODY};
@@ -469,13 +470,19 @@ impl InputsChannel {
 
         match msg_type {
             inputs_server::INIT => {
-                debug!("inputs: init received");
+                // Nothing acts on INIT, so a short body is no error.
+                match InputsInit::decode(payload) {
+                    Ok(init) => debug!(
+                        "inputs: init received: modifiers={:#x}",
+                        init.keyboard_modifiers
+                    ),
+                    Err(_) => debug!("inputs: init received"),
+                }
             }
 
             inputs_server::KEY_MODIFIERS => {
-                if payload.len() >= 2 {
-                    let modifiers = u16::from_le_bytes([payload[0], payload[1]]);
-
+                // A short KEY_MODIFIERS is ignored.
+                if let Ok(KeyModifiers { modifiers }) = KeyModifiers::decode(payload) {
                     if self.log_config.verbose {
                         logging::log_detail(&format!("modifiers={:#x}", modifiers));
                     } else {
@@ -596,7 +603,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent { scancode }.write(&mut payload)?;
+                KeyEvent { scancode }.write(&mut payload);
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
                 debug!("inputs: key down: scancode={:#x}", scancode);
@@ -621,7 +628,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent { scancode }.write(&mut payload)?;
+                KeyEvent { scancode }.write(&mut payload);
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
                 debug!("inputs: key up: scancode={:#x}", scancode);
@@ -651,10 +658,10 @@ impl InputsChannel {
                     MousePosition {
                         x,
                         y,
-                        buttons: self.button_state as u16,
+                        buttons_state: self.button_state as u16,
                         display_id: 0,
                     }
-                    .write(&mut payload)?;
+                    .write(&mut payload);
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
@@ -680,9 +687,9 @@ impl InputsChannel {
                     MouseMotion {
                         dx,
                         dy,
-                        buttons: self.button_state as u16,
+                        buttons_state: self.button_state as u16,
                     }
-                    .write(&mut payload)?;
+                    .write(&mut payload);
                     let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
@@ -705,10 +712,10 @@ impl InputsChannel {
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state as u16,
+                    buttons_state: self.button_state as u16,
                     display_id: 0,
                 }
-                .write(&mut pos_payload)?;
+                .write(&mut pos_payload);
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -726,10 +733,10 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button as u8,
+                    button: button_id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
-                .write(&mut payload)?;
+                .write(&mut payload);
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
                 info!(
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
@@ -750,10 +757,10 @@ impl InputsChannel {
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state as u16,
+                    buttons_state: self.button_state as u16,
                     display_id: 0,
                 }
-                .write(&mut pos_payload)?;
+                .write(&mut pos_payload);
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -769,10 +776,10 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button as u8,
+                    button: button_id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
-                .write(&mut payload)?;
+                .write(&mut payload);
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
                 debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
                 self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
@@ -949,7 +956,7 @@ impl InputsChannel {
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
         let mut payload = Vec::new();
-        InputsKeyModifiers { modifiers }.write(&mut payload)?;
+        KeyModifiers { modifiers }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
         self.send_with_log(inputs_client::KEY_MODIFIERS, &msg)
             .await?;
@@ -1006,7 +1013,7 @@ impl InputsChannel {
     /// Send a raw key-down without event recording or modifier tracking.
     async fn send_key_down(&mut self, scancode: u32) -> Result<()> {
         let mut payload = Vec::new();
-        KeyEvent { scancode }.write(&mut payload)?;
+        KeyEvent { scancode }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_DOWN, &payload);
         self.send_with_log(inputs_client::KEY_DOWN, &msg).await
     }
@@ -1014,7 +1021,7 @@ impl InputsChannel {
     /// Send a raw key-up without event recording or modifier tracking.
     async fn send_key_up(&mut self, scancode: u32) -> Result<()> {
         let mut payload = Vec::new();
-        KeyEvent { scancode }.write(&mut payload)?;
+        KeyEvent { scancode }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_UP, &payload);
         self.send_with_log(inputs_client::KEY_UP, &msg).await
     }
@@ -1527,6 +1534,24 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
     }
 
     Ok(keys)
+}
+
+/// The `mouse_button_id` a press or release names, from the
+/// `mouse_buttons` mask ryll's input events carry. spice.proto gives
+/// `MOUSE_PRESS` and `MOUSE_RELEASE` a button *id* (LEFT = 1) beside the
+/// buttons *mask* (LEFT = 1 << 0).
+///
+/// Only the mask's low byte is looked at, and a mask that is not exactly
+/// one of the five buttons ryll sends maps to `INVALID`, as it always has.
+fn button_id_for_mask(mask: u32) -> u8 {
+    match u32::from(mask as u8) {
+        mouse_buttons::LEFT => mouse_button_id::LEFT,
+        mouse_buttons::MIDDLE => mouse_button_id::MIDDLE,
+        mouse_buttons::RIGHT => mouse_button_id::RIGHT,
+        mouse_buttons::UP => mouse_button_id::UP,
+        mouse_buttons::DOWN => mouse_button_id::DOWN,
+        _ => mouse_button_id::INVALID,
+    }
 }
 
 #[cfg(test)]
@@ -2334,6 +2359,70 @@ mod tests {
                 1,
                 "Character '{}' should produce exactly one PasteKey",
                 c
+            );
+        }
+    }
+
+    /// The bytes ryll sends for each input message, built the way the
+    /// channel builds them. These are the bytes the old `io::Result`
+    /// writers produced, and moving `MouseButton`'s mask-to-id mapping
+    /// into this file must not change them.
+    #[test]
+    fn sent_input_payloads_are_unchanged() {
+        use super::button_id_for_mask;
+        use shakenfist_spice_protocol::messages::{
+            KeyEvent, KeyModifiers, MouseButton, MouseMotion, MousePosition, WireType,
+        };
+        fn bytes(value: &impl WireType) -> Vec<u8> {
+            let mut out = Vec::new();
+            value.write(&mut out);
+            out
+        }
+
+        assert_eq!(bytes(&KeyEvent { scancode: 0xe048 }), [0x48, 0xe0, 0, 0]);
+        assert_eq!(bytes(&KeyModifiers { modifiers: 0x0005 }), [5, 0]);
+
+        // The channel's button state is a u32 truncated to the wire's u16.
+        let button_state: u32 = 0x0001_01ff;
+        assert_eq!(
+            bytes(&MousePosition {
+                x: 0x0102_0304,
+                y: 0x0a0b_0c0d,
+                buttons_state: button_state as u16,
+                display_id: 0,
+            }),
+            [4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a, 0xff, 0x01, 0]
+        );
+        assert_eq!(
+            bytes(&MouseMotion {
+                dx: -2,
+                dy: 3,
+                buttons_state: button_state as u16,
+            }),
+            [0xfe, 0xff, 0xff, 0xff, 3, 0, 0, 0, 0xff, 0x01]
+        );
+        for (mask, id) in [
+            (0x01u32, 1u8),
+            (0x02, 2),
+            (0x04, 3),
+            (0x08, 4),
+            (0x10, 5),
+            (0x20, 0),
+            (0x40, 0),
+            (0x00, 0),
+            (0x03, 0),
+            (0x101, 1),
+            (0x104, 3),
+            (0x200, 0),
+        ] {
+            assert_eq!(
+                bytes(&MouseButton {
+                    button: button_id_for_mask(mask),
+                    buttons_state: button_state as u16,
+                }),
+                [id, 0xff, 0x01],
+                "mask {:#x}",
+                mask
             );
         }
     }
