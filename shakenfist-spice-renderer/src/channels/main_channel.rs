@@ -1,5 +1,5 @@
 /// Main channel handler - session management, ping/pong, channel list
-use anyhow::Result;
+use anyhow::{Context, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,8 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, ChannelsList, MainInit, Notify, Ping, SetAck,
+    make_message, take_message, AgentDisconnected, AgentTokens, ChannelsList, Disconnecting,
+    MainInit, MainMouseMode, MouseModeRequest, MultiMediaTime, Notify, Ping, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
     main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
@@ -26,21 +27,6 @@ use shakenfist_spice_protocol::{
 
 use super::agent_queue::AgentSendQueue;
 use super::{ChannelEvent, EventSink, MAX_MESSAGE_BODY};
-
-/// Parse a SpiceMsgMainMouseMode payload. The SPICE wire format
-/// is two little-endian `uint16`s — `supported_modes` followed by
-/// `current_mode`. (Historical misreads of this as a single `u32`
-/// produce nonsense values like 131075 when current_mode=2 and
-/// supported_modes=3.) Returns `None` if the payload is shorter
-/// than 4 bytes.
-pub(crate) fn parse_mouse_mode_payload(payload: &[u8]) -> Option<(u16, u16)> {
-    if payload.len() < 4 {
-        return None;
-    }
-    let supported = u16::from_le_bytes([payload[0], payload[1]]);
-    let current = u16::from_le_bytes([payload[2], payload[3]]);
-    Some((supported, current))
-}
 
 /// True when the server supports CLIENT (absolute) mouse mode but
 /// is currently in a different mode. Used to decide whether to
@@ -83,29 +69,6 @@ fn hash_clipboard(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
     normalize_clipboard(text).hash(&mut h);
     h.finish()
-}
-
-/// Build the body of a `SPICE_MSGC_MAIN_MOUSE_MODE_REQUEST`.
-///
-/// `spice.proto` declares `mouse_mode` as `flags16`, so the body
-/// is a single little-endian `u16`. Writing `u32` here ships two
-/// extra zero bytes, which some servers tolerate and others
-/// reject as malformed — matching the read side at
-/// `parse_mouse_mode_payload` which is already u16-aware.
-fn build_mouse_mode_request_payload(mode: u32) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(2);
-    // Vec writes never fail; unwrap is safe.
-    payload
-        .write_u16::<LittleEndian>(mode as u16)
-        .expect("Vec write should not fail");
-    payload
-}
-
-/// Parse a SpiceMsgMainAgentConnectedTokens payload: one little-endian
-/// `uint32` giving the client's new agent token window.
-fn parse_agent_connected_tokens(payload: &[u8]) -> Option<u32> {
-    let bytes: [u8; 4] = payload.get(..4)?.try_into().ok()?;
-    Some(u32::from_le_bytes(bytes))
 }
 
 /// Decode the body of a `VD_AGENT_REPLY`.
@@ -791,7 +754,7 @@ impl MainChannel {
 
         match msg_type {
             main_server::INIT => {
-                let init = MainInit::read(payload)?;
+                let init = MainInit::decode(payload).context("malformed main INIT")?;
                 info!("main: session initialized: id={}", init.session_id);
 
                 // Seed the shared mm_time clock from the server's initial
@@ -872,8 +835,13 @@ impl MainChannel {
                 // Wire format is two u16s: supported_modes then
                 // current_mode. Parsing it as a u32 produces garbage
                 // like 131075 (=0x00020003 when supported=3 and
-                // current=2) which then fails every mode check.
-                if let Some((supported, current)) = parse_mouse_mode_payload(payload) {
+                // current=2) which then fails every mode check. A short
+                // payload is warned about and skipped.
+                if let Ok(MainMouseMode {
+                    supported_modes: supported,
+                    current_mode: current,
+                }) = MainMouseMode::decode(payload)
+                {
                     let mode_name = match current {
                         1 => "server (relative)",
                         2 => "client (absolute)",
@@ -911,9 +879,7 @@ impl MainChannel {
                 // `last_frame_delay`. Updating the shared
                 // `MmClock` here also makes the value visible in
                 // `MainSnapshot::mm_time_*` for bug reports.
-                if payload.len() >= 4 {
-                    let mm_time =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+                if let Ok(MultiMediaTime { time: mm_time }) = MultiMediaTime::decode(payload) {
                     debug!("main: multi_media_time={}", mm_time);
                     self.mm_clock
                         .set(mm_time, self.traffic.elapsed().as_secs_f64());
@@ -926,7 +892,7 @@ impl MainChannel {
             }
 
             main_server::CHANNELS_LIST => {
-                let list = ChannelsList::read(payload)?;
+                let list = ChannelsList::decode(payload).context("malformed CHANNELS_LIST")?;
                 info!(
                     "main: received channel list: {} channels",
                     list.channels.len()
@@ -969,7 +935,7 @@ impl MainChannel {
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                let ping = Ping::read(payload)?;
+                let ping = Ping::decode(payload).context("malformed PING")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -980,7 +946,7 @@ impl MainChannel {
 
                 // Send pong response
                 let mut pong_payload = Vec::new();
-                ping.write_pong(&mut pong_payload)?;
+                ping.pong().write(&mut pong_payload);
                 let response = make_message(main_client::PONG, &pong_payload);
 
                 self.send_with_log(main_client::PONG, &response).await?;
@@ -1000,7 +966,7 @@ impl MainChannel {
             }
 
             main_server::SET_ACK => {
-                let set_ack = SetAck::read(payload)?;
+                let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -1011,45 +977,58 @@ impl MainChannel {
 
                 // Send ack_sync response
                 let mut ack_payload = Vec::new();
-                SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                set_ack.ack_sync().write(&mut ack_payload);
                 let response = make_message(main_client::ACK_SYNC, &ack_payload);
 
                 self.send_with_log(main_client::ACK_SYNC, &response).await?;
             }
 
             main_server::NOTIFY => {
-                let notify = Notify::read(payload)?;
+                let notify = Notify::decode(payload).context("malformed NOTIFY")?;
+                let severity = notify.severity_kind();
+                let message = notify.message_text().into_owned();
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                        notify.severity, notify.visibility, notify.what, notify.message,
+                        severity,
+                        notify.visibility_kind(),
+                        notify.what,
+                        message,
                     ));
                 }
-                match notify.severity {
+                match severity {
                     NotifySeverity::Error => {
-                        warn!("main: server notify (error): {}", notify.message)
+                        warn!("main: server notify (error): {}", message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("main: server notify (warn): {}", notify.message)
+                        warn!("main: server notify (warn): {}", message)
                     }
-                    NotifySeverity::Info => info!("main: server notify: {}", notify.message),
+                    NotifySeverity::Info => info!("main: server notify: {}", message),
                 }
                 let mut entry = NotificationEntry::new(
-                    notify.severity,
+                    severity,
                     NotificationSource::Spice {
                         channel: ChannelType::Main,
                         what: notify.what,
                     },
-                    notify.message.clone(),
+                    message,
                 );
-                if let Some(v) = notify.visibility {
+                if let Some(v) = notify.visibility_kind() {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
             }
 
             main_server::DISCONNECTING => {
-                info!("main: server sent disconnect notification");
+                // The reason is only logged, so a short body is no reason
+                // to skip the announcement.
+                match Disconnecting::decode(payload) {
+                    Ok(msg) => info!(
+                        "main: server sent disconnect notification (reason={})",
+                        msg.reason
+                    ),
+                    Err(_) => info!("main: server sent disconnect notification"),
+                }
                 // Deliberately `emit`, not `emit_session_ended`: this is
                 // only an announcement, and the read loop carries on, so
                 // blocking here on a stalled UI would stop main answering
@@ -1077,12 +1056,12 @@ impl MainChannel {
             // spice-gtk, tokens are not zeroed on AGENT_DISCONNECTED: the
             // server still expects the tail of a part-sent message.
             main_server::AGENT_CONNECTED_TOKENS => {
-                match parse_agent_connected_tokens(payload) {
-                    Some(tokens) => {
+                match AgentTokens::decode(payload) {
+                    Ok(AgentTokens { num_tokens: tokens }) => {
                         info!("main: vdagent connected with {} agent tokens", tokens);
                         self.agent_tokens = tokens;
                     }
-                    None => warn!(
+                    Err(_) => warn!(
                         "main: short AGENT_CONNECTED_TOKENS payload ({} bytes), \
                          keeping {} agent tokens",
                         payload.len(),
@@ -1096,7 +1075,12 @@ impl MainChannel {
             }
 
             main_server::AGENT_DISCONNECTED => {
-                info!("main: vdagent disconnected");
+                // The error code is only logged; a short body still means
+                // the agent has gone.
+                match AgentDisconnected::decode(payload) {
+                    Ok(msg) => info!("main: vdagent disconnected (error_code={})", msg.error_code),
+                    Err(_) => info!("main: vdagent disconnected"),
+                }
                 self.agent_connected = false;
                 self.publish_agent_connected();
                 self.agent_caps_announced = false;
@@ -1137,13 +1121,20 @@ impl MainChannel {
             }
 
             main_server::AGENT_TOKEN => {
-                if payload.len() >= 4 {
-                    let tokens =
-                        u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                    self.agent_tokens = self.agent_tokens.saturating_add(tokens);
-                } else {
-                    self.agent_tokens = self.agent_tokens.saturating_add(1);
-                    warn!("main: short AGENT_TOKEN payload ({} bytes)", payload.len());
+                match AgentTokens::decode(payload) {
+                    Ok(AgentTokens { num_tokens: tokens }) => {
+                        self.agent_tokens = self.agent_tokens.saturating_add(tokens);
+                    }
+                    // A short AGENT_TOKEN counts as one token. The quirk
+                    // predates the protocol crate's AgentTokens, and was
+                    // kept when the parse moved there so that the move
+                    // changed no behaviour (andris
+                    // PLAN-x11-desktop-phase-02-wire-types.md, survey
+                    // finding 3).
+                    Err(_) => {
+                        self.agent_tokens = self.agent_tokens.saturating_add(1);
+                        warn!("main: short AGENT_TOKEN payload ({} bytes)", payload.len());
+                    }
                 }
 
                 self.flush_agent_queue().await?;
@@ -1290,7 +1281,11 @@ impl MainChannel {
             return Ok(());
         }
         info!("main: requesting client mouse mode");
-        let mode_payload = build_mouse_mode_request_payload(MOUSE_MODE_CLIENT);
+        let mut mode_payload = Vec::with_capacity(MouseModeRequest::SIZE);
+        MouseModeRequest {
+            mode: MOUSE_MODE_CLIENT as u16,
+        }
+        .write(&mut mode_payload);
         let msg = make_message(main_client::MOUSE_MODE_REQUEST, &mode_payload);
         self.send_with_log(main_client::MOUSE_MODE_REQUEST, &msg)
             .await?;
@@ -1304,8 +1299,11 @@ impl MainChannel {
     }
 
     async fn send_agent_start(&mut self) -> Result<()> {
-        let mut payload = Vec::with_capacity(4);
-        payload.write_u32::<LittleEndian>(u32::MAX)?;
+        let mut payload = Vec::with_capacity(AgentTokens::SIZE);
+        AgentTokens {
+            num_tokens: u32::MAX,
+        }
+        .write(&mut payload);
         let msg = make_message(main_client::AGENT_START, &payload);
         self.send_with_log(main_client::AGENT_START, &msg).await
     }
@@ -1870,63 +1868,16 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        agent_caps_has, agent_starved, build_clipboard_payload, build_mouse_mode_request_payload,
-        clipboard_grab_offers, hash_clipboard, parse_agent_connected_tokens,
-        parse_mouse_mode_payload, parse_vd_agent_reply, ping_interval_ms,
-        should_request_client_mouse_mode, should_warn_agent_stalled, split_clipboard_selection,
-        split_clipboard_type, STUCK_AGENT_NOTIFY_INTERVAL, STUCK_AGENT_THRESHOLD,
-        VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CLIPBOARD,
-        VD_AGENT_CLIPBOARD_GRAB, VD_AGENT_CLIPBOARD_NONE, VD_AGENT_CLIPBOARD_RELEASE,
-        VD_AGENT_CLIPBOARD_REQUEST, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,
-        VD_AGENT_CLIPBOARD_UTF8_TEXT, VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG,
-        VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
+        agent_caps_has, agent_starved, build_clipboard_payload, clipboard_grab_offers,
+        hash_clipboard, parse_vd_agent_reply, ping_interval_ms, should_request_client_mouse_mode,
+        should_warn_agent_stalled, split_clipboard_selection, split_clipboard_type,
+        STUCK_AGENT_NOTIFY_INTERVAL, STUCK_AGENT_THRESHOLD, VD_AGENT_ANNOUNCE_CAPABILITIES,
+        VD_AGENT_CAP_CLIPBOARD_SELECTION, VD_AGENT_CLIPBOARD, VD_AGENT_CLIPBOARD_GRAB,
+        VD_AGENT_CLIPBOARD_NONE, VD_AGENT_CLIPBOARD_RELEASE, VD_AGENT_CLIPBOARD_REQUEST,
+        VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD, VD_AGENT_CLIPBOARD_UTF8_TEXT,
+        VD_AGENT_DISPLAY_CONFIG, VD_AGENT_MONITORS_CONFIG, VD_AGENT_MOUSE_STATE, VD_AGENT_REPLY,
     };
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
-
-    // Payload bytes observed in the 2026-04-23 macbook bug-report
-    // main.pcap. Parsing these as a single little-endian u32 yields
-    // 131075 / 65537 / 65539 — which failed every mode check in the
-    // GUI and left clicks broken after a guest reboot.
-    #[test]
-    fn parse_mouse_mode_splits_supported_and_current() {
-        // supported=3 (both), current=2 (CLIENT) — initial negotiation.
-        assert_eq!(
-            parse_mouse_mode_payload(&[0x03, 0x00, 0x02, 0x00]),
-            Some((3, 2))
-        );
-        // supported=1 (server only), current=1 (SERVER) — right after
-        // guest reboot, agent gone.
-        assert_eq!(
-            parse_mouse_mode_payload(&[0x01, 0x00, 0x01, 0x00]),
-            Some((1, 1))
-        );
-        // supported=3 (both), current=1 (SERVER) — agent back but
-        // server still in SERVER mode; this is the case that must
-        // trigger a CLIENT re-request.
-        assert_eq!(
-            parse_mouse_mode_payload(&[0x03, 0x00, 0x01, 0x00]),
-            Some((3, 1))
-        );
-    }
-
-    // SpiceMsgMainAgentConnectedTokens carries spice-server's
-    // REDS_AGENT_WINDOW_SIZE (10) as a little-endian u32.
-    #[test]
-    fn parse_agent_connected_tokens_reads_window() {
-        assert_eq!(parse_agent_connected_tokens(&[0x0a, 0, 0, 0]), Some(10));
-        assert_eq!(
-            parse_agent_connected_tokens(&[0x0a, 0, 0, 0, 0xff]),
-            Some(10)
-        );
-        assert_eq!(parse_agent_connected_tokens(&[0x0a, 0, 0]), None);
-        assert_eq!(parse_agent_connected_tokens(&[]), None);
-    }
-
-    #[test]
-    fn parse_mouse_mode_rejects_short_payload() {
-        assert_eq!(parse_mouse_mode_payload(&[]), None);
-        assert_eq!(parse_mouse_mode_payload(&[0x03, 0x00, 0x01]), None);
-    }
 
     #[test]
     fn should_request_client_when_server_supports_it_but_is_in_server_mode() {
@@ -1971,28 +1922,6 @@ mod tests {
         assert_ne!(
             VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_MOUSE_STATE,
             "ANNOUNCE_CAPABILITIES (6) must not collide with MOUSE_STATE (1)"
-        );
-    }
-
-    #[test]
-    fn mouse_mode_request_payload_is_two_bytes_for_client() {
-        // Regression for PR 31 blocking #3: the body is flags16 (one
-        // little-endian u16), not u32. Writing u32 here shipped two
-        // extra zero bytes that some servers reject as malformed.
-        assert_eq!(
-            build_mouse_mode_request_payload(MOUSE_MODE_CLIENT),
-            vec![0x02, 0x00],
-        );
-    }
-
-    #[test]
-    fn mouse_mode_request_payload_is_two_bytes_for_server() {
-        // Same shape regardless of which mode we ask for —
-        // belt-and-braces against a future "let's also encode
-        // supported_modes" temptation that would re-widen the body.
-        assert_eq!(
-            build_mouse_mode_request_payload(MOUSE_MODE_SERVER),
-            vec![0x01, 0x00],
         );
     }
 

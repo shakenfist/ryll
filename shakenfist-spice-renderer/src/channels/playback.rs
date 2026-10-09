@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard, PoisonError, TryLockError};
@@ -14,7 +14,7 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck,
+    make_message, take_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
     main_client, playback_server, warn_once, ChannelType, NotifySeverity,
@@ -1041,13 +1041,13 @@ impl PlaybackChannel {
 
             match msg_type {
                 playback_server::SET_ACK => {
-                    let set_ack = SetAck::read(payload)?;
+                    let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
                     self.ack_generation = set_ack.generation;
                     self.ack_window = set_ack.window;
                     self.message_count = 0;
                     self.last_ack = 0;
                     let mut ack_payload = Vec::new();
-                    SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                    set_ack.ack_sync().write(&mut ack_payload);
                     let response = make_message(main_client::ACK_SYNC, &ack_payload);
                     self.send_with_log(main_client::ACK_SYNC, &response).await?;
                 }
@@ -1055,41 +1055,46 @@ impl PlaybackChannel {
                     self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                     self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                    let ping = Ping::read(payload)?;
+                    let ping = Ping::decode(payload).context("malformed PING")?;
                     let mut pong_payload = Vec::new();
-                    ping.write_pong(&mut pong_payload)?;
+                    ping.pong().write(&mut pong_payload);
                     let response = make_message(main_client::PONG, &pong_payload);
                     self.send_with_log(main_client::PONG, &response).await?;
                     self.pong_send_count = self.pong_send_count.saturating_add(1);
                 }
                 playback_server::NOTIFY => {
-                    let notify = NotifyMessage::read(payload)?;
+                    let notify = NotifyMessage::decode(payload).context("malformed NOTIFY")?;
+                    let severity = notify.severity_kind();
+                    let message = notify.message_text().into_owned();
                     if self.log_config.verbose {
                         logging::log_detail(&format!(
                             "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                            notify.severity, notify.visibility, notify.what, notify.message,
+                            severity,
+                            notify.visibility_kind(),
+                            notify.what,
+                            message,
                         ));
                     }
-                    match notify.severity {
+                    match severity {
                         NotifySeverity::Error => {
-                            warn!("playback: server notify (error): {}", notify.message)
+                            warn!("playback: server notify (error): {}", message)
                         }
                         NotifySeverity::Warn => {
-                            warn!("playback: server notify (warn): {}", notify.message)
+                            warn!("playback: server notify (warn): {}", message)
                         }
                         NotifySeverity::Info => {
-                            info!("playback: server notify: {}", notify.message)
+                            info!("playback: server notify: {}", message)
                         }
                     }
                     let mut entry = NotificationEntry::new(
-                        notify.severity,
+                        severity,
                         NotificationSource::Spice {
                             channel: ChannelType::Playback,
                             what: notify.what,
                         },
-                        notify.message.clone(),
+                        message,
                     );
-                    if let Some(v) = notify.visibility {
+                    if let Some(v) = notify.visibility_kind() {
                         entry = entry.with_visibility(v);
                     }
                     self.events.emit(ChannelEvent::Notification(entry)).await;

@@ -1,5 +1,5 @@
 /// Display channel handler - surfaces, image rendering
-use anyhow::Result;
+use anyhow::{Context, Result};
 use flate2::read::ZlibDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
@@ -25,7 +25,7 @@ use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, take_message, DisplayInit, DrawBase, ImageDescriptor, Notify as NotifyMessage,
     Ping, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
-    SpiceTransparent, SurfaceCreate,
+    SpiceTransparent, SurfaceCreate, WireType,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::{
@@ -1359,7 +1359,7 @@ impl DisplayChannel {
             }
 
             display_server::SET_ACK => {
-                let set_ack = SetAck::read(payload)?;
+                let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -1373,7 +1373,7 @@ impl DisplayChannel {
 
                 // Send ack_sync response
                 let mut ack_payload = Vec::new();
-                SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                set_ack.ack_sync().write(&mut ack_payload);
                 let response = make_message(display_client::ACK_SYNC, &ack_payload);
                 self.send_with_log(display_client::ACK_SYNC, &response)
                     .await?;
@@ -1383,7 +1383,7 @@ impl DisplayChannel {
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                let ping = Ping::read(payload)?;
+                let ping = Ping::decode(payload).context("malformed PING")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -1393,40 +1393,45 @@ impl DisplayChannel {
                 }
 
                 let mut pong_payload = Vec::new();
-                ping.write_pong(&mut pong_payload)?;
+                ping.pong().write(&mut pong_payload);
                 let response = make_message(display_client::PONG, &pong_payload);
                 self.send_with_log(display_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 
             display_server::NOTIFY => {
-                let notify = NotifyMessage::read(payload)?;
+                let notify = NotifyMessage::decode(payload).context("malformed NOTIFY")?;
+                let severity = notify.severity_kind();
+                let message = notify.message_text().into_owned();
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                        notify.severity, notify.visibility, notify.what, notify.message,
+                        severity,
+                        notify.visibility_kind(),
+                        notify.what,
+                        message,
                     ));
                 }
-                match notify.severity {
+                match severity {
                     NotifySeverity::Error => {
-                        warn!("display: server notify (error): {}", notify.message)
+                        warn!("display: server notify (error): {}", message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("display: server notify (warn): {}", notify.message)
+                        warn!("display: server notify (warn): {}", message)
                     }
                     NotifySeverity::Info => {
-                        info!("display: server notify: {}", notify.message)
+                        info!("display: server notify: {}", message)
                     }
                 }
                 let mut entry = NotificationEntry::new(
-                    notify.severity,
+                    severity,
                     NotificationSource::Spice {
                         channel: ChannelType::Display,
                         what: notify.what,
                     },
-                    notify.message.clone(),
+                    message,
                 );
-                if let Some(v) = notify.visibility {
+                if let Some(v) = notify.visibility_kind() {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
