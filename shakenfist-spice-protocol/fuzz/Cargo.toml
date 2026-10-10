@@ -65,3 +65,17 @@ path = "fuzz_targets/fuzz_parse_connect_response.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_server_bound"
+path = "fuzz_targets/fuzz_server_bound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_client_bound"
+path = "fuzz_targets/fuzz_client_bound.rs"
+test = false
+doc = false
+bench = false
