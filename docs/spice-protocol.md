@@ -269,8 +269,13 @@ Currently supported codec types:
   that omit the Huffman tables after the first. The backend selection is
   described below.
 - `3` (H.264): decoded via `H264VideoDecoder` using the openh264 software
-  decoder; H.264 is typically more bandwidth-efficient than MJPEG for
-  sustained video playback.
+  decoder. H.264 is typically more bandwidth-efficient than MJPEG for
+  sustained video playback, but H.264 from spice-server's GStreamer
+  encoder does not decode yet
+  ([#398](https://github.com/shakenfist/ryll/issues/398)), so ryll
+  currently neither advertises `CODEC_H264` nor lists H.264 in its
+  codec preference, and the server never streams it H.264. The decoder
+  is kept for when that is fixed.
 
 **JPEG decoder selection** (used by `MJpegVideoDecoder`) runs once per
 display channel at startup and selects the fastest available backend:
@@ -462,7 +467,7 @@ important:
 | PREF_COMPRESSION | 6 | Client preference messaging for image compression algorithm |
 | MULTI_CODEC | 8 | Multiple video codec support in streaming |
 | CODEC_MJPEG | 9 | MJPEG video codec for streaming |
-| CODEC_H264 | 11 | H.264 video codec for streaming |
+| CODEC_H264 | 11 | H.264 video codec for streaming. Not currently advertised: see [#398](https://github.com/shakenfist/ryll/issues/398) |
 | PREF_VIDEO_CODEC_TYPE | 12 | Client preference messaging for video codec selection |
 
 Without **COMPOSITE**, the guest QXL driver falls back to a slow
