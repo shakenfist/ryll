@@ -1,13 +1,14 @@
 //! Surface mirror: applies SPICE display [`ChannelEvent`]s to a
 //! [`HashMap`] of [`DisplaySurface`].
 //!
-//! The mirror is the substrate the `--web` mode's `RealFrameSource`
-//! reads from. The dispatch in [`SurfaceMirror::apply_event`]
-//! mirrors the display-bearing arms of
-//! `ryll/src/app.rs::process_events` so the web-side pixel store
-//! stays in lock-step with what the GUI would draw. Cursor and
+//! [`SurfaceMirror::apply_event`] is the single draw-op dispatch
+//! every mode uses: the GUI, the headless control socket, and the
+//! `--web` mode's `RealFrameSource` all feed display events through
+//! it, so the three cannot drift apart. It reports what it did as a
+//! [`DrawOutcome`] so a frontend can layer its own reactions (auto-fit
+//! resizes, texture invalidation, frame counters) on top. Cursor and
 //! audio events are deliberately not handled here — those have
-//! separate observers in web mode (cursor relay, audio sink).
+//! separate observers (cursor relay, audio sink).
 //!
 //! The mirror lives in the renderer crate (rather than `ryll/`)
 //! because [`crate::encoder::RealFrameSource`] reads from it and
@@ -16,8 +17,42 @@
 
 use std::collections::HashMap;
 
+use tracing::{debug, info};
+
 use crate::channels::ChannelEvent;
 use crate::display::DisplaySurface;
+
+/// What [`SurfaceMirror::apply_event`] did with one event.
+///
+/// `key` is `(display_channel_id, surface_id)`. Sizes are the ones
+/// the server asked for, before [`DisplaySurface::new`] clamps them,
+/// so a frontend can tell an oversized request from a real one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawOutcome {
+    /// The event is not a display draw op; the mirror ignored it.
+    NotDisplay,
+    /// `SurfaceCreated` inserted a surface, replacing any surface
+    /// already at `key`.
+    Created {
+        key: (u8, u32),
+        width: u32,
+        height: u32,
+    },
+    /// `ImageReady` targeted an unknown surface, so one was created
+    /// big enough to hold the draw and then drawn into.
+    AutoCreated {
+        key: (u8, u32),
+        width: u32,
+        height: u32,
+    },
+    /// `SurfaceDestroyed` removed the surface at `key`.
+    Destroyed { key: (u8, u32) },
+    /// A draw op landed on the existing surface at `key`.
+    Drawn { key: (u8, u32) },
+    /// A draw op, or a `SurfaceDestroyed`, named a surface the
+    /// mirror does not hold; nothing changed.
+    UnknownSurface { key: (u8, u32) },
+}
 
 /// Live pixel store rebuilt from a stream of [`ChannelEvent`]s.
 ///
@@ -45,11 +80,12 @@ impl SurfaceMirror {
     /// Apply one [`ChannelEvent`] to the surface map.
     ///
     /// Display-bearing variants update the relevant
-    /// [`DisplaySurface`]; everything else is ignored. Mirrors
-    /// the dispatch in `ryll/src/app.rs::process_events` minus
-    /// the GUI-only state mutations (egui repaint hints,
-    /// resolution-change notifications, frame-time stats, etc.).
-    pub fn apply_event(&mut self, event: &ChannelEvent) {
+    /// [`DisplaySurface`]; everything else is ignored and reports
+    /// [`DrawOutcome::NotDisplay`]. This is the one dispatch every
+    /// mode shares; mode-specific reactions (egui repaint hints,
+    /// resolution-change notifications, frame stats) belong to the
+    /// caller, driven by the returned [`DrawOutcome`].
+    pub fn apply_event(&mut self, event: &ChannelEvent) -> DrawOutcome {
         match event {
             ChannelEvent::SurfaceCreated {
                 display_channel_id,
@@ -57,17 +93,34 @@ impl SurfaceMirror {
                 width,
                 height,
             } => {
-                self.surfaces.insert(
-                    (*display_channel_id, *surface_id),
-                    DisplaySurface::new(*surface_id, *width, *height),
+                info!(
+                    "surface_mirror: surface {}:{} created: {}x{}",
+                    display_channel_id, surface_id, width, height
                 );
+                let key = (*display_channel_id, *surface_id);
+                self.surfaces
+                    .insert(key, DisplaySurface::new(*surface_id, *width, *height));
+                DrawOutcome::Created {
+                    key,
+                    width: *width,
+                    height: *height,
+                }
             }
 
             ChannelEvent::SurfaceDestroyed {
                 display_channel_id,
                 surface_id,
             } => {
-                self.surfaces.remove(&(*display_channel_id, *surface_id));
+                info!(
+                    "surface_mirror: surface {}:{} destroyed",
+                    display_channel_id, surface_id
+                );
+                let key = (*display_channel_id, *surface_id);
+                if self.surfaces.remove(&key).is_some() {
+                    DrawOutcome::Destroyed { key }
+                } else {
+                    DrawOutcome::UnknownSurface { key }
+                }
             }
 
             ChannelEvent::ImageReady {
@@ -82,14 +135,29 @@ impl SurfaceMirror {
             } => {
                 // Auto-create surface if the server draws before sending
                 // SURFACE_CREATE (QEMU does this for the primary surface).
-                // Mirrors ryll/src/app.rs::process_events.
+                // Sizes saturate so a hostile left + width cannot overflow.
                 let key = (*display_channel_id, *surface_id);
+                let mut outcome = DrawOutcome::Drawn { key };
                 let entry = self.surfaces.entry(key).or_insert_with(|| {
                     let surf_w = left.saturating_add(*width);
                     let surf_h = top.saturating_add(*height);
+                    info!(
+                        "surface_mirror: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
+                        surface_id, surf_w, surf_h, left, top, width, height
+                    );
+                    outcome = DrawOutcome::AutoCreated {
+                        key,
+                        width: surf_w,
+                        height: surf_h,
+                    };
                     DisplaySurface::new(*surface_id, surf_w, surf_h)
                 });
                 entry.blit(*left, *top, *width, *height, pixels);
+                debug!(
+                    "surface_mirror: blit surface={}, pos=({},{}), size={}x{}",
+                    surface_id, left, top, width, height
+                );
+                outcome
             }
 
             ChannelEvent::ImageReadyChroma {
@@ -103,8 +171,16 @@ impl SurfaceMirror {
                 chroma_rgba,
                 ..
             } => {
-                if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
+                let key = (*display_channel_id, *surface_id);
+                if let Some(s) = self.surfaces.get_mut(&key) {
                     s.blit_chroma(*left, *top, *width, *height, pixels, *chroma_rgba);
+                    DrawOutcome::Drawn { key }
+                } else {
+                    debug!(
+                        "surface_mirror: ImageReadyChroma on unknown surface {}",
+                        surface_id
+                    );
+                    DrawOutcome::UnknownSurface { key }
                 }
             }
 
@@ -119,8 +195,16 @@ impl SurfaceMirror {
                 alpha,
                 ..
             } => {
-                if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
+                let key = (*display_channel_id, *surface_id);
+                if let Some(s) = self.surfaces.get_mut(&key) {
                     s.blit_alpha(*left, *top, *width, *height, pixels, *alpha);
+                    DrawOutcome::Drawn { key }
+                } else {
+                    debug!(
+                        "surface_mirror: ImageReadyAlpha on unknown surface {}",
+                        surface_id
+                    );
+                    DrawOutcome::UnknownSurface { key }
                 }
             }
 
@@ -132,8 +216,13 @@ impl SurfaceMirror {
                 clip,
                 ..
             } => {
-                if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
+                let key = (*display_channel_id, *surface_id);
+                if let Some(s) = self.surfaces.get_mut(&key) {
                     s.fill_rect(*left, *top, *right, *bottom, *colour, clip);
+                    DrawOutcome::Drawn { key }
+                } else {
+                    debug!("surface_mirror: FillRect on unknown surface {}", surface_id);
+                    DrawOutcome::UnknownSurface { key }
                 }
             }
 
@@ -146,8 +235,13 @@ impl SurfaceMirror {
                 clip,
                 ..
             } => {
-                if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
+                let key = (*display_channel_id, *surface_id);
+                if let Some(s) = self.surfaces.get_mut(&key) {
                     s.copy_bits(*src_x, *src_y, *left, *top, *right, *bottom, clip);
+                    DrawOutcome::Drawn { key }
+                } else {
+                    debug!("surface_mirror: CopyBits on unknown surface {}", surface_id);
+                    DrawOutcome::UnknownSurface { key }
                 }
             }
 
@@ -158,16 +252,20 @@ impl SurfaceMirror {
                 clip,
                 ..
             } => {
-                if let Some(s) = self.surfaces.get_mut(&(*display_channel_id, *surface_id)) {
+                let key = (*display_channel_id, *surface_id);
+                if let Some(s) = self.surfaces.get_mut(&key) {
                     s.invert_rect(*left, *top, *right, *bottom, clip);
+                    DrawOutcome::Drawn { key }
+                } else {
+                    debug!("surface_mirror: Invert on unknown surface {}", surface_id);
+                    DrawOutcome::UnknownSurface { key }
                 }
             }
 
             // All non-display events (cursor, audio, session
             // bookkeeping, USB/WebDAV state, etc.) are observed
-            // elsewhere in web mode — see the cursor relay (5d)
-            // and audio sink (5e). No-op here.
-            _ => {}
+            // elsewhere — see the cursor relay and audio sink.
+            _ => DrawOutcome::NotDisplay,
         }
     }
 
@@ -395,5 +493,215 @@ mod tests {
         });
         let s = m.primary_surface().expect("primary");
         assert_eq!(&s.pixels()[0..4], &[200, 100, 50, 255]);
+    }
+
+    fn created(m: &mut SurfaceMirror, width: u32, height: u32) -> DrawOutcome {
+        m.apply_event(&ChannelEvent::SurfaceCreated {
+            display_channel_id: 0,
+            surface_id: 0,
+            width,
+            height,
+        })
+    }
+
+    fn image_ready(left: u32, top: u32, width: u32, height: u32) -> ChannelEvent {
+        ChannelEvent::ImageReady {
+            display_channel_id: 0,
+            surface_id: 0,
+            left,
+            top,
+            width,
+            height,
+            pixels: vec![0u8; (width as usize) * (height as usize) * 4],
+            image_id: 0,
+            produced_at_secs: 0.0,
+        }
+    }
+
+    /// The five draw ops other than `ImageReady`, all aimed at `(0, 0)`.
+    fn other_draw_ops() -> Vec<ChannelEvent> {
+        vec![
+            ChannelEvent::ImageReadyChroma {
+                display_channel_id: 0,
+                surface_id: 0,
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                pixels: vec![0u8; 4],
+                chroma_rgba: [0, 0, 0, 255],
+                image_id: 0,
+                produced_at_secs: 0.0,
+            },
+            ChannelEvent::ImageReadyAlpha {
+                display_channel_id: 0,
+                surface_id: 0,
+                left: 0,
+                top: 0,
+                width: 1,
+                height: 1,
+                pixels: vec![0u8; 4],
+                alpha: 128,
+                image_id: 0,
+                produced_at_secs: 0.0,
+            },
+            ChannelEvent::FillRect {
+                display_channel_id: 0,
+                surface_id: 0,
+                rect: (0, 0, 1, 1),
+                colour: [1, 2, 3, 255],
+                clip: vec![],
+                produced_at_secs: 0.0,
+            },
+            ChannelEvent::CopyBits {
+                display_channel_id: 0,
+                surface_id: 0,
+                src_x: 0,
+                src_y: 0,
+                dest_rect: (1, 1, 2, 2),
+                clip: vec![],
+                produced_at_secs: 0.0,
+            },
+            ChannelEvent::Invert {
+                display_channel_id: 0,
+                surface_id: 0,
+                rect: (0, 0, 1, 1),
+                clip: vec![],
+                produced_at_secs: 0.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn outcome_not_display() {
+        let mut m = SurfaceMirror::new();
+        let outcome = m.apply_event(&ChannelEvent::DisplayMark {
+            produced_at_secs: 0.0,
+        });
+        assert_eq!(outcome, DrawOutcome::NotDisplay);
+    }
+
+    #[test]
+    fn outcome_created() {
+        let mut m = SurfaceMirror::new();
+        assert_eq!(
+            created(&mut m, 64, 32),
+            DrawOutcome::Created {
+                key: (0, 0),
+                width: 64,
+                height: 32
+            }
+        );
+    }
+
+    #[test]
+    fn outcome_created_when_replacing_existing_surface() {
+        let mut m = SurfaceMirror::new();
+        created(&mut m, 8, 8);
+        assert_eq!(
+            created(&mut m, 16, 4),
+            DrawOutcome::Created {
+                key: (0, 0),
+                width: 16,
+                height: 4
+            }
+        );
+        assert_eq!(m.primary_surface().expect("primary").size(), (16, 4));
+    }
+
+    #[test]
+    fn outcome_auto_created() {
+        let mut m = SurfaceMirror::new();
+        assert_eq!(
+            m.apply_event(&image_ready(2, 3, 4, 5)),
+            DrawOutcome::AutoCreated {
+                key: (0, 0),
+                width: 6,
+                height: 8
+            }
+        );
+    }
+
+    #[test]
+    fn outcome_destroyed() {
+        let mut m = SurfaceMirror::new();
+        created(&mut m, 8, 8);
+        let outcome = m.apply_event(&ChannelEvent::SurfaceDestroyed {
+            display_channel_id: 0,
+            surface_id: 0,
+        });
+        assert_eq!(outcome, DrawOutcome::Destroyed { key: (0, 0) });
+    }
+
+    #[test]
+    fn outcome_destroy_of_absent_surface_is_unknown() {
+        let mut m = SurfaceMirror::new();
+        let outcome = m.apply_event(&ChannelEvent::SurfaceDestroyed {
+            display_channel_id: 1,
+            surface_id: 2,
+        });
+        assert_eq!(outcome, DrawOutcome::UnknownSurface { key: (1, 2) });
+    }
+
+    #[test]
+    fn outcome_drawn_for_every_draw_op() {
+        let mut m = SurfaceMirror::new();
+        created(&mut m, 4, 4);
+        assert_eq!(
+            m.apply_event(&image_ready(0, 0, 1, 1)),
+            DrawOutcome::Drawn { key: (0, 0) }
+        );
+        for event in other_draw_ops() {
+            assert_eq!(
+                m.apply_event(&event),
+                DrawOutcome::Drawn { key: (0, 0) },
+                "{}",
+                event.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn outcome_unknown_surface_for_draw_ops() {
+        let mut m = SurfaceMirror::new();
+        for event in other_draw_ops() {
+            assert_eq!(
+                m.apply_event(&event),
+                DrawOutcome::UnknownSurface { key: (0, 0) },
+                "{}",
+                event.kind()
+            );
+        }
+        assert!(m.surfaces.is_empty());
+    }
+
+    #[test]
+    fn image_ready_auto_create_saturates_horizontal_overflow() {
+        // left + width overflows u32; the GUI's old unchecked add
+        // panicked here in debug builds.
+        let mut m = SurfaceMirror::new();
+        let outcome = m.apply_event(&image_ready(u32::MAX - 1, 0, 4, 1));
+        assert_eq!(
+            outcome,
+            DrawOutcome::AutoCreated {
+                key: (0, 0),
+                width: u32::MAX,
+                height: 1
+            }
+        );
+    }
+
+    #[test]
+    fn image_ready_auto_create_saturates_vertical_overflow() {
+        let mut m = SurfaceMirror::new();
+        let outcome = m.apply_event(&image_ready(0, u32::MAX - 1, 1, 4));
+        assert_eq!(
+            outcome,
+            DrawOutcome::AutoCreated {
+                key: (0, 0),
+                width: 1,
+                height: u32::MAX
+            }
+        );
     }
 }
