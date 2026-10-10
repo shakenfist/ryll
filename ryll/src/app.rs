@@ -27,7 +27,9 @@ use crate::bugreport::{
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::TextureCache;
-use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys, HostShortcut};
+use crate::input_egui::{
+    mouse_button_to_spice, paste_shortcut_pressed, translate_key_events, HeldKeys, HostShortcut,
+};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
@@ -3514,10 +3516,12 @@ impl eframe::App for RyllApp {
         let mut paste_triggered = false;
         if !self.region_select_active && !self.show_bug_dialog && self.paste_error_message.is_none()
         {
-            let ctrl_alt_v =
-                ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::V));
+            let ctrl_alt_v = ctx.input(|i| paste_shortcut_pressed(i.modifiers, &i.events));
             if ctrl_alt_v {
                 paste_triggered = self.trigger_paste();
+                if paste_triggered {
+                    self.held_keys.withhold_paste_release();
+                }
             }
         }
 

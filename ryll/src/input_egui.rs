@@ -154,6 +154,85 @@ impl HostShortcut {
     }
 }
 
+/// A clipboard chord whose press egui-winit reports as a clipboard event
+/// instead of as a key press.
+///
+/// egui-winit (`State::on_keyboard_input`) turns the press into
+/// `Event::Cut`, `Event::Copy` or `Event::Paste` and emits no
+/// `Event::Key` for it, but the release still arrives as an ordinary
+/// key event. The chords are the command modifier (Ctrl, or Cmd on
+/// macOS) with X, C or V; on Windows also Shift+Delete, Ctrl+Insert and
+/// Shift+Insert; and the dedicated Cut / Copy / Paste keys. For a paste
+/// it emits `Event::Paste` only when the host clipboard holds text, and
+/// otherwise nothing at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ClipboardChord {
+    Cut,
+    Copy,
+    Paste,
+}
+
+impl ClipboardChord {
+    const ALL: [ClipboardChord; 3] = [
+        ClipboardChord::Cut,
+        ClipboardChord::Copy,
+        ClipboardChord::Paste,
+    ];
+
+    fn from_event(event: &egui::Event) -> Option<Self> {
+        match event {
+            egui::Event::Cut => Some(ClipboardChord::Cut),
+            egui::Event::Copy => Some(ClipboardChord::Copy),
+            egui::Event::Paste(_) => Some(ClipboardChord::Paste),
+            _ => None,
+        }
+    }
+
+    /// The key whose press egui-winit replaced, judged from the
+    /// modifiers held when it did, or `None` for a dedicated Cut / Copy
+    /// / Paste key (which has no scancode).
+    ///
+    /// The modifiers cannot tell two of the Windows variants apart:
+    /// Ctrl+Insert arrives exactly like Ctrl+C, and Ctrl+Shift+Delete
+    /// like Ctrl+Shift+X. The key is needed when the press happens, a
+    /// release later, so those two are sent as C and X.
+    fn replaced_key(self, modifiers: egui::Modifiers) -> Option<egui::Key> {
+        match (self, modifiers.command, modifiers.shift) {
+            (ClipboardChord::Cut, true, _) => Some(egui::Key::X),
+            (ClipboardChord::Copy, true, _) => Some(egui::Key::C),
+            (ClipboardChord::Paste, true, _) => Some(egui::Key::V),
+            (ClipboardChord::Cut, false, true) => Some(egui::Key::Delete),
+            (ClipboardChord::Paste, false, true) => Some(egui::Key::Insert),
+            _ => None,
+        }
+    }
+
+    /// Whether a release of `key` (the logical key, which is what
+    /// egui-winit matched the chord on) can end a press reported as
+    /// this chord.
+    fn released_by(self, key: egui::Key) -> bool {
+        match self {
+            ClipboardChord::Cut => matches!(key, egui::Key::X | egui::Key::Delete | egui::Key::Cut),
+            ClipboardChord::Copy => {
+                matches!(key, egui::Key::C | egui::Key::Insert | egui::Key::Copy)
+            }
+            ClipboardChord::Paste => {
+                matches!(key, egui::Key::V | egui::Key::Insert | egui::Key::Paste)
+            }
+        }
+    }
+
+    /// Whether egui-winit treats a press of `key` with `modifiers` as a
+    /// paste chord that should reach the guest (so not a macOS Cmd
+    /// chord). `Event::Paste` is only emitted for one when the host
+    /// clipboard holds text.
+    fn is_guest_paste(key: egui::Key, modifiers: egui::Modifiers) -> bool {
+        !modifiers.mac_cmd
+            && ((modifiers.command && key == egui::Key::V)
+                || (modifiers.shift && !modifiers.ctrl && key == egui::Key::Insert))
+    }
+}
+
 /// The keys ryll has forwarded to the guest as pressed, keyed by the
 /// same key used for the scancode lookup.
 ///
@@ -168,7 +247,9 @@ impl HostShortcut {
 ///
 /// It also remembers presses that were deliberately *not* forwarded
 /// because they were part of a host Cmd chord, so that their releases
-/// are withheld too and the guest never sees half of a key stroke.
+/// are withheld too and the guest never sees half of a key stroke, and
+/// presses egui-winit reported as clipboard events, so their releases
+/// can be paired up.
 #[derive(Debug, Default)]
 pub struct HeldKeys {
     /// Held key -> the wire scancode that releases it.
@@ -176,6 +257,14 @@ pub struct HeldKeys {
     /// Keys whose press was withheld from the guest as part of a host
     /// Cmd chord, so their release must be withheld as well.
     suppressed: HashSet<egui::Key>,
+    /// Clipboard chords whose press egui-winit reported as a clipboard
+    /// event and whose release has not arrived yet. The value is the
+    /// key pressed in the guest in its place (also in `held`), or
+    /// `None` if the press was withheld.
+    clipboard: HashMap<ClipboardChord, Option<egui::Key>>,
+    /// The modifiers as of the latest event, because egui attaches none
+    /// to clipboard events.
+    modifiers: egui::Modifiers,
 }
 
 impl HeldKeys {
@@ -186,10 +275,60 @@ impl HeldKeys {
         // A withheld press whose release goes elsewhere must not
         // swallow the next, unrelated release of the same key.
         self.suppressed.clear();
+        self.clipboard.clear();
         self.held
             .drain()
             .map(|(_, up_code)| InputEvent::KeyUp(up_code))
             .collect()
+    }
+
+    /// Withhold the release of the paste chord ryll has just consumed as
+    /// its own Ctrl+Alt+V shortcut. ryll does not forward that frame's
+    /// input, so without this the V release would reach the guest on
+    /// its own, or, with no `Event::Paste` recorded for it, be taken
+    /// for a paste chord the guest never saw pressed.
+    pub fn withhold_paste_release(&mut self) {
+        self.clipboard.insert(ClipboardChord::Paste, None);
+    }
+
+    /// Handle a press egui-winit reported as a clipboard event.
+    ///
+    /// Off macOS the command modifier is Ctrl, so this is Ctrl+C, Ctrl+X
+    /// or Ctrl+V meant for the guest (Ctrl has already been forwarded),
+    /// and the key press it replaced is sent in its place. On macOS it
+    /// is a Cmd chord, which belongs to the host and is withheld like
+    /// any other (see `translate_key_events`).
+    fn press_clipboard_chord(&mut self, chord: ClipboardChord, out: &mut Vec<InputEvent>) {
+        if self.modifiers.mac_cmd {
+            self.clipboard.insert(chord, None);
+            return;
+        }
+        let Some(key) = chord.replaced_key(self.modifiers) else {
+            return;
+        };
+        let Some((down_code, up_code)) =
+            egui_key_to_logical(key).and_then(scancode_for_logical_key)
+        else {
+            return;
+        };
+        if self.held.contains_key(&key) {
+            // Auto-repeat: egui-winit reports every repeat of the chord
+            // as another clipboard event.
+            return;
+        }
+        self.suppressed.remove(&key);
+        self.held.insert(key, up_code);
+        self.clipboard.insert(chord, Some(key));
+        out.push(InputEvent::KeyDown(down_code));
+    }
+
+    /// Take the outstanding clipboard chord, if any, that a release of
+    /// logical `key` ends.
+    fn take_clipboard_chord(&mut self, key: egui::Key) -> Option<Option<egui::Key>> {
+        let chord = ClipboardChord::ALL
+            .into_iter()
+            .find(|chord| chord.released_by(key) && self.clipboard.contains_key(chord))?;
+        self.clipboard.remove(&chord)
     }
 }
 
@@ -209,11 +348,28 @@ impl HeldKeys {
 /// releases. A key that was already held when Cmd went down is still
 /// released normally. `mac_cmd` is only ever set on macOS, so this
 /// costs nothing elsewhere.
+///
+/// egui-winit reports the press of Ctrl+C, Ctrl+X and Ctrl+V (Cmd on
+/// macOS) as `Event::Copy` / `Cut` / `Paste` rather than as a key press
+/// (see [`ClipboardChord`]). Off macOS those are turned back into the
+/// key press they replaced, so the guest gets the whole chord; the
+/// pasted text is the host clipboard and is never typed. The press is
+/// sent as the key in the US-QWERTY position, so on a layout that moves
+/// C, X or V (Dvorak, say) the guest sees the key at that position; the
+/// release is still paired with it. When a paste chord's press left
+/// no event at all because the host clipboard had no text, the press is
+/// sent together with the release.
 pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
     let mut out = Vec::new();
     for event in events {
         match event {
             egui::Event::WindowFocused(false) => out.extend(held.release_all()),
+            egui::Event::ModifiersChanged(modifiers) => held.modifiers = *modifiers,
+            egui::Event::Cut | egui::Event::Copy | egui::Event::Paste(_) => {
+                if let Some(chord) = ClipboardChord::from_event(event) {
+                    held.press_clipboard_chord(chord, &mut out);
+                }
+            }
             egui::Event::Key {
                 key,
                 physical_key,
@@ -221,9 +377,26 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                 modifiers,
                 ..
             } => {
+                held.modifiers = *modifiers;
                 let lookup_key = physical_key.unwrap_or(*key);
                 if HostShortcut::is_shortcut_key(lookup_key) {
                     continue;
+                }
+                if !*pressed {
+                    if let Some(up_code) = held.held.remove(&lookup_key) {
+                        held.clipboard.retain(|_, sent| *sent != Some(lookup_key));
+                        out.push(InputEvent::KeyUp(up_code));
+                        continue;
+                    }
+                    if let Some(sent) = held.take_clipboard_chord(*key) {
+                        // The release of a clipboard chord whose press
+                        // was sent as a different physical key, or
+                        // withheld. Release whatever was sent.
+                        if let Some(up_code) = sent.and_then(|k| held.held.remove(&k)) {
+                            out.push(InputEvent::KeyUp(up_code));
+                        }
+                        continue;
+                    }
                 }
                 let Some((down_code, up_code)) =
                     egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
@@ -242,14 +415,18 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                     held.suppressed.remove(&lookup_key);
                     held.held.insert(lookup_key, up_code);
                     out.push(InputEvent::KeyDown(down_code));
-                } else if held.held.remove(&lookup_key).is_some() {
-                    out.push(InputEvent::KeyUp(up_code));
                 } else if held.suppressed.remove(&lookup_key) || modifiers.mac_cmd {
                     // The release of a withheld Cmd chord press. The
-                    // `mac_cmd` arm covers presses egui turned into
-                    // Copy / Cut / Paste events, which never reach
-                    // this function as key presses.
+                    // `mac_cmd` arm covers a Cmd+V whose press left no
+                    // event at all because the clipboard held no text.
                 } else {
+                    if ClipboardChord::is_guest_paste(*key, *modifiers) {
+                        // A paste chord whose press egui-winit swallowed
+                        // without an `Event::Paste`, because the host
+                        // clipboard held no text. The guest's clipboard
+                        // may well hold some, so send the whole stroke.
+                        out.push(InputEvent::KeyDown(down_code));
+                    }
                     out.push(InputEvent::KeyUp(up_code));
                 }
             }
@@ -257,6 +434,30 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
         }
     }
     out
+}
+
+/// Whether this frame's input holds ryll's paste-as-keystrokes chord,
+/// Ctrl+Alt+V.
+///
+/// Off macOS Ctrl is egui's command modifier, so egui-winit reports the
+/// V press of Ctrl+Alt+V as `Event::Paste` rather than as a key press,
+/// and looking for the key press alone never sees it. (When the host
+/// clipboard holds no text it reports nothing, but then there is
+/// nothing to paste either.)
+pub fn paste_shortcut_pressed(modifiers: egui::Modifiers, events: &[egui::Event]) -> bool {
+    modifiers.ctrl
+        && modifiers.alt
+        && events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Paste(_)
+                    | egui::Event::Key {
+                        key: egui::Key::V,
+                        pressed: true,
+                        ..
+                    }
+            )
+        })
 }
 
 /// Convert an egui pointer button to the SPICE wire button flag.
@@ -284,6 +485,40 @@ mod tests {
             pressed,
             repeat,
             modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Ctrl as egui-winit reports it off macOS, where Ctrl is the
+    /// command modifier.
+    const CTRL: egui::Modifiers = egui::Modifiers {
+        alt: false,
+        ctrl: true,
+        shift: false,
+        mac_cmd: false,
+        command: true,
+    };
+
+    /// Cmd as egui-winit reports it on macOS.
+    const CMD: egui::Modifiers = egui::Modifiers {
+        alt: false,
+        ctrl: false,
+        shift: false,
+        mac_cmd: true,
+        command: true,
+    };
+
+    fn key_with(
+        logical: egui::Key,
+        physical: egui::Key,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> egui::Event {
+        egui::Event::Key {
+            key: logical,
+            physical_key: Some(physical),
+            pressed,
+            repeat: false,
+            modifiers,
         }
     }
 
@@ -469,13 +704,229 @@ mod tests {
     #[test]
     fn cmd_copy_release_is_not_forwarded() {
         // egui-winit turns the Cmd+C press into Event::Copy, so only
-        // the release reaches us as a key event.
+        // the release reaches us as a key event. Cmd+C is the host's
+        // copy, not a chord for the guest.
         let mut held = HeldKeys::default();
         let events = translate_key_events(
-            &[egui::Event::Copy, cmd_key(egui::Key::C, false)],
+            &[
+                egui::Event::ModifiersChanged(CMD),
+                egui::Event::Copy,
+                cmd_key(egui::Key::C, false),
+            ],
             &mut held,
         );
         assert!(events.is_empty());
+        assert!(held.release_all().is_empty());
+    }
+
+    #[test]
+    fn cmd_copy_with_cmd_released_first_is_not_forwarded() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CMD),
+                egui::Event::Copy,
+                egui::Event::ModifiersChanged(egui::Modifiers::default()),
+                key(egui::Key::C, egui::Key::C, false, false),
+            ],
+            &mut held,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn ctrl_clipboard_chords_reach_the_guest() {
+        // Ctrl+C, Ctrl+X and Ctrl+V as egui-winit reports them off
+        // macOS: Ctrl changes, the press becomes a clipboard event, and
+        // only the release is a key event (#494). Ctrl itself is
+        // forwarded by `RyllApp::handle_input`.
+        for (event, k, codes) in [
+            (
+                egui::Event::Copy,
+                egui::Key::C,
+                [(true, 0x2E), (false, 0xAE)],
+            ),
+            (
+                egui::Event::Cut,
+                egui::Key::X,
+                [(true, 0x2D), (false, 0xAD)],
+            ),
+            (
+                egui::Event::Paste("host clipboard".to_string()),
+                egui::Key::V,
+                [(true, 0x2F), (false, 0xAF)],
+            ),
+        ] {
+            let mut held = HeldKeys::default();
+            let events = translate_key_events(
+                &[
+                    egui::Event::ModifiersChanged(CTRL),
+                    event.clone(),
+                    key_with(k, k, false, CTRL),
+                ],
+                &mut held,
+            );
+            // Only the chord key: the pasted text is the host's
+            // clipboard and is never typed.
+            assert_eq!(wire(events), codes.to_vec(), "{event:?}");
+            assert!(held.release_all().is_empty(), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn ctrl_clipboard_chord_auto_repeat_is_not_forwarded() {
+        // Each auto-repeat of a held Ctrl+C is another Event::Copy.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::Copy,
+                egui::Event::Copy,
+                egui::Event::Copy,
+                key_with(egui::Key::C, egui::Key::C, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
+    }
+
+    #[test]
+    fn ctrl_clipboard_chord_with_ctrl_released_first_pairs_up() {
+        // The press is judged by the modifiers when it happened, not
+        // when the key comes up; the next Ctrl+C must still work.
+        let mut held = HeldKeys::default();
+        let sequence = [
+            egui::Event::ModifiersChanged(CTRL),
+            egui::Event::Copy,
+            egui::Event::ModifiersChanged(egui::Modifiers::default()),
+            key(egui::Key::C, egui::Key::C, false, false),
+        ];
+        let first = translate_key_events(&sequence, &mut held);
+        let second = translate_key_events(&sequence, &mut held);
+        assert_eq!(wire(first), vec![(true, 0x2E), (false, 0xAE)]);
+        assert_eq!(wire(second), vec![(true, 0x2E), (false, 0xAE)]);
+    }
+
+    #[test]
+    fn ctrl_clipboard_chord_on_moved_layout_releases_what_was_sent() {
+        // On Dvorak, logical C is the physical I key. egui-winit
+        // matches the chord on the logical key; the press is sent as
+        // the US-QWERTY C position and the release must undo exactly
+        // that, not release I.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::Copy,
+                key_with(egui::Key::C, egui::Key::I, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
+        assert!(held.release_all().is_empty());
+    }
+
+    #[test]
+    fn windows_insert_and_delete_clipboard_chords() {
+        // Windows only: Shift+Delete is a Cut and Shift+Insert a
+        // Paste, told apart from Ctrl+X / Ctrl+V by Ctrl not being
+        // held.
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        for (event, k) in [
+            (egui::Event::Cut, egui::Key::Delete),
+            (egui::Event::Paste("x".to_string()), egui::Key::Insert),
+        ] {
+            let (down, up) = egui_key_to_logical(k)
+                .and_then(scancode_for_logical_key)
+                .unwrap();
+            let mut held = HeldKeys::default();
+            let events = translate_key_events(
+                &[
+                    egui::Event::ModifiersChanged(shift),
+                    event.clone(),
+                    key_with(k, k, false, shift),
+                ],
+                &mut held,
+            );
+            assert_eq!(wire(events), vec![(true, down), (false, up)], "{event:?}");
+        }
+
+        // Ctrl+Insert arrives exactly like Ctrl+C, so it is sent as
+        // Ctrl+C. The release must still pair with it.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::Copy,
+                key_with(egui::Key::Insert, egui::Key::Insert, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
+    }
+
+    #[test]
+    fn ctrl_v_with_empty_host_clipboard_is_sent_on_release() {
+        // With no text on the host clipboard egui-winit reports nothing
+        // for the Ctrl+V press. The guest's own clipboard may still
+        // hold something, so the stroke is sent when V comes up.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                key_with(egui::Key::V, egui::Key::V, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2F), (false, 0xAF)]);
+    }
+
+    #[test]
+    fn consumed_paste_shortcut_release_is_withheld() {
+        // ryll consumed Ctrl+Alt+V as paste-as-keystrokes and did not
+        // forward that frame. The V release that follows must not
+        // reach the guest, whichever modifier is let go first.
+        let ctrl_alt = egui::Modifiers { alt: true, ..CTRL };
+        for release_mods in [ctrl_alt, CTRL, egui::Modifiers::default()] {
+            let mut held = HeldKeys::default();
+            held.withhold_paste_release();
+            let events = translate_key_events(
+                &[key_with(egui::Key::V, egui::Key::V, false, release_mods)],
+                &mut held,
+            );
+            assert!(events.is_empty(), "{release_mods:?}");
+        }
+    }
+
+    #[test]
+    fn paste_shortcut_is_seen_as_a_paste_event() {
+        let ctrl_alt = egui::Modifiers { alt: true, ..CTRL };
+        let paste = [egui::Event::Paste("text".to_string())];
+        let v_press = [key_with(egui::Key::V, egui::Key::V, true, ctrl_alt)];
+        // Off macOS egui-winit reports the press as Event::Paste.
+        assert!(paste_shortcut_pressed(ctrl_alt, &paste));
+        // On macOS Ctrl is not the command modifier, so V is a key.
+        assert!(paste_shortcut_pressed(ctrl_alt, &v_press));
+        // Ctrl+V on its own is the guest's.
+        assert!(!paste_shortcut_pressed(CTRL, &paste));
+        assert!(!paste_shortcut_pressed(ctrl_alt, &[]));
+    }
+
+    #[test]
+    fn focus_loss_releases_a_clipboard_chord_key() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::Copy,
+                egui::Event::WindowFocused(false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
     }
 
     #[test]

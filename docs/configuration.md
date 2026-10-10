@@ -330,6 +330,18 @@ Super / Windows key, so there is currently no way to send a Super
 chord to the guest from the macOS GUI. A key that was already held
 when Cmd went down is still released in the guest normally.
 
+On Linux and Windows, Ctrl+C, Ctrl+X and Ctrl+V go to the guest like
+any other Ctrl chord, so Ctrl+C interrupts a program in a guest
+terminal. They do not copy, cut or paste on the host, and Ctrl+V does
+not type the host clipboard (Ctrl+Alt+V does that, when
+paste-as-keystrokes is enabled). The GUI toolkit reports these chords
+by what they mean rather than by key, so ryll sends the key in its
+US-QWERTY position: on a layout that moves C, X or V (Dvorak, for
+example) the guest gets the key at that position instead. On Windows,
+Shift+Delete and Shift+Insert reach the guest as themselves, but
+Ctrl+Insert reaches it as Ctrl+C and Ctrl+Shift+Delete as
+Ctrl+Shift+X, because ryll cannot tell them apart from those.
+
 ## Environment Variables
 
 Currently, ryll does not use environment variables for configuration. All
