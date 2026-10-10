@@ -19,9 +19,7 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{
-    bitmap_flags, bitmap_fmt, clip_type, image_compression, ropd,
-};
+use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, clip_type, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -878,6 +876,9 @@ pub struct DisplayChannel {
     /// confirm the preference actually went out. One-shot per channel
     /// lifetime.
     pref_compression_sent: bool,
+    /// `SPICE_IMAGE_COMPRESSION_*` value sent in the link-up
+    /// `PREFERRED_COMPRESSION` message; chosen by `--preferred-compression`.
+    preferred_compression: u8,
     /// Set to true after we have successfully sent the link-up
     /// `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message. Mirrored into
     /// `DisplaySnapshot::pref_video_codec_type_sent`. One-shot per channel
@@ -903,6 +904,7 @@ impl DisplayChannel {
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
         image_cache_cap_bytes: usize,
+        preferred_compression: u8,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -958,6 +960,7 @@ impl DisplayChannel {
             h264_recent_durations: VecDeque::new(),
             h264_decode_total_count: 0,
             h264_decode_failed_count: 0,
+            preferred_compression,
             pref_compression_sent: false,
             pref_video_codec_type_sent: false,
         }
@@ -1059,12 +1062,9 @@ impl DisplayChannel {
         result
     }
 
-    async fn run_loop(&mut self) -> Result<()> {
-        info!("display: channel started");
-
-        // Send display init message
-        self.send_init().await?;
-
+    /// Send the one-shot link-up preference messages: image compression
+    /// then video codec types.
+    async fn send_link_up_preferences(&mut self) -> Result<()> {
         // One-shot link-up preference messages. spice-gtk fires both right
         // after the channel reaches STATE_LINKED (channel-display.c:984-995).
         // In ryll the channel is already linked by the time run_loop starts
@@ -1073,20 +1073,26 @@ impl DisplayChannel {
         // falls back to its default codec / compression choice if the
         // messages never arrive — but we propagate any IO error since it
         // indicates the socket is unhealthy and the read loop is about to
-        // fail anyway. Session 006 measurement: advertising AUTO_LZ here
-        // caused the server to stop using GLZ entirely (006c vs 006a:
-        // glz_dictionary_entries 23 → 0, evictions 1345 → 0, bytes_in 2.78 GB
-        // → 3.51 GB = +25%). For our UI-heavy workload the GLZ shared
-        // dictionary is the win; AUTO_GLZ lets the server still pick QUIC for
-        // photographic content but keep the dictionary for repeating UI
-        // elements.
-        self.send_preferred_compression(image_compression::AUTO_GLZ)
+        // fail anyway. The compression scheme is whatever the session was
+        // configured with (`--preferred-compression`); the default and the
+        // reason for it are documented on `Args::preferred_compression`.
+        self.send_preferred_compression(self.preferred_compression)
             .await?;
         self.send_preferred_video_codec_type(&[
             SPICE_VIDEO_CODEC_TYPE_H264,
             SPICE_VIDEO_CODEC_TYPE_MJPEG,
         ])
         .await?;
+        Ok(())
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
+        info!("display: channel started");
+
+        // Send display init message
+        self.send_init().await?;
+
+        self.send_link_up_preferences().await?;
 
         loop {
             // Read data into buffer
@@ -3353,6 +3359,7 @@ impl DisplayChannel {
 mod tests {
     use super::*;
     use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+    use shakenfist_spice_protocol::constants::image_compression;
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
     };
@@ -4168,6 +4175,7 @@ mod tests {
             LogConfig::default(),
             Arc::new(MmClock::new()),
             1024 * 1024,
+            image_compression::AUTO_GLZ,
         );
         (channel, peers)
     }
@@ -5031,6 +5039,26 @@ mod tests {
     // Pinned from what ryll sent before its client messages moved onto the
     // protocol crate's writers, so that the move cannot change them.
     // -------------------------------------------------------------------------
+
+    // The scheme asked for at link-up comes from configuration: AUTO_GLZ by
+    // default, and exactly LZ4 when asked, since spice-server only sends LZ4
+    // images to a client that requests that scheme.
+    #[tokio::test]
+    async fn link_up_sends_the_configured_compression() {
+        for (scheme, wire) in [
+            (image_compression::AUTO_GLZ, 2u8),
+            (image_compression::LZ4, 7u8),
+        ] {
+            let (mut channel, mut peers) = test_display_channel().await;
+            channel.preferred_compression = scheme;
+            channel
+                .send_link_up_preferences()
+                .await
+                .expect("send link-up preferences");
+            assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
+            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+        }
+    }
 
     #[tokio::test]
     async fn link_up_messages_are_unchanged() {

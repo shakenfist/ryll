@@ -971,6 +971,7 @@ pub struct RyllApp {
     /// `--glz-dictionary-cap-mib` at startup. Persisted here so
     /// reconnect passes the same value each time.
     glz_dictionary_cap_bytes: usize,
+    preferred_compression: u8,
 
     // Auto-snapshot config. `None` means the mode is disabled. A fresh
     // task is spawned per session: on each `SessionInitialized` the
@@ -1134,6 +1135,7 @@ impl RyllApp {
         auto_snapshot_cap: Option<usize>,
         image_cache_cap_bytes: usize,
         glz_dictionary_cap_bytes: usize,
+        preferred_compression: u8,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
         let session_state = SessionState::new();
@@ -1262,6 +1264,7 @@ impl RyllApp {
                     /* opus_sink */ None,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
+                    preferred_compression,
                 )
                 .await
                 {
@@ -1390,6 +1393,7 @@ impl RyllApp {
             debug_single_thread_runtime,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
+            preferred_compression,
             auto_snapshot_interval,
             auto_snapshot_cap: auto_snapshot_cap
                 .unwrap_or(crate::auto_snapshot::DEFAULT_AUTO_SNAPSHOT_CAP),
@@ -1519,6 +1523,7 @@ impl RyllApp {
         let single_thread_for_conn = self.debug_single_thread_runtime;
         let image_cache_cap_bytes = self.image_cache_cap_bytes;
         let glz_dictionary_cap_bytes = self.glz_dictionary_cap_bytes;
+        let preferred_compression = self.preferred_compression;
         let (failure_tx, failure_rx) = oneshot::channel();
         self.connection_failure_rx = Some(failure_rx);
         self.pending_connection_failure = None;
@@ -1565,6 +1570,7 @@ impl RyllApp {
                     /* opus_sink */ None,
                     image_cache_cap_bytes,
                     glz_dictionary_cap_bytes,
+                    preferred_compression,
                 )
                 .await
                 {

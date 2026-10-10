@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use configparser::ini::Ini;
+use shakenfist_spice_protocol::constants::image_compression;
 use shakenfist_spice_protocol::proxy::{parse_proxy_uri, HttpProxy};
 use shakenfist_spice_protocol::ConnectionConfig;
 use shakenfist_spice_webrtc::{BindSelector, UdpBindPolicy};
@@ -16,6 +17,36 @@ use tracing::warn;
 // CLI-shaped `Args` and `Config` definitions stay here, alongside
 // the path-validation helpers.
 pub use shakenfist_spice_renderer::device_config::{ShareDirConfig, VirtualDiskConfig};
+
+/// Image compression to ask spice-server for with
+/// `SPICE_MSGC_DISPLAY_PREFERRED_COMPRESSION`. The variants mirror
+/// `SPICE_IMAGE_COMPRESSION_*` (see `image_compression` in the protocol
+/// crate); the renderer is handed the wire value, not this type.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ImageCompression {
+    Off,
+    AutoGlz,
+    AutoLz,
+    Quic,
+    Glz,
+    Lz,
+    Lz4,
+}
+
+impl ImageCompression {
+    /// The `SPICE_IMAGE_COMPRESSION_*` value sent on the wire.
+    pub fn wire_value(self) -> u8 {
+        match self {
+            ImageCompression::Off => image_compression::OFF,
+            ImageCompression::AutoGlz => image_compression::AUTO_GLZ,
+            ImageCompression::AutoLz => image_compression::AUTO_LZ,
+            ImageCompression::Quic => image_compression::QUIC,
+            ImageCompression::Glz => image_compression::GLZ,
+            ImageCompression::Lz => image_compression::LZ,
+            ImageCompression::Lz4 => image_compression::LZ4,
+        }
+    }
+}
 
 /// Ryll - A Rust SPICE VDI client
 #[derive(Parser, Debug)]
@@ -70,6 +101,18 @@ pub struct Args {
     #[cfg(feature = "capture")]
     #[arg(long)]
     pub capture: Option<String>,
+
+    /// Image compression to ask spice-server for. Exists for diagnostics:
+    /// spice-server only sends LZ4 images to a client that asks for exactly
+    /// `lz4`, so this is how to capture them. The default, `auto-glz`, is
+    /// there for a measured reason: advertising `auto-lz` made the server
+    /// stop using GLZ entirely (GLZ dictionary entries 23 -> 0, bytes
+    /// received +25% in session 006). For a UI-heavy workload the shared GLZ
+    /// dictionary is the win, and `auto-glz` still lets the server pick QUIC
+    /// for photographic content while keeping the dictionary for repeating
+    /// UI elements.
+    #[arg(long, value_enum, default_value_t = ImageCompression::AutoGlz)]
+    pub preferred_compression: ImageCompression,
 
     /// Number of monitors to connect (default: 1)
     #[arg(long, default_value_t = 1)]
@@ -780,6 +823,35 @@ mod tests {
     fn no_obey_guest_size_flag_sets_true() {
         let args = Args::parse_from(["ryll", "--direct", "host:5900", "--no-obey-guest-size"]);
         assert!(args.no_obey_guest_size);
+    }
+
+    #[test]
+    fn preferred_compression_defaults_to_auto_glz() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900"]);
+        assert_eq!(args.preferred_compression, ImageCompression::AutoGlz);
+        assert_eq!(args.preferred_compression.wire_value(), 2);
+    }
+
+    #[test]
+    fn preferred_compression_parses_every_mode() {
+        for (name, wire) in [
+            ("off", 1),
+            ("auto-glz", 2),
+            ("auto-lz", 3),
+            ("quic", 4),
+            ("glz", 5),
+            ("lz", 6),
+            ("lz4", 7),
+        ] {
+            let args = Args::parse_from([
+                "ryll",
+                "--direct",
+                "host:5900",
+                "--preferred-compression",
+                name,
+            ]);
+            assert_eq!(args.preferred_compression.wire_value(), wire, "{}", name);
+        }
     }
 
     // ── .vv extension keys ──────────────────────────────────
