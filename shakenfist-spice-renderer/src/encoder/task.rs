@@ -38,6 +38,15 @@ pub enum EncoderControl {
 /// receiver is dropped). `next_frame` returning `None` is
 /// **not** a stop condition — only an explicit Stop or a
 /// channel error stops the task.
+///
+/// A dropped receiver is noticed at the next tick, not at the next
+/// send. The difference matters on a static screen, where there may
+/// never be a next send: the task would poll an unchanging surface
+/// forever. It runs on tokio's blocking pool, and dropping a runtime
+/// waits for every blocking task to finish, so a task that cannot see
+/// its consumer has gone also stops the runtime that spawned it from
+/// shutting down. That is what hung ryll's `/offer` signalling test for
+/// six hours at a time in CI (#330).
 pub struct EncoderTask;
 
 impl EncoderTask {
@@ -80,6 +89,13 @@ fn run<S: FrameSource>(
 
     loop {
         let tick_start = Instant::now();
+
+        // Nobody is left to take a frame, so stop now rather than at
+        // the next send, which a static screen may never reach. See
+        // `EncoderTask` for why this is not merely tidiness.
+        if output.is_closed() {
+            return Ok(());
+        }
 
         // Drain any pending control messages without blocking.
         loop {
@@ -495,6 +511,39 @@ mod tests {
         let res = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
             .await
             .expect("task didn't stop in time")
+            .expect("join");
+        assert!(res.is_ok());
+    }
+
+    /// Dropping the receiver stops the task even when it has no frame
+    /// to send.
+    ///
+    /// The source here yields one frame and then nothing, like a
+    /// static screen, and the control channel is held open, so the
+    /// only way out is noticing the receiver has gone. Before the task
+    /// checked for that every tick it noticed only when a send failed,
+    /// and with no further frames there was never another send: the
+    /// task ran forever, and so did the drop of the runtime that
+    /// spawned it (#330).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_the_receiver_stops_an_idle_task() {
+        let encoder = H264Encoder::new(64, 64, 30).expect("init");
+        let source = CountedFrameSource::new(64, 64, 1);
+        let (tx, mut rx) = mpsc::channel(16);
+        let (_ctl_tx, ctl_rx) = mpsc::channel(4);
+
+        let handle = EncoderTask::spawn(encoder, source, tx, ctl_rx, 30);
+
+        // Take the one frame, so the task is idle rather than mid-send.
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the first frame should arrive")
+            .expect("channel open");
+        drop(rx);
+
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+            .await
+            .expect("an idle task should stop once its receiver is dropped")
             .expect("join");
         assert!(res.is_ok());
     }

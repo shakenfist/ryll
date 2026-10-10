@@ -2024,10 +2024,19 @@ impl WebrtcBridge {
     /// for ICE gathering to complete, and return the fully-resolved
     /// SDP string. Mirrors what a browser would do before sending
     /// its offer to the server.
+    ///
+    /// Bounded the same way as `TestPeer::offer_and_gather`, and for
+    /// the same reason: a test should fail with a diagnosis rather
+    /// than hang if gathering never completes.
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        self.wait_for_gathering().await;
+        crate::test_client::wait_for_gathering(
+            &self.pc,
+            &self.gathered,
+            crate::test_client::GATHER_TIMEOUT,
+        )
+        .await?;
         let local = self
             .pc
             .local_description()

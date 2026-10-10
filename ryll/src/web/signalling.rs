@@ -490,7 +490,9 @@ mod tests {
             });
         }
         let token = state.token.clone();
-        let router = build_router(state);
+        // Keep a handle on the state: the encoder `post_offer` starts
+        // has to be stopped below.
+        let router = build_router(state.clone());
 
         // Build a client-side PC to generate a real SDP
         // offer.
@@ -562,6 +564,16 @@ mod tests {
             .await
             .expect("client rsd");
         client.close().await.expect("client close");
+
+        // Stop the encoder `post_offer` started, as production does on
+        // the next offer or when the viewer goes. It runs on the
+        // blocking pool, and dropping this test's runtime waits for
+        // every blocking task, so an encoder left running hangs the
+        // test after its last assertion has passed. That is how this
+        // test spent six hours at a time in CI (#330); the encoder now
+        // also stops once its frame receiver is dropped, but a test
+        // should not lean on teardown order to clean up after itself.
+        state.encoder.lock().await.stop().await;
     }
 
     /// `post_offer` must not try to push anything to the browser.
