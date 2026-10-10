@@ -51,3 +51,4 @@
 - PLAN-two-stage-ci.md: Two-stage CI
 - PLAN-main-event-drops.md: Main-channel event drops
 - PLAN-decoder-hardening.md: Image decoder hardening
+- PLAN-app-split.md: Splitting app.rs
