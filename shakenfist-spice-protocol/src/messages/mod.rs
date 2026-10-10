@@ -19,11 +19,23 @@ pub use display::*;
 pub use inputs::*;
 pub use main::*;
 
+// Size constants follow one convention. `SIZE` is the length of a body
+// whose wire size is fixed. `MIN_SIZE` is the floor of a variable-length
+// body: its length with every variable part empty. A constant naming one
+// part of a body says which part (`HEADER_SIZE`, `FLAGS_SIZE`). `Ping`
+// predates the convention: its `SIZE` is the fixed fields before its
+// padding.
+
 /// A SPICE message body with a fixed wire layout.
 pub trait WireType: Sized {
     /// Parse a body. Trailing bytes are ignored.
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError>;
     /// Append the body's wire encoding to `out`.
+    ///
+    /// Writers are infallible: a length or count is cast to the `u32`,
+    /// `u16` or `u8` field the wire gives it, and a value too large for
+    /// its field is truncated. Callers must keep bodies within the wire's
+    /// limits; some writers `debug_assert!` that they have.
     fn write(&self, out: &mut Vec<u8>);
     /// Parse a whole message body.
     fn decode(body: &[u8]) -> Result<Self, LinkError> {

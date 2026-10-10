@@ -5,6 +5,8 @@ pub mod inputs;
 pub mod main_channel;
 #[cfg(feature = "audio")]
 pub mod playback;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod usbredir;
 pub mod volume;
 mod watchdog;

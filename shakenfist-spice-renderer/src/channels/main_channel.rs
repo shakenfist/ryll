@@ -149,7 +149,8 @@ enum GuestClipboard {
 
 impl GuestClipboard {
     /// Parse a clipboard message of `agent_type`, which must be one of the
-    /// four clipboard message types.
+    /// four clipboard message types; any other type is refused with
+    /// [`LinkError::Unsupported`].
     fn decode(agent_type: u32, payload: &[u8], has_selection: bool) -> Result<Self, LinkError> {
         Ok(match agent_type {
             VD_AGENT_CLIPBOARD_GRAB => {
@@ -161,7 +162,14 @@ impl GuestClipboard {
             VD_AGENT_CLIPBOARD_REQUEST => {
                 GuestClipboard::Request(ClipboardRequest::decode_with(payload, has_selection)?)
             }
-            _ => GuestClipboard::Release(ClipboardRelease::decode_with(payload, has_selection)?),
+            VD_AGENT_CLIPBOARD_RELEASE => {
+                GuestClipboard::Release(ClipboardRelease::decode_with(payload, has_selection)?)
+            }
+            _ => {
+                return Err(LinkError::Unsupported {
+                    what: "non-clipboard agent message type",
+                })
+            }
         })
     }
 
@@ -1138,9 +1146,7 @@ impl MainChannel {
                     // A short AGENT_TOKEN counts as one token. The quirk
                     // predates the protocol crate's AgentTokens, and was
                     // kept when the parse moved there so that the move
-                    // changed no behaviour (andris
-                    // PLAN-x11-desktop-phase-02-wire-types.md, survey
-                    // finding 3).
+                    // changed no behaviour.
                     Err(_) => {
                         self.agent_tokens = self.agent_tokens.saturating_add(1);
                         warn!("main: short AGENT_TOKEN payload ({} bytes)", payload.len());
@@ -1862,6 +1868,7 @@ mod tests {
     use shakenfist_spice_protocol::constants::vd_agent::{VD_AGENT_ERROR, VD_AGENT_SUCCESS};
     use shakenfist_spice_protocol::messages::vd_agent::VdAgentReply;
     use shakenfist_spice_protocol::messages::WireType;
+    use shakenfist_spice_protocol::reader::LinkError;
     use shakenfist_spice_protocol::{MOUSE_MODE_CLIENT, MOUSE_MODE_SERVER};
 
     #[test]
@@ -2063,6 +2070,12 @@ mod tests {
         assert_eq!(grab.selection, VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD);
         assert!(grab.offers(VD_AGENT_CLIPBOARD_UTF8_TEXT));
         assert!(GuestClipboard::decode(VD_AGENT_CLIPBOARD, &body[..3], true).is_err());
+        assert_eq!(
+            GuestClipboard::decode(VD_AGENT_MONITORS_CONFIG, &body, true).err(),
+            Some(LinkError::Unsupported {
+                what: "non-clipboard agent message type",
+            })
+        );
     }
 
     #[test]
@@ -2113,5 +2126,235 @@ mod tests {
         // arrives within NOTIFICATION_DEDUP_WINDOW (30 s) of the last one.
         // Repeats further apart would list a long stall once per repeat.
         assert!(STUCK_AGENT_NOTIFY_INTERVAL < std::time::Duration::from_secs(30));
+    }
+
+    /// Tests that drive a `MainChannel` over a loopback socket: the
+    /// failure policy for malformed messages, and the exact bytes the
+    /// senders put on the wire.
+    mod channel {
+        use super::super::*;
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use shakenfist_spice_protocol::constants::vd_agent::VD_AGENT_CLIPBOARD_SELECTION_PRIMARY;
+        use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
+
+        async fn test_main_channel() -> (MainChannel, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_monitors_tx, monitors_rx) = mpsc::channel(1);
+            let (init_tx, _init_rx) = oneshot::channel();
+            let (channels_tx, _channels_rx) = oneshot::channel();
+            let channel = MainChannel::new(
+                stream,
+                events,
+                SessionState::new(),
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                Arc::new(Mutex::new(MainSnapshot::default())),
+                monitors_rx,
+                1,
+                LogConfig::default(),
+                None,
+                init_tx,
+                channels_tx,
+                Arc::new(MmClock::new()),
+            );
+            (channel, peers)
+        }
+
+        #[tokio::test]
+        async fn short_init_ends_the_channel() {
+            let (mut channel, _peers) = test_main_channel().await;
+            assert!(channel
+                .handle_message(main_server::INIT, &[0; MainInit::SIZE - 1])
+                .await
+                .is_err());
+        }
+
+        #[tokio::test]
+        async fn short_mouse_mode_is_skipped() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel
+                .handle_message(main_server::MOUSE_MODE, &[3, 0, 1])
+                .await
+                .expect("a short MOUSE_MODE is skipped");
+            assert_eq!(channel.server_mouse_mode, None);
+            assert!(!channel.mouse_mode_request_pending);
+        }
+
+        #[tokio::test]
+        async fn short_agent_token_adds_exactly_one_token() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.agent_tokens = 5;
+            channel
+                .handle_message(main_server::AGENT_TOKEN, &[9, 0, 0])
+                .await
+                .expect("a short AGENT_TOKEN is no error");
+            assert_eq!(channel.agent_tokens, 6);
+            channel
+                .handle_message(main_server::AGENT_TOKEN, &9u32.to_le_bytes())
+                .await
+                .expect("AGENT_TOKEN");
+            assert_eq!(channel.agent_tokens, 15);
+        }
+
+        #[tokio::test]
+        async fn short_agent_connected_tokens_keeps_the_old_count() {
+            let (mut channel, _peers) = test_main_channel().await;
+            // Already announced, so connecting spends no tokens on it.
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 5;
+            channel
+                .handle_message(main_server::AGENT_CONNECTED_TOKENS, &[9, 0, 0])
+                .await
+                .expect("a short AGENT_CONNECTED_TOKENS is no error");
+            assert_eq!(channel.agent_tokens, 5);
+            assert!(channel.agent_connected);
+            channel
+                .handle_message(main_server::AGENT_CONNECTED_TOKENS, &9u32.to_le_bytes())
+                .await
+                .expect("AGENT_CONNECTED_TOKENS");
+            assert_eq!(channel.agent_tokens, 9);
+        }
+
+        #[tokio::test]
+        async fn mouse_mode_request_bytes() {
+            let (mut channel, mut peers) = test_main_channel().await;
+            channel
+                .maybe_request_client_mouse_mode(
+                    MOUSE_MODE_SERVER | MOUSE_MODE_CLIENT,
+                    MOUSE_MODE_SERVER,
+                )
+                .await
+                .expect("send");
+            assert!(channel.mouse_mode_request_pending);
+            assert_eq!(
+                peers.read_sent(8).await,
+                [
+                    105, 0, // SPICE_MSGC_MAIN_MOUSE_MODE_REQUEST
+                    2, 0, 0, 0, // size
+                    2, 0, // mode: SPICE_MOUSE_MODE_CLIENT
+                ]
+            );
+        }
+
+        /// A channel whose agent is connected, with tokens to spare and the
+        /// guest's capabilities in: `has_selection` says whether the guest
+        /// announced VD_AGENT_CAP_CLIPBOARD_SELECTION.
+        async fn clipboard_channel(has_selection: bool) -> (MainChannel, TestChannelPeers) {
+            let (mut channel, peers) = test_main_channel().await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            channel.guest_clipboard_selection = Some(has_selection);
+            (channel, peers)
+        }
+
+        /// The AGENT_DATA message carrying a VDAgentMessage of `agent_type`
+        /// with `body`, laid out by hand from spice.proto and vd_agent.h.
+        fn agent_data(agent_type: u8, body: &[u8]) -> Vec<u8> {
+            let agent_len = 20 + body.len() as u8;
+            let mut out = vec![
+                107,
+                0, // SPICE_MSGC_MAIN_AGENT_DATA
+                agent_len,
+                0,
+                0,
+                0, // size
+                1,
+                0,
+                0,
+                0, // VD_AGENT_PROTOCOL
+                agent_type,
+                0,
+                0,
+                0, // type
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0, // opaque
+                body.len() as u8,
+                0,
+                0,
+                0, // size
+            ];
+            out.extend_from_slice(body);
+            out
+        }
+
+        #[tokio::test]
+        async fn clipboard_sender_bytes_with_a_selection_header() {
+            let (mut channel, mut peers) = clipboard_channel(true).await;
+
+            assert!(channel.send_clipboard_grab().await.unwrap());
+            let grab = agent_data(
+                7, // VD_AGENT_CLIPBOARD_GRAB
+                &[
+                    0, 0, 0, 0, // selection CLIPBOARD, reserved
+                    1, 0, 0, 0, // VD_AGENT_CLIPBOARD_UTF8_TEXT
+                ],
+            );
+            assert_eq!(peers.read_sent(grab.len()).await, grab);
+
+            assert!(channel.send_clipboard_request().await.unwrap());
+            let request = agent_data(
+                8, // VD_AGENT_CLIPBOARD_REQUEST
+                &[
+                    0, 0, 0, 0, // selection CLIPBOARD, reserved
+                    1, 0, 0, 0, // VD_AGENT_CLIPBOARD_UTF8_TEXT
+                ],
+            );
+            assert_eq!(peers.read_sent(request.len()).await, request);
+
+            assert!(channel.send_clipboard_data("hi").await.unwrap());
+            let data = agent_data(
+                4, // VD_AGENT_CLIPBOARD
+                &[
+                    0, 0, 0, 0, // selection CLIPBOARD, reserved
+                    1, 0, 0, 0, // VD_AGENT_CLIPBOARD_UTF8_TEXT
+                    b'h', b'i',
+                ],
+            );
+            assert_eq!(peers.read_sent(data.len()).await, data);
+
+            assert!(channel
+                .send_clipboard_none(VD_AGENT_CLIPBOARD_SELECTION_PRIMARY)
+                .await
+                .unwrap());
+            let none = agent_data(
+                4, // VD_AGENT_CLIPBOARD
+                &[
+                    1, 0, 0, 0, // selection PRIMARY, reserved
+                    0, 0, 0, 0, // VD_AGENT_CLIPBOARD_NONE
+                ],
+            );
+            assert_eq!(peers.read_sent(none.len()).await, none);
+            assert_eq!(channel.agent_tokens, 6, "one token per message");
+        }
+
+        #[tokio::test]
+        async fn clipboard_sender_bytes_without_a_selection_header() {
+            let (mut channel, mut peers) = clipboard_channel(false).await;
+            assert!(channel.send_clipboard_grab().await.unwrap());
+            let grab = agent_data(7, &[1, 0, 0, 0]);
+            assert_eq!(peers.read_sent(grab.len()).await, grab);
+            assert!(channel.send_clipboard_data("hi").await.unwrap());
+            let data = agent_data(4, &[1, 0, 0, 0, b'h', b'i']);
+            assert_eq!(peers.read_sent(data.len()).await, data);
+        }
+
+        #[tokio::test]
+        async fn clipboard_senders_send_nothing_before_the_guest_caps() {
+            let (mut channel, _peers) = clipboard_channel(true).await;
+            channel.guest_clipboard_selection = None;
+            assert!(!channel.send_clipboard_grab().await.unwrap());
+            assert!(!channel.send_clipboard_request().await.unwrap());
+            assert!(!channel.send_clipboard_data("hi").await.unwrap());
+            assert!(!channel.send_clipboard_none(0).await.unwrap());
+            assert_eq!(channel.agent_tokens, 10, "nothing was sent");
+        }
     }
 }

@@ -12,7 +12,6 @@ use crate::snapshots::{InputEventRecord, InputsSnapshot};
 use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
-use shakenfist_spice_protocol::constants::mouse_button_id;
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -20,7 +19,7 @@ use shakenfist_spice_protocol::messages::{
     MousePosition, Notify as NotifyMessage, Ping, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
-    inputs_client, inputs_server, keyboard_modifiers, mouse_buttons, ChannelType, NotifySeverity,
+    inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
 };
 
 use super::{ChannelEvent, EventSink, InputEvent, MAX_MESSAGE_BODY};
@@ -733,7 +732,7 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button_id_for_mask(button),
+                    button: MouseButton::id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
                 .write(&mut payload);
@@ -776,7 +775,7 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button_id_for_mask(button),
+                    button: MouseButton::id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
                 .write(&mut payload);
@@ -1534,24 +1533,6 @@ pub fn translate_paste(text: &str) -> Result<Vec<PasteKey>, PasteError> {
     }
 
     Ok(keys)
-}
-
-/// The `mouse_button_id` a press or release names, from the
-/// `mouse_buttons` mask ryll's input events carry. spice.proto gives
-/// `MOUSE_PRESS` and `MOUSE_RELEASE` a button *id* (LEFT = 1) beside the
-/// buttons *mask* (LEFT = 1 << 0).
-///
-/// Only the mask's low byte is looked at, and a mask that is not exactly
-/// one of the five buttons ryll sends maps to `INVALID`, as it always has.
-fn button_id_for_mask(mask: u32) -> u8 {
-    match u32::from(mask as u8) {
-        mouse_buttons::LEFT => mouse_button_id::LEFT,
-        mouse_buttons::MIDDLE => mouse_button_id::MIDDLE,
-        mouse_buttons::RIGHT => mouse_button_id::RIGHT,
-        mouse_buttons::UP => mouse_button_id::UP,
-        mouse_buttons::DOWN => mouse_button_id::DOWN,
-        _ => mouse_button_id::INVALID,
-    }
 }
 
 #[cfg(test)]
@@ -2366,10 +2347,9 @@ mod tests {
     /// The bytes ryll sends for each input message, built the way the
     /// channel builds them. These are the bytes the old `io::Result`
     /// writers produced, and moving `MouseButton`'s mask-to-id mapping
-    /// into this file must not change them.
+    /// out of its writer must not change them.
     #[test]
     fn sent_input_payloads_are_unchanged() {
-        use super::button_id_for_mask;
         use shakenfist_spice_protocol::messages::{
             KeyEvent, KeyModifiers, MouseButton, MouseMotion, MousePosition, WireType,
         };
@@ -2417,7 +2397,7 @@ mod tests {
         ] {
             assert_eq!(
                 bytes(&MouseButton {
-                    button: button_id_for_mask(mask),
+                    button: MouseButton::id_for_mask(mask),
                     buttons_state: button_state as u16,
                 }),
                 [id, 0xff, 0x01],
@@ -2461,5 +2441,64 @@ mod tests {
         let key_result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Enter)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
+    }
+
+    // Failure policy for malformed messages: which end the channel and
+    // which are skipped.
+
+    mod failure_policy {
+        use std::sync::{Arc, Mutex};
+
+        use shakenfist_spice_protocol::inputs_server;
+        use shakenfist_spice_protocol::messages::{InputsInit, KeyModifiers, Ping, SetAck};
+        use tokio::sync::mpsc;
+
+        use super::super::InputsChannel;
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use crate::snapshots::InputsSnapshot;
+        use crate::{ByteCounter, LogConfig};
+
+        async fn test_inputs_channel() -> (InputsChannel, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_input_tx, input_rx) = mpsc::channel(1);
+            let channel = InputsChannel::new(
+                stream,
+                events,
+                input_rx,
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                Arc::new(Mutex::new(InputsSnapshot::default())),
+                false,
+                LogConfig::default(),
+            );
+            (channel, peers)
+        }
+
+        #[tokio::test]
+        async fn short_init_and_key_modifiers_are_ignored() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel
+                .handle_server_message(inputs_server::INIT, &[0; InputsInit::SIZE - 1])
+                .await
+                .expect("a short INIT is no error");
+            channel
+                .handle_server_message(inputs_server::KEY_MODIFIERS, &[0; KeyModifiers::SIZE - 1])
+                .await
+                .expect("a short KEY_MODIFIERS is ignored");
+        }
+
+        #[tokio::test]
+        async fn short_set_ack_and_ping_end_the_channel() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            assert!(channel
+                .handle_server_message(inputs_server::SET_ACK, &[0; SetAck::SIZE - 1])
+                .await
+                .is_err());
+            assert!(channel
+                .handle_server_message(inputs_server::PING, &[0; Ping::SIZE - 1])
+                .await
+                .is_err());
+        }
     }
 }

@@ -18,36 +18,6 @@ use crate::reader::{BoundedReader, LinkError};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{self, Cursor};
 
-fn read_i32(r: &mut BoundedReader<'_>) -> Result<i32, LinkError> {
-    Ok(i32::from_le_bytes(r.read_array()?))
-}
-
-/// Refuse a server-supplied element count before reserving room for it:
-/// `count` elements of `size` bytes must fit in what is left of the body.
-fn check_count(
-    r: &BoundedReader<'_>,
-    what: &'static str,
-    count: usize,
-    size: usize,
-) -> Result<(), LinkError> {
-    let room = r.remaining() / size;
-    if count > room {
-        return Err(LinkError::TooLarge {
-            what,
-            value: count,
-            max: room,
-        });
-    }
-    Ok(())
-}
-
-/// Read a `u32` length, then that many bytes (spice.proto's
-/// `uint32 data_size; uint8 data[data_size]`).
-fn read_sized_bytes(r: &mut BoundedReader<'_>) -> Result<Vec<u8>, LinkError> {
-    let size = r.read_u32()? as usize;
-    Ok(r.read_bytes(size)?.to_vec())
-}
-
 fn write_sized_bytes(out: &mut Vec<u8>, data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out.extend_from_slice(data);
@@ -63,16 +33,17 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 16;
 }
 
 impl WireType for Rect {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(Rect {
-            top: read_i32(r)?,
-            left: read_i32(r)?,
-            bottom: read_i32(r)?,
-            right: read_i32(r)?,
+            top: r.read_i32()?,
+            left: r.read_i32()?,
+            bottom: r.read_i32()?,
+            right: r.read_i32()?,
         })
     }
 
@@ -118,7 +89,7 @@ impl WireType for Clip {
         let mut rects = Vec::new();
         if clip_type == clip_type::RECTS {
             let count = r.read_u32()? as usize;
-            check_count(r, "num_rects", count, Rect::SIZE)?;
+            r.check_count("num_rects", count, Rect::SIZE)?;
             rects.reserve(count);
             for _ in 0..count {
                 rects.push(Rect::read(r)?);
@@ -188,14 +159,15 @@ pub struct SpicePoint {
 }
 
 impl SpicePoint {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 8;
 }
 
 impl WireType for SpicePoint {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(SpicePoint {
-            x: read_i32(r)?,
-            y: read_i32(r)?,
+            x: r.read_i32()?,
+            y: r.read_i32()?,
         })
     }
 
@@ -288,6 +260,7 @@ pub struct SpiceQMask {
 }
 
 impl SpiceQMask {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 13;
 }
 
@@ -361,6 +334,7 @@ pub struct SpiceBlackness {
 }
 
 impl SpiceBlackness {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = SpiceQMask::SIZE;
 
     pub fn read(data: &[u8]) -> io::Result<Self> {
@@ -473,6 +447,7 @@ pub struct SpiceTransparent {
 }
 
 impl SpiceTransparent {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 28;
 
     pub fn read(data: &[u8]) -> io::Result<Self> {
@@ -520,6 +495,7 @@ pub struct SpiceAlphaBlend {
 }
 
 impl SpiceAlphaBlend {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 23;
 
     pub fn read(data: &[u8]) -> io::Result<Self> {
@@ -565,6 +541,7 @@ pub struct ImageDescriptor {
 }
 
 impl ImageDescriptor {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 18;
 }
 
@@ -881,6 +858,7 @@ pub struct SpiceCopy {
 }
 
 impl SpiceCopy {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4 + Rect::SIZE + 2 + 1 + SpiceQMask::SIZE;
 
     /// A reader over the source image's bytes, or `None` if `src_bitmap`
@@ -1175,6 +1153,7 @@ pub struct SurfaceCreate {
 }
 
 impl SurfaceCreate {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 20;
 }
 
@@ -1235,6 +1214,7 @@ pub struct DisplayHead {
 }
 
 impl DisplayHead {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 28;
 }
 
@@ -1282,7 +1262,7 @@ impl WireType for DisplayMonitorsConfig {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         let count = r.read_u16()? as usize;
         let max_allowed = r.read_u16()?;
-        check_count(r, "monitors_config count", count, DisplayHead::SIZE)?;
+        r.check_count("monitors_config count", count, DisplayHead::SIZE)?;
         let mut heads = Vec::with_capacity(count);
         for _ in 0..count {
             heads.push(DisplayHead::read(r)?);
@@ -1362,7 +1342,7 @@ impl WireType for StreamCreate {
 
 /// spice.proto `StreamDataHeader`: which stream a frame belongs to, and
 /// when to show it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamDataHeader {
     pub id: u32,
     pub multi_media_time: u32,
@@ -1384,18 +1364,50 @@ impl WireType for StreamDataHeader {
 
 /// `SPICE_MSG_DISPLAY_STREAM_DATA` (server to client): one encoded frame,
 /// as a `u32` size and that many bytes.
+///
+/// [`StreamDataRef`] is the same message with the frame borrowed from the
+/// body, for a reader that need not copy it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamData {
     pub base: StreamDataHeader,
     pub data: Vec<u8>,
 }
 
+/// A [`StreamData`] whose frame borrows the message body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamDataRef<'a> {
+    pub base: StreamDataHeader,
+    pub data: &'a [u8],
+}
+
+impl<'a> StreamDataRef<'a> {
+    /// Parse a body without copying its frame. [`StreamData::read`] is
+    /// this plus the copy.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::Truncated`] if the header, the size or the frame runs
+    /// past the end of `r`.
+    pub fn read(r: &mut BoundedReader<'a>) -> Result<Self, LinkError> {
+        Ok(StreamDataRef {
+            base: StreamDataHeader::read(r)?,
+            data: BinaryData::read_data(r)?,
+        })
+    }
+}
+
+impl From<StreamDataRef<'_>> for StreamData {
+    fn from(frame: StreamDataRef<'_>) -> Self {
+        StreamData {
+            base: frame.base,
+            data: frame.data.to_vec(),
+        }
+    }
+}
+
 impl WireType for StreamData {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
-        Ok(StreamData {
-            base: StreamDataHeader::read(r)?,
-            data: read_sized_bytes(r)?,
-        })
+        StreamDataRef::read(r).map(StreamData::from)
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -1407,6 +1419,9 @@ impl WireType for StreamData {
 /// `SPICE_MSG_DISPLAY_STREAM_DATA_SIZED` (server to client): a frame that
 /// also carries its size and destination, for a stream whose size
 /// changes.
+///
+/// [`StreamDataSizedRef`] is the same message with the frame borrowed from
+/// the body, for a reader that need not copy it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamDataSized {
     pub base: StreamDataHeader,
@@ -1416,15 +1431,50 @@ pub struct StreamDataSized {
     pub data: Vec<u8>,
 }
 
-impl WireType for StreamDataSized {
-    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
-        Ok(StreamDataSized {
+/// A [`StreamDataSized`] whose frame borrows the message body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamDataSizedRef<'a> {
+    pub base: StreamDataHeader,
+    pub width: u32,
+    pub height: u32,
+    pub dest: Rect,
+    pub data: &'a [u8],
+}
+
+impl<'a> StreamDataSizedRef<'a> {
+    /// Parse a body without copying its frame. [`StreamDataSized::read`]
+    /// is this plus the copy.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::Truncated`] if the fixed fields, the size or the frame
+    /// runs past the end of `r`.
+    pub fn read(r: &mut BoundedReader<'a>) -> Result<Self, LinkError> {
+        Ok(StreamDataSizedRef {
             base: StreamDataHeader::read(r)?,
             width: r.read_u32()?,
             height: r.read_u32()?,
             dest: Rect::read(r)?,
-            data: read_sized_bytes(r)?,
+            data: BinaryData::read_data(r)?,
         })
+    }
+}
+
+impl From<StreamDataSizedRef<'_>> for StreamDataSized {
+    fn from(frame: StreamDataSizedRef<'_>) -> Self {
+        StreamDataSized {
+            base: frame.base,
+            width: frame.width,
+            height: frame.height,
+            dest: frame.dest,
+            data: frame.data.to_vec(),
+        }
+    }
+}
+
+impl WireType for StreamDataSized {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        StreamDataSizedRef::read(r).map(StreamDataSized::from)
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -1525,7 +1575,7 @@ impl WireType for DisplayInit {
             cache_id: r.read_u8()?,
             cache_size: i64::from_le_bytes(r.read_array()?),
             glz_dict_id: r.read_u8()?,
-            glz_dict_window: read_i32(r)?,
+            glz_dict_window: r.read_i32()?,
         })
     }
 
@@ -1556,6 +1606,7 @@ pub struct StreamReport {
 }
 
 impl StreamReport {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 32;
 }
 
@@ -1568,7 +1619,7 @@ impl WireType for StreamReport {
             end_frame_mm_time: r.read_u32()?,
             num_frames: r.read_u32()?,
             num_drops: r.read_u32()?,
-            last_frame_delay: read_i32(r)?,
+            last_frame_delay: r.read_i32()?,
             audio_delay: r.read_u32()?,
         })
     }
@@ -1890,11 +1941,11 @@ mod tests {
             multi_media_time: 12345,
         };
         assert_round_trip(&StreamData {
-            base: base.clone(),
+            base,
             data: vec![0xff, 0xd8, 0xff, 0xd9],
         });
         assert_round_trip(&StreamData {
-            base: base.clone(),
+            base,
             data: Vec::new(),
         });
         assert_round_trip(&StreamDataSized {
@@ -1957,6 +2008,30 @@ mod tests {
         assert_eq!(frame.dest, rect(0, 0, 240, 320));
         assert_eq!(frame.data, vec![0xaa, 0xbb]);
         assert!(StreamDataSized::decode(&sized[..37]).is_err());
+    }
+
+    #[test]
+    fn stream_data_refs_borrow_the_frame_the_owned_readers_copy() {
+        let mut data = le32(&[7, 12345, 3]);
+        data.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+        let mut r = BoundedReader::new(&data);
+        let frame = StreamDataRef::read(&mut r).expect("decodes");
+        assert_eq!(frame.data, &data[12..15]);
+        assert_eq!(r.position(), 15);
+        assert_eq!(StreamData::from(frame), StreamData::decode(&data).unwrap());
+        assert!(StreamDataRef::read(&mut BoundedReader::new(&data[..14])).is_err());
+
+        let mut sized = le32(&[7, 12345, 320, 240, 0, 0, 240, 320, 2]);
+        sized.extend_from_slice(&[0xaa, 0xbb]);
+        let mut r = BoundedReader::new(&sized);
+        let frame = StreamDataSizedRef::read(&mut r).expect("decodes");
+        assert_eq!(frame.data, &sized[36..]);
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(
+            StreamDataSized::from(frame),
+            StreamDataSized::decode(&sized).unwrap()
+        );
+        assert!(StreamDataSizedRef::read(&mut BoundedReader::new(&sized[..37])).is_err());
     }
 
     #[test]
@@ -2542,6 +2617,92 @@ mod tests {
         assert_eq!(value.src_bitmap, Some(other_image(1)));
         assert_eq!(value.mask.bitmap, Some(from_cache_image(2)));
         assert_round_trip(&value);
+    }
+
+    /// A DRAW_COPY body whose pointers are `src_bitmap` and `mask_bitmap`,
+    /// as offsets from the end of the fixed fields, followed by `images`.
+    fn draw_copy_body(
+        src_bitmap: Option<usize>,
+        mask_bitmap: Option<usize>,
+        images: &[u8],
+    ) -> Vec<u8> {
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect(0, 0, 1, 1),
+            clip: Clip::none(),
+        };
+        let mut body = Vec::new();
+        base.write(&mut body);
+        let fixed_len = body.len() + SpiceCopy::SIZE;
+        let pointer = |at: Option<usize>| at.map_or(0, |at| (fixed_len + at) as u32);
+        SpiceCopy {
+            src_bitmap: pointer(src_bitmap),
+            mask: SpiceQMask {
+                bitmap_offset: pointer(mask_bitmap),
+                ..SpiceQMask::default()
+            },
+            ..SpiceCopy::default()
+        }
+        .write(&mut body);
+        body.extend_from_slice(images);
+        body
+    }
+
+    #[test]
+    fn draw_copy_bounds_an_unmodelled_mask_at_a_later_source() {
+        // The mask first, of an unmodelled type, and the source after it:
+        // the mask's bytes stop where the source starts.
+        let mut images = Vec::new();
+        descriptor(ImageType::Quic, 1).write(&mut images);
+        images.extend_from_slice(&[1, 2, 3]);
+        let src_at = images.len();
+        from_cache_image(2).write(&mut images);
+
+        let value = DrawCopy::decode(&draw_copy_body(Some(src_at), Some(0), &images)).unwrap();
+        assert_eq!(
+            value.mask.bitmap.as_ref().unwrap().payload,
+            ImagePayload::Other(vec![1, 2, 3])
+        );
+        assert_eq!(value.src_bitmap, Some(from_cache_image(2)));
+        assert_round_trip(&value);
+    }
+
+    #[test]
+    fn draw_copy_reads_an_aliased_image_for_both_pointers() {
+        // Both pointers at the same offset: each reads the image there,
+        // and an unmodelled one runs to the end of the body for both. The
+        // writer lays out two copies, which read back as the same value.
+        for image in [from_cache_image(1), other_image(2)] {
+            let mut images = Vec::new();
+            image.write(&mut images);
+            let body = draw_copy_body(Some(0), Some(0), &images);
+
+            let mut r = BoundedReader::new(&body);
+            let value = DrawCopy::read(&mut r).unwrap();
+            assert_eq!(r.position(), body.len());
+            assert_eq!(value.src_bitmap.as_ref(), Some(&image));
+            assert_eq!(value.mask.bitmap.as_ref(), Some(&image));
+            assert_round_trip(&value);
+        }
+    }
+
+    #[test]
+    fn draw_copy_refuses_a_pointer_at_the_end_of_the_body() {
+        // An offset equal to the body's length addresses an empty region,
+        // which has no room for an image descriptor.
+        let body = draw_copy_body(Some(0), None, &[]);
+        assert_eq!(
+            DrawCopy::decode(&body),
+            Err(LinkError::Truncated {
+                needed: 8,
+                available: 0,
+            })
+        );
+        let body = draw_copy_body(None, Some(0), &[]);
+        assert!(matches!(
+            DrawCopy::decode(&body),
+            Err(LinkError::Truncated { .. })
+        ));
     }
 
     #[test]

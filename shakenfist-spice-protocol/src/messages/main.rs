@@ -26,6 +26,7 @@ pub struct MainInit {
 }
 
 impl MainInit {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 32;
 }
 
@@ -86,14 +87,7 @@ impl WireType for ChannelsList {
         // Each entry is two bytes, so the body bounds the count. Check it
         // before reserving: the count is server-supplied, and trusting it
         // would let a six-byte message reserve gigabytes.
-        let room = r.remaining() / 2;
-        if num_channels > room {
-            return Err(LinkError::TooLarge {
-                what: "num_of_channels",
-                value: num_channels,
-                max: room,
-            });
-        }
+        r.check_count("num_of_channels", num_channels, 2)?;
 
         let mut channels = Vec::with_capacity(num_channels);
         for _ in 0..num_channels {
@@ -129,6 +123,7 @@ pub struct MainMouseMode {
 }
 
 impl MainMouseMode {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -156,6 +151,7 @@ pub struct MouseModeRequest {
 }
 
 impl MouseModeRequest {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 2;
 }
 
@@ -179,6 +175,7 @@ pub struct MultiMediaTime {
 }
 
 impl MultiMediaTime {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -208,6 +205,7 @@ pub struct AgentTokens {
 }
 
 impl AgentTokens {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -232,6 +230,7 @@ pub struct AgentDisconnected {
 }
 
 impl AgentDisconnected {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 
     /// The error code, with any unknown value read as

@@ -19,6 +19,7 @@ pub struct MessageHeader {
 }
 
 impl MessageHeader {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 6;
 
     pub fn read(data: &[u8]) -> io::Result<Self> {
@@ -58,7 +59,9 @@ impl MessageHeader {
 pub struct Ping {
     pub id: u32,
     pub timestamp: u64,
-    /// Bytes of padding after the fixed fields.
+    /// Bytes of padding after the fixed fields. The writer emits this many
+    /// zeros, so a sender chooses it and should keep it small: it is not
+    /// bounded here.
     pub padding_len: usize,
 }
 
@@ -107,6 +110,7 @@ pub struct Pong {
 }
 
 impl Pong {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 12;
 }
 
@@ -133,6 +137,7 @@ pub struct SetAck {
 }
 
 impl SetAck {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 8;
 
     /// The `ACK_SYNC` that answers this message: its generation, echoed.
@@ -166,6 +171,7 @@ pub struct AckSync {
 }
 
 impl AckSync {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -214,8 +220,8 @@ pub struct Notify {
 }
 
 impl Notify {
-    /// Size of the fixed fields; the text follows.
-    pub const SIZE: usize = 24;
+    /// The size with empty text: the fixed fields alone.
+    pub const MIN_SIZE: usize = 24;
 
     /// The severity, with any value outside 0–2 read as
     /// [`NotifySeverity::Info`].
@@ -294,6 +300,7 @@ pub struct Disconnecting {
 }
 
 impl Disconnecting {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 12;
 
     /// The reason, with any unknown value read as [`SpiceError::Error`].
@@ -318,7 +325,14 @@ impl WireType for Disconnecting {
 }
 
 /// Helper to construct a complete message with header
+///
+/// The header's size field is a `u32`, so `payload` must be shorter than
+/// 4 GiB; a longer one would be framed with a truncated size.
 pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
+    debug_assert!(
+        u32::try_from(payload.len()).is_ok(),
+        "a message body's length is a u32 on the wire"
+    );
     let mut buf = Vec::with_capacity(MessageHeader::SIZE + payload.len());
     let header = MessageHeader {
         message_type,

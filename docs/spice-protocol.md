@@ -344,8 +344,9 @@ through kerbside.
 > **Known discrepancy, under investigation in
 > [shakenfist/ryll#475](https://github.com/shakenfist/ryll/issues/475).**
 > The LZ4 description here and below is what ryll does today, and it
-> disagrees with spice-server and spice-common: spice.proto:558 puts a
-> `data_size` prefix before the LZ4 payload, the reference uses streaming
+> disagrees with spice-server and spice-common: spice.proto:612-613 makes
+> the LZ4 image a `BinaryData`, which spice.proto:558-561 defines with a
+> `data_size` prefix before the payload, the reference uses streaming
 > LZ4 over multi-line chunks rather than independent per-row blocks, and
 > the `SPICE_BITMAP_FMT` values differ from the ones listed below
 > (see spice-common's `enums.h`). Do not treat this section as the

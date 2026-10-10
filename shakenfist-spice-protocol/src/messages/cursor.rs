@@ -27,6 +27,7 @@ pub struct CursorHeader {
 }
 
 impl CursorHeader {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 17;
 }
 
@@ -68,6 +69,9 @@ impl WireType for CursorHeader {
 /// `header` is `Some` exactly when `flags` has `NONE` clear. The reader
 /// keeps that invariant; a value built by hand must keep it too, or it will
 /// not read back as written.
+///
+/// [`SpiceCursorRef`] is the same struct with the data borrowed from the
+/// body, for a reader that need not copy it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpiceCursor {
     pub flags: u16,
@@ -96,22 +100,60 @@ impl SpiceCursor {
     }
 }
 
-impl WireType for SpiceCursor {
-    /// Reads the flags, the header when `NONE` is clear, and the rest of
-    /// the body as data.
-    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+/// A [`SpiceCursor`] whose shape data borrows the message body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiceCursorRef<'a> {
+    pub flags: u16,
+    pub header: Option<CursorHeader>,
+    pub data: &'a [u8],
+}
+
+impl<'a> SpiceCursorRef<'a> {
+    /// Read the flags, the header when `NONE` is clear, and the rest of the
+    /// body as data, without copying the data. [`SpiceCursor::read`] is
+    /// this plus the copy.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::Truncated`] if the flags, or a header they say is
+    /// present, run past the end of `r`.
+    pub fn read(r: &mut BoundedReader<'a>) -> Result<Self, LinkError> {
         let flags = r.read_u16()?;
         let header = if flags & cursor_flags::NONE == 0 {
             Some(CursorHeader::read(r)?)
         } else {
             None
         };
-        let data = r.read_bytes(r.remaining())?.to_vec();
-        Ok(SpiceCursor {
+        let data = r.read_bytes(r.remaining())?;
+        Ok(SpiceCursorRef {
             flags,
             header,
             data,
         })
+    }
+
+    /// Whether `flags` has `bit` (a `cursor_flags::*` value) set.
+    #[must_use]
+    pub fn has_flag(&self, bit: u16) -> bool {
+        self.flags & bit != 0
+    }
+}
+
+impl From<SpiceCursorRef<'_>> for SpiceCursor {
+    fn from(cursor: SpiceCursorRef<'_>) -> Self {
+        SpiceCursor {
+            flags: cursor.flags,
+            header: cursor.header,
+            data: cursor.data.to_vec(),
+        }
+    }
+}
+
+impl WireType for SpiceCursor {
+    /// Reads the flags, the header when `NONE` is clear, and the rest of
+    /// the body as data.
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        SpiceCursorRef::read(r).map(SpiceCursor::from)
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -143,14 +185,15 @@ pub struct CursorInitHead {
 }
 
 impl CursorInitHead {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 9;
 }
 
 impl WireType for CursorInitHead {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(CursorInitHead {
-            x: i16::from_le_bytes(r.read_array()?),
-            y: i16::from_le_bytes(r.read_array()?),
+            x: r.read_i16()?,
+            y: r.read_i16()?,
             trail_length: r.read_u16()?,
             trail_frequency: r.read_u16()?,
             visible: r.read_u8()?,
@@ -198,14 +241,15 @@ pub struct CursorSetHead {
 }
 
 impl CursorSetHead {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 5;
 }
 
 impl WireType for CursorSetHead {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(CursorSetHead {
-            x: i16::from_le_bytes(r.read_array()?),
-            y: i16::from_le_bytes(r.read_array()?),
+            x: r.read_i16()?,
+            y: r.read_i16()?,
             visible: r.read_u8()?,
         })
     }
@@ -247,14 +291,15 @@ pub struct CursorMove {
 }
 
 impl CursorMove {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
 impl WireType for CursorMove {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(CursorMove {
-            x: i16::from_le_bytes(r.read_array()?),
-            y: i16::from_le_bytes(r.read_array()?),
+            x: r.read_i16()?,
+            y: r.read_i16()?,
         })
     }
 
@@ -272,6 +317,7 @@ pub struct CursorInvalOne {
 }
 
 impl CursorInvalOne {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 8;
 }
 
@@ -403,6 +449,18 @@ mod tests {
                 }),
                 data: vec![0xaa, 0xbb],
             }
+        );
+
+        // The borrowed reader reads the same struct, with the data still in
+        // the body.
+        let mut r = BoundedReader::new(&body);
+        let cursor = SpiceCursorRef::read(&mut r).expect("decodes");
+        assert_eq!(cursor.data, &body[19..]);
+        assert!(cursor.has_flag(cursor_flags::CACHE_ME));
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(
+            SpiceCursor::from(cursor),
+            SpiceCursor::decode(&body).unwrap()
         );
     }
 

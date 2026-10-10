@@ -29,7 +29,7 @@ use shakenfist_spice_protocol::messages::{
     DrawBase, ImageDescriptor, Notify as NotifyMessage, Ping, PreferredCompression,
     PreferredVideoCodecType, Rect, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceCopy,
     SpiceFill, SpiceOpaque, SpicePoint, SpiceTransparent, StreamActivateReport, StreamClip,
-    StreamCreate, StreamData, StreamDataSized, StreamDestroy, StreamReport, SurfaceCreate,
+    StreamCreate, StreamDataRef, StreamDataSizedRef, StreamDestroy, StreamReport, SurfaceCreate,
     SurfaceDestroy, WireType,
 };
 use shakenfist_spice_protocol::parse::{read_u16_le, read_u32_le, read_u64_le};
@@ -1710,22 +1710,23 @@ impl DisplayChannel {
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
                 // A malformed frame is ignored, as a short one always was.
-                // One whose data_size runs past the body is malformed.
-                let (base, dest, frame_data) = if msg_type == display_server::STREAM_DATA_SIZED {
-                    let Ok(frame) = StreamDataSized::decode(payload) else {
+                // One whose data_size runs past the body is malformed. The
+                // frame is borrowed from the payload, not copied.
+                let mut r = BoundedReader::new(payload);
+                let (base, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED {
+                    let Ok(frame) = StreamDataSizedRef::read(&mut r) else {
                         return Ok(());
                     };
                     // The wire's edges are signed; ryll keeps their bits.
                     let (left, top, right, bottom) = ltrb(&frame.dest);
                     (frame.base, Some((top, left, bottom, right)), frame.data)
                 } else {
-                    let Ok(frame) = StreamData::decode(payload) else {
+                    let Ok(frame) = StreamDataRef::read(&mut r) else {
                         return Ok(());
                     };
                     (frame.base, None, frame.data)
                 };
                 let (stream_id, frame_mm_time) = (base.id, base.multi_media_time);
-                let jpeg_data = frame_data.as_slice();
 
                 // Evaluate STREAM_REPORT bookkeeping BEFORE the MJPEG
                 // decode dispatch — `report_num_frames` counts every
@@ -3341,6 +3342,7 @@ impl DisplayChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
     };
@@ -4141,62 +4143,12 @@ mod tests {
     // allocation per message.
     // -------------------------------------------------------------------------
 
-    /// A `TrafficSink` that records nothing.
-    ///
-    /// The channel calls into the sink on every message; these tests
-    /// are about `self.streams`, so the recording is noise. `elapsed`
-    /// still has to advance monotonically because `retire_stream`
-    /// stamps lifetimes with it.
-    struct NullTraffic {
-        started: std::time::Instant,
-    }
-
-    impl NullTraffic {
-        fn new() -> Self {
-            NullTraffic {
-                started: std::time::Instant::now(),
-            }
-        }
-    }
-
-    impl crate::traffic::TrafficSink for NullTraffic {
-        fn record_sent(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
-        fn record_received(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
-        fn elapsed(&self) -> std::time::Duration {
-            self.started.elapsed()
-        }
-    }
-
-    /// Everything a `DisplayChannel` under test needs kept alive
-    /// alongside it.
-    ///
-    /// The peer socket and the event receiver are both load-bearing
-    /// even though no test reads them: dropping the peer would make
-    /// any write fail, and dropping the receiver would send `emit`
-    /// down its shutdown path. Neither is what these tests are
-    /// exercising, so both are held rather than leaked.
-    struct TestChannelPeers {
-        _peer: tokio::net::TcpStream,
-        _events: tokio::sync::mpsc::Receiver<ChannelEvent>,
-    }
-
     /// Build a `DisplayChannel` wired to a loopback socket.
     async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let client = tokio::net::TcpStream::connect(addr)
-            .await
-            .expect("connect to loopback listener");
-        let (server, _) = listener.accept().await.expect("accept loopback connection");
-
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
-        let events = EventSink::new(tx, Arc::new(tokio::sync::Notify::new()));
-
+        let (stream, events, peers) = loopback().await;
         let channel = DisplayChannel::new(
             0,
-            SpiceStream::Plain(client),
+            stream,
             events,
             None,
             Arc::new(ByteCounter::new()),
@@ -4207,13 +4159,7 @@ mod tests {
             Arc::new(MmClock::new()),
             1024 * 1024,
         );
-        (
-            channel,
-            TestChannelPeers {
-                _peer: server,
-                _events: rx,
-            },
-        )
+        (channel, peers)
     }
 
     // spice-server sends INVAL_ALL_PALETTES on every connect (#446). With
@@ -4257,7 +4203,7 @@ mod tests {
                 bottom: 64,
                 right: 64,
             },
-            clip: shakenfist_spice_protocol::messages::Clip::none(),
+            clip: Clip::none(),
         }
         .write(&mut v);
         v
@@ -4450,6 +4396,128 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Failure policy for malformed messages. Some end the channel (Err),
+    // the rest are skipped; these pin which is which, so that a change
+    // in either direction is deliberate.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn short_messages_that_end_the_channel() {
+        let (mut channel, _peer) = test_display_channel().await;
+        for (msg_type, len) in [
+            (display_server::SURFACE_CREATE, SurfaceCreate::SIZE - 1),
+            (display_server::SET_ACK, SetAck::SIZE - 1),
+            (display_server::PING, Ping::SIZE - 1),
+            (display_server::NOTIFY, NotifyMessage::MIN_SIZE - 1),
+        ] {
+            assert!(
+                channel
+                    .handle_message(msg_type, &vec![0; len])
+                    .await
+                    .is_err(),
+                "a short message {} must end the channel",
+                msg_type
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn short_surface_destroy_and_stream_clip_are_ignored() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        channel
+            .handle_message(display_server::SURFACE_DESTROY, &[1, 0, 0])
+            .await
+            .expect("a short SURFACE_DESTROY is ignored");
+        channel
+            .handle_message(display_server::STREAM_CLIP, &[1, 0, 0])
+            .await
+            .expect("a short STREAM_CLIP is ignored");
+        assert!(
+            peers.events.try_recv().is_err(),
+            "an ignored message emits nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_stream_messages_are_ignored() {
+        let (mut channel, _peer) = test_display_channel().await;
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+
+        // A frame whose data_size runs past the body.
+        let mut frame = Vec::new();
+        for v in [7u32, 0, 10] {
+            frame.extend_from_slice(&v.to_le_bytes());
+        }
+        frame.extend_from_slice(&[0xff, 0xd8]);
+        channel
+            .handle_message(display_server::STREAM_DATA, &frame)
+            .await
+            .expect("a short STREAM_DATA is ignored");
+        channel
+            .handle_message(display_server::STREAM_DATA_SIZED, &frame)
+            .await
+            .expect("a short STREAM_DATA_SIZED is ignored");
+        assert_eq!(
+            channel.streams[&7].frames_received, 0,
+            "an ignored frame is not counted"
+        );
+
+        channel
+            .handle_message(display_server::STREAM_DESTROY, &[7, 0, 0])
+            .await
+            .expect("a short STREAM_DESTROY is ignored");
+        assert!(channel.streams.contains_key(&7));
+        assert_eq!(channel.streams_destroyed_total, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_create_without_its_clip_is_ignored() {
+        let (mut channel, _peer) = test_display_channel().await;
+        let mut create = stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG);
+        assert_eq!(create.len(), StreamCreate::MIN_SIZE);
+        create.pop();
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("a STREAM_CREATE without its clip is ignored");
+        assert!(channel.streams.is_empty());
+        assert_eq!(channel.streams_created_total, 0);
+    }
+
+    #[tokio::test]
+    async fn draw_copy_shorter_than_its_base_warns_and_is_skipped() {
+        let (mut channel, _peer) = test_display_channel().await;
+        channel
+            .handle_message(display_server::DRAW_COPY, &[0; DrawBase::MIN_SIZE - 1])
+            .await
+            .expect("a DRAW_COPY shorter than its DrawBase is skipped");
+        assert!(
+            logging::warn_once_keys().contains(&"display:decode_failure:draw_copy:short_payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn draw_copy_with_its_clip_rects_cut_short_ends_the_channel() {
+        let (mut channel, _peer) = test_display_channel().await;
+        // surface_id, bbox, a RECTS clip claiming one rectangle, and no
+        // rectangle: long enough for DrawBase::MIN_SIZE, short of the clip.
+        let mut payload = vec![0; 4 + Rect::SIZE];
+        payload.push(clip_type::RECTS);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        assert!(payload.len() >= DrawBase::MIN_SIZE);
+        assert!(channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .is_err());
+    }
+
+    // -------------------------------------------------------------------------
     // ZLIB_GLZ_RGB inflate bounds (#176)
     // -------------------------------------------------------------------------
 
@@ -4615,7 +4683,7 @@ mod tests {
     /// far.
     fn drain_image_events(peers: &mut TestChannelPeers) -> Vec<(u32, u32, u32, u32, Vec<u8>)> {
         let mut out = Vec::new();
-        while let Ok(event) = peers._events.try_recv() {
+        while let Ok(event) = peers.events.try_recv() {
             if let ChannelEvent::ImageReady {
                 left,
                 top,
@@ -4804,7 +4872,7 @@ mod tests {
             .expect("draw_transparent must not error");
 
         let mut chroma_draws = 0;
-        while let Ok(event) = peers._events.try_recv() {
+        while let Ok(event) = peers.events.try_recv() {
             if matches!(event, ChannelEvent::ImageReadyChroma { .. }) {
                 chroma_draws += 1;
             }
@@ -4942,25 +5010,13 @@ mod tests {
     // protocol crate's writers, so that the move cannot change them.
     // -------------------------------------------------------------------------
 
-    /// Read exactly `len` bytes the channel wrote to its socket.
-    async fn sent_bytes(peers: &mut TestChannelPeers, len: usize) -> Vec<u8> {
-        use tokio::io::AsyncReadExt;
-        let mut buf = vec![0u8; len];
-        peers
-            ._peer
-            .read_exact(&mut buf)
-            .await
-            .expect("read what the channel sent");
-        buf
-    }
-
     #[tokio::test]
     async fn link_up_messages_are_unchanged() {
         let (mut channel, mut peers) = test_display_channel().await;
 
         channel.send_init().await.expect("send INIT");
         assert_eq!(
-            sent_bytes(&mut peers, 6 + 14).await,
+            peers.read_sent(6 + 14).await,
             vec![
                 101, 0, 14, 0, 0, 0, // mini header: INIT, 14 bytes
                 1, // pixmap_cache_id
@@ -4974,7 +5030,7 @@ mod tests {
             .send_preferred_compression(image_compression::AUTO_GLZ)
             .await
             .expect("send PREFERRED_COMPRESSION");
-        assert_eq!(sent_bytes(&mut peers, 7).await, vec![103, 0, 1, 0, 0, 0, 2]);
+        assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, 2]);
 
         channel
             .send_preferred_video_codec_type(&[
@@ -4983,10 +5039,7 @@ mod tests {
             ])
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
-        assert_eq!(
-            sent_bytes(&mut peers, 9).await,
-            vec![105, 0, 3, 0, 0, 0, 2, 3, 1]
-        );
+        assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
 
         // More codecs than the u8 count can say: the first 255 are sent.
         let codecs: Vec<u8> = (0..300).map(|i| (i % 7) as u8).collect();
@@ -4994,7 +5047,7 @@ mod tests {
             .send_preferred_video_codec_type(&codecs)
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
-        let sent = sent_bytes(&mut peers, 6 + 256).await;
+        let sent = peers.read_sent(6 + 256).await;
         assert_eq!(&sent[..7], &[105, 0, 0, 1, 0, 0, 255]);
         assert_eq!(&sent[7..], &codecs[..255]);
     }
@@ -5024,7 +5077,7 @@ mod tests {
             .send_stream_report(7)
             .await
             .expect("send STREAM_REPORT");
-        let sent = sent_bytes(&mut peers, 6 + 32).await;
+        let sent = peers.read_sent(6 + 32).await;
         assert_eq!(
             &sent[..30],
             &[

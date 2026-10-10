@@ -15,7 +15,7 @@ use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
     make_message, take_message, CursorHeader, CursorInitHead, CursorInvalOne, CursorMove,
-    CursorSetHead, Notify as NotifyMessage, Ping, SetAck, SpiceCursor, WireType,
+    CursorSetHead, Notify as NotifyMessage, Ping, SetAck, SpiceCursor, SpiceCursorRef, WireType,
 };
 use shakenfist_spice_protocol::reader::BoundedReader;
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
@@ -400,7 +400,7 @@ impl CursorChannel {
             return;
         }
 
-        let cursor = match SpiceCursor::read(r) {
+        let cursor = match SpiceCursorRef::read(r) {
             Ok(c) => c,
             Err(e) => {
                 warn!("cursor: failed to parse SpiceCursor: {}", e);
@@ -444,7 +444,7 @@ impl CursorChannel {
             return;
         }
 
-        let image = decode_cursor_pixels(header, &cursor.data);
+        let image = decode_cursor_pixels(header, cursor.data);
 
         if let Some(img) = image {
             if cache_me {
@@ -586,6 +586,7 @@ fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<Curs
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
 
     /// A cursor shape as the protocol crate's writer puts it on the wire,
     /// read back the way the channel reads it.
@@ -765,5 +766,71 @@ mod tests {
         let cursor = wire_cursor(cursor_type::ALPHA, 0, 0, 0, &[]);
         let result = decode(&cursor);
         assert!(result.is_none());
+    }
+
+    // Failure policy for malformed messages: which end the channel and
+    // which are skipped.
+
+    async fn test_cursor_channel() -> (CursorChannel, TestChannelPeers) {
+        let (stream, events, peers) = loopback().await;
+        let channel = CursorChannel::new(
+            stream,
+            events,
+            None,
+            Arc::new(ByteCounter::new()),
+            Arc::new(NullTraffic::new()),
+            Arc::new(Mutex::new(CursorSnapshot::default())),
+            LogConfig::default(),
+        );
+        (channel, peers)
+    }
+
+    #[tokio::test]
+    async fn short_init_and_set_end_the_channel() {
+        let (mut channel, _peers) = test_cursor_channel().await;
+        let init = vec![0; CursorInitHead::SIZE - 1];
+        assert!(channel
+            .handle_message(cursor_server::INIT, &init)
+            .await
+            .is_err());
+        let set = vec![0; CursorSetHead::SIZE - 1];
+        assert!(channel
+            .handle_message(cursor_server::SET, &set)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn short_move_and_inval_one_are_ignored() {
+        let (mut channel, mut peers) = test_cursor_channel().await;
+        let cached = CursorImage {
+            width: 1,
+            height: 1,
+            hot_spot_x: 0,
+            hot_spot_y: 0,
+            pixels: vec![0; 4],
+        };
+        channel.cursor_cache.insert(0, cached);
+
+        channel
+            .handle_message(cursor_server::MOVE, &[1, 0, 2])
+            .await
+            .expect("a short MOVE is ignored");
+        channel
+            .handle_message(
+                cursor_server::INVALIDATE_ONE,
+                &[0; CursorInvalOne::SIZE - 1],
+            )
+            .await
+            .expect("a short INVAL_ONE is ignored");
+
+        assert!(
+            peers.events.try_recv().is_err(),
+            "a short MOVE moves nothing"
+        );
+        assert!(
+            channel.cursor_cache.contains_key(&0),
+            "a short INVAL_ONE invalidates nothing"
+        );
     }
 }

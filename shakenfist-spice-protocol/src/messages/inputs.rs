@@ -4,6 +4,7 @@
 //! The server's `MOUSE_MOTION_ACK` has an empty body and needs no type.
 
 use super::WireType;
+use crate::constants::{mouse_button_id, mouse_buttons};
 use crate::reader::{BoundedReader, LinkError};
 
 /// `SPICE_MSG_INPUTS_INIT` (server to client): the guest's keyboard
@@ -15,6 +16,7 @@ pub struct InputsInit {
 }
 
 impl InputsInit {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 2;
 }
 
@@ -44,6 +46,7 @@ pub struct KeyModifiers {
 }
 
 impl KeyModifiers {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 2;
 }
 
@@ -69,6 +72,7 @@ pub struct KeyEvent {
 }
 
 impl KeyEvent {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -115,14 +119,15 @@ pub struct MouseMotion {
 }
 
 impl MouseMotion {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 10;
 }
 
 impl WireType for MouseMotion {
     fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(MouseMotion {
-            dx: i32::from_le_bytes(r.read_array()?),
-            dy: i32::from_le_bytes(r.read_array()?),
+            dx: r.read_i32()?,
+            dy: r.read_i32()?,
             buttons_state: r.read_u16()?,
         })
     }
@@ -146,6 +151,7 @@ pub struct MousePosition {
 }
 
 impl MousePosition {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 11;
 }
 
@@ -174,7 +180,7 @@ impl WireType for MousePosition {
 /// spice.proto gives the two fields different types. `button` is a
 /// `mouse_button` enum (`mouse_button_id::*`, LEFT = 1), while
 /// `buttons_state` is a `mouse_button_mask` (`mouse_buttons::*`, LEFT =
-/// 1 << 0). A caller holding a mask converts it to an id itself.
+/// 1 << 0). [`MouseButton::id_for_mask`] converts a mask to an id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MouseButton {
     /// A `mouse_button_id::*` value, kept raw so unknown ids survive.
@@ -184,7 +190,27 @@ pub struct MouseButton {
 }
 
 impl MouseButton {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 3;
+
+    /// The `mouse_button_id::*` a press or release names, from a
+    /// `mouse_buttons::*` mask with one button set.
+    ///
+    /// Only the mask's low byte is looked at, and a mask that is not
+    /// exactly one of the five buttons ryll sends maps to `INVALID` (0).
+    /// Both are ryll's behaviour from before this type existed, kept so
+    /// that the bytes it sends do not change.
+    #[must_use]
+    pub fn id_for_mask(mask: u32) -> u8 {
+        match u32::from(mask as u8) {
+            mouse_buttons::LEFT => mouse_button_id::LEFT,
+            mouse_buttons::MIDDLE => mouse_button_id::MIDDLE,
+            mouse_buttons::RIGHT => mouse_button_id::RIGHT,
+            mouse_buttons::UP => mouse_button_id::UP,
+            mouse_buttons::DOWN => mouse_button_id::DOWN,
+            _ => mouse_button_id::INVALID,
+        }
+    }
 }
 
 impl WireType for MouseButton {
@@ -204,8 +230,29 @@ impl WireType for MouseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::mouse_button_id;
     use crate::messages::assert_round_trip;
+
+    #[test]
+    fn mouse_button_id_for_mask_maps_single_buttons_and_low_byte() {
+        for (mask, id) in [
+            (mouse_buttons::LEFT, mouse_button_id::LEFT),
+            (mouse_buttons::MIDDLE, mouse_button_id::MIDDLE),
+            (mouse_buttons::RIGHT, mouse_button_id::RIGHT),
+            (mouse_buttons::UP, mouse_button_id::UP),
+            (mouse_buttons::DOWN, mouse_button_id::DOWN),
+            // Masks naming no button, or several, are INVALID.
+            (0x00, mouse_button_id::INVALID),
+            (0x03, mouse_button_id::INVALID),
+            (0x20, mouse_button_id::INVALID),
+            (0x40, mouse_button_id::INVALID),
+            // Only the low byte counts.
+            (0x101, mouse_button_id::LEFT),
+            (0x104, mouse_button_id::RIGHT),
+            (0x200, mouse_button_id::INVALID),
+        ] {
+            assert_eq!(MouseButton::id_for_mask(mask), id, "mask {:#x}", mask);
+        }
+    }
 
     #[test]
     fn inputs_init_round_trips_and_decodes() {

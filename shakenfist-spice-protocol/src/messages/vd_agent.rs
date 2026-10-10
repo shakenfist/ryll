@@ -37,6 +37,7 @@ pub struct VdAgentMessageHeader {
 }
 
 impl VdAgentMessageHeader {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 20;
 
     /// A header for a `size`-byte body of `message_type`, with the current
@@ -83,6 +84,7 @@ pub struct MonConfig {
 }
 
 impl MonConfig {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 20;
 }
 
@@ -92,8 +94,8 @@ impl WireType for MonConfig {
             height: r.read_u32()?,
             width: r.read_u32()?,
             depth: r.read_u32()?,
-            x: i32::from_le_bytes(r.read_array()?),
-            y: i32::from_le_bytes(r.read_array()?),
+            x: r.read_i32()?,
+            y: r.read_i32()?,
         })
     }
 
@@ -115,6 +117,7 @@ pub struct MonitorMm {
 }
 
 impl MonitorMm {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 4;
 }
 
@@ -179,14 +182,7 @@ impl WireType for MonitorsConfig {
         // reserving, as spice-common's agent_message_monitors_config_from_le
         // does, so that a short message cannot reserve gigabytes.
         let element = MonConfig::SIZE + if physical { MonitorMm::SIZE } else { 0 };
-        let room = r.remaining() / element;
-        if num_of_monitors > room {
-            return Err(LinkError::TooLarge {
-                what: "num_of_monitors",
-                value: num_of_monitors,
-                max: room,
-            });
-        }
+        r.check_count("num_of_monitors", num_of_monitors, element)?;
 
         let mut monitors = Vec::with_capacity(num_of_monitors);
         for _ in 0..num_of_monitors {
@@ -254,8 +250,22 @@ impl AnnounceCapabilities {
             .is_some_and(|word| word & (1 << (cap % 32)) != 0)
     }
 
+    /// One more than the highest capability
+    /// [`set_capability`](Self::set_capability) will set: sixteen words of
+    /// bits, far more than vd_agent.h defines.
+    pub const MAX_CAPABILITY: u32 = 32 * 16;
+
     /// Set capability `cap`, growing the bitmap to hold it.
+    ///
+    /// This builds the caller's own announcement from `VD_AGENT_CAP_*`
+    /// constants. Never pass it a peer-supplied value: the bitmap grows to
+    /// hold `cap`. A `cap` at or above
+    /// [`MAX_CAPABILITY`](Self::MAX_CAPABILITY) is ignored, so that a
+    /// caller bug cannot allocate hundreds of MiB.
     pub fn set_capability(&mut self, cap: u32) {
+        if cap >= Self::MAX_CAPABILITY {
+            return;
+        }
         let word = cap as usize / 32;
         if self.caps.len() <= word {
             self.caps.resize(word + 1, 0);
@@ -293,6 +303,7 @@ pub struct VdAgentReply {
 }
 
 impl VdAgentReply {
+    /// The size on the wire, in bytes.
     pub const SIZE: usize = 8;
 
     /// Whether the agent reported success: `error` is
@@ -820,6 +831,17 @@ mod tests {
         assert_eq!(caps.caps, vec![0x67, 0x2]);
         assert!(caps.has_capability(33));
         assert!(!caps.has_capability(32));
+    }
+
+    #[test]
+    fn announce_capabilities_ignores_a_capability_beyond_the_bound() {
+        let mut caps = AnnounceCapabilities::default();
+        caps.set_capability(AnnounceCapabilities::MAX_CAPABILITY - 1);
+        assert_eq!(caps.caps.len(), 16);
+        caps.set_capability(AnnounceCapabilities::MAX_CAPABILITY);
+        caps.set_capability(u32::MAX);
+        assert_eq!(caps.caps.len(), 16);
+        assert!(!caps.has_capability(u32::MAX));
     }
 
     // --- VdAgentReply tests ---
