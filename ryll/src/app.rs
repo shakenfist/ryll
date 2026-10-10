@@ -727,6 +727,11 @@ pub struct RyllApp {
     // suppressed or the window loses focus.
     held_keys: HeldKeys,
 
+    // A screenshot was asked for (F8 or the menu) and its save dialog
+    // has not been opened yet. The dialog is opened after the frame's
+    // input has been forwarded; see `open_screenshot_dialog`.
+    screenshot_requested: bool,
+
     // Bitmask of mouse buttons we have forwarded as pressed to the
     // inputs channel.  Used to send synthetic releases when input
     // forwarding is suppressed (e.g. bug report dialog opens).
@@ -1313,6 +1318,7 @@ impl RyllApp {
             last_mouse_pos: None,
             last_modifiers: None,
             held_keys: HeldKeys::default(),
+            screenshot_requested: false,
             forwarded_buttons: 0,
             pending_resize: None,
             last_auto_resize: None,
@@ -3030,11 +3036,7 @@ impl RyllApp {
         // Don't forward input to the SPICE server when
         // the bug report dialog or region selection is active.
         if self.show_bug_dialog || self.region_select_active {
-            if let Some(tx) = &self.input_tx {
-                for ev in self.held_keys.release_all() {
-                    let _ = tx.try_send(ev);
-                }
-            }
+            self.release_guest_keys();
             return;
         }
 
@@ -3080,6 +3082,28 @@ impl RyllApp {
                 let _ = input_tx.try_send(ev);
             }
         });
+    }
+
+    /// Release every key the guest has been told is held: the keys in
+    /// `held_keys` and the Ctrl / Shift / Alt modifiers forwarded by
+    /// `handle_input`. Used whenever ryll stops forwarding input or may
+    /// have missed the releases, so the guest is not left auto-repeating
+    /// a key nobody is holding. A modifier still held afterwards is
+    /// pressed again by the next `handle_input`.
+    fn release_guest_keys(&mut self) {
+        let mut events = self.held_keys.release_all();
+        if let Some(prev) = self.last_modifiers.take() {
+            for (down, code) in [(prev.ctrl, 0x1D), (prev.shift, 0x2A), (prev.alt, 0x38)] {
+                if down {
+                    events.push(InputEvent::KeyUp(code | 0x80));
+                }
+            }
+        }
+        if let Some(tx) = &self.input_tx {
+            for ev in events {
+                let _ = tx.try_send(ev);
+            }
+        }
     }
 
     fn handle_cadence(&mut self) {
@@ -3158,6 +3182,14 @@ impl RyllApp {
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
     /// If the dialog is cancelled, nothing happens.
+    ///
+    /// The dialog is synchronous: it runs the native panel's modal loop
+    /// inside `ui()`, and any key released while it is open goes to the
+    /// panel, so egui never sees the release. Every key the guest holds
+    /// is therefore released once the dialog returns. The caller must
+    /// open the dialog only after the frame's input has been forwarded,
+    /// or a press from this frame would be sent after that release and
+    /// stick.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.surfaces.is_empty() {
             self.push_notification(
@@ -3176,6 +3208,7 @@ impl RyllApp {
         let picked = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .save_file();
+        self.release_guest_keys();
 
         if let Some(path) = picked {
             match self.save_screenshots(path) {
@@ -3463,7 +3496,7 @@ impl eframe::App for RyllApp {
         if !self.region_select_active {
             let f8_pressed = ctx.input(|i| i.key_pressed(HostShortcut::Screenshot.key()));
             if f8_pressed {
-                self.open_screenshot_dialog();
+                self.screenshot_requested = true;
             }
         }
 
@@ -3491,6 +3524,12 @@ impl eframe::App for RyllApp {
         // Handle input (skip if paste was triggered this frame)
         if !paste_triggered {
             self.handle_input(ctx);
+        }
+
+        // Only now, with this frame's keys forwarded, is it safe to block
+        // in the screenshot save dialog (see `open_screenshot_dialog`).
+        if std::mem::take(&mut self.screenshot_requested) {
+            self.open_screenshot_dialog();
         }
 
         // Refresh traffic viewer entries periodically
@@ -3803,7 +3842,10 @@ impl eframe::App for RyllApp {
                                 )
                                 .clicked()
                             {
-                                self.open_screenshot_dialog();
+                                // Opened next frame, after that frame's
+                                // input is forwarded.
+                                self.screenshot_requested = true;
+                                ui.ctx().request_repaint();
                                 ui.close();
                             }
                             if ui
