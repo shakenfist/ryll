@@ -33,6 +33,8 @@ CRATES=(
     shakenfist-spice-protocol
     shakenfist-spice-compression
     shakenfist-spice-usbredir
+    shakenfist-spice-renderer
+    shakenfist-spice-webrtc
 )
 
 err() { echo "error: $*" >&2; exit 1; }

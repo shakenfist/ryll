@@ -8,7 +8,7 @@
 # version, and (after confirmation) creates an annotated tag vX.Y.Z
 # pointing at that commit and pushes it. Pushing the tag triggers
 # .github/workflows/release.yml, which builds binaries, publishes
-# the four workspace crates to crates.io, creates a GitHub Release,
+# the six workspace crates to crates.io, creates a GitHub Release,
 # and updates the Homebrew tap.
 #
 # Usage:
@@ -91,8 +91,11 @@ echo "  $TARGET_SUBJECT"
 echo
 echo "Pushing this tag will trigger the release workflow:"
 echo "  - build binaries on Linux / macOS / Windows"
-echo "  - publish all four crates to crates.io (IRREVERSIBLE)"
+echo "  - wait for approval on the release environment (twice:"
+echo "    once for signing, once more for PyPI)"
+echo "  - publish all six crates to crates.io (IRREVERSIBLE)"
 echo "  - create the GitHub Release"
+echo "  - publish the ryll wheels to PyPI"
 echo "  - update the Homebrew tap"
 echo
 read -rp "Create and push tag $TAG? [y/N] " REPLY
