@@ -457,6 +457,10 @@ jobs:
             target: aarch64-pc-windows-msvc
             features: "--no-default-features"
     runs-on: ${{ matrix.os }}
+    # A normal leg takes 10-20 minutes. Without a bound, a test that
+    # hangs runs into GitHub's six-hour job ceiling instead (#330 did,
+    # repeatedly), and in the merge queue that stalls every PR behind it.
+    timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       # audiopus_sys source-builds libopus on macOS and Windows when
