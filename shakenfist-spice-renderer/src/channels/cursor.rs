@@ -1,5 +1,5 @@
 /// Cursor channel handler - cursor position, shape, and caching
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
@@ -10,12 +10,14 @@ use crate::{
     ByteCounter, CaptureSink, LogConfig, NotificationEntry, NotificationSource, TrafficSink,
 };
 use shakenfist_spice_compression::limits;
+use shakenfist_spice_protocol::constants::{cursor_flags, cursor_type};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, CursorInit, CursorSet, Notify as NotifyMessage, Ping, SetAck,
-    SpiceCursorHeader,
+    make_message, take_message, CursorHeader, CursorInitHead, CursorInvalOne, CursorMove,
+    CursorSetHead, Notify as NotifyMessage, Ping, SetAck, SpiceCursor, SpiceCursorRef, WireType,
 };
+use shakenfist_spice_protocol::reader::BoundedReader;
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
 
 use super::{ChannelEvent, CursorImage, EventSink, MAX_MESSAGE_BODY};
@@ -193,56 +195,62 @@ impl CursorChannel {
         self.opcodes.record_recv(msg_type);
 
         match msg_type {
+            // INIT and SET are read in two parts, the fixed fields and then
+            // the SpiceCursor (CursorInit and CursorSet are the two
+            // composed). Short fixed fields end the channel; a malformed
+            // cursor after them loses only the shape, and the position is
+            // still applied.
+            //
+            // spice.proto's Point16 is signed. Ryll has always handed the
+            // position on as u16, and the `as u16` casts keep those bits.
             cursor_server::INIT => {
-                let init = CursorInit::read(payload)?;
+                let mut r = BoundedReader::new(payload);
+                let init = CursorInitHead::read(&mut r).context("malformed INIT")?;
                 debug!(
                     "cursor: init: pos=({},{}), visible={}, payload_size={}",
-                    init.x,
-                    init.y,
+                    init.x as u16,
+                    init.y as u16,
                     init.visible,
                     payload.len()
                 );
 
                 self.events
                     .emit(ChannelEvent::CursorPosition {
-                        x: init.x,
-                        y: init.y,
+                        x: init.x as u16,
+                        y: init.y as u16,
                         visible: init.visible != 0,
                     })
                     .await;
 
-                // SpiceCursor data follows the 9-byte INIT header
-                self.parse_and_emit_cursor(&payload[CursorInit::SIZE..])
-                    .await;
+                self.parse_and_emit_cursor(&mut r).await;
             }
 
             cursor_server::SET => {
-                let set = CursorSet::read(payload)?;
+                let mut r = BoundedReader::new(payload);
+                let set = CursorSetHead::read(&mut r).context("malformed SET")?;
                 debug!(
                     "cursor: set: pos=({},{}), visible={}, payload_size={}",
-                    set.x,
-                    set.y,
+                    set.x as u16,
+                    set.y as u16,
                     set.visible,
                     payload.len()
                 );
 
                 self.events
                     .emit(ChannelEvent::CursorPosition {
-                        x: set.x,
-                        y: set.y,
+                        x: set.x as u16,
+                        y: set.y as u16,
                         visible: set.visible != 0,
                     })
                     .await;
 
-                // SpiceCursor data follows the 5-byte SET header
-                self.parse_and_emit_cursor(&payload[CursorSet::SIZE..])
-                    .await;
+                self.parse_and_emit_cursor(&mut r).await;
             }
 
             cursor_server::MOVE => {
-                if payload.len() >= 4 {
-                    let x = u16::from_le_bytes([payload[0], payload[1]]);
-                    let y = u16::from_le_bytes([payload[2], payload[3]]);
+                // A short MOVE is ignored.
+                if let Ok(mv) = CursorMove::decode(payload) {
+                    let (x, y) = (mv.x as u16, mv.y as u16);
                     debug!("cursor: move: ({},{})", x, y);
 
                     self.events
@@ -279,11 +287,8 @@ impl CursorChannel {
             }
 
             cursor_server::INVALIDATE_ONE => {
-                if payload.len() >= 8 {
-                    let id = u64::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
-                        payload[6], payload[7],
-                    ]);
+                // A short INVAL_ONE is ignored.
+                if let Ok(CursorInvalOne { id }) = CursorInvalOne::decode(payload) {
                     debug!("cursor: invalidate_one: id={}", id);
                     self.cursor_cache.remove(&id);
                 }
@@ -298,7 +303,7 @@ impl CursorChannel {
             }
 
             cursor_server::SET_ACK => {
-                let set_ack = SetAck::read(payload)?;
+                let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -312,7 +317,7 @@ impl CursorChannel {
 
                 // Send ack_sync response
                 let mut ack_payload = Vec::new();
-                SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                set_ack.ack_sync().write(&mut ack_payload);
                 let response = make_message(cursor_client::ACK_SYNC, &ack_payload);
                 self.send_with_log(cursor_client::ACK_SYNC, &response)
                     .await?;
@@ -322,7 +327,7 @@ impl CursorChannel {
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                let ping = Ping::read(payload)?;
+                let ping = Ping::decode(payload).context("malformed PING")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -332,40 +337,45 @@ impl CursorChannel {
                 }
 
                 let mut pong_payload = Vec::new();
-                ping.write_pong(&mut pong_payload)?;
+                ping.pong().write(&mut pong_payload);
                 let response = make_message(cursor_client::PONG, &pong_payload);
                 self.send_with_log(cursor_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 
             cursor_server::NOTIFY => {
-                let notify = NotifyMessage::read(payload)?;
+                let notify = NotifyMessage::decode(payload).context("malformed NOTIFY")?;
+                let severity = notify.severity_kind();
+                let message = notify.message_text().into_owned();
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                        notify.severity, notify.visibility, notify.what, notify.message,
+                        severity,
+                        notify.visibility_kind(),
+                        notify.what,
+                        message,
                     ));
                 }
-                match notify.severity {
+                match severity {
                     NotifySeverity::Error => {
-                        warn!("cursor: server notify (error): {}", notify.message)
+                        warn!("cursor: server notify (error): {}", message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("cursor: server notify (warn): {}", notify.message)
+                        warn!("cursor: server notify (warn): {}", message)
                     }
                     NotifySeverity::Info => {
-                        info!("cursor: server notify: {}", notify.message)
+                        info!("cursor: server notify: {}", message)
                     }
                 }
                 let mut entry = NotificationEntry::new(
-                    notify.severity,
+                    severity,
                     NotificationSource::Spice {
                         channel: ChannelType::Cursor,
                         what: notify.what,
                     },
-                    notify.message.clone(),
+                    message,
                 );
-                if let Some(v) = notify.visibility {
+                if let Some(v) = notify.visibility_kind() {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
@@ -381,26 +391,29 @@ impl CursorChannel {
         Ok(())
     }
 
-    /// Parse SpiceCursor data and emit a CursorShape event if successful.
-    async fn parse_and_emit_cursor(&mut self, data: &[u8]) {
-        if data.len() < SpiceCursorHeader::FLAGS_SIZE {
+    /// Read the SpiceCursor at the end of INIT or SET from `r`, and emit a
+    /// CursorShape event if it decodes. A missing cursor is ignored
+    /// silently and a truncated header with a warning; neither ends the
+    /// channel.
+    async fn parse_and_emit_cursor(&mut self, r: &mut BoundedReader<'_>) {
+        if r.remaining() < SpiceCursor::FLAGS_SIZE {
             return;
         }
 
-        let header = match SpiceCursorHeader::read(data) {
-            Ok(Some(h)) => h,
-            Ok(None) => {
-                debug!("cursor: FLAG_NONE set, no cursor data");
-                return;
-            }
+        let cursor = match SpiceCursorRef::read(r) {
+            Ok(c) => c,
             Err(e) => {
-                warn!("cursor: failed to parse SpiceCursorHeader: {}", e);
+                warn!("cursor: failed to parse SpiceCursor: {}", e);
                 return;
             }
         };
+        let Some(header) = &cursor.header else {
+            debug!("cursor: FLAG_NONE set, no cursor data");
+            return;
+        };
 
-        let from_cache = (header.flags & SpiceCursorHeader::FLAG_FROM_CACHE) != 0;
-        let cache_me = (header.flags & SpiceCursorHeader::FLAG_CACHE_ME) != 0;
+        let from_cache = cursor.has_flag(cursor_flags::FROM_CACHE);
+        let cache_me = cursor.has_flag(cursor_flags::CACHE_ME);
 
         debug!(
             "cursor: shape: type={}, {}x{}, hot=({},{}), id={}, flags={:#x} (cache_me={}, from_cache={})",
@@ -410,7 +423,7 @@ impl CursorChannel {
             header.hot_spot_x,
             header.hot_spot_y,
             header.unique_id,
-            header.flags,
+            cursor.flags,
             cache_me,
             from_cache,
         );
@@ -431,8 +444,7 @@ impl CursorChannel {
             return;
         }
 
-        let pixel_data = &data[SpiceCursorHeader::SIZE..];
-        let image = decode_cursor_pixels(&header, pixel_data);
+        let image = decode_cursor_pixels(header, cursor.data);
 
         if let Some(img) = image {
             if cache_me {
@@ -509,7 +521,7 @@ impl CursorChannel {
 }
 
 /// Decode cursor pixel data based on cursor_type, returning RGBA pixels.
-fn decode_cursor_pixels(header: &SpiceCursorHeader, pixel_data: &[u8]) -> Option<CursorImage> {
+fn decode_cursor_pixels(header: &CursorHeader, pixel_data: &[u8]) -> Option<CursorImage> {
     let w = header.width as usize;
     let h = header.height as usize;
 
@@ -521,11 +533,11 @@ fn decode_cursor_pixels(header: &SpiceCursorHeader, pixel_data: &[u8]) -> Option
     // the format's name for the warnings below.
     let (src_bpp, has_alpha, format_name) = match header.cursor_type {
         // Alpha: 32-bit ARGB per pixel
-        0 => (4, true, "alpha"),
+        cursor_type::ALPHA => (4, true, "alpha"),
         // Color24: 24-bit BGR per pixel
-        5 => (3, false, "color24"),
+        cursor_type::COLOR24 => (3, false, "color24"),
         // Color32: 32-bit xRGB per pixel (x is padding, not alpha)
-        6 => (4, false, "color32"),
+        cursor_type::COLOR32 => (4, false, "color32"),
         other => {
             warn!("cursor: unsupported cursor type {} ({}x{})", other, w, h);
             return None;
@@ -574,25 +586,37 @@ fn decode_cursor_pixels(header: &SpiceCursorHeader, pixel_data: &[u8]) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
 
-    fn build_cursor_payload(
+    /// A cursor shape as the protocol crate's writer puts it on the wire,
+    /// read back the way the channel reads it.
+    fn wire_cursor(
         cursor_type: u8,
         width: u16,
         height: u16,
         flags: u16,
         pixel_data: &[u8],
-    ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        // SpiceCursor: flags(2) + unique_id(8) + type(1) + w(2) + h(2) + hx(2) + hy(2)
-        buf.extend_from_slice(&flags.to_le_bytes());
-        buf.extend_from_slice(&1u64.to_le_bytes()); // unique_id = 1
-        buf.push(cursor_type);
-        buf.extend_from_slice(&width.to_le_bytes());
-        buf.extend_from_slice(&height.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // hot_spot_x
-        buf.extend_from_slice(&0u16.to_le_bytes()); // hot_spot_y
-        buf.extend_from_slice(pixel_data);
-        buf
+    ) -> SpiceCursor {
+        let cursor = SpiceCursor {
+            flags,
+            header: (flags & cursor_flags::NONE == 0).then_some(CursorHeader {
+                unique_id: 1,
+                cursor_type,
+                width,
+                height,
+                hot_spot_x: 0,
+                hot_spot_y: 0,
+            }),
+            data: pixel_data.to_vec(),
+        };
+        let mut body = Vec::new();
+        cursor.write(&mut body);
+        SpiceCursor::decode(&body).expect("a written cursor reads back")
+    }
+
+    /// Decode a shaped cursor's pixels as `parse_and_emit_cursor` does.
+    fn decode(cursor: &SpiceCursor) -> Option<CursorImage> {
+        decode_cursor_pixels(cursor.header.as_ref().expect("a shape"), &cursor.data)
     }
 
     #[test]
@@ -603,9 +627,8 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // transparent black
             0xFF, 0xFF, 0xFF, 0xFF, // opaque white
         ];
-        let data = build_cursor_payload(0, 2, 2, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        let cursor = wire_cursor(cursor_type::ALPHA, 2, 2, 0, &pixels);
+        let result = decode(&cursor);
         assert!(result.is_some());
 
         let img = result.unwrap();
@@ -635,9 +658,8 @@ mod tests {
     #[test]
     fn test_color32_cursor_xrgb_to_rgba() {
         let pixels: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0x00]; // B=AA, G=BB, R=CC, x=00
-        let data = build_cursor_payload(6, 1, 1, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        let cursor = wire_cursor(cursor_type::COLOR32, 1, 1, 0, &pixels);
+        let result = decode(&cursor);
         assert!(result.is_some());
 
         let img = result.unwrap();
@@ -650,9 +672,8 @@ mod tests {
             0x11, 0x22, 0x33, // B=11, G=22, R=33
             0x44, 0x55, 0x66, // B=44, G=55, R=66
         ];
-        let data = build_cursor_payload(5, 2, 1, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        let img = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).unwrap();
+        let cursor = wire_cursor(cursor_type::COLOR24, 2, 1, 0, &pixels);
+        let img = decode(&cursor).unwrap();
         assert_eq!(
             img.pixels,
             vec![0x33, 0x22, 0x11, 0xFF, 0x66, 0x55, 0x44, 0xFF]
@@ -662,12 +683,15 @@ mod tests {
     #[test]
     fn test_short_cursor_data_returns_none() {
         // One byte short of a 2x2 cursor, for each format.
-        for (cursor_type, bpp) in [(0u8, 4usize), (5, 3), (6, 4)] {
+        for (cursor_type, bpp) in [
+            (cursor_type::ALPHA, 4usize),
+            (cursor_type::COLOR24, 3),
+            (cursor_type::COLOR32, 4),
+        ] {
             let pixels = vec![0u8; 2 * 2 * bpp - 1];
-            let data = build_cursor_payload(cursor_type, 2, 2, 0, &pixels);
-            let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
+            let cursor = wire_cursor(cursor_type, 2, 2, 0, &pixels);
             assert!(
-                decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none(),
+                decode(&cursor).is_none(),
                 "cursor type {} with short data must be refused",
                 cursor_type
             );
@@ -679,10 +703,13 @@ mod tests {
         // #177: a 65535x65535 header with four bytes of pixel data.
         // Before the fix this allocated 16 GiB of RGBA and only then
         // noticed the data was short.
-        for cursor_type in [0u8, 5, 6] {
-            let data = build_cursor_payload(cursor_type, 65535, 65535, 0, &[0u8; 4]);
-            let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-            assert!(decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none());
+        for cursor_type in [
+            cursor_type::ALPHA,
+            cursor_type::COLOR24,
+            cursor_type::COLOR32,
+        ] {
+            let cursor = wire_cursor(cursor_type, 65535, 65535, 0, &[0u8; 4]);
+            assert!(decode(&cursor).is_none());
         }
     }
 
@@ -693,40 +720,117 @@ mod tests {
         let max = limits::MAX_IMAGE_DIMENSION as u16;
         let pixels = vec![0u8; (max as usize + 1) * 4];
 
-        let data = build_cursor_payload(0, max + 1, 1, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        assert!(decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).is_none());
+        let cursor = wire_cursor(cursor_type::ALPHA, max + 1, 1, 0, &pixels);
+        assert!(decode(&cursor).is_none());
 
-        let data = build_cursor_payload(0, max, 1, 0, &pixels);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        let img = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]).unwrap();
+        let cursor = wire_cursor(cursor_type::ALPHA, max, 1, 0, &pixels);
+        let img = decode(&cursor).unwrap();
         assert_eq!(img.pixels.len(), max as usize * 4);
     }
 
     #[test]
     fn test_from_cache_flag_no_pixel_data() {
-        let data = build_cursor_payload(0, 24, 24, SpiceCursorHeader::FLAG_FROM_CACHE, &[]);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        assert_eq!(
-            header.flags & SpiceCursorHeader::FLAG_FROM_CACHE,
-            SpiceCursorHeader::FLAG_FROM_CACHE
-        );
+        let cursor = wire_cursor(cursor_type::ALPHA, 24, 24, cursor_flags::FROM_CACHE, &[]);
+        assert!(cursor.has_flag(cursor_flags::FROM_CACHE));
+        let header = cursor.header.as_ref().expect("FROM_CACHE keeps the header");
         assert_eq!(header.width, 24);
         assert_eq!(header.height, 24);
+        assert!(cursor.data.is_empty());
     }
 
     #[test]
     fn test_flag_none_returns_none() {
-        let data = build_cursor_payload(0, 24, 24, SpiceCursorHeader::FLAG_NONE, &[]);
-        let result = SpiceCursorHeader::read(&data).unwrap();
-        assert!(result.is_none());
+        let cursor = wire_cursor(cursor_type::ALPHA, 24, 24, cursor_flags::NONE, &[]);
+        assert!(cursor.header.is_none());
+    }
+
+    #[test]
+    fn test_unsupported_cursor_types_return_none() {
+        // Only ALPHA, COLOR24 and COLOR32 decode; the rest are refused
+        // even with ample data.
+        for cursor_type in [
+            cursor_type::MONO,
+            cursor_type::COLOR4,
+            cursor_type::COLOR8,
+            cursor_type::COLOR16,
+            7,
+            0xff,
+        ] {
+            let cursor = wire_cursor(cursor_type, 2, 2, 0, &[0u8; 64]);
+            assert!(decode(&cursor).is_none(), "cursor type {}", cursor_type);
+        }
     }
 
     #[test]
     fn test_zero_dimension_cursor_returns_none() {
-        let data = build_cursor_payload(0, 0, 0, 0, &[]);
-        let header = SpiceCursorHeader::read(&data).unwrap().unwrap();
-        let result = decode_cursor_pixels(&header, &data[SpiceCursorHeader::SIZE..]);
+        let cursor = wire_cursor(cursor_type::ALPHA, 0, 0, 0, &[]);
+        let result = decode(&cursor);
         assert!(result.is_none());
+    }
+
+    // Failure policy for malformed messages: which end the channel and
+    // which are skipped.
+
+    async fn test_cursor_channel() -> (CursorChannel, TestChannelPeers) {
+        let (stream, events, peers) = loopback().await;
+        let channel = CursorChannel::new(
+            stream,
+            events,
+            None,
+            Arc::new(ByteCounter::new()),
+            Arc::new(NullTraffic::new()),
+            Arc::new(Mutex::new(CursorSnapshot::default())),
+            LogConfig::default(),
+        );
+        (channel, peers)
+    }
+
+    #[tokio::test]
+    async fn short_init_and_set_end_the_channel() {
+        let (mut channel, _peers) = test_cursor_channel().await;
+        let init = vec![0; CursorInitHead::SIZE - 1];
+        assert!(channel
+            .handle_message(cursor_server::INIT, &init)
+            .await
+            .is_err());
+        let set = vec![0; CursorSetHead::SIZE - 1];
+        assert!(channel
+            .handle_message(cursor_server::SET, &set)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn short_move_and_inval_one_are_ignored() {
+        let (mut channel, mut peers) = test_cursor_channel().await;
+        let cached = CursorImage {
+            width: 1,
+            height: 1,
+            hot_spot_x: 0,
+            hot_spot_y: 0,
+            pixels: vec![0; 4],
+        };
+        channel.cursor_cache.insert(0, cached);
+
+        channel
+            .handle_message(cursor_server::MOVE, &[1, 0, 2])
+            .await
+            .expect("a short MOVE is ignored");
+        channel
+            .handle_message(
+                cursor_server::INVALIDATE_ONE,
+                &[0; CursorInvalOne::SIZE - 1],
+            )
+            .await
+            .expect("a short INVAL_ONE is ignored");
+
+        assert!(
+            peers.events.try_recv().is_err(),
+            "a short MOVE moves nothing"
+        );
+        assert!(
+            channel.cursor_cache.contains_key(&0),
+            "a short INVAL_ONE invalidates nothing"
+        );
     }
 }

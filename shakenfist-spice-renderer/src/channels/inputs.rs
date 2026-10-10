@@ -1,5 +1,5 @@
 /// Inputs channel handler - keyboard and mouse input
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,8 +15,8 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, InputsKeyModifiers, KeyEvent, MouseButton, MouseMotion,
-    MousePosition, Notify as NotifyMessage, Ping, SetAck,
+    make_message, take_message, InputsInit, KeyEvent, KeyModifiers, MouseButton, MouseMotion,
+    MousePosition, Notify as NotifyMessage, Ping, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
@@ -469,13 +469,19 @@ impl InputsChannel {
 
         match msg_type {
             inputs_server::INIT => {
-                debug!("inputs: init received");
+                // Nothing acts on INIT, so a short body is no error.
+                match InputsInit::decode(payload) {
+                    Ok(init) => debug!(
+                        "inputs: init received: modifiers={:#x}",
+                        init.keyboard_modifiers
+                    ),
+                    Err(_) => debug!("inputs: init received"),
+                }
             }
 
             inputs_server::KEY_MODIFIERS => {
-                if payload.len() >= 2 {
-                    let modifiers = u16::from_le_bytes([payload[0], payload[1]]);
-
+                // A short KEY_MODIFIERS is ignored.
+                if let Ok(KeyModifiers { modifiers }) = KeyModifiers::decode(payload) {
                     if self.log_config.verbose {
                         logging::log_detail(&format!("modifiers={:#x}", modifiers));
                     } else {
@@ -491,7 +497,7 @@ impl InputsChannel {
             }
 
             inputs_server::SET_ACK => {
-                let set_ack = SetAck::read(payload)?;
+                let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -502,16 +508,17 @@ impl InputsChannel {
 
                 // ACK_SYNC is opcode 1 (common across all channels)
                 let mut ack_payload = Vec::new();
-                SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
-                let response = make_message(1, &ack_payload);
-                self.send_with_log(1, &response).await?;
+                set_ack.ack_sync().write(&mut ack_payload);
+                let response = make_message(inputs_client::ACK_SYNC, &ack_payload);
+                self.send_with_log(inputs_client::ACK_SYNC, &response)
+                    .await?;
             }
 
             inputs_server::PING => {
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                let ping = Ping::read(payload)?;
+                let ping = Ping::decode(payload).context("malformed PING")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -521,41 +528,46 @@ impl InputsChannel {
                 }
 
                 let mut pong_payload = Vec::new();
-                ping.write_pong(&mut pong_payload)?;
+                ping.pong().write(&mut pong_payload);
                 // Inputs channel uses same message type for pong
-                let response = make_message(3, &pong_payload); // PONG
-                self.send_with_log(3, &response).await?;
+                let response = make_message(inputs_client::PONG, &pong_payload);
+                self.send_with_log(inputs_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 
             inputs_server::NOTIFY => {
-                let notify = NotifyMessage::read(payload)?;
+                let notify = NotifyMessage::decode(payload).context("malformed NOTIFY")?;
+                let severity = notify.severity_kind();
+                let message = notify.message_text().into_owned();
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                        notify.severity, notify.visibility, notify.what, notify.message,
+                        severity,
+                        notify.visibility_kind(),
+                        notify.what,
+                        message,
                     ));
                 }
-                match notify.severity {
+                match severity {
                     NotifySeverity::Error => {
-                        warn!("inputs: server notify (error): {}", notify.message)
+                        warn!("inputs: server notify (error): {}", message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("inputs: server notify (warn): {}", notify.message)
+                        warn!("inputs: server notify (warn): {}", message)
                     }
                     NotifySeverity::Info => {
-                        info!("inputs: server notify: {}", notify.message)
+                        info!("inputs: server notify: {}", message)
                     }
                 }
                 let mut entry = NotificationEntry::new(
-                    notify.severity,
+                    severity,
                     NotificationSource::Spice {
                         channel: ChannelType::Inputs,
                         what: notify.what,
                     },
-                    notify.message.clone(),
+                    message,
                 );
-                if let Some(v) = notify.visibility {
+                if let Some(v) = notify.visibility_kind() {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
@@ -590,7 +602,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent { scancode }.write(&mut payload)?;
+                KeyEvent { scancode }.write(&mut payload);
                 let msg = make_message(inputs_client::KEY_DOWN, &payload);
 
                 debug!("inputs: key down: scancode={:#x}", scancode);
@@ -615,7 +627,7 @@ impl InputsChannel {
                 });
 
                 let mut payload = Vec::new();
-                KeyEvent { scancode }.write(&mut payload)?;
+                KeyEvent { scancode }.write(&mut payload);
                 let msg = make_message(inputs_client::KEY_UP, &payload);
 
                 debug!("inputs: key up: scancode={:#x}", scancode);
@@ -645,10 +657,10 @@ impl InputsChannel {
                     MousePosition {
                         x,
                         y,
-                        buttons: self.button_state as u16,
+                        buttons_state: self.button_state as u16,
                         display_id: 0,
                     }
-                    .write(&mut payload)?;
+                    .write(&mut payload);
                     let msg = make_message(inputs_client::MOUSE_POSITION, &payload);
                     self.send_with_log(inputs_client::MOUSE_POSITION, &msg)
                         .await?;
@@ -674,9 +686,9 @@ impl InputsChannel {
                     MouseMotion {
                         dx,
                         dy,
-                        buttons: self.button_state as u16,
+                        buttons_state: self.button_state as u16,
                     }
-                    .write(&mut payload)?;
+                    .write(&mut payload);
                     let msg = make_message(inputs_client::MOUSE_MOTION, &payload);
                     self.send_with_log(inputs_client::MOUSE_MOTION, &msg)
                         .await?;
@@ -699,10 +711,10 @@ impl InputsChannel {
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state as u16,
+                    buttons_state: self.button_state as u16,
                     display_id: 0,
                 }
-                .write(&mut pos_payload)?;
+                .write(&mut pos_payload);
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -720,10 +732,10 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button as u8,
+                    button: MouseButton::id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
-                .write(&mut payload)?;
+                .write(&mut payload);
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
                 info!(
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
@@ -744,10 +756,10 @@ impl InputsChannel {
                 MousePosition {
                     x,
                     y,
-                    buttons: self.button_state as u16,
+                    buttons_state: self.button_state as u16,
                     display_id: 0,
                 }
-                .write(&mut pos_payload)?;
+                .write(&mut pos_payload);
                 let pos_msg = make_message(inputs_client::MOUSE_POSITION, &pos_payload);
                 self.send_with_log(inputs_client::MOUSE_POSITION, &pos_msg)
                     .await?;
@@ -763,10 +775,10 @@ impl InputsChannel {
 
                 let mut payload = Vec::new();
                 MouseButton {
-                    button: button as u8,
+                    button: MouseButton::id_for_mask(button),
                     buttons_state: self.button_state as u16,
                 }
-                .write(&mut payload)?;
+                .write(&mut payload);
                 let msg = make_message(inputs_client::MOUSE_RELEASE, &payload);
                 debug!("inputs: mouse up: button={}, pos=({},{})", button, x, y);
                 self.send_with_log(inputs_client::MOUSE_RELEASE, &msg)
@@ -943,7 +955,7 @@ impl InputsChannel {
 
     async fn send_key_modifiers(&mut self, modifiers: u16) -> Result<()> {
         let mut payload = Vec::new();
-        InputsKeyModifiers { modifiers }.write(&mut payload)?;
+        KeyModifiers { modifiers }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
         self.send_with_log(inputs_client::KEY_MODIFIERS, &msg)
             .await?;
@@ -1000,7 +1012,7 @@ impl InputsChannel {
     /// Send a raw key-down without event recording or modifier tracking.
     async fn send_key_down(&mut self, scancode: u32) -> Result<()> {
         let mut payload = Vec::new();
-        KeyEvent { scancode }.write(&mut payload)?;
+        KeyEvent { scancode }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_DOWN, &payload);
         self.send_with_log(inputs_client::KEY_DOWN, &msg).await
     }
@@ -1008,7 +1020,7 @@ impl InputsChannel {
     /// Send a raw key-up without event recording or modifier tracking.
     async fn send_key_up(&mut self, scancode: u32) -> Result<()> {
         let mut payload = Vec::new();
-        KeyEvent { scancode }.write(&mut payload)?;
+        KeyEvent { scancode }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_UP, &payload);
         self.send_with_log(inputs_client::KEY_UP, &msg).await
     }
@@ -2332,6 +2344,69 @@ mod tests {
         }
     }
 
+    /// The bytes ryll sends for each input message, built the way the
+    /// channel builds them. These are the bytes the old `io::Result`
+    /// writers produced, and moving `MouseButton`'s mask-to-id mapping
+    /// out of its writer must not change them.
+    #[test]
+    fn sent_input_payloads_are_unchanged() {
+        use shakenfist_spice_protocol::messages::{
+            KeyEvent, KeyModifiers, MouseButton, MouseMotion, MousePosition, WireType,
+        };
+        fn bytes(value: &impl WireType) -> Vec<u8> {
+            let mut out = Vec::new();
+            value.write(&mut out);
+            out
+        }
+
+        assert_eq!(bytes(&KeyEvent { scancode: 0xe048 }), [0x48, 0xe0, 0, 0]);
+        assert_eq!(bytes(&KeyModifiers { modifiers: 0x0005 }), [5, 0]);
+
+        // The channel's button state is a u32 truncated to the wire's u16.
+        let button_state: u32 = 0x0001_01ff;
+        assert_eq!(
+            bytes(&MousePosition {
+                x: 0x0102_0304,
+                y: 0x0a0b_0c0d,
+                buttons_state: button_state as u16,
+                display_id: 0,
+            }),
+            [4, 3, 2, 1, 0x0d, 0x0c, 0x0b, 0x0a, 0xff, 0x01, 0]
+        );
+        assert_eq!(
+            bytes(&MouseMotion {
+                dx: -2,
+                dy: 3,
+                buttons_state: button_state as u16,
+            }),
+            [0xfe, 0xff, 0xff, 0xff, 3, 0, 0, 0, 0xff, 0x01]
+        );
+        for (mask, id) in [
+            (0x01u32, 1u8),
+            (0x02, 2),
+            (0x04, 3),
+            (0x08, 4),
+            (0x10, 5),
+            (0x20, 0),
+            (0x40, 0),
+            (0x00, 0),
+            (0x03, 0),
+            (0x101, 1),
+            (0x104, 3),
+            (0x200, 0),
+        ] {
+            assert_eq!(
+                bytes(&MouseButton {
+                    button: MouseButton::id_for_mask(mask),
+                    buttons_state: button_state as u16,
+                }),
+                [id, 0xff, 0x01],
+                "mask {:#x}",
+                mask
+            );
+        }
+    }
+
     #[test]
     fn paste_scancode_values_match_scancode_for_logical_key() {
         // For representative characters, verify that translate_paste produces the same
@@ -2366,5 +2441,64 @@ mod tests {
         let key_result = scancode_for_logical_key(LogicalKey::Whitespace(WSKey::Enter)).unwrap();
         assert_eq!(paste_result[0].press, key_result.0);
         assert_eq!(paste_result[0].release, key_result.1);
+    }
+
+    // Failure policy for malformed messages: which end the channel and
+    // which are skipped.
+
+    mod failure_policy {
+        use std::sync::{Arc, Mutex};
+
+        use shakenfist_spice_protocol::inputs_server;
+        use shakenfist_spice_protocol::messages::{InputsInit, KeyModifiers, Ping, SetAck};
+        use tokio::sync::mpsc;
+
+        use super::super::InputsChannel;
+        use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+        use crate::snapshots::InputsSnapshot;
+        use crate::{ByteCounter, LogConfig};
+
+        async fn test_inputs_channel() -> (InputsChannel, TestChannelPeers) {
+            let (stream, events, peers) = loopback().await;
+            let (_input_tx, input_rx) = mpsc::channel(1);
+            let channel = InputsChannel::new(
+                stream,
+                events,
+                input_rx,
+                None,
+                Arc::new(ByteCounter::new()),
+                Arc::new(NullTraffic::new()),
+                Arc::new(Mutex::new(InputsSnapshot::default())),
+                false,
+                LogConfig::default(),
+            );
+            (channel, peers)
+        }
+
+        #[tokio::test]
+        async fn short_init_and_key_modifiers_are_ignored() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            channel
+                .handle_server_message(inputs_server::INIT, &[0; InputsInit::SIZE - 1])
+                .await
+                .expect("a short INIT is no error");
+            channel
+                .handle_server_message(inputs_server::KEY_MODIFIERS, &[0; KeyModifiers::SIZE - 1])
+                .await
+                .expect("a short KEY_MODIFIERS is ignored");
+        }
+
+        #[tokio::test]
+        async fn short_set_ack_and_ping_end_the_channel() {
+            let (mut channel, _peers) = test_inputs_channel().await;
+            assert!(channel
+                .handle_server_message(inputs_server::SET_ACK, &[0; SetAck::SIZE - 1])
+                .await
+                .is_err());
+            assert!(channel
+                .handle_server_message(inputs_server::PING, &[0; Ping::SIZE - 1])
+                .await
+                .is_err());
+        }
     }
 }

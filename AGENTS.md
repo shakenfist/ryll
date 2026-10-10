@@ -120,8 +120,14 @@ that table is an incomplete change.
 
 ### Modifying protocol handling
 
-1. Message definitions in
-   `shakenfist-spice-protocol/src/messages.rs`
+1. Message definitions in the
+   `shakenfist-spice-protocol/src/messages/` module, one submodule per
+   channel (`common`, `main`, `display`, `cursor`, `inputs`,
+   `vd_agent`). A new type implements `WireType` (or
+   `ClipboardWireType` where the layout depends on negotiated
+   capabilities), with a `BoundedReader` reader and an infallible
+   writer. It ships with an `assert_round_trip` test and a test
+   decoding hand-written bytes laid out from spice.proto.
 2. Constants/enums in
    `shakenfist-spice-protocol/src/constants.rs`
 3. Channel-specific logic in

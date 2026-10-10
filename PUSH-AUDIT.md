@@ -239,7 +239,7 @@ conventions in `AGENTS.md` and `docs/design-decisions.md`:
   documented in `docs/design-decisions.md` decision #17.
 - Protocol message conventions: constants in
   `shakenfist-spice-protocol/src/constants.rs`, message
-  parsing in `messages.rs`, name lookups in `logging.rs`.
+  parsing in `messages/`, name lookups in `logging.rs`.
 - Image decompression conventions: header parsing,
   BGRX-to-RGBA conversion, `DecompressedImage` return
   type.

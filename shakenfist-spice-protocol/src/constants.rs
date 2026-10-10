@@ -372,6 +372,11 @@ pub mod inputs_client {
     pub const MOUSE_POSITION: u16 = 112;
     pub const MOUSE_PRESS: u16 = 113;
     pub const MOUSE_RELEASE: u16 = 114;
+    // Common-channel client messages, enums.h:436-438 (SPICE_MSGC_ACK_SYNC
+    // onwards). These are the same on every channel.
+    pub const ACK_SYNC: u16 = 1;
+    pub const ACK: u16 = 2;
+    pub const PONG: u16 = 3;
 }
 
 /// Input channel message types (server -> client)
@@ -494,6 +499,20 @@ pub mod keyboard_modifiers {
     pub const CAPS_LOCK: u16 = 1 << 2;
 }
 
+/// Mouse button ids (SPICE_MOUSE_BUTTON_* in enums.h:332-343): the
+/// `button` of `MOUSE_PRESS` and `MOUSE_RELEASE`. Not the masks in
+/// [`mouse_buttons`], which the `buttons_state` fields carry.
+pub mod mouse_button_id {
+    pub const INVALID: u8 = 0;
+    pub const LEFT: u8 = 1;
+    pub const MIDDLE: u8 = 2;
+    pub const RIGHT: u8 = 3;
+    pub const UP: u8 = 4;
+    pub const DOWN: u8 = 5;
+    pub const SIDE: u8 = 6;
+    pub const EXTRA: u8 = 7;
+}
+
 /// Mouse button flags
 pub mod mouse_buttons {
     pub const LEFT: u32 = 1 << 0;
@@ -527,6 +546,158 @@ pub mod brush {
     pub const NONE: u8 = 0;
     pub const SOLID: u8 = 1;
     pub const PATTERN: u8 = 2;
+}
+
+/// Clip type (SPICE_CLIP_TYPE_* in enums.h:130-136).
+pub mod clip_type {
+    pub const NONE: u8 = 0;
+    pub const RECTS: u8 = 1;
+}
+
+/// Bitmap pixel format (SPICE_BITMAP_FMT_* in enums.h:216-229).
+pub mod bitmap_fmt {
+    pub const INVALID: u8 = 0;
+    pub const BIT1_LE: u8 = 1;
+    pub const BIT1_BE: u8 = 2;
+    pub const BIT4_LE: u8 = 3;
+    pub const BIT4_BE: u8 = 4;
+    pub const BIT8: u8 = 5;
+    pub const BIT16: u8 = 6;
+    pub const BIT24: u8 = 7;
+    pub const BIT32: u8 = 8;
+    pub const RGBA: u8 = 9;
+    pub const BIT8_A: u8 = 10;
+}
+
+/// Bitmap flags (SPICE_BITMAP_FLAGS_* in enums.h:232-237).
+pub mod bitmap_flags {
+    pub const PAL_CACHE_ME: u8 = 1 << 0;
+    pub const PAL_FROM_CACHE: u8 = 1 << 1;
+    pub const TOP_DOWN: u8 = 1 << 2;
+    pub const MASK: u8 = 0x7;
+}
+
+/// Surface pixel format (SPICE_SURFACE_FMT_* in enums.h:292-301).
+pub mod surface_fmt {
+    pub const INVALID: u32 = 0;
+    pub const FMT_1_A: u32 = 1;
+    pub const FMT_8_A: u32 = 8;
+    pub const FMT_16_555: u32 = 16;
+    pub const FMT_32_XRGB: u32 = 32;
+    pub const FMT_16_565: u32 = 80;
+    pub const FMT_32_ARGB: u32 = 96;
+}
+
+/// Stream flags (SPICE_STREAM_FLAGS_* in enums.h:157-160).
+pub mod stream_flags {
+    pub const TOP_DOWN: u8 = 1 << 0;
+    pub const MASK: u8 = 0x1;
+}
+
+/// Image scale mode (SPICE_IMAGE_SCALE_MODE_* in enums.h:246-251).
+pub mod image_scale_mode {
+    pub const INTERPOLATE: u8 = 0;
+    pub const NEAREST: u8 = 1;
+}
+
+/// Mask flags (SPICE_MASK_FLAGS_* in enums.h:171-174).
+pub mod mask_flags {
+    pub const INVERS: u8 = 1 << 0;
+    pub const MASK: u8 = 0x1;
+}
+
+/// Cursor type (SPICE_CURSOR_TYPE_* in enums.h:357-366).
+pub mod cursor_type {
+    pub const ALPHA: u8 = 0;
+    pub const MONO: u8 = 1;
+    pub const COLOR4: u8 = 2;
+    pub const COLOR8: u8 = 3;
+    pub const COLOR16: u8 = 4;
+    pub const COLOR24: u8 = 5;
+    pub const COLOR32: u8 = 6;
+}
+
+/// Cursor flags (SPICE_CURSOR_FLAGS_* in enums.h:369-375).
+pub mod cursor_flags {
+    /// There is no cursor shape; no `CursorHeader` follows.
+    pub const NONE: u16 = 1 << 0;
+    pub const CACHE_ME: u16 = 1 << 1;
+    pub const FROM_CACHE: u16 = 1 << 2;
+    pub const MASK: u16 = 0x7;
+}
+
+/// Guest agent (vdagent) protocol constants, from spice-protocol's
+/// `spice/vd_agent.h`. Each value cites its line there.
+///
+/// These keep their C names: the header's message types, capability bits
+/// and clipboard types share words (`CLIPBOARD` is a message, a capability
+/// and a family of types), and the prefixes keep them apart.
+pub mod vd_agent {
+    /// `VDAgentMessage.protocol` (vd_agent.h:60).
+    pub const VD_AGENT_PROTOCOL: u32 = 1;
+    /// Largest agent data chunk (vd_agent.h:61).
+    pub const VD_AGENT_MAX_DATA_SIZE: u32 = 2048;
+
+    // `VDAgentMessage.type` (vd_agent.h:69-123).
+    pub const VD_AGENT_MOUSE_STATE: u32 = 1; // vd_agent.h:73
+    pub const VD_AGENT_MONITORS_CONFIG: u32 = 2; // vd_agent.h:78
+    pub const VD_AGENT_REPLY: u32 = 3; // vd_agent.h:82
+    pub const VD_AGENT_CLIPBOARD: u32 = 4; // vd_agent.h:87
+    pub const VD_AGENT_DISPLAY_CONFIG: u32 = 5; // vd_agent.h:92
+    pub const VD_AGENT_ANNOUNCE_CAPABILITIES: u32 = 6; // vd_agent.h:94
+    pub const VD_AGENT_CLIPBOARD_GRAB: u32 = 7; // vd_agent.h:100
+    pub const VD_AGENT_CLIPBOARD_REQUEST: u32 = 8; // vd_agent.h:105
+    pub const VD_AGENT_CLIPBOARD_RELEASE: u32 = 9; // vd_agent.h:107
+    pub const VD_AGENT_FILE_XFER_START: u32 = 10; // vd_agent.h:109
+    pub const VD_AGENT_FILE_XFER_STATUS: u32 = 11; // vd_agent.h:111
+    pub const VD_AGENT_FILE_XFER_DATA: u32 = 12; // vd_agent.h:113
+    pub const VD_AGENT_CLIENT_DISCONNECTED: u32 = 13; // vd_agent.h:115
+    pub const VD_AGENT_MAX_CLIPBOARD: u32 = 14; // vd_agent.h:117
+    pub const VD_AGENT_AUDIO_VOLUME_SYNC: u32 = 15; // vd_agent.h:119
+    pub const VD_AGENT_GRAPHICS_DEVICE_INFO: u32 = 16; // vd_agent.h:121
+
+    // `VDAgentMonitorsConfig.flags` (vd_agent.h:206-209).
+    pub const VD_AGENT_CONFIG_MONITORS_FLAG_USE_POS: u32 = 1 << 0; // vd_agent.h:207
+    pub const VD_AGENT_CONFIG_MONITORS_FLAG_PHYSICAL_SIZE: u32 = 1 << 1; // vd_agent.h:208
+
+    // `VDAgentReply.error` (vd_agent.h:266-269). Success is 1, not 0.
+    pub const VD_AGENT_SUCCESS: u32 = 1; // vd_agent.h:267
+    pub const VD_AGENT_ERROR: u32 = 2; // vd_agent.h:268
+
+    // Clipboard data types (vd_agent.h:280-293).
+    pub const VD_AGENT_CLIPBOARD_NONE: u32 = 0; // vd_agent.h:281
+    pub const VD_AGENT_CLIPBOARD_UTF8_TEXT: u32 = 1; // vd_agent.h:282
+    pub const VD_AGENT_CLIPBOARD_IMAGE_PNG: u32 = 2; // vd_agent.h:283
+    pub const VD_AGENT_CLIPBOARD_IMAGE_BMP: u32 = 3; // vd_agent.h:284
+    pub const VD_AGENT_CLIPBOARD_IMAGE_TIFF: u32 = 4; // vd_agent.h:285
+    pub const VD_AGENT_CLIPBOARD_IMAGE_JPG: u32 = 5; // vd_agent.h:286
+    pub const VD_AGENT_CLIPBOARD_FILE_LIST: u32 = 6; // vd_agent.h:292
+
+    // Clipboard selections, a `uint8_t` on the wire (vd_agent.h:295-299).
+    pub const VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD: u8 = 0; // vd_agent.h:296
+    pub const VD_AGENT_CLIPBOARD_SELECTION_PRIMARY: u8 = 1; // vd_agent.h:297
+    pub const VD_AGENT_CLIPBOARD_SELECTION_SECONDARY: u8 = 2; // vd_agent.h:298
+
+    // Capability bit indices (vd_agent.h:367-397).
+    pub const VD_AGENT_CAP_MOUSE_STATE: u32 = 0; // vd_agent.h:368
+    pub const VD_AGENT_CAP_MONITORS_CONFIG: u32 = 1; // vd_agent.h:369
+    pub const VD_AGENT_CAP_REPLY: u32 = 2; // vd_agent.h:370
+    pub const VD_AGENT_CAP_CLIPBOARD: u32 = 3; // vd_agent.h:371
+    pub const VD_AGENT_CAP_DISPLAY_CONFIG: u32 = 4; // vd_agent.h:372
+    pub const VD_AGENT_CAP_CLIPBOARD_BY_DEMAND: u32 = 5; // vd_agent.h:373
+    pub const VD_AGENT_CAP_CLIPBOARD_SELECTION: u32 = 6; // vd_agent.h:374
+    pub const VD_AGENT_CAP_SPARSE_MONITORS_CONFIG: u32 = 7; // vd_agent.h:375
+    pub const VD_AGENT_CAP_GUEST_LINEEND_LF: u32 = 8; // vd_agent.h:376
+    pub const VD_AGENT_CAP_GUEST_LINEEND_CRLF: u32 = 9; // vd_agent.h:377
+    pub const VD_AGENT_CAP_MAX_CLIPBOARD: u32 = 10; // vd_agent.h:378
+    pub const VD_AGENT_CAP_AUDIO_VOLUME_SYNC: u32 = 11; // vd_agent.h:379
+    pub const VD_AGENT_CAP_MONITORS_CONFIG_POSITION: u32 = 12; // vd_agent.h:380
+    pub const VD_AGENT_CAP_FILE_XFER_DISABLED: u32 = 13; // vd_agent.h:381
+    pub const VD_AGENT_CAP_FILE_XFER_DETAILED_ERRORS: u32 = 14; // vd_agent.h:382
+    pub const VD_AGENT_CAP_GRAPHICS_DEVICE_INFO: u32 = 15; // vd_agent.h:383
+    pub const VD_AGENT_CAP_CLIPBOARD_NO_RELEASE_ON_REGRAB: u32 = 16; // vd_agent.h:384
+    pub const VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL: u32 = 17; // vd_agent.h:385
+    pub const VD_AGENT_CAP_MONITORS_PHYSICAL_SIZE: u32 = 18; // vd_agent.h:395
 }
 
 /// Notify severity levels
@@ -586,6 +757,73 @@ impl SpiceVisibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitmap_fmt_values_match_enums_h() {
+        // enums.h:225-226. Easy to misread: 8 is 32BIT and 9 is RGBA.
+        assert_eq!(bitmap_fmt::BIT32, 8);
+        assert_eq!(bitmap_fmt::RGBA, 9);
+    }
+
+    #[test]
+    fn vd_agent_reply_values_match_vd_agent_h() {
+        // vd_agent.h:266-269. Success is 1: ryll#473 treated 0 as success.
+        assert_eq!(vd_agent::VD_AGENT_SUCCESS, 1);
+        assert_eq!(vd_agent::VD_AGENT_ERROR, 2);
+    }
+
+    #[test]
+    fn vd_agent_message_types_match_vd_agent_h() {
+        use vd_agent::*;
+        // vd_agent.h:69-123, numbered from VD_AGENT_MOUSE_STATE = 1.
+        assert_eq!(VD_AGENT_MOUSE_STATE, 1);
+        assert_eq!(VD_AGENT_MONITORS_CONFIG, 2);
+        assert_eq!(VD_AGENT_REPLY, 3);
+        assert_eq!(VD_AGENT_CLIPBOARD, 4);
+        assert_eq!(VD_AGENT_DISPLAY_CONFIG, 5);
+        assert_eq!(VD_AGENT_ANNOUNCE_CAPABILITIES, 6);
+        assert_eq!(VD_AGENT_CLIPBOARD_GRAB, 7);
+        assert_eq!(VD_AGENT_CLIPBOARD_REQUEST, 8);
+        assert_eq!(VD_AGENT_CLIPBOARD_RELEASE, 9);
+
+        // Regression for PR 31: ANNOUNCE_CAPABILITIES used to be 1,
+        // which collided with VD_AGENT_MOUSE_STATE. The server would
+        // dispatch our capabilities announcement to its mouse-state
+        // handler.
+        assert_ne!(
+            VD_AGENT_ANNOUNCE_CAPABILITIES, VD_AGENT_MOUSE_STATE,
+            "ANNOUNCE_CAPABILITIES (6) must not collide with MOUSE_STATE (1)"
+        );
+    }
+
+    #[test]
+    fn vd_agent_capability_bits_match_vd_agent_h() {
+        // vd_agent.h:367-397, numbered from VD_AGENT_CAP_MOUSE_STATE = 0.
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_BY_DEMAND, 5);
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_SELECTION, 6);
+        assert_eq!(vd_agent::VD_AGENT_CAP_CLIPBOARD_GRAB_SERIAL, 17);
+        assert_eq!(vd_agent::VD_AGENT_CAP_MONITORS_PHYSICAL_SIZE, 18);
+    }
+
+    #[test]
+    fn cursor_and_mouse_values_match_enums_h() {
+        assert_eq!(cursor_type::ALPHA, 0);
+        assert_eq!(cursor_type::COLOR24, 5);
+        assert_eq!(cursor_type::COLOR32, 6);
+        assert_eq!(cursor_flags::NONE, 1);
+        assert_eq!(cursor_flags::CACHE_ME, 2);
+        assert_eq!(cursor_flags::FROM_CACHE, 4);
+        assert_eq!(mouse_button_id::LEFT, 1);
+        assert_eq!(mouse_button_id::RIGHT, 3);
+        assert_eq!(mouse_button_id::DOWN, 5);
+    }
+
+    #[test]
+    fn common_client_message_values_match_enums_h() {
+        assert_eq!(inputs_client::ACK_SYNC, 1);
+        assert_eq!(inputs_client::ACK, 2);
+        assert_eq!(inputs_client::PONG, 3);
+    }
 
     #[test]
     fn spice_error_to_u32_round_trips() {

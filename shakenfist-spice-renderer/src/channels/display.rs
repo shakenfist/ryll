@@ -1,5 +1,5 @@
 /// Display channel handler - surfaces, image rendering
-use anyhow::Result;
+use anyhow::{Context, Result};
 use flate2::read::ZlibDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
@@ -19,15 +19,21 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{image_compression, ropd};
+use shakenfist_spice_protocol::constants::{
+    bitmap_flags, bitmap_fmt, clip_type, image_compression, ropd,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, DisplayInit, DrawBase, ImageDescriptor, Notify as NotifyMessage,
-    Ping, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
-    SpiceTransparent, SurfaceCreate,
+    make_message, take_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig,
+    DrawBase, ImageDescriptor, Notify as NotifyMessage, Ping, PreferredCompression,
+    PreferredVideoCodecType, Rect, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceCopy,
+    SpiceFill, SpiceOpaque, SpicePoint, SpiceTransparent, StreamActivateReport, StreamClip,
+    StreamCreate, StreamDataRef, StreamDataSizedRef, StreamDestroy, StreamReport, SurfaceCreate,
+    SurfaceDestroy, WireType,
 };
-use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
+use shakenfist_spice_protocol::parse::{read_u16_le, read_u32_le, read_u64_le};
+use shakenfist_spice_protocol::reader::{BoundedReader, LinkError};
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
     IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME,
@@ -280,7 +286,7 @@ fn mjpeg_duration_stats(ring: &VecDeque<u32>) -> (u32, u32, u32) {
 #[derive(Debug, Clone)]
 enum FillOutcome {
     /// Happy path: paint `colour` (RGBA) into `base.rect` with
-    /// `base.clip_rects`.
+    /// `base.clip`.
     Paint {
         base: DrawBase,
         colour: [u8; 4],
@@ -385,17 +391,45 @@ fn log_draw_base_if_verbose(log_config: LogConfig, payload: &[u8], op_name: &str
     if !log_config.verbose {
         return;
     }
-    if let Ok(base) = DrawBase::read(payload) {
+    if let Ok(base) = DrawBase::decode(payload) {
+        let (left, top, right, bottom) = ltrb(&base.bbox);
         logging::log_detail(&format!(
             "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
-            op_name, base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+            op_name, base.surface_id, left, top, right, bottom, base.clip.clip_type,
         ));
     }
 }
 
+/// A rectangle as the (left, top, right, bottom) tuple ryll's events
+/// carry. spice.proto's edges are signed; ryll has always read them as
+/// `u32`, and the casts keep those bits.
+fn ltrb(rect: &Rect) -> (u32, u32, u32, u32) {
+    (
+        rect.left as u32,
+        rect.top as u32,
+        rect.right as u32,
+        rect.bottom as u32,
+    )
+}
+
+/// A draw's clip rectangles as (left, top, right, bottom) tuples. Empty
+/// unless the clip type is RECTS.
+fn clip_ltrb(base: &DrawBase) -> Vec<(u32, u32, u32, u32)> {
+    base.clip.rects.iter().map(ltrb).collect()
+}
+
+/// Read the `DrawBase` that opens a draw payload, returning it and the
+/// draw-specific body after it.
+fn read_draw_base(payload: &[u8]) -> std::io::Result<(DrawBase, &[u8])> {
+    let mut r = BoundedReader::new(payload);
+    let base = DrawBase::read(&mut r)?;
+    let body = r.read_bytes(r.remaining())?;
+    Ok((base, body))
+}
+
 fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
-    let base = DrawBase::read(payload)?;
-    let (fill, _consumed) = SpiceFill::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let (fill, _consumed) = SpiceFill::read(body)?;
 
     if fill.rop_descriptor != ropd::OP_PUT {
         return Ok(FillOutcome::SkipNonOpPut {
@@ -440,8 +474,8 @@ enum SolidFillOutcome {
 }
 
 fn decode_draw_solid_fill(payload: &[u8]) -> std::io::Result<SolidFillOutcome> {
-    let base = DrawBase::read(payload)?;
-    let body = SpiceBlackness::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let body = SpiceBlackness::read(body)?;
     let masked_fallback = body.mask.flags != 0 || body.mask.bitmap_offset != 0;
     Ok(SolidFillOutcome::Paint {
         base,
@@ -464,8 +498,8 @@ enum CopyBitsOutcome {
 }
 
 fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
-    let base = DrawBase::read(payload)?;
-    let src_pos = SpicePoint::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let src_pos = SpicePoint::decode(body)?;
     // Wire type is int32; source coords are logically unsigned
     // indices into the surface buffer. Clamp negatives to 0.
     let src_x = src_pos.x.max(0) as u32;
@@ -475,20 +509,18 @@ fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
 
 /// Outcome of decoding a DRAW_BLEND payload.
 ///
-/// DRAW_BLEND shares the 36-byte SpiceCopy/SpiceBlend header with
-/// DRAW_COPY (draw.h defines the latter as a typedef for the
-/// former). On OP_PUT the blend is identical to a DRAW_COPY; any
-/// other ROP would require compositing that we don't implement, so
-/// we warn_once and skip.
+/// DRAW_BLEND's body is DRAW_COPY's (spice.proto's `Blend` is
+/// `@ctype(SpiceCopy)`), read here as a [`SpiceCopy`]. On OP_PUT the
+/// blend is identical to a DRAW_COPY; any other ROP would require
+/// compositing that we don't implement, so we warn_once and skip.
 #[derive(Debug, Clone)]
 enum BlendOutcome {
     Paint {
         base: DrawBase,
-        src_bitmap_offset: usize,
-        src_top: u32,
-        src_left: u32,
-        src_bottom: u32,
-        src_right: u32,
+        copy: SpiceCopy,
+        /// The length of the base and the copy, after which its images
+        /// start.
+        fixed_len: usize,
     },
     SkipNonOpPut {
         rop: u16,
@@ -496,33 +528,21 @@ enum BlendOutcome {
 }
 
 fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
-    let base = DrawBase::read(payload)?;
-    let copy_start = base.end_offset;
-    if payload.len() < copy_start + 36 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "Not enough data for SpiceBlend",
-        ));
-    }
-    let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
-    let src_top = read_u32_le(payload, copy_start + 4);
-    let src_left = read_u32_le(payload, copy_start + 8);
-    let src_bottom = read_u32_le(payload, copy_start + 12);
-    let src_right = read_u32_le(payload, copy_start + 16);
-    let rop = read_u16_le(payload, copy_start + 20);
+    let mut r = BoundedReader::new(payload);
+    let base = DrawBase::read(&mut r)?;
     // scale_mode and mask are parsed-through silently, matching
-    // how handle_draw_copy treats them today.
+    // how handle_draw_copy treats them.
+    let copy = SpiceCopy::read(&mut r)?;
 
-    if rop != ropd::OP_PUT {
-        return Ok(BlendOutcome::SkipNonOpPut { rop });
+    if copy.rop_descriptor != ropd::OP_PUT {
+        return Ok(BlendOutcome::SkipNonOpPut {
+            rop: copy.rop_descriptor,
+        });
     }
     Ok(BlendOutcome::Paint {
         base,
-        src_bitmap_offset,
-        src_top,
-        src_left,
-        src_bottom,
-        src_right,
+        copy,
+        fixed_len: r.position(),
     })
 }
 
@@ -550,8 +570,8 @@ enum OpaqueOutcome {
 }
 
 fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
-    let base = DrawBase::read(payload)?;
-    let (opaque, _consumed) = SpiceOpaque::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let (opaque, _consumed) = SpiceOpaque::read(body)?;
 
     if opaque.rop_descriptor != ropd::OP_PUT {
         return Ok(OpaqueOutcome::SkipNonOpPut {
@@ -587,8 +607,8 @@ enum TransparentOutcome {
 }
 
 fn decode_draw_transparent(payload: &[u8]) -> std::io::Result<TransparentOutcome> {
-    let base = DrawBase::read(payload)?;
-    let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let transparent = SpiceTransparent::read(body)?;
     // src_color is BGRX little-endian, same convention as brush colour.
     let chroma_rgba = [
         ((transparent.src_color >> 16) & 0xff) as u8,
@@ -630,8 +650,8 @@ enum AlphaBlendOutcome {
 }
 
 fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome> {
-    let base = DrawBase::read(payload)?;
-    let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let ab = SpiceAlphaBlend::read(body)?;
     if ab.alpha == 0 {
         return Ok(AlphaBlendOutcome::SkipZeroAlpha);
     }
@@ -645,6 +665,36 @@ fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome>
         src_bottom: ab.src_bottom,
         src_right: ab.src_right,
     })
+}
+
+/// Warn, once per draw op, that its source image pointer is null.
+fn warn_null_src_bitmap(op_name: &str) {
+    logging::warn_once_impl(
+        logging::intern_key(format!(
+            "display:decode_failure:{}:null_src_bitmap",
+            op_name
+        )),
+        &format!("display: {}: null src_bitmap", op_name),
+    );
+}
+
+/// Warn, once per draw op, that its source image has no room for a
+/// descriptor: `have` bytes are available to an image at `offset`.
+fn warn_short_img_desc(op_name: &str, have: usize, offset: usize) {
+    logging::warn_once_impl(
+        logging::intern_key(format!(
+            "display:decode_failure:{}:short_payload_img_desc",
+            op_name
+        )),
+        &format!(
+            "display: {}: payload too short for image descriptor \
+             (have {}, need {}, offset={})",
+            op_name,
+            have,
+            offset + ImageDescriptor::SIZE,
+            offset
+        ),
+    );
 }
 
 /// How `decode_image_and_emit` should composite the decoded
@@ -1103,7 +1153,7 @@ impl DisplayChannel {
         };
 
         let mut payload = Vec::new();
-        init.write(&mut payload)?;
+        init.write(&mut payload);
         let msg = make_message(display_client::INIT, &payload);
 
         if self.log_config.verbose {
@@ -1123,7 +1173,11 @@ impl DisplayChannel {
     /// this to pick how it encodes server-driven image fills
     /// (LZ vs GLZ vs QUIC etc).
     async fn send_preferred_compression(&mut self, scheme: u8) -> Result<()> {
-        let payload = [scheme];
+        let mut payload = Vec::new();
+        PreferredCompression {
+            image_compression: scheme,
+        }
+        .write(&mut payload);
         let msg = make_message(display_client::PREFERRED_COMPRESSION, &payload);
         if self.log_config.verbose {
             logging::log_detail(&format!("image_compression={}", scheme));
@@ -1142,10 +1196,13 @@ impl DisplayChannel {
     /// (channel-display.c:621-642) is the reference encoder.
     /// Called once at link-up from `run_loop`.
     async fn send_preferred_video_codec_type(&mut self, codecs: &[u8]) -> Result<()> {
-        let mut payload = Vec::with_capacity(1 + codecs.len());
+        // The count is a u8, so at most the first 255 codecs are sent.
         let num = u8::try_from(codecs.len()).unwrap_or(u8::MAX);
-        payload.push(num);
-        payload.extend_from_slice(&codecs[..num as usize]);
+        let mut payload = Vec::with_capacity(1 + num as usize);
+        PreferredVideoCodecType {
+            codecs: codecs[..num as usize].to_vec(),
+        }
+        .write(&mut payload);
         let msg = make_message(display_client::PREFERRED_VIDEO_CODEC_TYPE, &payload);
         if self.log_config.verbose {
             logging::log_detail(&format!(
@@ -1203,7 +1260,7 @@ impl DisplayChannel {
 
         match msg_type {
             display_server::SURFACE_CREATE => {
-                let surface = SurfaceCreate::read(payload)?;
+                let surface = SurfaceCreate::decode(payload).context("malformed SURFACE_CREATE")?;
                 info!(
                     "display: surface created: channel={}, id={}, {}x{}",
                     self.channel_id, surface.surface_id, surface.width, surface.height
@@ -1231,8 +1288,8 @@ impl DisplayChannel {
             }
 
             display_server::SURFACE_DESTROY => {
-                if payload.len() >= 4 {
-                    let surface_id = read_u32_le(payload, 0);
+                // A short SURFACE_DESTROY is ignored.
+                if let Ok(SurfaceDestroy { surface_id }) = SurfaceDestroy::decode(payload) {
                     info!("display: surface destroyed: id={}", surface_id);
 
                     if self.log_config.verbose {
@@ -1321,31 +1378,30 @@ impl DisplayChannel {
             }
 
             display_server::MONITORS_CONFIG => {
-                if payload.len() >= 8 {
-                    let count = read_u16_le(payload, 0);
-                    let max_allowed = read_u16_le(payload, 2);
-                    info!(
-                        "display: monitors_config: count={}, max_allowed={}, channel_id={}",
-                        count, max_allowed, self.channel_id
-                    );
-                    let mut offset = 4;
-                    for i in 0..count {
-                        if offset + 28 > payload.len() {
-                            break;
-                        }
-                        let head_id = read_u32_le(payload, offset);
-                        let surface_id = read_u32_le(payload, offset + 4);
-                        let width = read_u32_le(payload, offset + 8);
-                        let height = read_u32_le(payload, offset + 12);
-                        let x = read_u32_le(payload, offset + 16);
-                        let y = read_u32_le(payload, offset + 20);
-                        let flags = read_u32_le(payload, offset + 24);
+                // Only logged, so a malformed one is only noted.
+                match DisplayMonitorsConfig::decode(payload) {
+                    Ok(config) => {
                         info!(
-                            "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
-                            i, head_id, surface_id, width, height, x, y, flags
+                            "display: monitors_config: count={}, max_allowed={}, channel_id={}",
+                            config.heads.len(),
+                            config.max_allowed,
+                            self.channel_id
                         );
-                        offset += 28;
+                        for (i, head) in config.heads.iter().enumerate() {
+                            info!(
+                                "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
+                                i,
+                                head.monitor_id,
+                                head.surface_id,
+                                head.width,
+                                head.height,
+                                head.x,
+                                head.y,
+                                head.flags
+                            );
+                        }
                     }
+                    Err(e) => debug!("display: malformed monitors_config: {}", e),
                 }
             }
 
@@ -1359,7 +1415,7 @@ impl DisplayChannel {
             }
 
             display_server::SET_ACK => {
-                let set_ack = SetAck::read(payload)?;
+                let set_ack = SetAck::decode(payload).context("malformed SET_ACK")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -1373,7 +1429,7 @@ impl DisplayChannel {
 
                 // Send ack_sync response
                 let mut ack_payload = Vec::new();
-                SetAck::write_ack_sync(set_ack.generation, &mut ack_payload)?;
+                set_ack.ack_sync().write(&mut ack_payload);
                 let response = make_message(display_client::ACK_SYNC, &ack_payload);
                 self.send_with_log(display_client::ACK_SYNC, &response)
                     .await?;
@@ -1383,7 +1439,7 @@ impl DisplayChannel {
                 self.ping_recv_count = self.ping_recv_count.saturating_add(1);
                 self.last_ping_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
 
-                let ping = Ping::read(payload)?;
+                let ping = Ping::decode(payload).context("malformed PING")?;
 
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
@@ -1393,40 +1449,45 @@ impl DisplayChannel {
                 }
 
                 let mut pong_payload = Vec::new();
-                ping.write_pong(&mut pong_payload)?;
+                ping.pong().write(&mut pong_payload);
                 let response = make_message(display_client::PONG, &pong_payload);
                 self.send_with_log(display_client::PONG, &response).await?;
                 self.pong_send_count = self.pong_send_count.saturating_add(1);
             }
 
             display_server::NOTIFY => {
-                let notify = NotifyMessage::read(payload)?;
+                let notify = NotifyMessage::decode(payload).context("malformed NOTIFY")?;
+                let severity = notify.severity_kind();
+                let message = notify.message_text().into_owned();
                 if self.log_config.verbose {
                     logging::log_detail(&format!(
                         "severity={:?}, visibility={:?}, what={}, message=\"{}\"",
-                        notify.severity, notify.visibility, notify.what, notify.message,
+                        severity,
+                        notify.visibility_kind(),
+                        notify.what,
+                        message,
                     ));
                 }
-                match notify.severity {
+                match severity {
                     NotifySeverity::Error => {
-                        warn!("display: server notify (error): {}", notify.message)
+                        warn!("display: server notify (error): {}", message)
                     }
                     NotifySeverity::Warn => {
-                        warn!("display: server notify (warn): {}", notify.message)
+                        warn!("display: server notify (warn): {}", message)
                     }
                     NotifySeverity::Info => {
-                        info!("display: server notify: {}", notify.message)
+                        info!("display: server notify: {}", message)
                     }
                 }
                 let mut entry = NotificationEntry::new(
-                    notify.severity,
+                    severity,
                     NotificationSource::Spice {
                         channel: ChannelType::Display,
                         what: notify.what,
                     },
-                    notify.message.clone(),
+                    message,
                 );
-                if let Some(v) = notify.visibility {
+                if let Some(v) = notify.visibility_kind() {
                     entry = entry.with_visibility(v);
                 }
                 self.events.emit(ChannelEvent::Notification(entry)).await;
@@ -1492,17 +1553,17 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_CREATE => {
-                if payload.len() >= 50 {
-                    let surface_id = read_u32_le(payload, 0);
-                    let stream_id = read_u32_le(payload, 4);
-                    let _flags = payload[8];
-                    let codec_type = payload[9];
-                    let stream_w = read_u32_le(payload, 18);
-                    let stream_h = read_u32_le(payload, 22);
-                    let dest_top = read_u32_le(payload, 34);
-                    let dest_left = read_u32_le(payload, 38);
-                    let dest_bottom = read_u32_le(payload, 42);
-                    let dest_right = read_u32_le(payload, 46);
+                // A malformed STREAM_CREATE is ignored, as a short one always
+                // was. The clip type is part of the message, so one that
+                // stops before it is malformed.
+                if let Ok(create) = StreamCreate::decode(payload) {
+                    let surface_id = create.surface_id;
+                    let stream_id = create.id;
+                    let codec_type = create.codec_type;
+                    let stream_w = create.stream_width;
+                    let stream_h = create.stream_height;
+                    // The wire's edges are signed; ryll keeps their bits.
+                    let (dest_left, dest_top, dest_right, dest_bottom) = ltrb(&create.dest);
 
                     info!(
                         "display: stream_create: id={}, surface={}, codec={}, {}x{}, \
@@ -1644,55 +1705,38 @@ impl DisplayChannel {
                         },
                     );
                     self.streams_created_total = self.streams_created_total.saturating_add(1);
+                } else {
+                    warn_once!(
+                        "display:decode_failure:stream_create:malformed",
+                        "display: stream_create: malformed message ignored ({} bytes)",
+                        payload.len()
+                    );
                 }
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, frame_mm_time, dest, jpeg_data) =
-                    if msg_type == display_server::STREAM_DATA_SIZED {
-                        // SpiceMsgDisplayStreamDataSized layout (spice.proto):
-                        //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)
-                        //   offset  8: width (u32)
-                        //   offset 12: height (u32)
-                        //   offset 16: dest_top (u32)
-                        //   offset 20: dest_left (u32)
-                        //   offset 24: dest_bottom (u32)
-                        //   offset 28: dest_right (u32)
-                        //   offset 32: data_size (u32)
-                        //   offset 36: data
-                        if payload.len() < 36 {
-                            return Ok(());
-                        }
-                        let id = read_u32_le(payload, 0);
-                        let mm_time = read_u32_le(payload, 4);
-                        let dest_top = read_u32_le(payload, 16);
-                        let dest_left = read_u32_le(payload, 20);
-                        let dest_bottom = read_u32_le(payload, 24);
-                        let dest_right = read_u32_le(payload, 28);
-                        let data_size = read_u32_le(payload, 32) as usize;
-                        let data = &payload[36..36 + data_size.min(payload.len() - 36)];
-                        (
-                            id,
-                            mm_time,
-                            Some((dest_top, dest_left, dest_bottom, dest_right)),
-                            data,
-                        )
-                    } else {
-                        // SpiceMsgDisplayStreamData layout (spice.proto):
-                        //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)
-                        //   offset  8: data_size (u32)
-                        //   offset 12: data
-                        if payload.len() < 12 {
-                            return Ok(());
-                        }
-                        let id = read_u32_le(payload, 0);
-                        let mm_time = read_u32_le(payload, 4);
-                        let data_size = read_u32_le(payload, 8) as usize;
-                        let data = &payload[12..12 + data_size.min(payload.len() - 12)];
-                        (id, mm_time, None, data)
-                    };
+                // A malformed frame is ignored, as a short one always was.
+                // One whose data_size runs past the body is malformed. The
+                // frame is borrowed from the payload, not copied.
+                let mut r = BoundedReader::new(payload);
+                let frame = if msg_type == display_server::STREAM_DATA_SIZED {
+                    StreamDataSizedRef::read(&mut r).map(|frame| {
+                        // The wire's edges are signed; ryll keeps their bits.
+                        let (left, top, right, bottom) = ltrb(&frame.dest);
+                        (frame.base, Some((top, left, bottom, right)), frame.data)
+                    })
+                } else {
+                    StreamDataRef::read(&mut r).map(|frame| (frame.base, None, frame.data))
+                };
+                let Ok((base, dest, jpeg_data)) = frame else {
+                    warn_once!(
+                        "display:decode_failure:stream_data:malformed",
+                        "display: stream_data: malformed frame dropped ({} bytes)",
+                        payload.len()
+                    );
+                    return Ok(());
+                };
+                let (stream_id, frame_mm_time) = (base.id, base.multi_media_time);
 
                 // Evaluate STREAM_REPORT bookkeeping BEFORE the MJPEG
                 // decode dispatch — `report_num_frames` counts every
@@ -1886,15 +1930,15 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_CLIP => {
-                if payload.len() >= 4 {
-                    let stream_id = read_u32_le(payload, 0);
-                    debug!("display: stream_clip id={}", stream_id);
+                // Only logged; a malformed one is ignored.
+                if let Ok(clip) = StreamClip::decode(payload) {
+                    debug!("display: stream_clip id={}", clip.id);
                 }
             }
 
             display_server::STREAM_DESTROY => {
-                if payload.len() >= 4 {
-                    let stream_id = read_u32_le(payload, 0);
+                // A short STREAM_DESTROY is ignored.
+                if let Ok(StreamDestroy { id: stream_id }) = StreamDestroy::decode(payload) {
                     let now = self.traffic.elapsed().as_secs_f64();
                     if let Some(state) = self.streams.remove(&stream_id) {
                         self.retire_stream(stream_id, &state, now);
@@ -1930,23 +1974,19 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_ACTIVATE_REPORT => {
-                // 16-byte payload per spice.proto's
-                // SpiceMsgDisplayStreamActivateReport:
-                //   offset  0: stream_id (u32)
-                //   offset  4: unique_id (u32)
-                //   offset  8: max_window_size (u32)
-                //   offset 12: timeout_ms (u32)
-                if payload.len() < 16 {
+                let Ok(StreamActivateReport {
+                    stream_id,
+                    unique_id,
+                    max_window_size: raw_max_window_size,
+                    timeout_ms: raw_timeout_ms,
+                }) = StreamActivateReport::decode(payload)
+                else {
                     warn!(
                         "display: short stream_activate_report payload ({} bytes)",
                         payload.len()
                     );
                     return Ok(());
-                }
-                let stream_id = read_u32_le(payload, 0);
-                let unique_id = read_u32_le(payload, 4);
-                let raw_max_window_size = read_u32_le(payload, 8);
-                let raw_timeout_ms = read_u32_le(payload, 12);
+                };
 
                 let (max_window_size, timeout_ms) =
                     clamp_stream_report_params(raw_max_window_size, raw_timeout_ms);
@@ -1994,7 +2034,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_copy(&mut self, payload: &[u8]) -> Result<()> {
-        if payload.len() < 21 {
+        if payload.len() < DrawBase::MIN_SIZE {
             warn_once!(
                 "display:decode_failure:draw_copy:short_payload",
                 "display: draw_copy payload too short"
@@ -2002,79 +2042,120 @@ impl DisplayChannel {
             return Ok(());
         }
 
-        let base = DrawBase::read(payload)?;
-        let left = base.left;
-        let top = base.top;
+        // A DrawBase whose clip rectangles are cut short ends the channel,
+        // as every DrawBase failure does.
+        let mut r = BoundedReader::new(payload);
+        let base = DrawBase::read(&mut r).context("malformed DRAW_COPY base")?;
 
         if self.log_config.verbose {
+            let (left, top, right, bottom) = ltrb(&base.bbox);
             logging::log_detail(&format!(
                 "surface={}, rect=({},{}) to ({},{}), clip_type={}",
-                base.surface_id, left, top, base.right, base.bottom, base.clip_type
+                base.surface_id, left, top, right, bottom, base.clip.clip_type
             ));
         }
 
-        // SpiceCopy starts with src_bitmap offset (u32) pointing to SpiceImage
-        let copy_start = base.end_offset;
-        if payload.len() < copy_start + 4 {
-            warn_once!(
-                "display:decode_failure:draw_copy:short_spice_copy",
-                "display: draw_copy: payload too short for SpiceCopy"
-            );
+        // The SpiceCopy follows: a src_bitmap offset pointing to the
+        // SpiceImage, then the rest of its 36 bytes. A body too short for
+        // the offset and one too short for the rest warn separately.
+        let short_of_offset = r.remaining() < 4;
+        let Ok(copy) = SpiceCopy::read(&mut r) else {
+            if short_of_offset {
+                warn_once!(
+                    "display:decode_failure:draw_copy:short_spice_copy",
+                    "display: draw_copy: payload too short for SpiceCopy"
+                );
+            } else {
+                warn_once!(
+                    "display:decode_failure:draw_copy:short_spice_copy_header",
+                    "display: draw_copy: payload too short for SpiceCopy header"
+                );
+            }
             return Ok(());
-        }
-
-        let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
-
-        if payload.len() < copy_start + 36 {
-            warn_once!(
-                "display:decode_failure:draw_copy:short_spice_copy_header",
-                "display: draw_copy: payload too short for SpiceCopy header"
-            );
-            return Ok(());
-        }
-
-        let src_top = read_u32_le(payload, copy_start + 4);
-        let src_left = read_u32_le(payload, copy_start + 8);
-        let src_bottom = read_u32_le(payload, copy_start + 12);
-        let src_right = read_u32_le(payload, copy_start + 16);
-        let rop_descriptor = read_u16_le(payload, copy_start + 20);
-        let scale_mode = payload[copy_start + 22];
-        let mask_flags = payload[copy_start + 23];
-        let mask_pos_x = read_i32_le(payload, copy_start + 24);
-        let mask_pos_y = read_i32_le(payload, copy_start + 28);
-        let mask_bitmap_offset = read_u32_le(payload, copy_start + 32) as usize;
+        };
 
         if self.log_config.verbose {
             debug!(
                 "display: draw_copy detail: rop={:#x}, scale={}, mask={:#x}, \
                  pos=({},{}), mask_bmp={}, clip_type={}, clip_rects={}",
-                rop_descriptor,
-                scale_mode,
-                mask_flags,
-                mask_pos_x,
-                mask_pos_y,
-                mask_bitmap_offset,
-                base.clip_type,
-                base.clip_rects.len()
+                copy.rop_descriptor,
+                copy.scale_mode,
+                copy.mask.flags,
+                copy.mask.pos.x,
+                copy.mask.pos.y,
+                copy.mask.bitmap_offset,
+                base.clip.clip_type,
+                base.clip.rects.len()
             );
         }
 
+        self.decode_copy_image_and_emit(payload, "draw_copy", &base, &copy, r.position())
+            .await
+    }
+
+    /// Decode and draw the source image of a DRAW_COPY or DRAW_BLEND,
+    /// found through the protocol crate's pointer resolution.
+    ///
+    /// The image's bytes run to the mask image, if it comes next, or to
+    /// the end of the payload. A pointer into the draw's fixed fields is
+    /// refused.
+    async fn decode_copy_image_and_emit(
+        &mut self,
+        payload: &[u8],
+        op_name: &str,
+        base: &DrawBase,
+        copy: &SpiceCopy,
+        fixed_len: usize,
+    ) -> Result<()> {
+        let src_bitmap_offset = copy.src_bitmap as usize;
+        let mut image = match copy.src_bitmap_reader(payload, fixed_len) {
+            Ok(Some(image)) => image,
+            Ok(None) => {
+                warn_null_src_bitmap(op_name);
+                return Ok(());
+            }
+            Err(LinkError::PointerIntoFixedPart { .. }) => {
+                logging::warn_once_impl(
+                    logging::intern_key(format!(
+                        "display:decode_failure:{}:src_bitmap_in_fixed_part",
+                        op_name
+                    )),
+                    &format!(
+                        "display: {}: src_bitmap {} points into the first {} bytes, \
+                         which are fixed fields",
+                        op_name, src_bitmap_offset, fixed_len
+                    ),
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                warn_short_img_desc(op_name, payload.len(), src_bitmap_offset);
+                return Ok(());
+            }
+        };
+        let available = image.remaining();
+        let Ok(img_desc) = ImageDescriptor::read(&mut image) else {
+            warn_short_img_desc(op_name, src_bitmap_offset + available, src_bitmap_offset);
+            return Ok(());
+        };
+        let image_data = image.read_bytes(image.remaining())?;
+
         self.decode_image_and_emit(
-            payload,
-            "draw_copy",
-            &base,
-            src_bitmap_offset,
-            src_top,
-            src_left,
-            src_bottom,
-            src_right,
+            op_name,
+            base,
+            &img_desc,
+            image_data,
+            &copy.src_area,
             CompositeMode::Overwrite,
         )
         .await
     }
 
+    /// Decode and draw the source image of a DRAW_OPAQUE,
+    /// DRAW_TRANSPARENT or DRAW_ALPHA_BLEND, at an offset into the
+    /// payload. Its bytes run to the end of the payload.
     #[allow(clippy::too_many_arguments)]
-    async fn decode_image_and_emit(
+    async fn decode_image_at_offset_and_emit(
         &mut self,
         payload: &[u8],
         op_name: &str,
@@ -2087,52 +2168,57 @@ impl DisplayChannel {
         composite: CompositeMode,
     ) -> Result<()> {
         if src_bitmap_offset == 0 {
-            logging::warn_once_impl(
-                logging::intern_key(format!(
-                    "display:decode_failure:{}:null_src_bitmap",
-                    op_name
-                )),
-                &format!("display: {}: null src_bitmap", op_name),
-            );
+            warn_null_src_bitmap(op_name);
             return Ok(());
         }
 
         let image_start = src_bitmap_offset;
         if payload.len() < image_start + ImageDescriptor::SIZE {
-            logging::warn_once_impl(
-                logging::intern_key(format!(
-                    "display:decode_failure:{}:short_payload_img_desc",
-                    op_name
-                )),
-                &format!(
-                    "display: {}: payload too short for image descriptor \
-                     (have {}, need {}, offset={})",
-                    op_name,
-                    payload.len(),
-                    image_start + ImageDescriptor::SIZE,
-                    src_bitmap_offset
-                ),
-            );
+            warn_short_img_desc(op_name, payload.len(), src_bitmap_offset);
             return Ok(());
         }
 
-        let img_desc = ImageDescriptor::read(&payload[image_start..])?;
-        let image_type = ImageType::from_u8(img_desc.image_type);
-
-        // May be empty. A FromCache image is only its descriptor, and
-        // spice-server marshals the source image after the draw's fixed
-        // fields and before any mask, so a cache hit on a draw without a
-        // mask ends the payload. Each arm below checks the length of the
-        // data it reads.
+        let img_desc = ImageDescriptor::decode(&payload[image_start..])?;
         let image_data = &payload[image_start + ImageDescriptor::SIZE..];
+        // The source rect as spice.proto's signed Rect, with the same
+        // bits.
+        let src_area = Rect {
+            top: src_top as i32,
+            left: src_left as i32,
+            bottom: src_bottom as i32,
+            right: src_right as i32,
+        };
+        self.decode_image_and_emit(op_name, base, &img_desc, image_data, &src_area, composite)
+            .await
+    }
+
+    /// Decode `image_data`, the bytes after `img_desc`, and draw
+    /// `src_area` of it into `base`'s box.
+    ///
+    /// `image_data` may be empty. A FromCache image is only its
+    /// descriptor, and spice-server marshals the source image after the
+    /// draw's fixed fields and before any mask, so a cache hit on a draw
+    /// without a mask ends the payload. Each arm below checks the length
+    /// of the data it reads.
+    async fn decode_image_and_emit(
+        &mut self,
+        op_name: &str,
+        base: &DrawBase,
+        img_desc: &ImageDescriptor,
+        image_data: &[u8],
+        src_area: &Rect,
+        composite: CompositeMode,
+    ) -> Result<()> {
+        let image_type = ImageType::from_u8(img_desc.image_type);
+        let (src_left, src_top, src_right, src_bottom) = ltrb(src_area);
 
         debug!(
             "display: {}: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
              flags={}, data_bytes={}",
             op_name,
             base.surface_id,
-            base.left,
-            base.top,
+            base.bbox.left as u32,
+            base.bbox.top as u32,
             img_desc.width,
             img_desc.height,
             image_type,
@@ -2148,24 +2234,21 @@ impl DisplayChannel {
         let decode_start = Instant::now();
         let decompressed: Option<DecompressedImage> = match image_type {
             Some(ImageType::Pixmap) => {
-                // BitmapData: format(u8) + flags(u8) + x(u32) +
-                // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
-                // then raw pixel rows.
-                if image_data.len() < 18 {
-                    warn_once!(
-                        "display:decode_failure:pixmap:short_bitmap_data",
-                        "display: pixmap BitmapData header too short"
-                    );
-                    None
-                } else {
-                    let bmp_fmt = image_data[0];
-                    let bmp_flags = image_data[1];
-                    let bmp_width = read_u32_le(image_data, 2);
-                    let bmp_height = read_u32_le(image_data, 6);
-                    let bmp_stride = read_u32_le(image_data, 10);
-                    let top_down = (bmp_flags & 0x04) != 0;
-                    // palette_addr at offset 14..18 (ignored for 32-bit)
-                    let pixel_data = &image_data[18..];
+                // BitmapData: a BitmapHeader (18 bytes, or 22 when the
+                // palette comes from the cache), then raw pixel rows. The
+                // rows are checked below rather than by the protocol
+                // crate's BitmapPayload, so that each way they can be
+                // wrong keeps its own warning.
+                let mut bitmap = BoundedReader::new(image_data);
+                if let Ok(header) = BitmapHeader::read(&mut bitmap) {
+                    let bmp_fmt = header.format;
+                    let bmp_flags = header.flags;
+                    let bmp_width = header.x;
+                    let bmp_height = header.y;
+                    let bmp_stride = header.stride;
+                    let top_down = (bmp_flags & bitmap_flags::TOP_DOWN) != 0;
+                    // The palette is ignored: 32-bit formats have none.
+                    let pixel_data = bitmap.read_bytes(bitmap.remaining())?;
 
                     debug!(
                         "display: pixmap fmt={}, flags={:#x}, {}x{}, stride={}, top_down={}",
@@ -2173,7 +2256,7 @@ impl DisplayChannel {
                     );
 
                     // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
-                    if bmp_fmt != 8 && bmp_fmt != 9 {
+                    if bmp_fmt != bitmap_fmt::BIT32 && bmp_fmt != bitmap_fmt::RGBA {
                         warn_once!(
                             "display:decode_failure:pixmap:format_unsupported",
                             "display: pixmap format {} not supported (only 32-bit)",
@@ -2261,7 +2344,11 @@ impl DisplayChannel {
                                 rgba[di] = src_row[si + 2]; // R
                                 rgba[di + 1] = src_row[si + 1]; // G
                                 rgba[di + 2] = src_row[si]; // B
-                                rgba[di + 3] = if bmp_fmt == 9 { src_row[si + 3] } else { 255 };
+                                rgba[di + 3] = if bmp_fmt == bitmap_fmt::RGBA {
+                                    src_row[si + 3]
+                                } else {
+                                    255
+                                };
                             }
                         }
                         // `rgba` was sized from these dimensions, so
@@ -2278,6 +2365,12 @@ impl DisplayChannel {
                         }
                         image
                     }
+                } else {
+                    warn_once!(
+                        "display:decode_failure:pixmap:short_bitmap_data",
+                        "display: pixmap BitmapData header too short"
+                    );
+                    None
                 }
             }
             Some(ImageType::GlzRgb) => {
@@ -2468,15 +2561,7 @@ impl DisplayChannel {
                 // rather than the `image` crate's pure-Rust path. Session 006
                 // measured the old path at ~263 ms / frame at 1920×1472 on a
                 // Mac that has ImageIO available.
-                if image_data.len() < 4 {
-                    warn_once!(
-                        "display:decode_failure:jpeg:short_data",
-                        "display: JPEG data too short"
-                    );
-                    None
-                } else {
-                    let data_size = read_u32_le(image_data, 0) as usize;
-                    let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
+                if let Ok(jpeg_data) = BinaryData::read_data(&mut BoundedReader::new(image_data)) {
                     let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
                         DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
                     });
@@ -2491,6 +2576,14 @@ impl DisplayChannel {
                         );
                     }
                     decoded
+                } else {
+                    // Shorter than its size field, or than the size it
+                    // declares.
+                    warn_once!(
+                        "display:decode_failure:jpeg:short_data",
+                        "display: JPEG data too short"
+                    );
+                    None
                 }
             }
             Some(ImageType::Quic) => {
@@ -2662,13 +2755,12 @@ impl DisplayChannel {
                 }
             }
 
-            let dest_left = base.left;
-            let dest_top = base.top;
+            let (dest_left, dest_top, _, _) = ltrb(&base.bbox);
             let dest_right = dest_left.saturating_add(out_width);
             let dest_bottom = dest_top.saturating_add(out_height);
 
-            if base.clip_type == 1 && !base.clip_rects.is_empty() {
-                for (clip_left, clip_top, clip_right, clip_bottom) in &base.clip_rects {
+            if base.clip.clip_type == clip_type::RECTS && !base.clip.rects.is_empty() {
+                for (clip_left, clip_top, clip_right, clip_bottom) in &clip_ltrb(base) {
                     let il = dest_left.max(*clip_left);
                     let it = dest_top.max(*clip_top);
                     let ir = dest_right.min(*clip_right);
@@ -2716,8 +2808,8 @@ impl DisplayChannel {
                         composite,
                         self.channel_id,
                         base.surface_id,
-                        base.left,
-                        base.top,
+                        dest_left,
+                        dest_top,
                         out_width,
                         out_height,
                         out_pixels,
@@ -2769,9 +2861,9 @@ impl DisplayChannel {
                     .emit(ChannelEvent::FillRect {
                         display_channel_id: self.channel_id,
                         surface_id: base.surface_id,
-                        rect: (base.left, base.top, base.right, base.bottom),
+                        rect: ltrb(&base.bbox),
                         colour,
-                        clip: base.clip_rects,
+                        clip: clip_ltrb(&base),
                         produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
                     .await;
@@ -2805,9 +2897,9 @@ impl DisplayChannel {
             .emit(ChannelEvent::FillRect {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: (base.left, base.top, base.right, base.bottom),
+                rect: ltrb(&base.bbox),
                 colour,
-                clip: base.clip_rects,
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2856,8 +2948,8 @@ impl DisplayChannel {
             .emit(ChannelEvent::Invert {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: (base.left, base.top, base.right, base.bottom),
-                clip: base.clip_rects,
+                rect: ltrb(&base.bbox),
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2875,8 +2967,8 @@ impl DisplayChannel {
                 surface_id: base.surface_id,
                 src_x,
                 src_y,
-                dest_rect: (base.left, base.top, base.right, base.bottom),
-                clip: base.clip_rects,
+                dest_rect: ltrb(&base.bbox),
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2903,7 +2995,7 @@ impl DisplayChannel {
                 src_bottom,
                 src_right,
             } => {
-                self.decode_image_and_emit(
+                self.decode_image_at_offset_and_emit(
                     payload,
                     "draw_opaque",
                     &base,
@@ -2932,24 +3024,11 @@ impl DisplayChannel {
             }
             BlendOutcome::Paint {
                 base,
-                src_bitmap_offset,
-                src_top,
-                src_left,
-                src_bottom,
-                src_right,
+                copy,
+                fixed_len,
             } => {
-                self.decode_image_and_emit(
-                    payload,
-                    "draw_blend",
-                    &base,
-                    src_bitmap_offset,
-                    src_top,
-                    src_left,
-                    src_bottom,
-                    src_right,
-                    CompositeMode::Overwrite,
-                )
-                .await
+                self.decode_copy_image_and_emit(payload, "draw_blend", &base, &copy, fixed_len)
+                    .await
             }
         }
     }
@@ -2965,7 +3044,7 @@ impl DisplayChannel {
             src_bottom,
             src_right,
         } = decode_draw_transparent(payload)?;
-        self.decode_image_and_emit(
+        self.decode_image_at_offset_and_emit(
             payload,
             "draw_transparent",
             &base,
@@ -3000,7 +3079,7 @@ impl DisplayChannel {
                         alpha_flags
                     );
                 }
-                self.decode_image_and_emit(
+                self.decode_image_at_offset_and_emit(
                     payload,
                     "draw_alpha_blend",
                     &base,
@@ -3182,18 +3261,21 @@ impl DisplayChannel {
             let last_frame_delay: i32 =
                 (stream.report_end_frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
 
-            let mut buf = Vec::with_capacity(32);
-            buf.extend_from_slice(&stream_id.to_le_bytes());
-            buf.extend_from_slice(&stream.report_unique_id.to_le_bytes());
-            buf.extend_from_slice(&stream.report_start_frame_mm_time.to_le_bytes());
-            buf.extend_from_slice(&stream.report_end_frame_mm_time.to_le_bytes());
-            buf.extend_from_slice(&stream.report_num_frames.to_le_bytes());
-            buf.extend_from_slice(&stream.report_num_drops.to_le_bytes());
-            buf.extend_from_slice(&last_frame_delay.to_le_bytes());
-            // audio_delay = UINT32_MAX: no audio latency is
-            // surfaced yet, and measuring it was left out of
-            // scope for the stream-caps work.
-            buf.extend_from_slice(&u32::MAX.to_le_bytes());
+            let mut buf = Vec::with_capacity(StreamReport::SIZE);
+            StreamReport {
+                stream_id,
+                unique_id: stream.report_unique_id,
+                start_frame_mm_time: stream.report_start_frame_mm_time,
+                end_frame_mm_time: stream.report_end_frame_mm_time,
+                num_frames: stream.report_num_frames,
+                num_drops: stream.report_num_drops,
+                last_frame_delay,
+                // audio_delay = UINT32_MAX: no audio latency is
+                // surfaced yet, and measuring it was left out of
+                // scope for the stream-caps work.
+                audio_delay: u32::MAX,
+            }
+            .write(&mut buf);
 
             // Mirror counters into last_report_* and reset rolling.
             stream.last_report_num_frames = stream.report_num_frames;
@@ -3208,7 +3290,6 @@ impl DisplayChannel {
             stream.report_end_frame_mm_time = 0;
             stream.report_start_now_mm_time = 0;
 
-            debug_assert_eq!(buf.len(), 32, "STREAM_REPORT payload must be 32 bytes");
             Some(buf)
         } else {
             None
@@ -3271,6 +3352,10 @@ impl DisplayChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+    use shakenfist_spice_protocol::messages::{
+        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
+    };
 
     // -------------------------------------------------------------------------
     // Note: extract_dht_segments / inject_dht tests have moved to
@@ -3398,10 +3483,10 @@ mod tests {
                 assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
                 assert!(!masked_fallback);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
             }
             other => panic!("expected Paint, got {:?}", other),
         }
@@ -3485,10 +3570,10 @@ mod tests {
             } => {
                 assert!(!masked_fallback);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
             }
         }
     }
@@ -3548,10 +3633,10 @@ mod tests {
                 assert_eq!(src_x, 15);
                 assert_eq!(src_y, 7);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 50);
-                assert_eq!(base.left, 100);
-                assert_eq!(base.bottom, 70);
-                assert_eq!(base.right, 200);
+                assert_eq!(base.bbox.top, 50);
+                assert_eq!(base.bbox.left, 100);
+                assert_eq!(base.bbox.bottom, 70);
+                assert_eq!(base.bbox.right, 200);
             }
         }
     }
@@ -3622,22 +3707,20 @@ mod tests {
         match decode_draw_blend(&payload).expect("decode failed") {
             BlendOutcome::Paint {
                 base,
-                src_bitmap_offset,
-                src_top,
-                src_left,
-                src_bottom,
-                src_right,
+                copy,
+                fixed_len,
             } => {
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
-                assert_eq!(src_bitmap_offset, 0x100);
-                assert_eq!(src_top, 1);
-                assert_eq!(src_left, 2);
-                assert_eq!(src_bottom, 3);
-                assert_eq!(src_right, 4);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
+                assert_eq!(copy.src_bitmap, 0x100);
+                assert_eq!(copy.src_area.top, 1);
+                assert_eq!(copy.src_area.left, 2);
+                assert_eq!(copy.src_area.bottom, 3);
+                assert_eq!(copy.src_area.right, 4);
+                assert_eq!(fixed_len, payload.len());
             }
             other => panic!("expected Paint, got {:?}", other),
         }
@@ -3706,10 +3789,10 @@ mod tests {
                 src_right,
             } => {
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
                 assert_eq!(src_bitmap_offset, 0x100);
                 assert_eq!(src_top, 1);
                 assert_eq!(src_left, 2);
@@ -3776,7 +3859,7 @@ mod tests {
             } => {
                 assert_eq!(chroma_rgba, [0xAB, 0xCD, 0xEF, 0xFF]);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
+                assert_eq!(base.bbox.top, 10);
                 assert_eq!(src_bitmap_offset, 0x100);
                 assert_eq!(src_top, 1);
                 assert_eq!(src_left, 2);
@@ -4070,62 +4153,12 @@ mod tests {
     // allocation per message.
     // -------------------------------------------------------------------------
 
-    /// A `TrafficSink` that records nothing.
-    ///
-    /// The channel calls into the sink on every message; these tests
-    /// are about `self.streams`, so the recording is noise. `elapsed`
-    /// still has to advance monotonically because `retire_stream`
-    /// stamps lifetimes with it.
-    struct NullTraffic {
-        started: std::time::Instant,
-    }
-
-    impl NullTraffic {
-        fn new() -> Self {
-            NullTraffic {
-                started: std::time::Instant::now(),
-            }
-        }
-    }
-
-    impl crate::traffic::TrafficSink for NullTraffic {
-        fn record_sent(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
-        fn record_received(&self, _: &'static str, _: u16, _: &'static str, _: &[u8]) {}
-        fn elapsed(&self) -> std::time::Duration {
-            self.started.elapsed()
-        }
-    }
-
-    /// Everything a `DisplayChannel` under test needs kept alive
-    /// alongside it.
-    ///
-    /// The peer socket and the event receiver are both load-bearing
-    /// even though no test reads them: dropping the peer would make
-    /// any write fail, and dropping the receiver would send `emit`
-    /// down its shutdown path. Neither is what these tests are
-    /// exercising, so both are held rather than leaked.
-    struct TestChannelPeers {
-        _peer: tokio::net::TcpStream,
-        _events: tokio::sync::mpsc::Receiver<ChannelEvent>,
-    }
-
     /// Build a `DisplayChannel` wired to a loopback socket.
     async fn test_display_channel() -> (DisplayChannel, TestChannelPeers) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind loopback listener");
-        let addr = listener.local_addr().expect("local_addr");
-        let client = tokio::net::TcpStream::connect(addr)
-            .await
-            .expect("connect to loopback listener");
-        let (server, _) = listener.accept().await.expect("accept loopback connection");
-
-        let (tx, rx) = tokio::sync::mpsc::channel(256);
-        let events = EventSink::new(tx, Arc::new(tokio::sync::Notify::new()));
-
+        let (stream, events, peers) = loopback().await;
         let channel = DisplayChannel::new(
             0,
-            SpiceStream::Plain(client),
+            stream,
             events,
             None,
             Arc::new(ByteCounter::new()),
@@ -4136,13 +4169,7 @@ mod tests {
             Arc::new(MmClock::new()),
             1024 * 1024,
         );
-        (
-            channel,
-            TestChannelPeers {
-                _peer: server,
-                _events: rx,
-            },
-        )
+        (channel, peers)
     }
 
     // spice-server sends INVAL_ALL_PALETTES on every connect (#446). With
@@ -4167,23 +4194,28 @@ mod tests {
         assert!(!keys.contains(&"display:hexdump:108"));
     }
 
-    /// Minimum-length `SpiceMsgDisplayStreamCreate` payload.
-    ///
-    /// The handler requires 50 bytes and reads `surface_id`,
-    /// `stream_id`, `codec_type` and the stream / dest rectangles out
-    /// of fixed offsets; everything else is padding here.
+    /// A minimal 64x64 `SpiceMsgDisplayStreamCreate` payload, with no clip.
     fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
-        let mut v = vec![0u8; 50];
-        v[0..4].copy_from_slice(&0u32.to_le_bytes()); // surface_id
-        v[4..8].copy_from_slice(&stream_id.to_le_bytes());
-        v[8] = 0; // flags
-        v[9] = codec_type;
-        v[18..22].copy_from_slice(&64u32.to_le_bytes()); // stream_width
-        v[22..26].copy_from_slice(&64u32.to_le_bytes()); // stream_height
-        v[34..38].copy_from_slice(&0u32.to_le_bytes()); // dest_top
-        v[38..42].copy_from_slice(&0u32.to_le_bytes()); // dest_left
-        v[42..46].copy_from_slice(&64u32.to_le_bytes()); // dest_bottom
-        v[46..50].copy_from_slice(&64u32.to_le_bytes()); // dest_right
+        let mut v = Vec::new();
+        StreamCreate {
+            surface_id: 0,
+            id: stream_id,
+            flags: 0,
+            codec_type,
+            stamp: 0,
+            stream_width: 64,
+            stream_height: 64,
+            src_width: 0,
+            src_height: 0,
+            dest: Rect {
+                top: 0,
+                left: 0,
+                bottom: 64,
+                right: 64,
+            },
+            clip: Clip::none(),
+        }
+        .write(&mut v);
         v
     }
 
@@ -4374,6 +4406,140 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Failure policy for malformed messages. Some end the channel (Err),
+    // the rest are skipped; these pin which is which, so that a change
+    // in either direction is deliberate.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn short_messages_that_end_the_channel() {
+        let (mut channel, _peer) = test_display_channel().await;
+        for (msg_type, len) in [
+            (display_server::SURFACE_CREATE, SurfaceCreate::SIZE - 1),
+            (display_server::SET_ACK, SetAck::SIZE - 1),
+            (display_server::PING, Ping::SIZE - 1),
+            (display_server::NOTIFY, NotifyMessage::MIN_SIZE - 1),
+        ] {
+            assert!(
+                channel
+                    .handle_message(msg_type, &vec![0; len])
+                    .await
+                    .is_err(),
+                "a short message {} must end the channel",
+                msg_type
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn short_surface_destroy_and_stream_clip_are_ignored() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        channel
+            .handle_message(display_server::SURFACE_DESTROY, &[1, 0, 0])
+            .await
+            .expect("a short SURFACE_DESTROY is ignored");
+        channel
+            .handle_message(display_server::STREAM_CLIP, &[1, 0, 0])
+            .await
+            .expect("a short STREAM_CLIP is ignored");
+        assert!(
+            peers.events.try_recv().is_err(),
+            "an ignored message emits nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn short_stream_messages_are_ignored() {
+        let (mut channel, _peer) = test_display_channel().await;
+        channel
+            .handle_message(
+                display_server::STREAM_CREATE,
+                &stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG),
+            )
+            .await
+            .expect("stream_create must not error");
+
+        // A frame whose data_size runs past the body.
+        let mut frame = Vec::new();
+        for v in [7u32, 0, 10] {
+            frame.extend_from_slice(&v.to_le_bytes());
+        }
+        frame.extend_from_slice(&[0xff, 0xd8]);
+        channel
+            .handle_message(display_server::STREAM_DATA, &frame)
+            .await
+            .expect("a short STREAM_DATA is ignored");
+        channel
+            .handle_message(display_server::STREAM_DATA_SIZED, &frame)
+            .await
+            .expect("a short STREAM_DATA_SIZED is ignored");
+        assert_eq!(
+            channel.streams[&7].frames_received, 0,
+            "an ignored frame is not counted"
+        );
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:stream_data:malformed"));
+
+        channel
+            .handle_message(display_server::STREAM_DESTROY, &[7, 0, 0])
+            .await
+            .expect("a short STREAM_DESTROY is ignored");
+        assert!(channel.streams.contains_key(&7));
+        assert_eq!(channel.streams_destroyed_total, 0);
+    }
+
+    #[tokio::test]
+    async fn stream_create_without_its_clip_is_ignored() {
+        let (mut channel, _peer) = test_display_channel().await;
+        let mut create = stream_create_payload(7, SPICE_VIDEO_CODEC_TYPE_MJPEG);
+        assert_eq!(create.len(), StreamCreate::MIN_SIZE);
+        create.pop();
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("a STREAM_CREATE without its clip is ignored");
+
+        // A RECTS clip claiming one rectangle, and no rectangle.
+        create.push(clip_type::RECTS);
+        create.extend_from_slice(&1u32.to_le_bytes());
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("a STREAM_CREATE with its clip rects cut short is ignored");
+        assert!(channel.streams.is_empty());
+        assert_eq!(channel.streams_created_total, 0);
+        assert!(
+            logging::warn_once_keys().contains(&"display:decode_failure:stream_create:malformed")
+        );
+    }
+
+    #[tokio::test]
+    async fn draw_copy_shorter_than_its_base_warns_and_is_skipped() {
+        let (mut channel, _peer) = test_display_channel().await;
+        channel
+            .handle_message(display_server::DRAW_COPY, &[0; DrawBase::MIN_SIZE - 1])
+            .await
+            .expect("a DRAW_COPY shorter than its DrawBase is skipped");
+        assert!(
+            logging::warn_once_keys().contains(&"display:decode_failure:draw_copy:short_payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn draw_copy_with_its_clip_rects_cut_short_ends_the_channel() {
+        let (mut channel, _peer) = test_display_channel().await;
+        // surface_id, bbox, a RECTS clip claiming one rectangle, and no
+        // rectangle: long enough for DrawBase::MIN_SIZE, short of the clip.
+        let mut payload = vec![0; 4 + Rect::SIZE];
+        payload.push(clip_type::RECTS);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        assert!(payload.len() >= DrawBase::MIN_SIZE);
+        assert!(channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .is_err());
+    }
+
+    // -------------------------------------------------------------------------
     // ZLIB_GLZ_RGB inflate bounds (#176)
     // -------------------------------------------------------------------------
 
@@ -4444,64 +4610,58 @@ mod tests {
     // -------------------------------------------------------------------------
     // DRAW_COPY image decode and placement
     //
-    // These drive `handle_message` with hand-built DRAW_COPY payloads,
-    // so the whole of `decode_image_and_emit` runs: the decode arm, the
-    // cache, the source-rect crop and the clip-rect split.
+    // These drive `handle_message` with DRAW_COPY payloads from the
+    // protocol crate's builder, so the whole of `decode_image_and_emit`
+    // runs: the decode arm, the cache, the source-rect crop and the
+    // clip-rect split.
     // -------------------------------------------------------------------------
 
     /// SpiceRect as (top, left, bottom, right), the wire order.
     type WireRect = (u32, u32, u32, u32);
 
-    /// A DRAW_COPY payload drawing `image` at (0, 0) from `src_rect`.
-    ///
-    /// `image` is a SpiceImage (an `ImageDescriptor` and its data). An
-    /// empty `clip_rects` sends clip type NONE, otherwise RECTS.
-    fn draw_copy_payload(src_rect: WireRect, clip_rects: &[WireRect], image: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
-        for edge in [0u32, 0, 1, 1] {
-            v.extend_from_slice(&edge.to_le_bytes()); // dest box: top, left, bottom, right
+    fn rect((top, left, bottom, right): WireRect) -> Rect {
+        Rect {
+            top: top as i32,
+            left: left as i32,
+            bottom: bottom as i32,
+            right: right as i32,
         }
-        if clip_rects.is_empty() {
-            v.push(0); // clip_type NONE
-        } else {
-            v.push(1); // clip_type RECTS
-            v.extend_from_slice(&(clip_rects.len() as u32).to_le_bytes());
-            for (top, left, bottom, right) in clip_rects {
-                for edge in [top, left, bottom, right] {
-                    v.extend_from_slice(&edge.to_le_bytes());
-                }
-            }
-        }
-        // SpiceCopy: src_bitmap, src_area, rop(2), scale(1), mask
-        // flags(1), mask pos(8), mask bitmap(4) = 36 bytes, then the
-        // image straight after it.
-        let src_bitmap = (v.len() + 36) as u32;
-        v.extend_from_slice(&src_bitmap.to_le_bytes());
-        let (top, left, bottom, right) = src_rect;
-        for edge in [top, left, bottom, right] {
-            v.extend_from_slice(&edge.to_le_bytes());
-        }
-        v.extend_from_slice(&[0u8; 16]);
-        v.extend_from_slice(image);
-        v
     }
 
-    /// An `ImageDescriptor` (18 bytes).
+    /// A DRAW_COPY payload drawing `image` at (0, 0) from `src_rect`.
+    ///
+    /// An empty `clip_rects` sends clip type NONE, otherwise RECTS.
+    fn draw_copy_payload(
+        src_rect: WireRect,
+        clip_rects: &[WireRect],
+        image: &SpiceImage,
+    ) -> Vec<u8> {
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect((0, 0, 1, 1)),
+            clip: if clip_rects.is_empty() {
+                Clip::none()
+            } else {
+                Clip::rects(clip_rects.iter().copied().map(rect).collect())
+            },
+        };
+        DrawCopyBuilder::new(&base, image, rect(src_rect)).build()
+    }
+
     fn image_descriptor(
         id: u64,
         image_type: ImageType,
         flags: u8,
         width: u32,
         height: u32,
-    ) -> Vec<u8> {
-        let mut v = Vec::with_capacity(ImageDescriptor::SIZE);
-        v.extend_from_slice(&id.to_le_bytes());
-        v.push(image_type as u8);
-        v.push(flags);
-        v.extend_from_slice(&width.to_le_bytes());
-        v.extend_from_slice(&height.to_le_bytes());
-        v
+    ) -> ImageDescriptor {
+        ImageDescriptor {
+            image_id: id,
+            image_type: image_type as u8,
+            flags,
+            width,
+            height,
+        }
     }
 
     /// A top-down 32-bit BGRX Pixmap SpiceImage.
@@ -4512,32 +4672,40 @@ mod tests {
         height: u32,
         stride: u32,
         pixels: &[u8],
-    ) -> Vec<u8> {
-        let mut v = image_descriptor(id, ImageType::Pixmap, flags, width, height);
-        v.push(8); // format: 32-bit BGRX
-        v.push(0x04); // flags: top-down
-        v.extend_from_slice(&width.to_le_bytes());
-        v.extend_from_slice(&height.to_le_bytes());
-        v.extend_from_slice(&stride.to_le_bytes());
-        v.extend_from_slice(&0u32.to_le_bytes()); // palette
-        v.extend_from_slice(pixels);
-        v
+    ) -> SpiceImage {
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::Pixmap, flags, width, height),
+            payload: ImagePayload::Bitmap(BitmapPayload {
+                header: BitmapHeader {
+                    format: bitmap_fmt::BIT32,
+                    flags: bitmap_flags::TOP_DOWN,
+                    x: width,
+                    y: height,
+                    stride,
+                    palette: BitmapPalette::None,
+                },
+                data: pixels.to_vec(),
+            }),
+        }
     }
 
-    /// A FromCache SpiceImage for `id`, claiming `width` x `height`.
+    /// A cache hit on `id`, claiming `width` x `height`.
     ///
     /// Only the descriptor: FromCache carries no data after it, so with
     /// no mask following, the image ends the payload as it does on the
     /// wire.
-    fn from_cache_image(id: u64, width: u32, height: u32) -> Vec<u8> {
-        image_descriptor(id, ImageType::FromCache, 0, width, height)
+    fn from_cache_image(image_type: ImageType, id: u64, width: u32, height: u32) -> SpiceImage {
+        SpiceImage {
+            descriptor: image_descriptor(id, image_type, 0, width, height),
+            payload: ImagePayload::FromCache,
+        }
     }
 
     /// (left, top, width, height, pixels) of each ImageReady emitted so
     /// far.
     fn drain_image_events(peers: &mut TestChannelPeers) -> Vec<(u32, u32, u32, u32, Vec<u8>)> {
         let mut out = Vec::new();
-        while let Ok(event) = peers._events.try_recv() {
+        while let Ok(event) = peers.events.try_recv() {
             if let ChannelEvent::ImageReady {
                 left,
                 top,
@@ -4628,7 +4796,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 10000, 10000);
+        let image = from_cache_image(ImageType::FromCache, 42, 10000, 10000);
         let strip: WireRect = (0, 0, 1, 100);
         let whole: WireRect = (0, 0, 10000, 10000);
         for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
@@ -4651,7 +4819,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 2, 2);
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4677,9 +4845,11 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 2, 2);
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
         let payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
-        assert!(payload.ends_with(&image));
+        let mut image_bytes = Vec::new();
+        image.write(&mut image_bytes);
+        assert!(payload.ends_with(&image_bytes));
         channel
             .handle_message(display_server::DRAW_COPY, &payload)
             .await
@@ -4717,14 +4887,14 @@ mod tests {
             payload.extend_from_slice(&edge.to_le_bytes()); // src_area
         }
         payload.extend_from_slice(&[0u8; 8]);
-        payload.extend_from_slice(&from_cache_image(42, 2, 2));
+        from_cache_image(ImageType::FromCache, 42, 2, 2).write(&mut payload);
         channel
             .handle_message(display_server::DRAW_TRANSPARENT, &payload)
             .await
             .expect("draw_transparent must not error");
 
         let mut chroma_draws = 0;
-        while let Ok(event) = peers._events.try_recv() {
+        while let Ok(event) = peers.events.try_recv() {
             if matches!(event, ChannelEvent::ImageReadyChroma { .. }) {
                 chroma_draws += 1;
             }
@@ -4737,7 +4907,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        let image = from_cache_image(ImageType::FromCacheLossless, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4772,7 +4942,7 @@ mod tests {
             .expect("draw_copy must not error");
         assert_eq!(drain_image_events(&mut peers).len(), 1);
 
-        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        let image = from_cache_image(ImageType::FromCacheLossless, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4785,5 +4955,167 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_, _, _, _, rgba) = &events[0];
         assert_eq!(rgba, &vec![115, 114, 113, 255]);
+    }
+
+    #[tokio::test]
+    async fn draw_blend_with_op_put_draws_like_a_copy() {
+        // DRAW_BLEND's body is DRAW_COPY's, and its image is found the
+        // same way.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_BLEND,
+                &draw_copy_payload((1, 1, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_blend must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, vec![15, 14, 13, 255]);
+    }
+
+    #[tokio::test]
+    async fn draw_copy_src_bitmap_into_its_fixed_fields_is_refused() {
+        // spice.proto puts a draw's images after its fixed fields; a
+        // pointer back into them names no image.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let image = pixmap_image(1, 0, 2, 2, 8, &pixels);
+        let mut payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
+        let copy_at = DrawBase::MIN_SIZE;
+        payload[copy_at..copy_at + 4].copy_from_slice(&1u32.to_le_bytes());
+        channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .expect("a refused pointer is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys()
+            .contains(&"display:decode_failure:draw_copy:src_bitmap_in_fixed_part"));
+    }
+
+    #[tokio::test]
+    async fn pixmap_with_a_cached_palette_reads_rows_after_the_palette_id() {
+        // PAL_FROM_CACHE makes BitmapData's palette field a u64 cache id,
+        // so the rows start 22 bytes in, not 18.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let mut image = pixmap_image(1, 0, 2, 2, 8, &pixels);
+        if let ImagePayload::Bitmap(bitmap) = &mut image.payload {
+            bitmap.header.flags |= bitmap_flags::PAL_FROM_CACHE;
+            bitmap.header.palette = BitmapPalette::FromCache(5);
+        }
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].4,
+            vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255]
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // The bytes the display channel sends
+    //
+    // Pinned from what ryll sent before its client messages moved onto the
+    // protocol crate's writers, so that the move cannot change them.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn link_up_messages_are_unchanged() {
+        let (mut channel, mut peers) = test_display_channel().await;
+
+        channel.send_init().await.expect("send INIT");
+        assert_eq!(
+            peers.read_sent(6 + 14).await,
+            vec![
+                101, 0, 14, 0, 0, 0, // mini header: INIT, 14 bytes
+                1, // pixmap_cache_id
+                0x00, 0x00, 0x40, 0x01, 0, 0, 0, 0, // pixmap_cache_size: 20 MiB
+                1, // glz_dictionary_id
+                0x00, 0x00, 0x30, 0x00, // glz_dictionary_window_size: 3 MiB
+            ]
+        );
+
+        channel
+            .send_preferred_compression(image_compression::AUTO_GLZ)
+            .await
+            .expect("send PREFERRED_COMPRESSION");
+        assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, 2]);
+
+        channel
+            .send_preferred_video_codec_type(&[
+                SPICE_VIDEO_CODEC_TYPE_H264,
+                SPICE_VIDEO_CODEC_TYPE_MJPEG,
+            ])
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+
+        // More codecs than the u8 count can say: the first 255 are sent.
+        let codecs: Vec<u8> = (0..300).map(|i| (i % 7) as u8).collect();
+        channel
+            .send_preferred_video_codec_type(&codecs)
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        let sent = peers.read_sent(6 + 256).await;
+        assert_eq!(&sent[..7], &[105, 0, 0, 1, 0, 0, 255]);
+        assert_eq!(&sent[7..], &codecs[..255]);
+    }
+
+    #[tokio::test]
+    async fn stream_report_bytes_are_unchanged() {
+        let (mut channel, mut peers) = test_display_channel().await;
+
+        // A 51-byte STREAM_CREATE (the clip type ends it) for MJPEG
+        // stream 7, so that there is a stream to report on.
+        let mut create = vec![0u8; 51];
+        create[4..8].copy_from_slice(&7u32.to_le_bytes());
+        create[9] = SPICE_VIDEO_CODEC_TYPE_MJPEG;
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("stream_create");
+
+        let stream = channel.streams.get_mut(&7).expect("stream 7 exists");
+        stream.report_unique_id = 0xdead_beef;
+        stream.report_start_frame_mm_time = 100;
+        stream.report_end_frame_mm_time = 0;
+        stream.report_num_frames = 5;
+        stream.report_num_drops = 1;
+
+        channel
+            .send_stream_report(7)
+            .await
+            .expect("send STREAM_REPORT");
+        let sent = peers.read_sent(6 + 32).await;
+        assert_eq!(
+            &sent[..30],
+            &[
+                102, 0, 32, 0, 0, 0, // mini header: STREAM_REPORT, 32 bytes
+                7, 0, 0, 0, // stream_id
+                0xef, 0xbe, 0xad, 0xde, // unique_id
+                100, 0, 0, 0, // start_frame_mm_time
+                0, 0, 0, 0, // end_frame_mm_time
+                5, 0, 0, 0, // num_frames
+                1, 0, 0, 0, // num_drops
+            ]
+        );
+        // last_frame_delay is end_frame_mm_time minus the clock's now,
+        // which has advanced by however long the test took.
+        let delay = i32::from_le_bytes([sent[30], sent[31], sent[32], sent[33]]);
+        assert!((-60_000..=0).contains(&delay), "delay {delay}");
+        assert_eq!(&sent[34..], &[0xff, 0xff, 0xff, 0xff]); // audio_delay
     }
 }

@@ -557,8 +557,7 @@ pub struct MainSnapshot {
     pub agent_request_count: u32,
     /// Number of VD_AGENT_REPLY messages received. Cumulative.
     pub agent_reply_count: u32,
-    /// Number of REPLY messages with non-zero `error` field
-    /// (anything other than VD_AGENT_SUCCESS = 0).
+    /// Number of REPLY messages whose `error` field is not VD_AGENT_SUCCESS (1).
     pub agent_reply_error_count: u32,
     /// Session-relative seconds at the most recent REPLY
     /// receipt. None until the first REPLY arrives.

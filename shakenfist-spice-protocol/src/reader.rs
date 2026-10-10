@@ -48,6 +48,17 @@ pub enum LinkError {
         buffer_len: usize,
     },
 
+    /// An offset inside a structure points back into that
+    /// structure's own fixed fields, the first `fixed_len` bytes,
+    /// rather than at the data after them that it addresses.
+    #[error("pointer {offset} points into the first {fixed_len} bytes, which are fixed fields")]
+    PointerIntoFixedPart { offset: usize, fixed_len: usize },
+
+    /// The input uses a feature this parser does not model. `what`
+    /// names the feature.
+    #[error("{what} is not supported")]
+    Unsupported { what: &'static str },
+
     /// The four-byte magic at the start of a message did not
     /// match the expected value.
     ///
@@ -108,6 +119,21 @@ pub enum LinkError {
         missing: Vec<&'static str>,
         caps: Vec<u32>,
     },
+}
+
+/// Lets an `io::Result` parser use `?` on a [`BoundedReader`]
+/// parse. A truncated input becomes
+/// [`std::io::ErrorKind::UnexpectedEof`], as the `byteorder`
+/// readers report it; anything else is
+/// [`std::io::ErrorKind::InvalidData`].
+impl From<LinkError> for std::io::Error {
+    fn from(e: LinkError) -> Self {
+        let kind = match e {
+            LinkError::Truncated { .. } => std::io::ErrorKind::UnexpectedEof,
+            _ => std::io::ErrorKind::InvalidData,
+        };
+        std::io::Error::new(kind, e)
+    }
 }
 
 /// A cursor over a byte slice that tracks position and enforces
@@ -213,6 +239,26 @@ impl<'a> BoundedReader<'a> {
         Ok(u32::from_le_bytes(self.read_array::<4>()?))
     }
 
+    /// Read a little-endian `i16` and advance the position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkError::Truncated`] if fewer than 2 bytes
+    /// remain.
+    pub fn read_i16(&mut self) -> Result<i16, LinkError> {
+        Ok(i16::from_le_bytes(self.read_array::<2>()?))
+    }
+
+    /// Read a little-endian `i32` and advance the position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkError::Truncated`] if fewer than 4 bytes
+    /// remain.
+    pub fn read_i32(&mut self) -> Result<i32, LinkError> {
+        Ok(i32::from_le_bytes(self.read_array::<4>()?))
+    }
+
     /// Read a little-endian `u64` and advance the position.
     ///
     /// # Errors
@@ -248,6 +294,34 @@ impl<'a> BoundedReader<'a> {
             out.push(self.read_u32()?);
         }
         Ok(out)
+    }
+
+    /// Refuse a declared element count that the rest of the
+    /// buffer cannot hold: `count` elements of `size` bytes each
+    /// must fit in [`remaining`](Self::remaining). Call it
+    /// before reserving room for the elements, so a hostile
+    /// count cannot trigger a large speculative allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinkError::TooLarge`] naming `what`, with the
+    /// most elements that would fit as `max`, if `count` is
+    /// larger than that.
+    pub fn check_count(
+        &self,
+        what: &'static str,
+        count: usize,
+        size: usize,
+    ) -> Result<(), LinkError> {
+        let room = self.remaining().checked_div(size).unwrap_or(usize::MAX);
+        if count > room {
+            return Err(LinkError::TooLarge {
+                what,
+                value: count,
+                max: room,
+            });
+        }
+        Ok(())
     }
 
     /// Return a bounds-checked slice of the *original* buffer.
@@ -292,6 +366,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn link_error_converts_to_io_error_kind() {
+        let truncated: std::io::Error = LinkError::Truncated {
+            needed: 4,
+            available: 1,
+        }
+        .into();
+        assert_eq!(truncated.kind(), std::io::ErrorKind::UnexpectedEof);
+        let bad: std::io::Error = LinkError::TooLarge {
+            what: "num_rects",
+            value: 9,
+            max: 1,
+        }
+        .into();
+        assert_eq!(bad.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn read_integers_little_endian() {
         let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let mut r = BoundedReader::new(&data);
@@ -310,6 +401,55 @@ mod tests {
         let mut r = BoundedReader::new(&data);
         assert_eq!(r.read_u64().unwrap(), 1);
         assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn read_signed_integers_little_endian() {
+        let data = [0xfe, 0xff, 0xfd, 0xff, 0xff, 0xff, 0x02, 0x00, 0x00, 0x00];
+        let mut r = BoundedReader::new(&data);
+        assert_eq!(r.read_i16().unwrap(), -2);
+        assert_eq!(r.read_i32().unwrap(), -3);
+        assert_eq!(r.read_i32().unwrap(), 2);
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn underrun_signed_integers_return_truncated() {
+        let mut r = BoundedReader::new(&[0xaa]);
+        assert_eq!(
+            r.read_i16(),
+            Err(LinkError::Truncated {
+                needed: 2,
+                available: 1,
+            })
+        );
+        let mut r = BoundedReader::new(&[0xaa, 0xbb, 0xcc]);
+        assert_eq!(
+            r.read_i32(),
+            Err(LinkError::Truncated {
+                needed: 4,
+                available: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn check_count_bounds_count_by_remaining_bytes() {
+        let data = [0u8; 10];
+        let mut r = BoundedReader::new(&data);
+        r.read_u16().unwrap();
+        // Eight bytes left: room for two 4-byte elements.
+        assert_eq!(r.check_count("things", 2, 4), Ok(()));
+        assert_eq!(
+            r.check_count("things", 3, 4),
+            Err(LinkError::TooLarge {
+                what: "things",
+                value: 3,
+                max: 2,
+            })
+        );
+        // Checking does not consume anything.
+        assert_eq!(r.remaining(), 8);
     }
 
     #[test]

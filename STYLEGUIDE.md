@@ -168,8 +168,8 @@ When adding support for a new SPICE message:
 2. Add the name mapping in the corresponding `message_names::` function
    in `protocol/logging.rs`.
 3. Add the handler in the channel's `handle_message` match arm.
-4. If the message has structured fields, add a parser struct in
-   `protocol/messages.rs`.
+4. If the message has structured fields, add a type in the channel's
+   submodule of `shakenfist-spice-protocol/src/messages/`.
 
 Keep constants.rs and logging.rs in sync -- every constant should have
 a name mapping so it doesn't show as "unknown" in logs.
@@ -218,7 +218,8 @@ shared registry).
 
 ## Protocol message structs
 
-Message structs in `protocol/messages.rs` follow this pattern:
+Message types live in the per-channel submodules of
+`shakenfist-spice-protocol/src/messages/` and implement `WireType`:
 
 ```rust
 pub struct FooMessage {
@@ -226,29 +227,31 @@ pub struct FooMessage {
     pub field_b: u16,
 }
 
-impl FooMessage {
-    pub const SIZE: usize = 6;
-
-    pub fn read(data: &[u8]) -> io::Result<Self> {
-        if data.len() < Self::SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Not enough data for FooMessage",
-            ));
-        }
-        let mut cursor = Cursor::new(data);
+impl WireType for FooMessage {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(FooMessage {
-            field_a: cursor.read_u32::<LittleEndian>()?,
-            field_b: cursor.read_u16::<LittleEndian>()?,
+            field_a: r.read_u32()?,
+            field_b: r.read_u16()?,
         })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.field_a.to_le_bytes());
+        out.extend_from_slice(&self.field_b.to_le_bytes());
     }
 }
 ```
 
 - Wire byte order is **little-endian** for all SPICE messages.
 - `SPICE_ADDRESS` is **u32** in mini-header mode (not u64).
-- Use `Cursor` + `ReadBytesExt`/`WriteBytesExt` for all parsing.
-- Size validation first, then parsing.
+- The reader takes a `BoundedReader`, which checks bounds and overflow
+  and never panics, and returns `LinkError`. The writer is infallible
+  and appends to a `Vec<u8>`. `WireType::decode` parses a whole body.
+- Types whose layout depends on negotiated capabilities implement
+  `ClipboardWireType` instead and take that context as an argument.
+- Every type has an `assert_round_trip` test, plus a test decoding
+  hand-written bytes laid out from spice.proto, so a reader and writer
+  that share a misunderstanding do not both pass.
 
 ## Image decompression
 
@@ -312,7 +315,7 @@ wrong geometry downstream. Treat that `None` as a decode failure.
 ### Message framing
 
 Channel read loops split messages off their receive buffer with
-`take_message` (`shakenfist-spice-protocol/src/messages.rs`), passing
+`take_message` (`shakenfist-spice-protocol/src/messages/common.rs`), passing
 `MAX_MESSAGE_BODY` (`shakenfist-spice-renderer/src/channels/mod.rs`).
 Do not re-implement the header-then-body loop in a channel: the
 server-declared `message_size` is a `u32`, and the shared helper is
