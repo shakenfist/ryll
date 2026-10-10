@@ -24,6 +24,9 @@ use shakenfist_spice_protocol::constants::vd_agent::{
 };
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
+use shakenfist_spice_protocol::messages::agent_stream::{
+    AgentMessage, AgentReassembler, AgentStreamItem, MAX_AGENT_MESSAGE_SIZE,
+};
 use shakenfist_spice_protocol::messages::vd_agent::{
     AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
     ClipboardWireType, MonConfig, MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
@@ -34,7 +37,7 @@ use shakenfist_spice_protocol::messages::{
 };
 use shakenfist_spice_protocol::reader::LinkError;
 use shakenfist_spice_protocol::{
-    main_client, main_server, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
+    main_client, main_server, warn_once, ChannelType, NotifySeverity, MOUSE_MODE_CLIENT,
 };
 
 use super::agent_queue::AgentSendQueue;
@@ -276,6 +279,8 @@ pub struct MainChannel {
     agent_tokens: u32,
     /// Agent messages waiting for `agent_tokens`; see `agent_queue`.
     agent_queue: AgentSendQueue,
+    /// Guest agent messages being put back together from AGENT_DATA.
+    agent_stream: AgentReassembler,
     agent_caps_announced: bool,
     guest_caps_received: bool,
     /// Whether the guest agent announced `VD_AGENT_CAP_CLIPBOARD_SELECTION`,
@@ -408,6 +413,7 @@ impl MainChannel {
             agent_connected: false,
             agent_tokens: 0,
             agent_queue: AgentSendQueue::default(),
+            agent_stream: AgentReassembler::default(),
             agent_caps_announced: false,
             monitors,
             monitors_config_rx,
@@ -1056,6 +1062,7 @@ impl MainChannel {
 
             main_server::AGENT_CONNECTED => {
                 info!("main: vdagent connected");
+                self.reset_agent_stream();
                 self.agent_connected = true;
                 self.publish_agent_connected();
                 self.connect_agent().await?;
@@ -1080,6 +1087,7 @@ impl MainChannel {
                         self.agent_tokens
                     ),
                 }
+                self.reset_agent_stream();
                 self.agent_connected = true;
                 self.publish_agent_connected();
                 self.connect_agent().await?;
@@ -1095,6 +1103,9 @@ impl MainChannel {
                 }
                 self.agent_connected = false;
                 self.publish_agent_connected();
+                // A message the agent left half-sent must not be completed
+                // by the next agent's data.
+                self.reset_agent_stream();
                 self.agent_caps_announced = false;
                 self.guest_caps_received = false;
                 self.guest_clipboard_selection = None;
@@ -1111,30 +1122,13 @@ impl MainChannel {
             }
 
             main_server::AGENT_DATA => {
-                // Each AGENT_DATA is taken to start a new agent message, and
-                // the body is cut to what this one carries. That is wrong
-                // for messages spice-server splits across several
-                // AGENT_DATAs (ryll#474), and is kept as it is until that
-                // is fixed.
-                match VdAgentMessageHeader::decode(payload) {
-                    Ok(header) => {
-                        let agent_type = header.message_type;
-                        let agent_size = header.size as usize;
-                        let body = &payload[VdAgentMessageHeader::SIZE..];
-                        let agent_payload = &body[..agent_size.min(body.len())];
-                        debug!(
-                            "main: agent_data from server: type={}, size={}",
-                            agent_type, agent_size
-                        );
-                        self.handle_agent_message(agent_type, agent_payload).await?;
-                    }
-                    Err(_) => {
-                        debug!(
-                            "main: agent_data from server: {} bytes: {:02x?}",
-                            payload.len(),
-                            payload
-                        );
-                    }
+                // spice-server forwards guest agent data in AGENT_DATAs of
+                // at most 2048 bytes, so one agent message (a clipboard
+                // copy, typically) can span many of them, and only the
+                // first carries its header. The reassembler buffers them
+                // until the whole message is in; see `agent_stream`.
+                for item in self.agent_stream.push(payload) {
+                    self.handle_agent_stream_item(item).await?;
                 }
             }
 
@@ -1475,6 +1469,44 @@ impl MainChannel {
             }
             _ => {}
         }
+    }
+
+    /// Forget any partly received guest agent message.
+    fn reset_agent_stream(&mut self) {
+        if !self.agent_stream.at_message_boundary() {
+            debug!("main: dropping a partly received agent message");
+        }
+        self.agent_stream.reset();
+    }
+
+    async fn handle_agent_stream_item(&mut self, item: AgentStreamItem) -> Result<()> {
+        match item {
+            AgentStreamItem::Message(AgentMessage { header, payload }) => {
+                debug!(
+                    "main: agent message from guest: type={}, size={}",
+                    header.message_type, header.size
+                );
+                self.handle_agent_message(header.message_type, &payload)
+                    .await?;
+            }
+            AgentStreamItem::Oversized(header) => {
+                warn_once!(
+                    "main:agent_data:oversized",
+                    "main: agent message from guest dropped: type={}, size={} is over the {}-byte limit",
+                    header.message_type,
+                    header.size,
+                    MAX_AGENT_MESSAGE_SIZE
+                );
+            }
+            AgentStreamItem::BadProtocol(header) => {
+                warn_once!(
+                    "main:agent_data:bad_protocol",
+                    "main: agent data out of step (header protocol {}), skipping to the next AGENT_DATA",
+                    header.protocol
+                );
+            }
+        }
+        Ok(())
     }
 
     async fn handle_agent_message(&mut self, agent_type: u32, payload: &[u8]) -> Result<()> {
@@ -2144,10 +2176,18 @@ mod tests {
     mod channel {
         use super::super::*;
         use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
-        use shakenfist_spice_protocol::constants::vd_agent::VD_AGENT_CLIPBOARD_SELECTION_PRIMARY;
+        use shakenfist_spice_protocol::constants::vd_agent::{
+            VD_AGENT_CLIPBOARD_SELECTION_PRIMARY, VD_AGENT_MAX_DATA_SIZE,
+        };
         use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
 
         async fn test_main_channel() -> (MainChannel, TestChannelPeers) {
+            test_main_channel_with_clipboard(None).await
+        }
+
+        async fn test_main_channel_with_clipboard(
+            clipboard: Option<Arc<dyn ClipboardBackend>>,
+        ) -> (MainChannel, TestChannelPeers) {
             let (stream, events, peers) = loopback().await;
             let (_monitors_tx, monitors_rx) = mpsc::channel(1);
             let (init_tx, _init_rx) = oneshot::channel();
@@ -2163,7 +2203,7 @@ mod tests {
                 monitors_rx,
                 1,
                 LogConfig::default(),
-                None,
+                clipboard,
                 init_tx,
                 channels_tx,
                 Arc::new(MmClock::new()),
@@ -2394,6 +2434,92 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(channel.agent_tokens, 10, "nothing was sent");
+        }
+
+        /// A host clipboard that records what the channel writes to it.
+        #[derive(Default)]
+        struct RecordingClipboard {
+            written: Mutex<Vec<String>>,
+        }
+
+        impl ClipboardBackend for RecordingClipboard {
+            fn get_text(&self) -> Option<String> {
+                None
+            }
+
+            fn set_text(&self, text: &str) -> Result<(), String> {
+                self.written.lock().unwrap().push(text.to_string());
+                Ok(())
+            }
+        }
+
+        /// A guest VD_AGENT_CLIPBOARD of UTF-8 `text` for the CLIPBOARD
+        /// selection, as the AGENT_DATA bodies spice-server would send it.
+        fn guest_clipboard_chunks(text: &str) -> Vec<Vec<u8>> {
+            let mut body = vec![
+                0, 0, 0, 0, // selection CLIPBOARD, reserved
+                1, 0, 0, 0, // VD_AGENT_CLIPBOARD_UTF8_TEXT
+            ];
+            body.extend_from_slice(text.as_bytes());
+            agent_message(VD_AGENT_CLIPBOARD, &body)
+                .chunks(VD_AGENT_MAX_DATA_SIZE as usize)
+                .map(<[u8]>::to_vec)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn guest_clipboard_spanning_several_agent_data_is_reassembled() {
+            // ryll#474: a guest copy over ~2 KB arrives in several
+            // AGENT_DATAs and must reach the host clipboard whole.
+            let recorder = Arc::new(RecordingClipboard::default());
+            let (mut channel, _peers) =
+                test_main_channel_with_clipboard(Some(recorder.clone())).await;
+            channel.agent_connected = true;
+            channel.guest_clipboard_selection = Some(true);
+
+            let text: String = (0..7000)
+                .map(|i| char::from(b'a' + (i % 26) as u8))
+                .collect();
+            let chunks = guest_clipboard_chunks(&text);
+            assert_eq!(chunks.len(), 4);
+            for chunk in &chunks {
+                channel
+                    .handle_message(main_server::AGENT_DATA, chunk)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(*recorder.written.lock().unwrap(), vec![text]);
+        }
+
+        #[tokio::test]
+        async fn agent_disconnect_drops_a_half_received_message() {
+            let recorder = Arc::new(RecordingClipboard::default());
+            let (mut channel, _peers) =
+                test_main_channel_with_clipboard(Some(recorder.clone())).await;
+            channel.agent_connected = true;
+            channel.guest_clipboard_selection = Some(true);
+
+            let first = guest_clipboard_chunks(&"x".repeat(5000));
+            channel
+                .handle_message(main_server::AGENT_DATA, &first[0])
+                .await
+                .unwrap();
+            channel
+                .handle_message(main_server::AGENT_DISCONNECTED, &0u32.to_le_bytes())
+                .await
+                .unwrap();
+            assert!(channel.agent_stream.at_message_boundary());
+
+            // The next agent's first message is read from its own header.
+            channel.agent_connected = true;
+            channel.guest_clipboard_selection = Some(true);
+            for chunk in guest_clipboard_chunks("after") {
+                channel
+                    .handle_message(main_server::AGENT_DATA, &chunk)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(*recorder.written.lock().unwrap(), vec!["after".to_string()]);
         }
     }
 }

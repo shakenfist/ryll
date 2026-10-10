@@ -6,6 +6,7 @@
 
 use crate::reader::{BoundedReader, LinkError};
 
+pub mod agent_stream;
 mod common;
 mod cursor;
 mod display;
