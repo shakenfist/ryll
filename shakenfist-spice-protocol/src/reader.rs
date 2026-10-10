@@ -48,6 +48,17 @@ pub enum LinkError {
         buffer_len: usize,
     },
 
+    /// An offset inside a structure points back into that
+    /// structure's own fixed fields, the first `fixed_len` bytes,
+    /// rather than at the data after them that it addresses.
+    #[error("pointer {offset} points into the first {fixed_len} bytes, which are fixed fields")]
+    PointerIntoFixedPart { offset: usize, fixed_len: usize },
+
+    /// The input uses a feature this parser does not model. `what`
+    /// names the feature.
+    #[error("{what} is not supported")]
+    Unsupported { what: &'static str },
+
     /// The four-byte magic at the start of a message did not
     /// match the expected value.
     ///

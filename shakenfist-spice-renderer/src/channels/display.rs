@@ -19,18 +19,21 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{clip_type, image_compression, ropd};
+use shakenfist_spice_protocol::constants::{
+    bitmap_flags, bitmap_fmt, clip_type, image_compression, ropd,
+};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, DisplayInit, DisplayMonitorsConfig, DrawBase, ImageDescriptor,
-    Notify as NotifyMessage, Ping, PreferredCompression, PreferredVideoCodecType, Rect, SetAck,
-    SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
-    SpiceTransparent, StreamActivateReport, StreamClip, StreamCreate, StreamData, StreamDataSized,
-    StreamDestroy, StreamReport, SurfaceCreate, SurfaceDestroy, WireType,
+    make_message, take_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig,
+    DrawBase, ImageDescriptor, Notify as NotifyMessage, Ping, PreferredCompression,
+    PreferredVideoCodecType, Rect, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceCopy,
+    SpiceFill, SpiceOpaque, SpicePoint, SpiceTransparent, StreamActivateReport, StreamClip,
+    StreamCreate, StreamData, StreamDataSized, StreamDestroy, StreamReport, SurfaceCreate,
+    SurfaceDestroy, WireType,
 };
-use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
-use shakenfist_spice_protocol::reader::BoundedReader;
+use shakenfist_spice_protocol::parse::{read_u16_le, read_u32_le, read_u64_le};
+use shakenfist_spice_protocol::reader::{BoundedReader, LinkError};
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
     IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME,
@@ -506,20 +509,18 @@ fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
 
 /// Outcome of decoding a DRAW_BLEND payload.
 ///
-/// DRAW_BLEND shares the 36-byte SpiceCopy/SpiceBlend header with
-/// DRAW_COPY (draw.h defines the latter as a typedef for the
-/// former). On OP_PUT the blend is identical to a DRAW_COPY; any
-/// other ROP would require compositing that we don't implement, so
-/// we warn_once and skip.
+/// DRAW_BLEND's body is DRAW_COPY's (spice.proto's `Blend` is
+/// `@ctype(SpiceCopy)`), read here as a [`SpiceCopy`]. On OP_PUT the
+/// blend is identical to a DRAW_COPY; any other ROP would require
+/// compositing that we don't implement, so we warn_once and skip.
 #[derive(Debug, Clone)]
 enum BlendOutcome {
     Paint {
         base: DrawBase,
-        src_bitmap_offset: usize,
-        src_top: u32,
-        src_left: u32,
-        src_bottom: u32,
-        src_right: u32,
+        copy: SpiceCopy,
+        /// The length of the base and the copy, after which its images
+        /// start.
+        fixed_len: usize,
     },
     SkipNonOpPut {
         rop: u16,
@@ -527,32 +528,21 @@ enum BlendOutcome {
 }
 
 fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
-    let (base, body) = read_draw_base(payload)?;
-    if body.len() < 36 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "Not enough data for SpiceBlend",
-        ));
-    }
-    let src_bitmap_offset = read_u32_le(body, 0) as usize;
-    let src_top = read_u32_le(body, 4);
-    let src_left = read_u32_le(body, 8);
-    let src_bottom = read_u32_le(body, 12);
-    let src_right = read_u32_le(body, 16);
-    let rop = read_u16_le(body, 20);
+    let mut r = BoundedReader::new(payload);
+    let base = DrawBase::read(&mut r)?;
     // scale_mode and mask are parsed-through silently, matching
-    // how handle_draw_copy treats them today.
+    // how handle_draw_copy treats them.
+    let copy = SpiceCopy::read(&mut r)?;
 
-    if rop != ropd::OP_PUT {
-        return Ok(BlendOutcome::SkipNonOpPut { rop });
+    if copy.rop_descriptor != ropd::OP_PUT {
+        return Ok(BlendOutcome::SkipNonOpPut {
+            rop: copy.rop_descriptor,
+        });
     }
     Ok(BlendOutcome::Paint {
         base,
-        src_bitmap_offset,
-        src_top,
-        src_left,
-        src_bottom,
-        src_right,
+        copy,
+        fixed_len: r.position(),
     })
 }
 
@@ -675,6 +665,36 @@ fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome>
         src_bottom: ab.src_bottom,
         src_right: ab.src_right,
     })
+}
+
+/// Warn, once per draw op, that its source image pointer is null.
+fn warn_null_src_bitmap(op_name: &str) {
+    logging::warn_once_impl(
+        logging::intern_key(format!(
+            "display:decode_failure:{}:null_src_bitmap",
+            op_name
+        )),
+        &format!("display: {}: null src_bitmap", op_name),
+    );
+}
+
+/// Warn, once per draw op, that its source image has no room for a
+/// descriptor: `have` bytes are available to an image at `offset`.
+fn warn_short_img_desc(op_name: &str, have: usize, offset: usize) {
+    logging::warn_once_impl(
+        logging::intern_key(format!(
+            "display:decode_failure:{}:short_payload_img_desc",
+            op_name
+        )),
+        &format!(
+            "display: {}: payload too short for image descriptor \
+             (have {}, need {}, offset={})",
+            op_name,
+            have,
+            offset + ImageDescriptor::SIZE,
+            offset
+        ),
+    );
 }
 
 /// How `decode_image_and_emit` should composite the decoded
@@ -2024,68 +2044,107 @@ impl DisplayChannel {
             ));
         }
 
-        // SpiceCopy starts with src_bitmap offset (u32) pointing to SpiceImage
-        let copy_start = r.position();
-        if payload.len() < copy_start + 4 {
-            warn_once!(
-                "display:decode_failure:draw_copy:short_spice_copy",
-                "display: draw_copy: payload too short for SpiceCopy"
-            );
+        // The SpiceCopy follows: a src_bitmap offset pointing to the
+        // SpiceImage, then the rest of its 36 bytes. A body too short for
+        // the offset and one too short for the rest warn separately.
+        let short_of_offset = r.remaining() < 4;
+        let Ok(copy) = SpiceCopy::read(&mut r) else {
+            if short_of_offset {
+                warn_once!(
+                    "display:decode_failure:draw_copy:short_spice_copy",
+                    "display: draw_copy: payload too short for SpiceCopy"
+                );
+            } else {
+                warn_once!(
+                    "display:decode_failure:draw_copy:short_spice_copy_header",
+                    "display: draw_copy: payload too short for SpiceCopy header"
+                );
+            }
             return Ok(());
-        }
-
-        let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
-
-        if payload.len() < copy_start + 36 {
-            warn_once!(
-                "display:decode_failure:draw_copy:short_spice_copy_header",
-                "display: draw_copy: payload too short for SpiceCopy header"
-            );
-            return Ok(());
-        }
-
-        let src_top = read_u32_le(payload, copy_start + 4);
-        let src_left = read_u32_le(payload, copy_start + 8);
-        let src_bottom = read_u32_le(payload, copy_start + 12);
-        let src_right = read_u32_le(payload, copy_start + 16);
-        let rop_descriptor = read_u16_le(payload, copy_start + 20);
-        let scale_mode = payload[copy_start + 22];
-        let mask_flags = payload[copy_start + 23];
-        let mask_pos_x = read_i32_le(payload, copy_start + 24);
-        let mask_pos_y = read_i32_le(payload, copy_start + 28);
-        let mask_bitmap_offset = read_u32_le(payload, copy_start + 32) as usize;
+        };
 
         if self.log_config.verbose {
             debug!(
                 "display: draw_copy detail: rop={:#x}, scale={}, mask={:#x}, \
                  pos=({},{}), mask_bmp={}, clip_type={}, clip_rects={}",
-                rop_descriptor,
-                scale_mode,
-                mask_flags,
-                mask_pos_x,
-                mask_pos_y,
-                mask_bitmap_offset,
+                copy.rop_descriptor,
+                copy.scale_mode,
+                copy.mask.flags,
+                copy.mask.pos.x,
+                copy.mask.pos.y,
+                copy.mask.bitmap_offset,
                 base.clip.clip_type,
                 base.clip.rects.len()
             );
         }
 
+        self.decode_copy_image_and_emit(payload, "draw_copy", &base, &copy, r.position())
+            .await
+    }
+
+    /// Decode and draw the source image of a DRAW_COPY or DRAW_BLEND,
+    /// found through the protocol crate's pointer resolution.
+    ///
+    /// The image's bytes run to the mask image, if it comes next, or to
+    /// the end of the payload. A pointer into the draw's fixed fields is
+    /// refused.
+    async fn decode_copy_image_and_emit(
+        &mut self,
+        payload: &[u8],
+        op_name: &str,
+        base: &DrawBase,
+        copy: &SpiceCopy,
+        fixed_len: usize,
+    ) -> Result<()> {
+        let src_bitmap_offset = copy.src_bitmap as usize;
+        let mut image = match copy.src_bitmap_reader(payload, fixed_len) {
+            Ok(Some(image)) => image,
+            Ok(None) => {
+                warn_null_src_bitmap(op_name);
+                return Ok(());
+            }
+            Err(LinkError::PointerIntoFixedPart { .. }) => {
+                logging::warn_once_impl(
+                    logging::intern_key(format!(
+                        "display:decode_failure:{}:src_bitmap_in_fixed_part",
+                        op_name
+                    )),
+                    &format!(
+                        "display: {}: src_bitmap {} points into the first {} bytes, \
+                         which are fixed fields",
+                        op_name, src_bitmap_offset, fixed_len
+                    ),
+                );
+                return Ok(());
+            }
+            Err(_) => {
+                warn_short_img_desc(op_name, payload.len(), src_bitmap_offset);
+                return Ok(());
+            }
+        };
+        let available = image.remaining();
+        let Ok(img_desc) = ImageDescriptor::read(&mut image) else {
+            warn_short_img_desc(op_name, src_bitmap_offset + available, src_bitmap_offset);
+            return Ok(());
+        };
+        let image_data = image.read_bytes(image.remaining())?;
+
         self.decode_image_and_emit(
-            payload,
-            "draw_copy",
-            &base,
-            src_bitmap_offset,
-            src_top,
-            src_left,
-            src_bottom,
-            src_right,
+            op_name,
+            base,
+            &img_desc,
+            image_data,
+            &copy.src_area,
             CompositeMode::Overwrite,
         )
         .await
     }
 
+    /// Decode and draw the source image of a DRAW_OPAQUE,
+    /// DRAW_TRANSPARENT or DRAW_ALPHA_BLEND, at an offset into the
+    /// payload. Its bytes run to the end of the payload.
     #[allow(clippy::too_many_arguments)]
-    async fn decode_image_and_emit(
+    async fn decode_image_at_offset_and_emit(
         &mut self,
         payload: &[u8],
         op_name: &str,
@@ -2098,44 +2157,49 @@ impl DisplayChannel {
         composite: CompositeMode,
     ) -> Result<()> {
         if src_bitmap_offset == 0 {
-            logging::warn_once_impl(
-                logging::intern_key(format!(
-                    "display:decode_failure:{}:null_src_bitmap",
-                    op_name
-                )),
-                &format!("display: {}: null src_bitmap", op_name),
-            );
+            warn_null_src_bitmap(op_name);
             return Ok(());
         }
 
         let image_start = src_bitmap_offset;
         if payload.len() < image_start + ImageDescriptor::SIZE {
-            logging::warn_once_impl(
-                logging::intern_key(format!(
-                    "display:decode_failure:{}:short_payload_img_desc",
-                    op_name
-                )),
-                &format!(
-                    "display: {}: payload too short for image descriptor \
-                     (have {}, need {}, offset={})",
-                    op_name,
-                    payload.len(),
-                    image_start + ImageDescriptor::SIZE,
-                    src_bitmap_offset
-                ),
-            );
+            warn_short_img_desc(op_name, payload.len(), src_bitmap_offset);
             return Ok(());
         }
 
-        let img_desc = ImageDescriptor::read(&payload[image_start..])?;
-        let image_type = ImageType::from_u8(img_desc.image_type);
-
-        // May be empty. A FromCache image is only its descriptor, and
-        // spice-server marshals the source image after the draw's fixed
-        // fields and before any mask, so a cache hit on a draw without a
-        // mask ends the payload. Each arm below checks the length of the
-        // data it reads.
+        let img_desc = ImageDescriptor::decode(&payload[image_start..])?;
         let image_data = &payload[image_start + ImageDescriptor::SIZE..];
+        // The source rect as spice.proto's signed Rect, with the same
+        // bits.
+        let src_area = Rect {
+            top: src_top as i32,
+            left: src_left as i32,
+            bottom: src_bottom as i32,
+            right: src_right as i32,
+        };
+        self.decode_image_and_emit(op_name, base, &img_desc, image_data, &src_area, composite)
+            .await
+    }
+
+    /// Decode `image_data`, the bytes after `img_desc`, and draw
+    /// `src_area` of it into `base`'s box.
+    ///
+    /// `image_data` may be empty. A FromCache image is only its
+    /// descriptor, and spice-server marshals the source image after the
+    /// draw's fixed fields and before any mask, so a cache hit on a draw
+    /// without a mask ends the payload. Each arm below checks the length
+    /// of the data it reads.
+    async fn decode_image_and_emit(
+        &mut self,
+        op_name: &str,
+        base: &DrawBase,
+        img_desc: &ImageDescriptor,
+        image_data: &[u8],
+        src_area: &Rect,
+        composite: CompositeMode,
+    ) -> Result<()> {
+        let image_type = ImageType::from_u8(img_desc.image_type);
+        let (src_left, src_top, src_right, src_bottom) = ltrb(src_area);
 
         debug!(
             "display: {}: surface={}, pos=({},{}), size={}x{}, type={:?}, id={}, \
@@ -2159,24 +2223,21 @@ impl DisplayChannel {
         let decode_start = Instant::now();
         let decompressed: Option<DecompressedImage> = match image_type {
             Some(ImageType::Pixmap) => {
-                // BitmapData: format(u8) + flags(u8) + x(u32) +
-                // y(u32) + stride(u32) + palette_addr(u32) = 18 bytes,
-                // then raw pixel rows.
-                if image_data.len() < 18 {
-                    warn_once!(
-                        "display:decode_failure:pixmap:short_bitmap_data",
-                        "display: pixmap BitmapData header too short"
-                    );
-                    None
-                } else {
-                    let bmp_fmt = image_data[0];
-                    let bmp_flags = image_data[1];
-                    let bmp_width = read_u32_le(image_data, 2);
-                    let bmp_height = read_u32_le(image_data, 6);
-                    let bmp_stride = read_u32_le(image_data, 10);
-                    let top_down = (bmp_flags & 0x04) != 0;
-                    // palette_addr at offset 14..18 (ignored for 32-bit)
-                    let pixel_data = &image_data[18..];
+                // BitmapData: a BitmapHeader (18 bytes, or 22 when the
+                // palette comes from the cache), then raw pixel rows. The
+                // rows are checked below rather than by the protocol
+                // crate's BitmapPayload, so that each way they can be
+                // wrong keeps its own warning.
+                let mut bitmap = BoundedReader::new(image_data);
+                if let Ok(header) = BitmapHeader::read(&mut bitmap) {
+                    let bmp_fmt = header.format;
+                    let bmp_flags = header.flags;
+                    let bmp_width = header.x;
+                    let bmp_height = header.y;
+                    let bmp_stride = header.stride;
+                    let top_down = (bmp_flags & bitmap_flags::TOP_DOWN) != 0;
+                    // The palette is ignored: 32-bit formats have none.
+                    let pixel_data = bitmap.read_bytes(bitmap.remaining())?;
 
                     debug!(
                         "display: pixmap fmt={}, flags={:#x}, {}x{}, stride={}, top_down={}",
@@ -2184,7 +2245,7 @@ impl DisplayChannel {
                     );
 
                     // Only 32-bit BGRX (fmt=8) and RGBA (fmt=9) are supported
-                    if bmp_fmt != 8 && bmp_fmt != 9 {
+                    if bmp_fmt != bitmap_fmt::BIT32 && bmp_fmt != bitmap_fmt::RGBA {
                         warn_once!(
                             "display:decode_failure:pixmap:format_unsupported",
                             "display: pixmap format {} not supported (only 32-bit)",
@@ -2272,7 +2333,11 @@ impl DisplayChannel {
                                 rgba[di] = src_row[si + 2]; // R
                                 rgba[di + 1] = src_row[si + 1]; // G
                                 rgba[di + 2] = src_row[si]; // B
-                                rgba[di + 3] = if bmp_fmt == 9 { src_row[si + 3] } else { 255 };
+                                rgba[di + 3] = if bmp_fmt == bitmap_fmt::RGBA {
+                                    src_row[si + 3]
+                                } else {
+                                    255
+                                };
                             }
                         }
                         // `rgba` was sized from these dimensions, so
@@ -2289,6 +2354,12 @@ impl DisplayChannel {
                         }
                         image
                     }
+                } else {
+                    warn_once!(
+                        "display:decode_failure:pixmap:short_bitmap_data",
+                        "display: pixmap BitmapData header too short"
+                    );
+                    None
                 }
             }
             Some(ImageType::GlzRgb) => {
@@ -2479,15 +2550,7 @@ impl DisplayChannel {
                 // rather than the `image` crate's pure-Rust path. Session 006
                 // measured the old path at ~263 ms / frame at 1920×1472 on a
                 // Mac that has ImageIO available.
-                if image_data.len() < 4 {
-                    warn_once!(
-                        "display:decode_failure:jpeg:short_data",
-                        "display: JPEG data too short"
-                    );
-                    None
-                } else {
-                    let data_size = read_u32_le(image_data, 0) as usize;
-                    let jpeg_data = &image_data[4..4 + data_size.min(image_data.len() - 4)];
+                if let Ok(jpeg_data) = BinaryData::read_data(&mut BoundedReader::new(image_data)) {
                     let decoded = self.jpeg_decoder.decode(jpeg_data).and_then(|dec| {
                         DecompressedImage::new(dec.width, dec.height, dec.rgba, img_desc.image_id)
                     });
@@ -2502,6 +2565,14 @@ impl DisplayChannel {
                         );
                     }
                     decoded
+                } else {
+                    // Shorter than its size field, or than the size it
+                    // declares.
+                    warn_once!(
+                        "display:decode_failure:jpeg:short_data",
+                        "display: JPEG data too short"
+                    );
+                    None
                 }
             }
             Some(ImageType::Quic) => {
@@ -2913,7 +2984,7 @@ impl DisplayChannel {
                 src_bottom,
                 src_right,
             } => {
-                self.decode_image_and_emit(
+                self.decode_image_at_offset_and_emit(
                     payload,
                     "draw_opaque",
                     &base,
@@ -2942,24 +3013,11 @@ impl DisplayChannel {
             }
             BlendOutcome::Paint {
                 base,
-                src_bitmap_offset,
-                src_top,
-                src_left,
-                src_bottom,
-                src_right,
+                copy,
+                fixed_len,
             } => {
-                self.decode_image_and_emit(
-                    payload,
-                    "draw_blend",
-                    &base,
-                    src_bitmap_offset,
-                    src_top,
-                    src_left,
-                    src_bottom,
-                    src_right,
-                    CompositeMode::Overwrite,
-                )
-                .await
+                self.decode_copy_image_and_emit(payload, "draw_blend", &base, &copy, fixed_len)
+                    .await
             }
         }
     }
@@ -2975,7 +3033,7 @@ impl DisplayChannel {
             src_bottom,
             src_right,
         } = decode_draw_transparent(payload)?;
-        self.decode_image_and_emit(
+        self.decode_image_at_offset_and_emit(
             payload,
             "draw_transparent",
             &base,
@@ -3010,7 +3068,7 @@ impl DisplayChannel {
                         alpha_flags
                     );
                 }
-                self.decode_image_and_emit(
+                self.decode_image_at_offset_and_emit(
                     payload,
                     "draw_alpha_blend",
                     &base,
@@ -3283,6 +3341,9 @@ impl DisplayChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shakenfist_spice_protocol::messages::{
+        BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
+    };
 
     // -------------------------------------------------------------------------
     // Note: extract_dht_segments / inject_dht tests have moved to
@@ -3634,22 +3695,20 @@ mod tests {
         match decode_draw_blend(&payload).expect("decode failed") {
             BlendOutcome::Paint {
                 base,
-                src_bitmap_offset,
-                src_top,
-                src_left,
-                src_bottom,
-                src_right,
+                copy,
+                fixed_len,
             } => {
                 assert_eq!(base.surface_id, 0);
                 assert_eq!(base.bbox.top, 10);
                 assert_eq!(base.bbox.left, 20);
                 assert_eq!(base.bbox.bottom, 30);
                 assert_eq!(base.bbox.right, 40);
-                assert_eq!(src_bitmap_offset, 0x100);
-                assert_eq!(src_top, 1);
-                assert_eq!(src_left, 2);
-                assert_eq!(src_bottom, 3);
-                assert_eq!(src_right, 4);
+                assert_eq!(copy.src_bitmap, 0x100);
+                assert_eq!(copy.src_area.top, 1);
+                assert_eq!(copy.src_area.left, 2);
+                assert_eq!(copy.src_area.bottom, 3);
+                assert_eq!(copy.src_area.right, 4);
+                assert_eq!(fixed_len, payload.len());
             }
             other => panic!("expected Paint, got {:?}", other),
         }
@@ -4461,64 +4520,58 @@ mod tests {
     // -------------------------------------------------------------------------
     // DRAW_COPY image decode and placement
     //
-    // These drive `handle_message` with hand-built DRAW_COPY payloads,
-    // so the whole of `decode_image_and_emit` runs: the decode arm, the
-    // cache, the source-rect crop and the clip-rect split.
+    // These drive `handle_message` with DRAW_COPY payloads from the
+    // protocol crate's builder, so the whole of `decode_image_and_emit`
+    // runs: the decode arm, the cache, the source-rect crop and the
+    // clip-rect split.
     // -------------------------------------------------------------------------
 
     /// SpiceRect as (top, left, bottom, right), the wire order.
     type WireRect = (u32, u32, u32, u32);
 
-    /// A DRAW_COPY payload drawing `image` at (0, 0) from `src_rect`.
-    ///
-    /// `image` is a SpiceImage (an `ImageDescriptor` and its data). An
-    /// empty `clip_rects` sends clip type NONE, otherwise RECTS.
-    fn draw_copy_payload(src_rect: WireRect, clip_rects: &[WireRect], image: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(&0u32.to_le_bytes()); // surface_id
-        for edge in [0u32, 0, 1, 1] {
-            v.extend_from_slice(&edge.to_le_bytes()); // dest box: top, left, bottom, right
+    fn rect((top, left, bottom, right): WireRect) -> Rect {
+        Rect {
+            top: top as i32,
+            left: left as i32,
+            bottom: bottom as i32,
+            right: right as i32,
         }
-        if clip_rects.is_empty() {
-            v.push(0); // clip_type NONE
-        } else {
-            v.push(1); // clip_type RECTS
-            v.extend_from_slice(&(clip_rects.len() as u32).to_le_bytes());
-            for (top, left, bottom, right) in clip_rects {
-                for edge in [top, left, bottom, right] {
-                    v.extend_from_slice(&edge.to_le_bytes());
-                }
-            }
-        }
-        // SpiceCopy: src_bitmap, src_area, rop(2), scale(1), mask
-        // flags(1), mask pos(8), mask bitmap(4) = 36 bytes, then the
-        // image straight after it.
-        let src_bitmap = (v.len() + 36) as u32;
-        v.extend_from_slice(&src_bitmap.to_le_bytes());
-        let (top, left, bottom, right) = src_rect;
-        for edge in [top, left, bottom, right] {
-            v.extend_from_slice(&edge.to_le_bytes());
-        }
-        v.extend_from_slice(&[0u8; 16]);
-        v.extend_from_slice(image);
-        v
     }
 
-    /// An `ImageDescriptor` (18 bytes).
+    /// A DRAW_COPY payload drawing `image` at (0, 0) from `src_rect`.
+    ///
+    /// An empty `clip_rects` sends clip type NONE, otherwise RECTS.
+    fn draw_copy_payload(
+        src_rect: WireRect,
+        clip_rects: &[WireRect],
+        image: &SpiceImage,
+    ) -> Vec<u8> {
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect((0, 0, 1, 1)),
+            clip: if clip_rects.is_empty() {
+                Clip::none()
+            } else {
+                Clip::rects(clip_rects.iter().copied().map(rect).collect())
+            },
+        };
+        DrawCopyBuilder::new(&base, image, rect(src_rect)).build()
+    }
+
     fn image_descriptor(
         id: u64,
         image_type: ImageType,
         flags: u8,
         width: u32,
         height: u32,
-    ) -> Vec<u8> {
-        let mut v = Vec::with_capacity(ImageDescriptor::SIZE);
-        v.extend_from_slice(&id.to_le_bytes());
-        v.push(image_type as u8);
-        v.push(flags);
-        v.extend_from_slice(&width.to_le_bytes());
-        v.extend_from_slice(&height.to_le_bytes());
-        v
+    ) -> ImageDescriptor {
+        ImageDescriptor {
+            image_id: id,
+            image_type: image_type as u8,
+            flags,
+            width,
+            height,
+        }
     }
 
     /// A top-down 32-bit BGRX Pixmap SpiceImage.
@@ -4529,25 +4582,33 @@ mod tests {
         height: u32,
         stride: u32,
         pixels: &[u8],
-    ) -> Vec<u8> {
-        let mut v = image_descriptor(id, ImageType::Pixmap, flags, width, height);
-        v.push(8); // format: 32-bit BGRX
-        v.push(0x04); // flags: top-down
-        v.extend_from_slice(&width.to_le_bytes());
-        v.extend_from_slice(&height.to_le_bytes());
-        v.extend_from_slice(&stride.to_le_bytes());
-        v.extend_from_slice(&0u32.to_le_bytes()); // palette
-        v.extend_from_slice(pixels);
-        v
+    ) -> SpiceImage {
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::Pixmap, flags, width, height),
+            payload: ImagePayload::Bitmap(BitmapPayload {
+                header: BitmapHeader {
+                    format: bitmap_fmt::BIT32,
+                    flags: bitmap_flags::TOP_DOWN,
+                    x: width,
+                    y: height,
+                    stride,
+                    palette: BitmapPalette::None,
+                },
+                data: pixels.to_vec(),
+            }),
+        }
     }
 
-    /// A FromCache SpiceImage for `id`, claiming `width` x `height`.
+    /// A cache hit on `id`, claiming `width` x `height`.
     ///
     /// Only the descriptor: FromCache carries no data after it, so with
     /// no mask following, the image ends the payload as it does on the
     /// wire.
-    fn from_cache_image(id: u64, width: u32, height: u32) -> Vec<u8> {
-        image_descriptor(id, ImageType::FromCache, 0, width, height)
+    fn from_cache_image(image_type: ImageType, id: u64, width: u32, height: u32) -> SpiceImage {
+        SpiceImage {
+            descriptor: image_descriptor(id, image_type, 0, width, height),
+            payload: ImagePayload::FromCache,
+        }
     }
 
     /// (left, top, width, height, pixels) of each ImageReady emitted so
@@ -4645,7 +4706,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 10000, 10000);
+        let image = from_cache_image(ImageType::FromCache, 42, 10000, 10000);
         let strip: WireRect = (0, 0, 1, 100);
         let whole: WireRect = (0, 0, 10000, 10000);
         for (src_rect, clip_rects) in [(strip, &[][..]), (whole, &[strip][..])] {
@@ -4668,7 +4729,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 2, 2);
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4694,9 +4755,11 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = from_cache_image(42, 2, 2);
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
         let payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
-        assert!(payload.ends_with(&image));
+        let mut image_bytes = Vec::new();
+        image.write(&mut image_bytes);
+        assert!(payload.ends_with(&image_bytes));
         channel
             .handle_message(display_server::DRAW_COPY, &payload)
             .await
@@ -4734,7 +4797,7 @@ mod tests {
             payload.extend_from_slice(&edge.to_le_bytes()); // src_area
         }
         payload.extend_from_slice(&[0u8; 8]);
-        payload.extend_from_slice(&from_cache_image(42, 2, 2));
+        from_cache_image(ImageType::FromCache, 42, 2, 2).write(&mut payload);
         channel
             .handle_message(display_server::DRAW_TRANSPARENT, &payload)
             .await
@@ -4754,7 +4817,7 @@ mod tests {
         let (mut channel, mut peers) = test_display_channel().await;
         cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
 
-        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        let image = from_cache_image(ImageType::FromCacheLossless, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4789,7 +4852,7 @@ mod tests {
             .expect("draw_copy must not error");
         assert_eq!(drain_image_events(&mut peers).len(), 1);
 
-        let image = image_descriptor(42, ImageType::FromCacheLossless, 0, 2, 2);
+        let image = from_cache_image(ImageType::FromCacheLossless, 42, 2, 2);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
@@ -4802,6 +4865,74 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_, _, _, _, rgba) = &events[0];
         assert_eq!(rgba, &vec![115, 114, 113, 255]);
+    }
+
+    #[tokio::test]
+    async fn draw_blend_with_op_put_draws_like_a_copy() {
+        // DRAW_BLEND's body is DRAW_COPY's, and its image is found the
+        // same way.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_BLEND,
+                &draw_copy_payload((1, 1, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_blend must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, vec![15, 14, 13, 255]);
+    }
+
+    #[tokio::test]
+    async fn draw_copy_src_bitmap_into_its_fixed_fields_is_refused() {
+        // spice.proto puts a draw's images after its fixed fields; a
+        // pointer back into them names no image.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let image = pixmap_image(1, 0, 2, 2, 8, &pixels);
+        let mut payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
+        let copy_at = DrawBase::MIN_SIZE;
+        payload[copy_at..copy_at + 4].copy_from_slice(&1u32.to_le_bytes());
+        channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .expect("a refused pointer is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys()
+            .contains(&"display:decode_failure:draw_copy:src_bitmap_in_fixed_part"));
+    }
+
+    #[tokio::test]
+    async fn pixmap_with_a_cached_palette_reads_rows_after_the_palette_id() {
+        // PAL_FROM_CACHE makes BitmapData's palette field a u64 cache id,
+        // so the rows start 22 bytes in, not 18.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let mut image = pixmap_image(1, 0, 2, 2, 8, &pixels);
+        if let ImagePayload::Bitmap(bitmap) = &mut image.payload {
+            bitmap.header.flags |= bitmap_flags::PAL_FROM_CACHE;
+            bitmap.header.palette = BitmapPalette::FromCache(5);
+        }
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].4,
+            vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255]
+        );
     }
 
     // -------------------------------------------------------------------------

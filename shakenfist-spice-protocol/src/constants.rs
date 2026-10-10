@@ -594,6 +594,12 @@ pub mod stream_flags {
     pub const MASK: u8 = 0x1;
 }
 
+/// Image scale mode (SPICE_IMAGE_SCALE_MODE_* in enums.h:246-251).
+pub mod image_scale_mode {
+    pub const INTERPOLATE: u8 = 0;
+    pub const NEAREST: u8 = 1;
+}
+
 /// Mask flags (SPICE_MASK_FLAGS_* in enums.h:171-174).
 pub mod mask_flags {
     pub const INVERS: u8 = 1 << 0;

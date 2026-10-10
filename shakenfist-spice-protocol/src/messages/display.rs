@@ -5,11 +5,15 @@
 //! signed, so their fields are `i32`; ryll's renderer has always used the
 //! same bits as `u32`, and casts at its call sites.
 //!
-//! The draw bodies other than DRAW_COPY's (`SpiceFill`, `SpiceOpaque`
-//! and the rest) are still `io::Result` readers over a slice; moving them
-//! onto [`BoundedReader`] is shakenfist/ryll#136.
+//! Images inside a draw message are addressed by pointers, which are
+//! offsets from the start of the message body. [`DrawCopy`] holds its
+//! images resolved; [`SpiceCopy`] is the same body as it is on the wire.
+//!
+//! The draw bodies other than DRAW_COPY's and DRAW_BLEND's (`SpiceFill`,
+//! `SpiceOpaque` and the rest) are still `io::Result` readers over a slice;
+//! moving them onto [`BoundedReader`] is shakenfist/ryll#136.
 use super::WireType;
-use crate::constants::clip_type;
+use crate::constants::{bitmap_flags, clip_type, image_scale_mode, ropd, ImageType};
 use crate::reader::{BoundedReader, LinkError};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::io::{self, Cursor};
@@ -547,8 +551,11 @@ impl SpiceAlphaBlend {
     }
 }
 
-/// Image descriptor from draw message
-#[derive(Debug, Clone)]
+/// spice.proto `ImageDescriptor`: the 18 bytes that open every image.
+///
+/// `image_type` is an [`ImageType`] value, kept raw so that an unknown
+/// type survives a round trip. `flags` holds `IMAGE_FLAGS_*` bits.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageDescriptor {
     pub image_id: u64,
     pub image_type: u8,
@@ -559,24 +566,600 @@ pub struct ImageDescriptor {
 
 impl ImageDescriptor {
     pub const SIZE: usize = 18;
+}
 
-    pub fn read(data: &[u8]) -> io::Result<Self> {
-        if data.len() < Self::SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "Not enough data for ImageDescriptor",
-            ));
-        }
-
-        let mut cursor = Cursor::new(data);
+impl WireType for ImageDescriptor {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
         Ok(ImageDescriptor {
-            image_id: cursor.read_u64::<LittleEndian>()?,
-            image_type: cursor.read_u8()?,
-            flags: cursor.read_u8()?,
-            width: cursor.read_u32::<LittleEndian>()?,
-            height: cursor.read_u32::<LittleEndian>()?,
+            image_id: r.read_u64()?,
+            image_type: r.read_u8()?,
+            flags: r.read_u8()?,
+            width: r.read_u32()?,
+            height: r.read_u32()?,
         })
     }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.image_id.to_le_bytes());
+        out.push(self.image_type);
+        out.push(self.flags);
+        out.extend_from_slice(&self.width.to_le_bytes());
+        out.extend_from_slice(&self.height.to_le_bytes());
+    }
+}
+
+/// The palette field of a [`BitmapHeader`] (spice.proto's anonymous `pal`
+/// switch in `BitmapData`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitmapPalette {
+    /// A null palette pointer: the bitmap has no palette. 32-bit and RGBA
+    /// bitmaps never have one.
+    None,
+    /// A pointer to a spice.proto `Palette`, as an offset from the start
+    /// of the message body. The reader never produces `Offset(0)`, which
+    /// is written as, and reads back as, [`BitmapPalette::None`].
+    Offset(u32),
+    /// `bitmap_flags::PAL_FROM_CACHE` is set: the id of a palette the
+    /// client cached earlier. The field is then a `u64` on the wire, not a
+    /// pointer.
+    FromCache(u64),
+}
+
+/// spice.proto `BitmapData` up to its pixels: the header of a `BITMAP`
+/// (pixmap) image.
+///
+/// The header is 18 bytes, or 22 when `flags` has
+/// `bitmap_flags::PAL_FROM_CACHE`, because the palette field is then a
+/// `u64` cache id rather than a `u32` pointer. `palette` must agree with
+/// that flag, or the value will not read back as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitmapHeader {
+    /// A `bitmap_fmt::*` value.
+    pub format: u8,
+    /// `bitmap_flags::*` bits.
+    pub flags: u8,
+    /// Width in pixels (spice.proto's `x`).
+    pub x: u32,
+    /// Height in rows (spice.proto's `y`).
+    pub y: u32,
+    /// Bytes from the start of one row to the start of the next.
+    pub stride: u32,
+    pub palette: BitmapPalette,
+}
+
+impl BitmapHeader {
+    /// The size with a palette pointer, which is all ryll's pixmaps.
+    pub const SIZE: usize = 18;
+
+    /// The pixel data's length in bytes, `stride * y` (spice.proto's
+    /// `image_size(8, stride, y)`), or `None` if that overflows `usize`.
+    #[must_use]
+    pub fn data_len(&self) -> Option<usize> {
+        (self.stride as usize).checked_mul(self.y as usize)
+    }
+}
+
+impl WireType for BitmapHeader {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        let format = r.read_u8()?;
+        let flags = r.read_u8()?;
+        let x = r.read_u32()?;
+        let y = r.read_u32()?;
+        let stride = r.read_u32()?;
+        let palette = if flags & bitmap_flags::PAL_FROM_CACHE != 0 {
+            BitmapPalette::FromCache(r.read_u64()?)
+        } else {
+            match r.read_u32()? {
+                0 => BitmapPalette::None,
+                offset => BitmapPalette::Offset(offset),
+            }
+        };
+        Ok(BitmapHeader {
+            format,
+            flags,
+            x,
+            y,
+            stride,
+            palette,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        debug_assert_eq!(
+            self.flags & bitmap_flags::PAL_FROM_CACHE != 0,
+            matches!(self.palette, BitmapPalette::FromCache(_)),
+            "PAL_FROM_CACHE and a FromCache palette go together"
+        );
+        out.push(self.format);
+        out.push(self.flags);
+        out.extend_from_slice(&self.x.to_le_bytes());
+        out.extend_from_slice(&self.y.to_le_bytes());
+        out.extend_from_slice(&self.stride.to_le_bytes());
+        match self.palette {
+            BitmapPalette::None => out.extend_from_slice(&0u32.to_le_bytes()),
+            BitmapPalette::Offset(offset) => out.extend_from_slice(&offset.to_le_bytes()),
+            BitmapPalette::FromCache(id) => out.extend_from_slice(&id.to_le_bytes()),
+        }
+    }
+}
+
+/// spice.proto `BitmapData`: a [`BitmapHeader`], then `stride * y` bytes
+/// of pixel rows.
+///
+/// `data` must be [`BitmapHeader::data_len`] bytes long, or the value will
+/// not read back as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitmapPayload {
+    pub header: BitmapHeader,
+    pub data: Vec<u8>,
+}
+
+impl WireType for BitmapPayload {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        let header = BitmapHeader::read(r)?;
+        let len = header.data_len().ok_or(LinkError::TooLarge {
+            what: "bitmap data",
+            value: usize::MAX,
+            max: r.remaining(),
+        })?;
+        let data = r.read_bytes(len)?.to_vec();
+        Ok(BitmapPayload { header, data })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        debug_assert_eq!(
+            Some(self.data.len()),
+            self.header.data_len(),
+            "bitmap data is stride * y bytes"
+        );
+        self.header.write(out);
+        out.extend_from_slice(&self.data);
+    }
+}
+
+/// spice.proto `BinaryData`: a `u32` size, then that many bytes. JPEG
+/// images carry one, as do QUIC, LZ, GLZ and LZ4 images.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BinaryData {
+    pub data: Vec<u8>,
+}
+
+impl BinaryData {
+    /// Read the size and return the data it covers without copying it.
+    /// [`BinaryData::read`] is this plus the copy.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::Truncated`] if the size or the data runs past the end
+    /// of `r`.
+    pub fn read_data<'a>(r: &mut BoundedReader<'a>) -> Result<&'a [u8], LinkError> {
+        let size = r.read_u32()? as usize;
+        r.read_bytes(size)
+    }
+}
+
+impl WireType for BinaryData {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        Ok(BinaryData {
+            data: BinaryData::read_data(r)?.to_vec(),
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        write_sized_bytes(out, &self.data);
+    }
+}
+
+/// What follows an [`ImageDescriptor`], by its `image_type`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImagePayload {
+    /// `ImageType::Pixmap` (spice.proto `BITMAP`).
+    Bitmap(BitmapPayload),
+    /// `ImageType::Jpeg`.
+    Jpeg(BinaryData),
+    /// `ImageType::FromCache` or `ImageType::FromCacheLossless`, which
+    /// spice.proto gives no data: the descriptor's `image_id` names an
+    /// image the client cached earlier.
+    FromCache,
+    /// Any other type, whose layout this crate does not model (QUIC,
+    /// LZ_RGB, GLZ_RGB, LZ_PLT, SURFACE, ZLIB_GLZ_RGB, JPEG_ALPHA, LZ4 and
+    /// unknown types): every byte from the end of the descriptor to the end
+    /// of the image's region. In a draw message the region ends at the
+    /// next image or the end of the body; see [`DrawCopy`].
+    Other(Vec<u8>),
+}
+
+impl ImagePayload {
+    /// Whether this payload is the one spice.proto gives `image_type`.
+    #[must_use]
+    pub fn matches_type(&self, image_type: u8) -> bool {
+        let modelled = match ImageType::from_u8(image_type) {
+            Some(ImageType::Pixmap) => Some(matches!(self, ImagePayload::Bitmap(_))),
+            Some(ImageType::Jpeg) => Some(matches!(self, ImagePayload::Jpeg(_))),
+            Some(ImageType::FromCache | ImageType::FromCacheLossless) => {
+                Some(matches!(self, ImagePayload::FromCache))
+            }
+            _ => None,
+        };
+        modelled.unwrap_or(matches!(self, ImagePayload::Other(_)))
+    }
+}
+
+/// spice.proto `Image`: a descriptor and the payload its type selects.
+///
+/// The payload must be the one [`ImagePayload::matches_type`] accepts for
+/// `descriptor.image_type`, or the value will not read back as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpiceImage {
+    pub descriptor: ImageDescriptor,
+    pub payload: ImagePayload,
+}
+
+impl WireType for SpiceImage {
+    /// Parse an image. An [`ImagePayload::Other`] takes every byte left in
+    /// `r`, so read it from a reader bounded to the image, as
+    /// [`DrawCopy::read`] does.
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        let descriptor = ImageDescriptor::read(r)?;
+        let payload = match ImageType::from_u8(descriptor.image_type) {
+            Some(ImageType::Pixmap) => ImagePayload::Bitmap(BitmapPayload::read(r)?),
+            Some(ImageType::Jpeg) => ImagePayload::Jpeg(BinaryData::read(r)?),
+            Some(ImageType::FromCache | ImageType::FromCacheLossless) => ImagePayload::FromCache,
+            _ => ImagePayload::Other(r.read_bytes(r.remaining())?.to_vec()),
+        };
+        Ok(SpiceImage {
+            descriptor,
+            payload,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        debug_assert!(
+            self.payload.matches_type(self.descriptor.image_type),
+            "the payload is the one the descriptor's type selects"
+        );
+        self.descriptor.write(out);
+        match &self.payload {
+            ImagePayload::Bitmap(bitmap) => bitmap.write(out),
+            ImagePayload::Jpeg(jpeg) => jpeg.write(out),
+            ImagePayload::FromCache => {}
+            ImagePayload::Other(bytes) => out.extend_from_slice(bytes),
+        }
+    }
+}
+
+/// The bytes an image pointer in a draw message addresses: from `offset`
+/// to the next pointer after it in `pointers`, or to the end of `body`.
+///
+/// `body` is the whole message body, which offsets are measured from, and
+/// `fixed_len` the length of the message's fixed fields. A null (0)
+/// pointer gives `None`.
+///
+/// spice-server appends each pointee after the fixed fields, in pointer
+/// order (`marshaller.c`, `spice_marshaller_get_ptr_submarshaller`), so
+/// one image's bytes end where the next begins.
+fn pointee<'a>(
+    body: &'a [u8],
+    fixed_len: usize,
+    offset: u32,
+    pointers: &[u32],
+) -> Result<Option<BoundedReader<'a>>, LinkError> {
+    if offset == 0 {
+        return Ok(None);
+    }
+    let offset = offset as usize;
+    if offset < fixed_len {
+        return Err(LinkError::PointerIntoFixedPart { offset, fixed_len });
+    }
+    let end = pointers
+        .iter()
+        .map(|&p| p as usize)
+        .filter(|&p| p > offset)
+        .min()
+        .unwrap_or(body.len())
+        .min(body.len());
+    let len = end.saturating_sub(offset);
+    BoundedReader::new(body).sub_reader(offset, len).map(Some)
+}
+
+/// spice.proto `Copy`, the body of DRAW_COPY after its [`DrawBase`], as it
+/// is on the wire. DRAW_BLEND's `Blend` is the same struct.
+///
+/// `src_bitmap` and `mask.bitmap_offset` point at images, as offsets from
+/// the start of the message body, with 0 for null. [`DrawCopy`] resolves
+/// them; this type is for a reader that needs to see each step, as ryll's
+/// renderer does, and is read and resolved by the same code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpiceCopy {
+    pub src_bitmap: u32,
+    pub src_area: Rect,
+    /// `ropd::*` bits.
+    pub rop_descriptor: u16,
+    /// An `image_scale_mode::*` value.
+    pub scale_mode: u8,
+    pub mask: SpiceQMask,
+}
+
+impl SpiceCopy {
+    pub const SIZE: usize = 4 + Rect::SIZE + 2 + 1 + SpiceQMask::SIZE;
+
+    /// A reader over the source image's bytes, or `None` if `src_bitmap`
+    /// is null. The bytes run to the mask image, if that comes next, or to
+    /// the end of `body`.
+    ///
+    /// `body` is the whole message body and `fixed_len` the length of the
+    /// [`DrawBase`] and this struct, which is where the reader that read
+    /// them stopped.
+    ///
+    /// # Errors
+    ///
+    /// [`LinkError::PointerIntoFixedPart`] if the offset is inside the
+    /// fixed fields, and [`LinkError::BadOffset`] if it is past the end of
+    /// `body`.
+    pub fn src_bitmap_reader<'a>(
+        &self,
+        body: &'a [u8],
+        fixed_len: usize,
+    ) -> Result<Option<BoundedReader<'a>>, LinkError> {
+        pointee(body, fixed_len, self.src_bitmap, &self.pointers())
+    }
+
+    /// As [`SpiceCopy::src_bitmap_reader`], for the mask image.
+    ///
+    /// # Errors
+    ///
+    /// As [`SpiceCopy::src_bitmap_reader`].
+    pub fn mask_bitmap_reader<'a>(
+        &self,
+        body: &'a [u8],
+        fixed_len: usize,
+    ) -> Result<Option<BoundedReader<'a>>, LinkError> {
+        pointee(body, fixed_len, self.mask.bitmap_offset, &self.pointers())
+    }
+
+    fn pointers(&self) -> [u32; 2] {
+        [self.src_bitmap, self.mask.bitmap_offset]
+    }
+}
+
+impl WireType for SpiceCopy {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        Ok(SpiceCopy {
+            src_bitmap: r.read_u32()?,
+            src_area: Rect::read(r)?,
+            rop_descriptor: r.read_u16()?,
+            scale_mode: r.read_u8()?,
+            mask: SpiceQMask::read(r)?,
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.src_bitmap.to_le_bytes());
+        self.src_area.write(out);
+        out.extend_from_slice(&self.rop_descriptor.to_le_bytes());
+        out.push(self.scale_mode);
+        self.mask.write(out);
+    }
+}
+
+/// spice.proto `QMask` with its image resolved. [`SpiceQMask`] is the same
+/// struct as it is on the wire, with the image as an offset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QMask {
+    /// `mask_flags::*` bits.
+    pub flags: u8,
+    pub pos: SpicePoint,
+    pub bitmap: Option<SpiceImage>,
+}
+
+/// `SPICE_MSG_DISPLAY_DRAW_COPY`, with its images resolved. DRAW_BLEND has
+/// the same layout.
+///
+/// Offsets exist only on the wire. The reader follows them and checks
+/// that each lies after the fixed fields and within the body; the writer
+/// lays the images out after the fixed fields, source first and then the
+/// mask, as spice-server does (`dcc-send.cpp`,
+/// `red_marshall_qxl_draw_copy`), and points at them. So a value read from
+/// any accepted layout writes out in that canonical one and reads back
+/// unchanged.
+///
+/// Read it from a reader over the whole message body, since offsets are
+/// measured from the start of the reader's buffer. An image whose payload
+/// is [`ImagePayload::Other`] runs to the next image or the end of the
+/// body, so unlike most readers this one does not ignore trailing bytes
+/// after such an image: they are part of it.
+///
+/// A bitmap with a palette pointer is refused with
+/// [`LinkError::Unsupported`], because palettes are not modelled. ryll
+/// draws only 32-bit bitmaps, which have none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DrawCopy {
+    pub base: DrawBase,
+    pub src_bitmap: Option<SpiceImage>,
+    pub src_area: Rect,
+    /// `ropd::*` bits.
+    pub rop_descriptor: u16,
+    /// An `image_scale_mode::*` value.
+    pub scale_mode: u8,
+    pub mask: QMask,
+}
+
+/// Read the image at a pointee, returning it and the offset just past it.
+fn read_pointee(
+    region: Option<BoundedReader<'_>>,
+    offset: u32,
+) -> Result<Option<(SpiceImage, usize)>, LinkError> {
+    let Some(mut region) = region else {
+        return Ok(None);
+    };
+    let image = SpiceImage::read(&mut region)?;
+    if let ImagePayload::Bitmap(bitmap) = &image.payload {
+        if matches!(bitmap.header.palette, BitmapPalette::Offset(_)) {
+            return Err(LinkError::Unsupported {
+                what: "bitmap palette pointer",
+            });
+        }
+    }
+    Ok(Some((image, offset as usize + region.position())))
+}
+
+impl WireType for DrawCopy {
+    fn read(r: &mut BoundedReader<'_>) -> Result<Self, LinkError> {
+        let body = r.slice_at(0, r.position() + r.remaining())?;
+        let base = DrawBase::read(r)?;
+        let copy = SpiceCopy::read(r)?;
+        let fixed_len = r.position();
+
+        let src = read_pointee(copy.src_bitmap_reader(body, fixed_len)?, copy.src_bitmap)?;
+        let mask = read_pointee(
+            copy.mask_bitmap_reader(body, fixed_len)?,
+            copy.mask.bitmap_offset,
+        )?;
+
+        // Leave the reader after the last byte any image used.
+        let end = [&src, &mask]
+            .iter()
+            .filter_map(|image| image.as_ref().map(|(_, end)| *end))
+            .fold(fixed_len, usize::max);
+        r.read_bytes(end - fixed_len)?;
+
+        Ok(DrawCopy {
+            base,
+            src_bitmap: src.map(|(image, _)| image),
+            src_area: copy.src_area,
+            rop_descriptor: copy.rop_descriptor,
+            scale_mode: copy.scale_mode,
+            mask: QMask {
+                flags: copy.mask.flags,
+                pos: copy.mask.pos,
+                bitmap: mask.map(|(image, _)| image),
+            },
+        })
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        DrawCopyBuilder {
+            base: &self.base,
+            src_bitmap: self.src_bitmap.as_ref(),
+            src_area: self.src_area,
+            rop_descriptor: self.rop_descriptor,
+            scale_mode: self.scale_mode,
+            mask_flags: self.mask.flags,
+            mask_pos: self.mask.pos,
+            mask_bitmap: self.mask.bitmap.as_ref(),
+        }
+        .write(out);
+    }
+}
+
+/// Builds a DRAW_COPY or DRAW_BLEND body from borrowed parts, so that a
+/// sender need not copy its pixels into a [`DrawCopy`] first.
+///
+/// It lays the body out in two passes, as spice-server's marshaller does:
+/// the [`DrawBase`] and [`SpiceCopy`] with null image pointers, then the
+/// source image, then the mask image, and finally each pointer patched to
+/// its image's offset from the start of the body. [`DrawCopy::write`] is
+/// this builder, so both produce the same bytes for the same values.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawCopyBuilder<'a> {
+    base: &'a DrawBase,
+    src_bitmap: Option<&'a SpiceImage>,
+    src_area: Rect,
+    rop_descriptor: u16,
+    scale_mode: u8,
+    mask_flags: u8,
+    mask_pos: SpicePoint,
+    mask_bitmap: Option<&'a SpiceImage>,
+}
+
+impl<'a> DrawCopyBuilder<'a> {
+    /// Copy `src_area` of `src_bitmap` to `base`'s box, with `OP_PUT`,
+    /// `INTERPOLATE` scaling and no mask.
+    #[must_use]
+    pub fn new(base: &'a DrawBase, src_bitmap: &'a SpiceImage, src_area: Rect) -> Self {
+        DrawCopyBuilder {
+            base,
+            src_bitmap: Some(src_bitmap),
+            src_area,
+            rop_descriptor: ropd::OP_PUT,
+            scale_mode: image_scale_mode::INTERPOLATE,
+            mask_flags: 0,
+            mask_pos: SpicePoint::default(),
+            mask_bitmap: None,
+        }
+    }
+
+    /// Set the `ropd::*` bits.
+    #[must_use]
+    pub fn rop_descriptor(mut self, rop_descriptor: u16) -> Self {
+        self.rop_descriptor = rop_descriptor;
+        self
+    }
+
+    /// Set the `image_scale_mode::*` value.
+    #[must_use]
+    pub fn scale_mode(mut self, scale_mode: u8) -> Self {
+        self.scale_mode = scale_mode;
+        self
+    }
+
+    /// Set the mask: its `mask_flags::*` bits, position and image.
+    #[must_use]
+    pub fn mask(mut self, flags: u8, pos: SpicePoint, bitmap: Option<&'a SpiceImage>) -> Self {
+        self.mask_flags = flags;
+        self.mask_pos = pos;
+        self.mask_bitmap = bitmap;
+        self
+    }
+
+    /// Append the body to `out`. Offsets are measured from where it starts.
+    pub fn write(&self, out: &mut Vec<u8>) {
+        let start = out.len();
+        self.base.write(out);
+        let copy_at = out.len();
+        SpiceCopy {
+            src_bitmap: 0,
+            src_area: self.src_area,
+            rop_descriptor: self.rop_descriptor,
+            scale_mode: self.scale_mode,
+            mask: SpiceQMask {
+                flags: self.mask_flags,
+                pos: self.mask_pos,
+                bitmap_offset: 0,
+            },
+        }
+        .write(out);
+
+        let src_bitmap = append_pointee(out, start, self.src_bitmap);
+        let mask_bitmap = append_pointee(out, start, self.mask_bitmap);
+        patch_u32(out, copy_at, src_bitmap);
+        patch_u32(out, copy_at + SpiceCopy::SIZE - 4, mask_bitmap);
+    }
+
+    /// The body as a new buffer.
+    #[must_use]
+    pub fn build(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.write(&mut out);
+        out
+    }
+}
+
+/// Append `image`, if any, and return its offset from `start`, or 0 for
+/// none. A message body's length is a `u32` on the wire, so an offset
+/// within one fits.
+fn append_pointee(out: &mut Vec<u8>, start: usize, image: Option<&SpiceImage>) -> u32 {
+    let Some(image) = image else {
+        return 0;
+    };
+    let offset = (out.len() - start) as u32;
+    image.write(out);
+    offset
+}
+
+/// Overwrite the placeholder `u32` at `at`, which the caller wrote.
+fn patch_u32(out: &mut [u8], at: usize, value: u32) {
+    out[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 /// `SPICE_MSG_DISPLAY_SURFACE_CREATE` (server to client).
@@ -1052,6 +1635,7 @@ impl WireType for PreferredVideoCodecType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{bitmap_fmt, mask_flags};
     use crate::messages::assert_round_trip;
 
     fn le32(values: &[u32]) -> Vec<u8> {
@@ -1477,40 +2061,573 @@ mod tests {
         assert!(PreferredVideoCodecType::decode(&[2, 3]).is_err());
     }
 
-    // --- ImageDescriptor tests ---
+    // --- Image and DRAW_COPY tests ---
 
-    #[test]
-    fn test_image_descriptor_valid() {
-        let mut data = Vec::new();
-        // image_id = 0xDEADBEEFCAFEBABE (u64 LE, offset 0)
-        data.extend_from_slice(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes());
-        // image_type = 3 (u8, offset 8)
-        data.push(3u8);
-        // flags = 7 (u8, offset 9)
-        data.push(7u8);
-        // width = 1920 (u32 LE, offset 10)
-        data.extend_from_slice(&1920u32.to_le_bytes());
-        // height = 1080 (u32 LE, offset 14)
-        data.extend_from_slice(&1080u32.to_le_bytes());
+    fn descriptor(image_type: ImageType, id: u64) -> ImageDescriptor {
+        ImageDescriptor {
+            image_id: id,
+            image_type: image_type as u8,
+            flags: 0,
+            width: 2,
+            height: 2,
+        }
+    }
 
-        assert_eq!(data.len(), 18);
+    /// A top-down 32-bit 2x2 bitmap whose rows are padded to 12 bytes.
+    fn bitmap_image(id: u64) -> SpiceImage {
+        SpiceImage {
+            descriptor: descriptor(ImageType::Pixmap, id),
+            payload: ImagePayload::Bitmap(BitmapPayload {
+                header: BitmapHeader {
+                    format: bitmap_fmt::BIT32,
+                    flags: bitmap_flags::TOP_DOWN,
+                    x: 2,
+                    y: 2,
+                    stride: 12,
+                    palette: BitmapPalette::None,
+                },
+                data: (1..=24).collect(),
+            }),
+        }
+    }
 
-        let desc = ImageDescriptor::read(&data).expect("ImageDescriptor valid read failed");
-        assert_eq!(desc.image_id, 0xDEAD_BEEF_CAFE_BABE);
-        assert_eq!(desc.image_type, 3);
-        assert_eq!(desc.flags, 7);
-        assert_eq!(desc.width, 1920);
-        assert_eq!(desc.height, 1080);
+    fn jpeg_image(id: u64) -> SpiceImage {
+        SpiceImage {
+            descriptor: descriptor(ImageType::Jpeg, id),
+            payload: ImagePayload::Jpeg(BinaryData {
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            }),
+        }
+    }
+
+    fn from_cache_image(id: u64) -> SpiceImage {
+        SpiceImage {
+            descriptor: descriptor(ImageType::FromCache, id),
+            payload: ImagePayload::FromCache,
+        }
+    }
+
+    /// An LZ4 image, which this crate does not model: its bytes are kept
+    /// as they are.
+    fn other_image(id: u64) -> SpiceImage {
+        SpiceImage {
+            descriptor: descriptor(ImageType::Lz4, id),
+            payload: ImagePayload::Other(vec![1, 8, 0, 0, 0, 3, 0xAA, 0xBB, 0xCC]),
+        }
+    }
+
+    fn draw_copy(src_bitmap: Option<SpiceImage>, mask_bitmap: Option<SpiceImage>) -> DrawCopy {
+        DrawCopy {
+            base: DrawBase {
+                surface_id: 0,
+                bbox: rect(10, 20, 12, 22),
+                clip: Clip::rects(vec![rect(10, 20, 11, 22)]),
+            },
+            src_bitmap,
+            src_area: rect(0, 0, 2, 2),
+            rop_descriptor: ropd::OP_PUT,
+            scale_mode: image_scale_mode::NEAREST,
+            mask: QMask {
+                flags: mask_flags::INVERS,
+                pos: SpicePoint { x: -1, y: 1 },
+                bitmap: mask_bitmap,
+            },
+        }
     }
 
     #[test]
-    fn test_image_descriptor_too_short() {
-        let data = vec![0u8; 17]; // one byte short of the 18-byte minimum
-        let result = ImageDescriptor::read(&data);
-        assert!(
-            result.is_err(),
-            "Expected error for too-short ImageDescriptor input"
+    fn image_descriptor_round_trips_and_decodes_spice_proto_layout() {
+        assert_round_trip(&ImageDescriptor {
+            image_id: u64::MAX,
+            image_type: 200,
+            flags: 0xFF,
+            width: 1,
+            height: u32::MAX,
+        });
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xDEAD_BEEF_CAFE_BABEu64.to_le_bytes()); // id
+        data.push(3); // type
+        data.push(7); // flags
+        data.extend_from_slice(&le32(&[1920, 1080])); // width, height
+        assert_eq!(data.len(), ImageDescriptor::SIZE);
+        assert_eq!(
+            ImageDescriptor::decode(&data).unwrap(),
+            ImageDescriptor {
+                image_id: 0xDEAD_BEEF_CAFE_BABE,
+                image_type: 3,
+                flags: 7,
+                width: 1920,
+                height: 1080,
+            }
         );
+        assert!(ImageDescriptor::decode(&data[..17]).is_err());
+    }
+
+    fn bitmap_header(flags: u8, palette: BitmapPalette) -> BitmapHeader {
+        BitmapHeader {
+            format: bitmap_fmt::BIT8,
+            flags,
+            x: 3,
+            y: 2,
+            stride: 4,
+            palette,
+        }
+    }
+
+    #[test]
+    fn bitmap_header_round_trips_each_palette() {
+        assert_round_trip(&bitmap_header(bitmap_flags::TOP_DOWN, BitmapPalette::None));
+        assert_round_trip(&bitmap_header(0, BitmapPalette::Offset(99)));
+        assert_round_trip(&bitmap_header(
+            bitmap_flags::PAL_FROM_CACHE,
+            BitmapPalette::FromCache(u64::MAX),
+        ));
+        assert_round_trip(&BitmapHeader {
+            format: 200,
+            flags: !bitmap_flags::PAL_FROM_CACHE,
+            x: u32::MAX,
+            y: u32::MAX,
+            stride: u32::MAX,
+            palette: BitmapPalette::None,
+        });
+    }
+
+    #[test]
+    fn bitmap_header_decodes_spice_proto_layout() {
+        // format, flags, x, y, stride, then a u32 palette pointer.
+        let mut data = vec![bitmap_fmt::BIT32, bitmap_flags::TOP_DOWN];
+        data.extend_from_slice(&le32(&[3, 2, 12, 0]));
+        assert_eq!(data.len(), BitmapHeader::SIZE);
+        let header = BitmapHeader::decode(&data).unwrap();
+        assert_eq!(
+            header,
+            BitmapHeader {
+                format: bitmap_fmt::BIT32,
+                flags: bitmap_flags::TOP_DOWN,
+                x: 3,
+                y: 2,
+                stride: 12,
+                palette: BitmapPalette::None,
+            }
+        );
+        assert_eq!(header.data_len(), Some(24));
+        assert!(BitmapHeader::decode(&data[..17]).is_err());
+
+        data[14..18].copy_from_slice(&40u32.to_le_bytes());
+        assert_eq!(
+            BitmapHeader::decode(&data).unwrap().palette,
+            BitmapPalette::Offset(40)
+        );
+
+        // PAL_FROM_CACHE makes the palette field a u64 cache id, so the
+        // header is 22 bytes.
+        let mut cached = vec![bitmap_fmt::BIT8, bitmap_flags::PAL_FROM_CACHE];
+        cached.extend_from_slice(&le32(&[3, 2, 4]));
+        cached.extend_from_slice(&0x0102_0304_0506_0708u64.to_le_bytes());
+        let mut r = BoundedReader::new(&cached);
+        assert_eq!(
+            BitmapHeader::read(&mut r).unwrap().palette,
+            BitmapPalette::FromCache(0x0102_0304_0506_0708)
+        );
+        assert_eq!(r.position(), 22);
+        assert!(BitmapHeader::decode(&cached[..21]).is_err());
+    }
+
+    #[test]
+    fn bitmap_payload_round_trips_and_reads_stride_times_rows() {
+        let ImagePayload::Bitmap(bitmap) = bitmap_image(1).payload else {
+            unreachable!()
+        };
+        assert_round_trip(&bitmap);
+        assert_round_trip(&BitmapPayload {
+            header: bitmap_header(0, BitmapPalette::None),
+            data: vec![7; 8],
+        });
+
+        // The data is stride * y bytes; anything after it is not the
+        // bitmap's.
+        let mut data = Vec::new();
+        bitmap_header(0, BitmapPalette::None).write(&mut data);
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut r = BoundedReader::new(&data);
+        let bitmap = BitmapPayload::read(&mut r).unwrap();
+        assert_eq!(bitmap.data, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(r.remaining(), 1);
+        assert_eq!(
+            BitmapPayload::decode(&data[..BitmapHeader::SIZE + 7]),
+            Err(LinkError::Truncated {
+                needed: 8,
+                available: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn binary_data_round_trips_and_decodes_spice_proto_layout() {
+        assert_round_trip(&BinaryData::default());
+        assert_round_trip(&BinaryData {
+            data: vec![1, 2, 3],
+        });
+
+        let data = [2, 0, 0, 0, 0xAB, 0xCD, 0xEF];
+        let mut r = BoundedReader::new(&data);
+        assert_eq!(BinaryData::read_data(&mut r).unwrap(), &[0xAB, 0xCD]);
+        assert_eq!(r.remaining(), 1);
+        assert_eq!(
+            BinaryData::decode(&data[..5]),
+            Err(LinkError::Truncated {
+                needed: 2,
+                available: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn spice_image_round_trips_each_payload() {
+        assert_round_trip(&bitmap_image(1));
+        assert_round_trip(&jpeg_image(2));
+        assert_round_trip(&from_cache_image(3));
+        assert_round_trip(&SpiceImage {
+            descriptor: descriptor(ImageType::FromCacheLossless, 4),
+            payload: ImagePayload::FromCache,
+        });
+        assert_round_trip(&other_image(5));
+        assert_round_trip(&SpiceImage {
+            descriptor: ImageDescriptor {
+                image_type: 250,
+                ..descriptor(ImageType::Pixmap, 6)
+            },
+            payload: ImagePayload::Other(Vec::new()),
+        });
+    }
+
+    #[test]
+    fn spice_image_decodes_spice_proto_layout() {
+        // A JPEG: descriptor, then BinaryData.
+        let mut data = Vec::new();
+        data.extend_from_slice(&9u64.to_le_bytes());
+        data.extend_from_slice(&[ImageType::Jpeg as u8, 0]);
+        data.extend_from_slice(&le32(&[2, 2, 4]));
+        data.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xD9]);
+        assert_eq!(SpiceImage::decode(&data).unwrap(), jpeg_image(9));
+
+        // A cache hit is only its descriptor; the bytes after it are not
+        // the image's.
+        let mut data = Vec::new();
+        descriptor(ImageType::FromCache, 3).write(&mut data);
+        data.push(0xEE);
+        let mut r = BoundedReader::new(&data);
+        assert_eq!(SpiceImage::read(&mut r).unwrap(), from_cache_image(3));
+        assert_eq!(r.remaining(), 1);
+
+        // A type this crate does not model keeps every remaining byte.
+        let mut data = Vec::new();
+        descriptor(ImageType::GlzRgb, 4).write(&mut data);
+        data.extend_from_slice(&[1, 2, 3]);
+        assert_eq!(
+            SpiceImage::decode(&data).unwrap().payload,
+            ImagePayload::Other(vec![1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn spice_copy_round_trips_and_decodes_spice_proto_layout() {
+        assert_round_trip(&SpiceCopy::default());
+        let copy = SpiceCopy {
+            src_bitmap: 57,
+            src_area: rect(1, 2, 3, 4),
+            rop_descriptor: ropd::OP_PUT,
+            scale_mode: image_scale_mode::NEAREST,
+            mask: SpiceQMask {
+                flags: mask_flags::INVERS,
+                pos: SpicePoint { x: -5, y: 6 },
+                bitmap_offset: 93,
+            },
+        };
+        assert_round_trip(&copy);
+
+        // src_bitmap, src_area, rop_descriptor, scale_mode, then the QMask.
+        let mut data = le32(&[57, 1, 2, 3, 4]);
+        data.extend_from_slice(&ropd::OP_PUT.to_le_bytes());
+        data.extend_from_slice(&[image_scale_mode::NEAREST, mask_flags::INVERS]);
+        data.extend_from_slice(&(-5i32).to_le_bytes());
+        data.extend_from_slice(&le32(&[6, 93]));
+        assert_eq!(data.len(), SpiceCopy::SIZE);
+        assert_eq!(SpiceCopy::decode(&data).unwrap(), copy);
+        assert!(SpiceCopy::decode(&data[..SpiceCopy::SIZE - 1]).is_err());
+    }
+
+    #[test]
+    fn draw_copy_round_trips_each_payload_and_a_mask() {
+        for image in [
+            bitmap_image(1),
+            jpeg_image(2),
+            from_cache_image(3),
+            other_image(4),
+        ] {
+            assert_round_trip(&draw_copy(Some(image.clone()), None));
+            // A mask image follows the source, which ends where it starts.
+            assert_round_trip(&draw_copy(Some(image.clone()), Some(other_image(5))));
+            assert_round_trip(&draw_copy(Some(other_image(6)), Some(image)));
+        }
+        assert_round_trip(&draw_copy(None, None));
+        assert_round_trip(&draw_copy(None, Some(bitmap_image(7))));
+        assert_round_trip(&DrawCopy {
+            base: DrawBase {
+                surface_id: 3,
+                bbox: rect(0, 0, 0, 0),
+                clip: Clip::none(),
+            },
+            ..draw_copy(Some(from_cache_image(8)), Some(from_cache_image(9)))
+        });
+    }
+
+    /// The bytes ryll's renderer tests built by hand for DRAW_COPY before
+    /// the builder existed: the base, the 36-byte Copy with `src_bitmap`
+    /// pointing just past it and no mask, then the image.
+    fn hand_laid_draw_copy(clip_rects: &[(u32, u32, u32, u32)], image: &[u8]) -> Vec<u8> {
+        let mut v = le32(&[0, 0, 0, 1, 1]); // surface_id, box: top, left, bottom, right
+        if clip_rects.is_empty() {
+            v.push(clip_type::NONE);
+        } else {
+            v.push(clip_type::RECTS);
+            v.extend_from_slice(&(clip_rects.len() as u32).to_le_bytes());
+            for (top, left, bottom, right) in clip_rects {
+                v.extend_from_slice(&le32(&[*top, *left, *bottom, *right]));
+            }
+        }
+        let src_bitmap = (v.len() + 36) as u32;
+        v.extend_from_slice(&le32(&[src_bitmap, 0, 0, 2, 2])); // src_bitmap, src_area
+        v.extend_from_slice(&[0u8; 16]); // rop, scale_mode, mask
+        v.extend_from_slice(image);
+        v
+    }
+
+    #[test]
+    fn draw_copy_builder_matches_hand_laid_bytes() {
+        for clip_rects in [&[][..], &[(0, 0, 1, 1), (5, 6, 7, 8)][..]] {
+            let base = DrawBase {
+                surface_id: 0,
+                bbox: rect(0, 0, 1, 1),
+                clip: if clip_rects.is_empty() {
+                    Clip::none()
+                } else {
+                    Clip::rects(
+                        clip_rects
+                            .iter()
+                            .map(|&(t, l, b, r)| rect(t as i32, l as i32, b as i32, r as i32))
+                            .collect(),
+                    )
+                },
+            };
+            for image in [bitmap_image(1), from_cache_image(2)] {
+                let mut image_bytes = Vec::new();
+                image.write(&mut image_bytes);
+                let expected = hand_laid_draw_copy(clip_rects, &image_bytes);
+
+                let built = DrawCopyBuilder::new(&base, &image, rect(0, 0, 2, 2))
+                    .rop_descriptor(0)
+                    .build();
+                assert_eq!(built, expected);
+
+                // DrawCopy::write is the builder, and the bytes read back.
+                let value = DrawCopy::decode(&expected).unwrap();
+                assert_eq!(value.src_bitmap.as_ref(), Some(&image));
+                assert_eq!(value.mask, QMask::default());
+                let mut written = Vec::new();
+                value.write(&mut written);
+                assert_eq!(written, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn draw_copy_builder_offsets_are_from_the_body_start() {
+        let value = draw_copy(Some(jpeg_image(1)), Some(from_cache_image(2)));
+        let mut body = Vec::new();
+        value.write(&mut body);
+
+        // A body appended after other bytes carries the same offsets.
+        let mut out = vec![0xAA; 6];
+        DrawCopyBuilder::new(&value.base, &jpeg_image(1), value.src_area)
+            .scale_mode(image_scale_mode::NEAREST)
+            .mask(
+                mask_flags::INVERS,
+                SpicePoint { x: -1, y: 1 },
+                Some(&from_cache_image(2)),
+            )
+            .write(&mut out);
+        assert_eq!(&out[6..], &body[..]);
+
+        // The pointers lead to the source, then the mask straight after it.
+        let mut r = BoundedReader::new(&body);
+        DrawBase::read(&mut r).unwrap();
+        let copy = SpiceCopy::read(&mut r).unwrap();
+        let fixed_len = r.position();
+        assert_eq!(copy.src_bitmap as usize, fixed_len);
+        assert_eq!(
+            copy.mask.bitmap_offset as usize,
+            fixed_len + ImageDescriptor::SIZE + 4 + 4
+        );
+        assert_eq!(body.len(), copy.mask.bitmap_offset as usize + 18);
+    }
+
+    #[test]
+    fn draw_copy_bounds_an_unmodelled_image_at_the_mask() {
+        // Hand-lay a source of an unmodelled type and a mask after it: the
+        // source's bytes stop where the mask starts.
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect(0, 0, 1, 1),
+            clip: Clip::none(),
+        };
+        let mut body = Vec::new();
+        base.write(&mut body);
+        let fixed_len = body.len() + SpiceCopy::SIZE;
+        let mut src = Vec::new();
+        descriptor(ImageType::Quic, 1).write(&mut src);
+        src.extend_from_slice(&[1, 2, 3]);
+        SpiceCopy {
+            src_bitmap: fixed_len as u32,
+            mask: SpiceQMask {
+                bitmap_offset: (fixed_len + src.len()) as u32,
+                ..SpiceQMask::default()
+            },
+            ..SpiceCopy::default()
+        }
+        .write(&mut body);
+        body.extend_from_slice(&src);
+        from_cache_image(2).write(&mut body);
+
+        let value = DrawCopy::decode(&body).unwrap();
+        assert_eq!(
+            value.src_bitmap.unwrap().payload,
+            ImagePayload::Other(vec![1, 2, 3])
+        );
+        assert_eq!(value.mask.bitmap, Some(from_cache_image(2)));
+    }
+
+    #[test]
+    fn draw_copy_rewrites_another_layout_in_spice_server_order() {
+        // The mask before the source, with a gap between the fixed fields
+        // and the first image: accepted, and written back in canonical
+        // order, which then reads back unchanged.
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect(0, 0, 1, 1),
+            clip: Clip::none(),
+        };
+        let mut body = Vec::new();
+        base.write(&mut body);
+        let fixed_len = body.len() + SpiceCopy::SIZE;
+        let mask_at = fixed_len + 3;
+        let src_at = mask_at + ImageDescriptor::SIZE;
+        SpiceCopy {
+            src_bitmap: src_at as u32,
+            mask: SpiceQMask {
+                bitmap_offset: mask_at as u32,
+                ..SpiceQMask::default()
+            },
+            ..SpiceCopy::default()
+        }
+        .write(&mut body);
+        body.extend_from_slice(&[0xEE; 3]);
+        from_cache_image(2).write(&mut body);
+        other_image(1).write(&mut body);
+
+        let mut r = BoundedReader::new(&body);
+        let value = DrawCopy::read(&mut r).unwrap();
+        assert_eq!(r.position(), body.len());
+        assert_eq!(value.src_bitmap, Some(other_image(1)));
+        assert_eq!(value.mask.bitmap, Some(from_cache_image(2)));
+        assert_round_trip(&value);
+    }
+
+    #[test]
+    fn draw_copy_refuses_bad_pointers() {
+        let base = DrawBase {
+            surface_id: 0,
+            bbox: rect(0, 0, 1, 1),
+            clip: Clip::rects(vec![rect(0, 0, 1, 1)]),
+        };
+        let fixed_len = 4 + Rect::SIZE + 1 + 4 + Rect::SIZE + SpiceCopy::SIZE;
+        let body = |src_bitmap: u32, mask_bitmap: u32| {
+            let mut body = Vec::new();
+            base.write(&mut body);
+            SpiceCopy {
+                src_bitmap,
+                mask: SpiceQMask {
+                    bitmap_offset: mask_bitmap,
+                    ..SpiceQMask::default()
+                },
+                ..SpiceCopy::default()
+            }
+            .write(&mut body);
+            assert_eq!(body.len(), fixed_len);
+            from_cache_image(1).write(&mut body);
+            body
+        };
+
+        let good = fixed_len as u32;
+        assert!(DrawCopy::decode(&body(good, 0)).is_ok());
+        // Into the clip rectangles, and into the Copy itself.
+        for into_fixed in [30, fixed_len as u32 - 1] {
+            assert_eq!(
+                DrawCopy::decode(&body(into_fixed, 0)),
+                Err(LinkError::PointerIntoFixedPart {
+                    offset: into_fixed as usize,
+                    fixed_len,
+                })
+            );
+            assert_eq!(
+                DrawCopy::decode(&body(good, into_fixed)),
+                Err(LinkError::PointerIntoFixedPart {
+                    offset: into_fixed as usize,
+                    fixed_len,
+                })
+            );
+        }
+        // Past the end, and too close to it for a descriptor.
+        let len = fixed_len + ImageDescriptor::SIZE;
+        assert_eq!(
+            DrawCopy::decode(&body(len as u32 + 1, 0)),
+            Err(LinkError::BadOffset {
+                offset: len + 1,
+                len: 0,
+                buffer_len: len,
+            })
+        );
+        assert!(matches!(
+            DrawCopy::decode(&body(good + 1, 0)),
+            Err(LinkError::Truncated { .. })
+        ));
+        // A truncated fixed part.
+        assert!(DrawCopy::decode(&body(good, 0)[..fixed_len - 1]).is_err());
+    }
+
+    #[test]
+    fn draw_copy_refuses_a_palette_pointer() {
+        let mut image = bitmap_image(1);
+        if let ImagePayload::Bitmap(bitmap) = &mut image.payload {
+            bitmap.header.palette = BitmapPalette::Offset(4);
+        }
+        let mut body = Vec::new();
+        draw_copy(Some(image), None).write(&mut body);
+        assert_eq!(
+            DrawCopy::decode(&body),
+            Err(LinkError::Unsupported {
+                what: "bitmap palette pointer",
+            })
+        );
+
+        // A palette from the cache is a value, not a pointer.
+        let mut image = bitmap_image(1);
+        if let ImagePayload::Bitmap(bitmap) = &mut image.payload {
+            bitmap.header.flags |= bitmap_flags::PAL_FROM_CACHE;
+            bitmap.header.palette = BitmapPalette::FromCache(77);
+        }
+        assert_round_trip(&draw_copy(Some(image), None));
     }
 
     // --- SpiceBrush tests ---
