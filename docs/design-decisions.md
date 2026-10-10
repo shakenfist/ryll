@@ -33,19 +33,24 @@ produced.
    headless tokio select loop both poll this flag and shut down cleanly,
    ensuring capture sessions are finalized.
 
-6. **Unbuffered capture I/O on dedicated tasks** - Pcap and MP4 writers in
+6. **Unbuffered capture I/O on dedicated threads** - Pcap and MP4 writers in
    `capture.rs` write directly to `File` (no `BufWriter`), so written bytes are
    always on disk and survive SIGINT without explicit flush. Both writers run
-   on **dedicated tokio tasks** (`pcap_writer_task`, `video_writer_task`); the
-   channel handlers and the egui frame loop enqueue via non-blocking `try_send`
-   so slow disk cannot back-pressure the SPICE socket or stall the GUI. Queue
-   caps `PCAP_QUEUE_CAPACITY = 1024` and `VIDEO_QUEUE_CAPACITY = 8`; drops are
-   counted in per-channel `writer_dropped_count` (channels) and
-   `AppSnapshot::video_drop_count` (video). MP4 finalisation runs on the
-   encoder task after the sender drops, so a bug report assembled within
-   milliseconds of `CaptureSession::close()` may see an unfinalised MP4. That
-   was accepted deliberately: finalising synchronously would have blocked the
-   caller on the encoder draining. See
+   on **dedicated OS threads** owned by `CaptureSession` (`pcap_writer_loop`,
+   `video_writer_loop`); the channel handlers and the egui frame loop enqueue
+   via non-blocking `try_send` so slow disk cannot back-pressure the SPICE
+   socket or stall the GUI. They are threads, not tokio tasks, because the
+   session is created before any runtime exists and, in GUI mode, outlives
+   each per-connection runtime; running them as tasks made `--capture` panic
+   at startup (shakenfist/ryll#399). Queue caps `PCAP_QUEUE_CAPACITY = 1024`
+   and `VIDEO_QUEUE_CAPACITY = 8`; drops are counted in per-channel
+   `writer_dropped_count` (channels) and `AppSnapshot::video_drop_count`
+   (video). MP4 finalisation runs on the encoder thread after the sender
+   drops, so a bug report assembled within milliseconds of
+   `CaptureSession::close()` may see an unfinalised MP4. That was accepted
+   deliberately: finalising synchronously would have blocked the caller (the
+   egui update loop among them) on the encoder draining. `Drop` joins both
+   threads, so the MP4 is complete once the session itself is gone. See
    [`PLAN-video-keeping-up.md`](plans/PLAN-video-keeping-up.md) for the
    trade-off.
 
