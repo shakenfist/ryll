@@ -133,6 +133,10 @@
       "sha": "c952afb188490748898188583f4e7413fa43077a",
       "date": "2026-09-23"
     },
+    "docs/channel-diagnostics-audit.md": {
+      "sha": "dbe88d83ec95189be8d39784502e4e87916296fc",
+      "date": "2026-10-10"
+    },
     "docs/ci.md": {
       "sha": "e1a7dccf113a2701078451d632e684784c5efc5c",
       "date": "2026-10-05"
@@ -161,6 +165,10 @@
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
       "date": "2026-08-17"
     },
+    "docs/diagnostics.md": {
+      "sha": "6ca1bd2c94b5beee5d0f8ce54e9fc17b1894775d",
+      "date": "2026-10-10"
+    },
     "docs/features.md": {
       "sha": "0702cc7a9350c4818534d5f50e1b2aa71fd15e38",
       "date": "2026-10-05"
@@ -181,6 +189,10 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
+    "docs/multi-mode-parity.md": {
+      "sha": "81edb01125016cce7fda7b6edd14dc498a38836c",
+      "date": "2026-10-10"
+    },
     "docs/portability.md": {
       "sha": "90130e736cb79aee967252b5155d489ee3d96317",
       "date": "2026-07-31"
@@ -189,6 +201,10 @@
       "sha": "eade1c912a8b368fdc0b5a3139d69b5edd31fbe7",
       "date": "2026-10-05"
     },
+    "docs/rendering-pipeline.md": {
+      "sha": "b085b46e91088dd4f3b9af600571d6b34597196f",
+      "date": "2026-10-10"
+    },
     "docs/session-lifecycle.md": {
       "sha": "0ef7cd691c1a103460a8df67847c6af16b532aee",
       "date": "2026-10-05"
@@ -196,6 +212,10 @@
     "docs/spice-protocol.md": {
       "sha": "3923badae6aa32499e491f39909e58372a7b73ad",
       "date": "2026-10-06"
+    },
+    "docs/troubleshooting.md": {
+      "sha": "c054d5631ed9402064acf28d58fc1dea45026650",
+      "date": "2026-10-10"
     },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
@@ -229,9 +249,17 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
+    "ryll/src/app.rs": {
+      "sha": "208b8cd3edd7990256123ba9e09b31e9bec31d6f",
+      "date": "2026-10-10"
+    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
       "date": "2026-09-27"
+    },
+    "ryll/src/bugreport.rs": {
+      "sha": "f0101c2da5762447179089ac9cacc0187b1443ce",
+      "date": "2026-10-10"
     },
     "ryll/src/capture.rs": {
       "sha": "768a13052f69062a164e084896d7002944365f5c",
@@ -493,6 +521,10 @@
       "sha": "23e8bfd7b50109b0245b3400b18ce0d907300782",
       "date": "2026-10-05"
     },
+    "shakenfist-spice-renderer/src/channels/playback.rs": {
+      "sha": "a9e8d5e30f665ed8f940ed262e95e6fb8e2dfee1",
+      "date": "2026-10-10"
+    },
     "shakenfist-spice-renderer/src/channels/usbredir.rs": {
       "sha": "74c9c8728034661894d0d9dab1590cf9f28c9904",
       "date": "2026-10-05"
@@ -596,6 +628,10 @@
     "shakenfist-spice-renderer/src/session_state.rs": {
       "sha": "7a3e2ae84a36cc7d91ac742b22e9f4c64c7274a1",
       "date": "2026-10-05"
+    },
+    "shakenfist-spice-renderer/src/snapshots.rs": {
+      "sha": "235fd6c99a26ef72b01513eaecbba00b67c5f649",
+      "date": "2026-10-10"
     },
     "shakenfist-spice-renderer/src/surface_mirror.rs": {
       "sha": "896a0b88832e80822e5477814e25ec44eb48edb6",
