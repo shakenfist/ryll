@@ -141,8 +141,8 @@ ryll/src/
 │                        #   implements CaptureSink)
 ├── clipboard_arboard.rs # Host clipboard (implements ClipboardBackend)
 ├── config.rs            # CLI args, .vv parsing
-├── display_gui.rs       # GuiSurface: egui TextureHandle wrapper
-│                        #   around DisplaySurface
+├── display_gui.rs       # TextureCache: egui TextureHandles
+│                        #   keyed by surface
 ├── input_egui.rs        # egui::Key → LogicalKey adapter
 ├── notifications.rs     # NotificationStore + NotificationStoreSink
 ├── settings.rs          # is_verbose() gate

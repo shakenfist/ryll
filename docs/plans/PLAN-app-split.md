@@ -793,6 +793,10 @@ Plan-specific close-out notes:
   path sized the surface with an unchecked `left + width`, which
   panics a debug build on overflow; the shared mirror uses
   `saturating_add`.
+* **Issues filed.** Phase 1 filed
+  [#479](https://github.com/shakenfist/ryll/issues/479):
+  `frames_received` counts different events in GUI and headless
+  mode.
 * **Related issues.** #468 (documentation names code by symbol,
   not line number): `docs/multi-mode-parity.md` cites
   `ryll/src/app.rs:NNNN` line numbers that are already stale and
