@@ -613,4 +613,27 @@ mod tests {
             assert!(decompress_spice_lz4(&body, width, height).is_none());
         }
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // The body, width and height are all attacker-controlled. Any
+        // input must return without panicking, and a success must hold
+        // exactly the RGBA bytes its dimensions call for.
+        #[test]
+        fn decompress_spice_lz4_never_panics_on_arbitrary_bytes(
+            header in prop::option::of((0u8..=1, 6u8..=9)),
+            body in prop::collection::vec(any::<u8>(), 0..4096),
+            width in 0usize..=64,
+            height in 0usize..=64,
+        ) {
+            // Random bytes almost never get past the header, so some
+            // cases are given a valid one to reach the block loop.
+            let mut data = header.map(|(t, f)| vec![t, f]).unwrap_or_default();
+            data.extend_from_slice(&body);
+            if let Some(img) = decompress_spice_lz4(&data, width, height) {
+                prop_assert_eq!(img.pixels.len(), width * height * 4);
+            }
+        }
+    }
 }

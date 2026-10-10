@@ -12,12 +12,12 @@ decompression algorithms:
 - **LZ4** — SPICE's LZ4 image format (a format byte, then dependent
   raw LZ4 blocks with big-endian lengths, decoded with `lz4_flex`).
   Feature `lz4` (default), pulls in `lz4_flex`.
+- **Encoders** — feature `encode` (off by default, independent of
+  the decoder features), for SPICE servers. The encoders are new and
+  LZ4 (`encode_spice_lz4`, from a borrowed `Bgrx` image) is the first.
 
-The crate name covers both directions. The current release
-provides decompression only, matching what the ryll client
-needs today. Compression may be added in future minor releases
-(SPICE proxies and server-side tooling are likely consumers)
-without a crate rename.
+The crate name covers both directions. Decompression is the
+default; compression is opt-in through `encode`.
 
 ## Return types
 

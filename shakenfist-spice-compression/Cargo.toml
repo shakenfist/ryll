@@ -18,6 +18,10 @@ quic = []
 glz = ["dep:tokio"]
 lz = []
 lz4 = ["dep:lz4_flex"]
+# Image encoders, for SPICE servers. Independent of the decoder
+# features above, so `default-features = false, features = ["encode"]`
+# builds. LZ4 is the first encoder.
+encode = ["dep:lz4_flex"]
 jpeg = ["dep:jpeg-decoder"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
@@ -114,3 +118,8 @@ windows = { version = "0.62", features = [
 # mozjpeg / pure-Rust chain.
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.9"
+
+[dev-dependencies]
+# Property tests. Only `std` is needed: the default features add
+# process forking and timeouts we do not use, and their dependencies.
+proptest = { version = "1", default-features = false, features = ["std"] }
