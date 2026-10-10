@@ -161,7 +161,9 @@ with web mode).
 
 ## Open questions
 
-1. **Does the shared draw-op dispatch move `GuiSurface` onto
+1. **Answered in phase 1 (decision 1): the GUI holds a
+   `SurfaceMirror` and a separate texture cache.** Original question:
+   does the shared draw-op dispatch move `GuiSurface` onto
    `SurfaceMirror`, or extract a common function both call?**
    The GUI needs a texture invalidation per touched surface;
    the mirror does not. A `SurfaceMirror<S: SurfaceLike>` or a
@@ -169,8 +171,9 @@ with web mode).
    returning which surface it touched are both plausible. Phase 1
    decides, with the renderer crate's egui-free rule (AGENTS.md)
    as a hard constraint: the shared code must not see a texture.
-2. **Does the reconnect state machine belong in the renderer
-   crate?** Today only the GUI auto-reconnects. If headless or web
+2. **Answered in phase 1 (finding 6): no, it stays in ryll.**
+   Original question: does the reconnect state machine belong in
+   the renderer crate? Today only the GUI auto-reconnects. If headless or web
    mode should (check `docs/multi-mode-parity.md` and
    `docs/session-lifecycle.md`), the pure `ReconnectState` belongs
    in `shakenfist-spice-renderer`. Phase 1 answers this; if the
@@ -199,7 +202,7 @@ with web mode).
 
 | Phase | Plan | Status | Merged |
 |-------|------|--------|--------|
-| 1. Reuse survey and shared draw dispatch | PLAN-app-split-phase-01-reuse.md | Not started | |
+| 1. Reuse survey and shared draw dispatch | [PLAN-app-split-phase-01-reuse.md](PLAN-app-split-phase-01-reuse.md) | In progress | |
 | 2. Module directory and pure state | PLAN-app-split-phase-02-pure-state.md | Not started | |
 | 3. Events and bug-report flow | PLAN-app-split-phase-03-events.md | Not started | |
 | 4. Split `ui` into per-panel files | PLAN-app-split-phase-04-panels.md | Not started | |
@@ -786,6 +789,10 @@ Plan-specific close-out notes:
   `shakenfist-spice-webrtc/src/bridge.rs` (3,089) after them. The
   fleet-wide file-size ratchet (open question 3) belongs in
   shakenfist/development.
+* **Bugs fixed.** Phase 1: the GUI's `ImageReady` auto-create
+  path sized the surface with an unchecked `left + width`, which
+  panics a debug build on overflow; the shared mirror uses
+  `saturating_add`.
 * **Related issues.** #468 (documentation names code by symbol,
   not line number): `docs/multi-mode-parity.md` cites
   `ryll/src/app.rs:NNNN` line numbers that are already stale and
