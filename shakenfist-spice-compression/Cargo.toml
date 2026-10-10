@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), extracted from the ryll SPICE client."
+description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), and LZ4 and JPEG encoders for servers, from the ryll SPICE client."
 readme = "README.md"
 
 [lints]

@@ -1,7 +1,8 @@
 # shakenfist-spice-compression
 
 Pure-Rust implementations of the SPICE image-stream
-decompression algorithms:
+decompression algorithms, with optional LZ4 and JPEG encoders for
+servers (see Encoders below):
 
 - **QUIC** — the SPICE wavelet/arithmetic codec (not the QUIC
   transport protocol). Feature `quic` (default).

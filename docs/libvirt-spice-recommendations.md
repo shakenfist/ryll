@@ -198,9 +198,12 @@ Silicon).
 
 `auto_lz` switches the server's default to plain LZ, which is much
 faster to decode (~10–20 ms for the same payload) at the cost of a
-slightly worse compression ratio. Combined with ryll's advertised
-`LZ4_COMPRESSION` capability, the server will pick LZ4 — even faster — for any frames that benefit
-from it.
+slightly worse compression ratio. This does not make the server use
+LZ4: spice-server's `auto_glz` and `auto_lz` modes never choose it.
+It sends LZ4 images only to a client whose preferred compression is
+exactly LZ4 (ryll: `--preferred-compression lz4`) and which advertises
+the LZ4 display capability, and never to a client on a Unix socket,
+which gets no image compression at all.
 
 If you actually need glz (e.g. you are bandwidth-constrained over a
 WAN link), keep `auto_glz` but at least drop the

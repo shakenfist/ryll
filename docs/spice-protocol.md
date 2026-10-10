@@ -215,6 +215,25 @@ layout writes out in the canonical one and reads back unchanged. Image
 types the crate does not model are carried as an opaque payload bounded by
 the next pointee.
 
+### Encoding images (server role)
+
+A server that sends image data can build the `BinaryData` bodies with the
+compression crate's `encode` feature, which is not on by default. It has
+two encoders, `encode_spice_lz4` and `encode_spice_jpeg`, and both take a
+`Bgrx`: a borrowed 32-bit B,G,R,X image with a row stride, such as an X11
+ZPixmap at depth 24. Each returns the body of a `BinaryData` (the bytes
+after `data_size`), to be wrapped as `ImagePayload::Lz4` or
+`ImagePayload::Jpeg`. The LZ4 body follows the framing described under
+[Wire format differences](#wire-format-differences).
+
+- The encoded result can be larger than the raw pixels. As spice-server
+  does, send an uncompressed BITMAP instead when it is.
+- Send LZ4 only to a client that advertises the LZ4 display capability
+  (cap 5).
+- A JPEG's dimensions must equal the image descriptor's; spice-common
+  asserts it. `encode_spice_jpeg` encodes exactly the `Bgrx` dimensions,
+  so describe the image with the same width and height.
+
 ## Image Types and Compression
 
 SPICE uses several image types for display updates. The type is
