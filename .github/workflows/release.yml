@@ -22,7 +22,7 @@ jobs:
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
           EXPECTED="${TAG_NAME#v}"
-          # All four crates inherit from [workspace.package].version,
+          # All six crates inherit from [workspace.package].version,
           # so a single check on the root Cargo.toml is authoritative.
           ACTUAL=$(awk '
             /^\[workspace\.package\]/ { in_wp=1; next }
@@ -61,7 +61,7 @@ jobs:
           - **Tag expects:** ${{ steps.check.outputs.expected }}
           - **[workspace.package].version has:** ${{ steps.check.outputs.actual }}
 
-          To fix: update \`version\` in \`[workspace.package]\` in the root \`Cargo.toml\`, commit, and re-tag. Normally this is done via \`make publish X.Y.Z\`.
+          To fix: update \`version\` in \`[workspace.package]\` in the root \`Cargo.toml\`, commit, and re-tag. Normally this is done via \`make propose-release X.Y.Z\` then \`make tag-release X.Y.Z\`.
 
           See the [failed workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
 
@@ -133,12 +133,15 @@ jobs:
             # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            features: "--no-default-features"
+            # Windows drops only `capture` (pcap-file / etherparse /
+            # mp4 do not build here). --no-default-features also
+            # turns off gui and audio, so add those back explicitly.
+            features: "--no-default-features --features ryll/gui,ryll/audio"
           - name: Windows (aarch64)
             # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            features: "--no-default-features"
+            features: "--no-default-features --features ryll/gui,ryll/audio"
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"

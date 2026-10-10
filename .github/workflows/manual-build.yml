@@ -65,17 +65,19 @@ jobs:
                   'target': 'x86_64-pc-windows-msvc',
                   # Matches release.yml: ryll's `capture` feature
                   # (pcap-file / etherparse / mp4) is Linux/macOS
-                  # only; building it on Windows fails. The
-                  # per-platform JPEG decoder (WIC) is target-gated
-                  # not feature-gated, so this does not affect 3H.
-                  'features': '--no-default-features',
+                  # only; building it on Windows fails, so default
+                  # features are off and gui and audio are added
+                  # back explicitly. The per-platform JPEG decoder
+                  # (WIC) is target-gated not feature-gated, so this
+                  # does not affect 3H.
+                  'features': '--no-default-features --features ryll/gui,ryll/audio',
               },
               'windows-aarch64': {
                   'name': 'Windows (aarch64)',
                   # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
                   'os': 'windows-11-arm',
                   'target': 'aarch64-pc-windows-msvc',
-                  'features': '--no-default-features',
+                  'features': '--no-default-features --features ryll/gui,ryll/audio',
               },
           }
           valid = ['linux-x86_64'] + list(hosted_platforms)

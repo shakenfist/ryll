@@ -220,12 +220,14 @@ release: fetch
 # cannot be cross-checked this way -- aws-lc-sys needs an MSVC
 # toolchain to compile its vendored BoringSSL C sources -- but the
 # gnu triple shares the cfg(windows)/windows-sys surface with msvc,
-# so it catches the common case cheaply. See
+# so it catches the common case cheaply. The feature set matches the
+# Windows matrix legs: everything but `capture`. See
 # docs/plans/PLAN-two-stage-ci.md.
 check-windows: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		cargo check --frozen --target x86_64-pc-windows-gnu --no-default-features -p ryll
+		cargo check --frozen --target x86_64-pc-windows-gnu --no-default-features \
+			--features ryll/gui,ryll/audio -p ryll
 
 # Cutting a release is a two-phase operation so the version bump
 # goes through the normal PR review gate rather than landing
