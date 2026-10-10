@@ -266,9 +266,10 @@ depends on the image type:
 - **ZLIB_GLZ_RGB (107)**: 8-byte header — `glz_data_size` (u32 LE)
   + `compressed_size` (u32 LE) — then zlib-compressed GLZ data.
   Decompress with zlib first, then pass to the GLZ decompressor.
-- **LZ4 (109)**: NO `data_size` prefix. Data starts with 1-byte
-  `top_down`, 1-byte `spice_format`, then per-row LZ4 blocks each
-  with a 4-byte big-endian size prefix.
+- **LZ4 (109)**: 4-byte `data_size` (u32 LE) prefix, as a
+  `BinaryData`. Its data is a 1-byte top-down flag, a 1-byte
+  `SPICE_BITMAP_FMT_*`, then dependent LZ4 blocks each with a 4-byte
+  big-endian length prefix; pass the data to `decompress_spice_lz4`.
 - **Pixmap (0)**: raw BGRX pixels, no header.
 - **FromCache (103)**: no pixel data, look up by `image_id`.
 

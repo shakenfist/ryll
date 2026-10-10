@@ -9,9 +9,9 @@ decompression algorithms:
   `GlzDictionary` and notify-based cross-frame reference
   resolution. Feature `glz` (default), pulls in `tokio`.
 - **LZ** — single-frame LZ. Feature `lz` (default).
-- **LZ4** — SPICE's per-row LZ4 image format (each row is
-  independently compressed with `lz4_flex` and a 4-byte length
-  prefix). Feature `lz4` (default), pulls in `lz4_flex`.
+- **LZ4** — SPICE's LZ4 image format (a format byte, then dependent
+  raw LZ4 blocks with big-endian lengths, decoded with `lz4_flex`).
+  Feature `lz4` (default), pulls in `lz4_flex`.
 
 The crate name covers both directions. The current release
 provides decompression only, matching what the ryll client

@@ -316,7 +316,12 @@ dependency.
 - **tokio-rustls** - TLS support
 - **clap** - CLI parsing
 - **rsa/sha1** - Authentication encryption
-- **image** - JPEG decoding (via the `image` crate with jpeg feature)
+- **jpeg-decoder/mozjpeg** - JPEG decoding in
+  `shakenfist-spice-compression`, as two of the backends that
+  `best_for_platform()` in its `jpeg` module chooses between (ImageIO,
+  WIC, VA-API, libjpeg-turbo via `mozjpeg`, then pure-Rust
+  `jpeg-decoder`); see [the SPICE protocol notes](spice-protocol.md)
+- **image** - PNG encoding of control-socket screenshots
 - **cpal** - Cross-platform audio output
 - **rtrb** - Lock-free ring buffer for audio sample passing
 - **opus-decoder** - Pure-Rust Opus audio decoding

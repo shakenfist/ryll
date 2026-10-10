@@ -2504,17 +2504,35 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Lz4) => {
-                // SPICE LZ4 format:
-                //   1 byte: top_down flag
-                //   1 byte: spice bitmap format
-                //   then per-row blocks: 4-byte BE size + LZ4 compressed row
-                //
-                // Note: unlike LZ_RGB/GLZ_RGB, the LZ4 data does NOT have
-                // a data_size u32 prefix — the pixel data starts immediately
-                // after the ImageDescriptor.
-                let width = img_desc.width as usize;
-                let height = img_desc.height as usize;
-                decompress_spice_lz4(image_data, width, height)
+                // LZ4: BinaryData wrapper (4-byte data_size, then a
+                // top-down byte, a bitmap format byte and big-endian
+                // length-prefixed LZ4 blocks, which the decoder reads).
+                if let Ok(lz4_data) = BinaryData::read_data(&mut BoundedReader::new(image_data)) {
+                    let decoded = decompress_spice_lz4(
+                        lz4_data,
+                        img_desc.width as usize,
+                        img_desc.height as usize,
+                    );
+                    // The decoder logs which check failed; this records
+                    // the gap once a session.
+                    if decoded.is_none() {
+                        warn_once!(
+                            "display:decode_failure:lz4:decode_failed",
+                            "display: LZ4 decode failed ({}x{})",
+                            img_desc.width,
+                            img_desc.height
+                        );
+                    }
+                    decoded
+                } else {
+                    // Shorter than its size field, or than the size it
+                    // declares.
+                    warn_once!(
+                        "display:decode_failure:lz4:short_data",
+                        "display: LZ4 data too short"
+                    );
+                    None
+                }
             }
             Some(ImageType::FromCache) | Some(ImageType::FromCacheLossless) => {
                 // FromCacheLossless names an entry the server knows is
@@ -2693,6 +2711,16 @@ impl DisplayChannel {
                 image_type,
                 Some(ImageType::GlzRgb) | Some(ImageType::ZlibGlzRgb)
             );
+            // A GLZ image's id comes from its own header, and names its
+            // entry in the GLZ dictionary. Every other image is known by
+            // its descriptor's id: some decoders (LZ, LZ4) do not set
+            // one, and the descriptor's id is what a later FromCache
+            // names.
+            let image_id = if is_glz {
+                img.image_id
+            } else {
+                img_desc.image_id
+            };
             if is_glz {
                 // GLZ images are always cached -- they form the shared
                 // dictionary that cross-frame references depend on.
@@ -2722,7 +2750,7 @@ impl DisplayChannel {
                 // Only cache non-GLZ images when the server requests it.
                 // insert() replaces an existing entry, which is all
                 // CACHE_REPLACE_ME asks for.
-                let _ = self.image_cache.insert(img.image_id, img.pixels.clone());
+                let _ = self.image_cache.insert(image_id, img.pixels.clone());
             }
 
             let mut out_width = img.width;
@@ -2803,7 +2831,7 @@ impl DisplayChannel {
                             sub_w as u32,
                             sub_h as u32,
                             sub_pixels,
-                            img.image_id,
+                            image_id,
                             self.traffic.elapsed().as_secs_f64(),
                         ))
                         .await;
@@ -2819,7 +2847,7 @@ impl DisplayChannel {
                         out_width,
                         out_height,
                         out_pixels,
-                        img.image_id,
+                        image_id,
                         self.traffic.elapsed().as_secs_f64(),
                     ))
                     .await;
@@ -4963,6 +4991,94 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_, _, _, _, rgba) = &events[0];
         assert_eq!(rgba, &vec![115, 114, 113, 255]);
+    }
+
+    /// A top-down 32-bit LZ4 image of `pixels` (B,G,R,X), as one block.
+    fn lz4_image(id: u64, flags: u8, width: u32, height: u32, pixels: &[u8]) -> SpiceImage {
+        let block = lz4_flex::block::compress(pixels);
+        let mut body = vec![1, bitmap_fmt::BIT32];
+        body.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        body.extend_from_slice(&block);
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::Lz4, flags, width, height),
+            payload: ImagePayload::Lz4(BinaryData { data: body }),
+        }
+    }
+
+    #[tokio::test]
+    async fn lz4_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // The LZ4 decoder does not know the image's id, so the cache
+        // must key it by the descriptor's, which is what a later
+        // FromCache names.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let expected = vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255];
+        let image = lz4_image(0x1234, IMAGE_FLAGS_CACHE_ME, 2, 2, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, rgba) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(rgba, &expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    #[tokio::test]
+    async fn lz4_data_size_past_the_payload_warns_and_is_skipped() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let image = lz4_image(1, 0, 2, 2, &pixels);
+        let ImagePayload::Lz4(lz4) = &image.payload else {
+            unreachable!()
+        };
+        // The image ends the payload, so its data_size is just before
+        // its body; claim one byte more than there is.
+        let mut payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
+        let size_at = payload.len() - lz4.data.len() - 4;
+        payload[size_at..size_at + 4].copy_from_slice(&(lz4.data.len() as u32 + 1).to_le_bytes());
+        channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .expect("a short LZ4 image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:lz4:short_data"));
+    }
+
+    #[tokio::test]
+    async fn lz4_image_that_does_not_decode_warns_and_is_skipped() {
+        // Three pixels' worth of data for a 2x2 image.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let image = lz4_image(1, 0, 2, 2, &[0; 12]);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("an undecodable LZ4 image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:lz4:decode_failed"));
     }
 
     #[tokio::test]

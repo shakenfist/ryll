@@ -734,12 +734,16 @@ pub enum ImagePayload {
     Bitmap(BitmapPayload),
     /// `ImageType::Jpeg`.
     Jpeg(BinaryData),
+    /// `ImageType::Lz4`. The data is opaque here: a top-down byte, a
+    /// `bitmap_fmt` value, then big-endian length-prefixed LZ4 blocks,
+    /// which the compression crate decodes.
+    Lz4(BinaryData),
     /// `ImageType::FromCache` or `ImageType::FromCacheLossless`, which
     /// spice.proto gives no data: the descriptor's `image_id` names an
     /// image the client cached earlier.
     FromCache,
     /// Any other type, whose layout this crate does not model (QUIC,
-    /// LZ_RGB, GLZ_RGB, LZ_PLT, SURFACE, ZLIB_GLZ_RGB, JPEG_ALPHA, LZ4 and
+    /// LZ_RGB, GLZ_RGB, LZ_PLT, SURFACE, ZLIB_GLZ_RGB, JPEG_ALPHA and
     /// unknown types): every byte from the end of the descriptor to the end
     /// of the image's region. In a draw message the region ends at the
     /// next image or the end of the body; see [`DrawCopy`].
@@ -753,6 +757,7 @@ impl ImagePayload {
         let modelled = match ImageType::from_u8(image_type) {
             Some(ImageType::Pixmap) => Some(matches!(self, ImagePayload::Bitmap(_))),
             Some(ImageType::Jpeg) => Some(matches!(self, ImagePayload::Jpeg(_))),
+            Some(ImageType::Lz4) => Some(matches!(self, ImagePayload::Lz4(_))),
             Some(ImageType::FromCache | ImageType::FromCacheLossless) => {
                 Some(matches!(self, ImagePayload::FromCache))
             }
@@ -781,6 +786,7 @@ impl WireType for SpiceImage {
         let payload = match ImageType::from_u8(descriptor.image_type) {
             Some(ImageType::Pixmap) => ImagePayload::Bitmap(BitmapPayload::read(r)?),
             Some(ImageType::Jpeg) => ImagePayload::Jpeg(BinaryData::read(r)?),
+            Some(ImageType::Lz4) => ImagePayload::Lz4(BinaryData::read(r)?),
             Some(ImageType::FromCache | ImageType::FromCacheLossless) => ImagePayload::FromCache,
             _ => ImagePayload::Other(r.read_bytes(r.remaining())?.to_vec()),
         };
@@ -799,6 +805,7 @@ impl WireType for SpiceImage {
         match &self.payload {
             ImagePayload::Bitmap(bitmap) => bitmap.write(out),
             ImagePayload::Jpeg(jpeg) => jpeg.write(out),
+            ImagePayload::Lz4(lz4) => lz4.write(out),
             ImagePayload::FromCache => {}
             ImagePayload::Other(bytes) => out.extend_from_slice(bytes),
         }
@@ -2182,11 +2189,21 @@ mod tests {
         }
     }
 
-    /// An LZ4 image, which this crate does not model: its bytes are kept
+    /// An LZ4 image whose body is top-down, 32-bit, and one 3-byte block.
+    fn lz4_image(id: u64) -> SpiceImage {
+        SpiceImage {
+            descriptor: descriptor(ImageType::Lz4, id),
+            payload: ImagePayload::Lz4(BinaryData {
+                data: vec![1, 8, 0, 0, 0, 3, 0xAA, 0xBB, 0xCC],
+            }),
+        }
+    }
+
+    /// A QUIC image, which this crate does not model: its bytes are kept
     /// as they are.
     fn other_image(id: u64) -> SpiceImage {
         SpiceImage {
-            descriptor: descriptor(ImageType::Lz4, id),
+            descriptor: descriptor(ImageType::Quic, id),
             payload: ImagePayload::Other(vec![1, 8, 0, 0, 0, 3, 0xAA, 0xBB, 0xCC]),
         }
     }
@@ -2362,6 +2379,11 @@ mod tests {
     fn spice_image_round_trips_each_payload() {
         assert_round_trip(&bitmap_image(1));
         assert_round_trip(&jpeg_image(2));
+        assert_round_trip(&lz4_image(7));
+        assert_round_trip(&SpiceImage {
+            descriptor: descriptor(ImageType::Lz4, 8),
+            payload: ImagePayload::Lz4(BinaryData::default()),
+        });
         assert_round_trip(&from_cache_image(3));
         assert_round_trip(&SpiceImage {
             descriptor: descriptor(ImageType::FromCacheLossless, 4),
@@ -2386,6 +2408,19 @@ mod tests {
         data.extend_from_slice(&le32(&[2, 2, 4]));
         data.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xD9]);
         assert_eq!(SpiceImage::decode(&data).unwrap(), jpeg_image(9));
+
+        // An LZ4 image is a BinaryData too: data_size, then the top-down
+        // byte, the format and the blocks. The bytes after it are not the
+        // image's.
+        let mut data = Vec::new();
+        data.extend_from_slice(&5u64.to_le_bytes());
+        data.extend_from_slice(&[ImageType::Lz4 as u8, 0]);
+        data.extend_from_slice(&le32(&[2, 2, 9]));
+        data.extend_from_slice(&[1, 8, 0, 0, 0, 3, 0xAA, 0xBB, 0xCC, 0xEE]);
+        let mut r = BoundedReader::new(&data);
+        assert_eq!(SpiceImage::read(&mut r).unwrap(), lz4_image(5));
+        assert_eq!(r.remaining(), 1);
+        assert!(SpiceImage::decode(&data[..data.len() - 2]).is_err());
 
         // A cache hit is only its descriptor; the bytes after it are not
         // the image's.
@@ -2438,6 +2473,7 @@ mod tests {
         for image in [
             bitmap_image(1),
             jpeg_image(2),
+            lz4_image(10),
             from_cache_image(3),
             other_image(4),
         ] {
