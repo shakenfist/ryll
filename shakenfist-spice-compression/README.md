@@ -2,7 +2,7 @@
 
 Pure-Rust implementations of the SPICE image-stream
 decompression algorithms, with optional LZ4 and JPEG encoders for
-servers (see Encoders below):
+servers (see the Encoders item below):
 
 - **QUIC** — the SPICE wavelet/arithmetic codec (not the QUIC
   transport protocol). Feature `quic` (default).

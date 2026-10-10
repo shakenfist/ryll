@@ -102,15 +102,10 @@ pub struct Args {
     #[arg(long)]
     pub capture: Option<String>,
 
-    /// Image compression to ask spice-server for. Exists for diagnostics:
-    /// spice-server only sends LZ4 images to a client that asks for exactly
-    /// `lz4`, so this is how to capture them. The default, `auto-glz`, is
-    /// there for a measured reason: advertising `auto-lz` made the server
-    /// stop using GLZ entirely (GLZ dictionary entries 23 -> 0, bytes
-    /// received +25% in session 006). For a UI-heavy workload the shared GLZ
-    /// dictionary is the win, and `auto-glz` still lets the server pick QUIC
-    /// for photographic content while keeping the dictionary for repeating
-    /// UI elements.
+    /// Image compression to ask spice-server for. For diagnostics:
+    /// spice-server only sends LZ4 images to a client that asks for
+    /// exactly `lz4`. The default, `auto-glz`, is chosen for a measured
+    /// reason; see docs/configuration.md.
     #[arg(long, value_enum, default_value_t = ImageCompression::AutoGlz)]
     pub preferred_compression: ImageCompression,
 

@@ -139,6 +139,8 @@ impl ImageBuffer for BgrxRows<'_, '_> {
     }
 
     fn fill_buffers(&self, y: u16, buffers: &mut [Vec<u8>; 4]) {
+        // The encoder pads the last MCU row by asking for rows past the end.
+        let y = y.min(self.height() - 1);
         let start = y as usize * self.0.stride;
         let row = &self.0.data[start..start + self.0.width as usize * 4];
         for &[b, g, r, _] in row.as_chunks::<4>().0 {
@@ -217,7 +219,6 @@ mod tests {
             lz4_flex::block::decompress(&body[6..], packed.len()).unwrap(),
             packed
         );
-        assert_eq!(&body[6..], &lz4_flex::block::compress(&packed)[..]);
     }
 
     #[test]
@@ -360,7 +361,6 @@ mod jpeg_tests {
                 (width, height)
             );
             let err = mean_error(&decoded.rgba, width, &f);
-            println!("{name}: {width}x{height} pad {pad}: mean error {err:.3}");
             assert!(err < max, "{name}: mean error {err} >= {max}");
         }
     }

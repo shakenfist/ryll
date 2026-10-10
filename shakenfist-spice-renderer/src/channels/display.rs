@@ -5043,6 +5043,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pixmap_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // Non-GLZ images are cached under the id in their descriptor,
+        // which is what a later FromCache names.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let expected = vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255];
+        let image = pixmap_image(0x1234, IMAGE_FLAGS_CACHE_ME, 2, 2, 8, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    #[tokio::test]
     async fn lz4_data_size_past_the_payload_warns_and_is_skipped() {
         let (mut channel, mut peers) = test_display_channel().await;
         let pixels: Vec<u8> = (1..=16).collect();

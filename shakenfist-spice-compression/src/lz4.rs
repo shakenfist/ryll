@@ -86,12 +86,11 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         return None;
     };
     let row_bytes = width.checked_mul(bpp)?;
-    let mut decoded = vec![0u8; row_bytes.checked_mul(height)?];
-
     if blocks.is_empty() {
         warn!("display: LZ4 image has no blocks");
         return None;
     }
+    let mut decoded = vec![0u8; row_bytes.checked_mul(height)?];
     let mut blocks = blocks;
     let mut pos = 0usize;
     while !blocks.is_empty() {
@@ -143,23 +142,59 @@ pub fn decompress_spice_lz4(data: &[u8], width: usize, height: usize) -> Option<
         return None;
     }
 
-    let mut rgba = vec![0u8; rgba_size];
-    let src_rows = decoded.chunks_exact(row_bytes);
-    let dst_rows = rgba.chunks_exact_mut(width * 4);
-    if top_down {
-        src_rows
-            .zip(dst_rows)
-            .for_each(|(src, dst)| convert_row(format, src, dst));
+    // The 32-bit formats decode to exactly the RGBA size, so convert
+    // them where they are rather than holding a second full-size
+    // buffer. The 16 and 24-bit formats are smaller and need one.
+    let rgba = if bpp == 4 {
+        bgra_to_rgba_in_place(&mut decoded, width, format == bitmap_fmt::RGBA, top_down);
+        decoded
     } else {
-        src_rows
-            .zip(dst_rows.rev())
-            .for_each(|(src, dst)| convert_row(format, src, dst));
-    }
+        let mut rgba = vec![0u8; rgba_size];
+        let src_rows = decoded.chunks_exact(row_bytes);
+        let dst_rows = rgba.chunks_exact_mut(width * 4);
+        if top_down {
+            src_rows
+                .zip(dst_rows)
+                .for_each(|(src, dst)| convert_row(format, src, dst));
+        } else {
+            src_rows
+                .zip(dst_rows.rev())
+                .for_each(|(src, dst)| convert_row(format, src, dst));
+        }
+        rgba
+    };
 
     // `rgba_len` accepted these dimensions above, which caps each side
     // at `MAX_IMAGE_DIMENSION`, so the casts cannot truncate and `new`
     // cannot refuse a buffer it sized.
     DecompressedImage::new(width as u32, height as u32, rgba, 0)
+}
+
+/// Turn B,G,R,X or B,G,R,A pixels into RGBA in place. `has_alpha`
+/// keeps the fourth byte; otherwise it becomes 255. A bottom-up
+/// image also has its rows reversed, by swapping the first row with
+/// the last, the second with the second last, and so on.
+fn bgra_to_rgba_in_place(pixels: &mut [u8], width: usize, has_alpha: bool, top_down: bool) {
+    for px in pixels.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+        if !has_alpha {
+            px[3] = 255;
+        }
+    }
+    if top_down {
+        return;
+    }
+    let row_bytes = width * 4;
+    let rows = pixels.len() / row_bytes;
+    let (top, bottom) = pixels.split_at_mut(rows / 2 * row_bytes);
+    // With an odd row count the middle row stays where it is.
+    let bottom = &mut bottom[rows % 2 * row_bytes..];
+    for (t, b) in top
+        .chunks_exact_mut(row_bytes)
+        .zip(bottom.chunks_exact_mut(row_bytes).rev())
+    {
+        t.swap_with_slice(b);
+    }
 }
 
 /// Convert one decoded row of `format` pixels to RGBA. Alpha is kept
@@ -283,6 +318,18 @@ mod tests {
         let data = lz4_body(false, 8, &[&[0, 0, 255, 0, 0, 255, 0, 0]]);
         let img = decompress_spice_lz4(&data, 1, 2).unwrap();
         assert_eq!(img.pixels, vec![0, 255, 0, 255, 255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn decompress_spice_lz4_bottom_up_odd_row_count() {
+        // Red, green and blue rows in memory; bottom-up, blue is the
+        // top row and green, in the middle, stays where it is.
+        let data = lz4_body(false, 8, &[&[0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 0]]);
+        let img = decompress_spice_lz4(&data, 1, 3).unwrap();
+        assert_eq!(
+            img.pixels,
+            vec![0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255]
+        );
     }
 
     #[test]

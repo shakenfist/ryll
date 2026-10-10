@@ -328,6 +328,11 @@ dependency.
 - **openh264** - H.264 encoding in `shakenfist-spice-renderer`
   (the encoder pipeline). Capture mode in ryll consumes it
   transitively via the renderer.
+- **jpeg-encoder** - JPEG encoding behind the `encode` feature of
+  `shakenfist-spice-compression`
+- **lz4_flex** - LZ4 image decode and encode in
+  `shakenfist-spice-compression`, plus usbredir and webdav
+  compression in `shakenfist-spice-renderer`
 - **nusb** - USB device access (pure Rust, no libusb)
 - **dav-server** - WebDAV server (RFC 4918, LocalFs backend)
 - **hyper** - HTTP/1.1 framing for WebDAV byte-stream transport

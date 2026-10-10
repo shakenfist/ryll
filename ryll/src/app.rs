@@ -971,6 +971,10 @@ pub struct RyllApp {
     /// `--glz-dictionary-cap-mib` at startup. Persisted here so
     /// reconnect passes the same value each time.
     glz_dictionary_cap_bytes: usize,
+
+    /// `SPICE_IMAGE_COMPRESSION_*` wire value from
+    /// `--preferred-compression`, sent at each display channel
+    /// link-up, including on reconnect.
     preferred_compression: u8,
 
     // Auto-snapshot config. `None` means the mode is disabled. A fresh

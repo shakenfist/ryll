@@ -19,9 +19,10 @@ The decoded buffer is `height` rows of `width * bytes_per_pixel` bytes
 is 1 and the bottom row when it is 0. Width and height come from the
 image descriptor, which is not in these files; they are listed below.
 
-None of these files was checked with ryll's own LZ4 decoder. They were
-decoded with liblz4 1.9.4 through the Python `lz4` package 4.4.5, the
-library spice-common's decoder uses.
+liblz4 1.9.4 through the Python `lz4` package 4.4.5, the library
+spice-common's decoder uses, was the independent reference used to
+make and check these files. The tests in `src/lz4.rs` now decode
+every one of them with ryll's own decoder as well.
 
 ## Captured images
 
