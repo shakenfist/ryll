@@ -110,6 +110,21 @@ pub enum LinkError {
     },
 }
 
+/// Lets an `io::Result` parser use `?` on a [`BoundedReader`]
+/// parse. A truncated input becomes
+/// [`std::io::ErrorKind::UnexpectedEof`], as the `byteorder`
+/// readers report it; anything else is
+/// [`std::io::ErrorKind::InvalidData`].
+impl From<LinkError> for std::io::Error {
+    fn from(e: LinkError) -> Self {
+        let kind = match e {
+            LinkError::Truncated { .. } => std::io::ErrorKind::UnexpectedEof,
+            _ => std::io::ErrorKind::InvalidData,
+        };
+        std::io::Error::new(kind, e)
+    }
+}
+
 /// A cursor over a byte slice that tracks position and enforces
 /// bounds on every read.
 ///
@@ -290,6 +305,23 @@ impl<'a> BoundedReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_error_converts_to_io_error_kind() {
+        let truncated: std::io::Error = LinkError::Truncated {
+            needed: 4,
+            available: 1,
+        }
+        .into();
+        assert_eq!(truncated.kind(), std::io::ErrorKind::UnexpectedEof);
+        let bad: std::io::Error = LinkError::TooLarge {
+            what: "num_rects",
+            value: 9,
+            max: 1,
+        }
+        .into();
+        assert_eq!(bad.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn read_integers_little_endian() {

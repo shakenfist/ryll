@@ -19,15 +19,18 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{image_compression, ropd};
+use shakenfist_spice_protocol::constants::{clip_type, image_compression, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, DisplayInit, DrawBase, ImageDescriptor, Notify as NotifyMessage,
-    Ping, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
-    SpiceTransparent, SurfaceCreate, WireType,
+    make_message, take_message, DisplayInit, DisplayMonitorsConfig, DrawBase, ImageDescriptor,
+    Notify as NotifyMessage, Ping, PreferredCompression, PreferredVideoCodecType, Rect, SetAck,
+    SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceFill, SpiceOpaque, SpicePoint,
+    SpiceTransparent, StreamActivateReport, StreamClip, StreamCreate, StreamData, StreamDataSized,
+    StreamDestroy, StreamReport, SurfaceCreate, SurfaceDestroy, WireType,
 };
 use shakenfist_spice_protocol::parse::{read_i32_le, read_u16_le, read_u32_le, read_u64_le};
+use shakenfist_spice_protocol::reader::BoundedReader;
 use shakenfist_spice_protocol::{
     display_client, display_server, warn_once, ChannelType, ImageType, NotifySeverity,
     IMAGE_FLAGS_CACHE_ME, IMAGE_FLAGS_CACHE_REPLACE_ME,
@@ -280,7 +283,7 @@ fn mjpeg_duration_stats(ring: &VecDeque<u32>) -> (u32, u32, u32) {
 #[derive(Debug, Clone)]
 enum FillOutcome {
     /// Happy path: paint `colour` (RGBA) into `base.rect` with
-    /// `base.clip_rects`.
+    /// `base.clip`.
     Paint {
         base: DrawBase,
         colour: [u8; 4],
@@ -385,17 +388,45 @@ fn log_draw_base_if_verbose(log_config: LogConfig, payload: &[u8], op_name: &str
     if !log_config.verbose {
         return;
     }
-    if let Ok(base) = DrawBase::read(payload) {
+    if let Ok(base) = DrawBase::decode(payload) {
+        let (left, top, right, bottom) = ltrb(&base.bbox);
         logging::log_detail(&format!(
             "{}: surface={}, rect=({},{})-({},{}), clip_type={}",
-            op_name, base.surface_id, base.left, base.top, base.right, base.bottom, base.clip_type,
+            op_name, base.surface_id, left, top, right, bottom, base.clip.clip_type,
         ));
     }
 }
 
+/// A rectangle as the (left, top, right, bottom) tuple ryll's events
+/// carry. spice.proto's edges are signed; ryll has always read them as
+/// `u32`, and the casts keep those bits.
+fn ltrb(rect: &Rect) -> (u32, u32, u32, u32) {
+    (
+        rect.left as u32,
+        rect.top as u32,
+        rect.right as u32,
+        rect.bottom as u32,
+    )
+}
+
+/// A draw's clip rectangles as (left, top, right, bottom) tuples. Empty
+/// unless the clip type is RECTS.
+fn clip_ltrb(base: &DrawBase) -> Vec<(u32, u32, u32, u32)> {
+    base.clip.rects.iter().map(ltrb).collect()
+}
+
+/// Read the `DrawBase` that opens a draw payload, returning it and the
+/// draw-specific body after it.
+fn read_draw_base(payload: &[u8]) -> std::io::Result<(DrawBase, &[u8])> {
+    let mut r = BoundedReader::new(payload);
+    let base = DrawBase::read(&mut r)?;
+    let body = r.read_bytes(r.remaining())?;
+    Ok((base, body))
+}
+
 fn decode_draw_fill(payload: &[u8]) -> std::io::Result<FillOutcome> {
-    let base = DrawBase::read(payload)?;
-    let (fill, _consumed) = SpiceFill::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let (fill, _consumed) = SpiceFill::read(body)?;
 
     if fill.rop_descriptor != ropd::OP_PUT {
         return Ok(FillOutcome::SkipNonOpPut {
@@ -440,8 +471,8 @@ enum SolidFillOutcome {
 }
 
 fn decode_draw_solid_fill(payload: &[u8]) -> std::io::Result<SolidFillOutcome> {
-    let base = DrawBase::read(payload)?;
-    let body = SpiceBlackness::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let body = SpiceBlackness::read(body)?;
     let masked_fallback = body.mask.flags != 0 || body.mask.bitmap_offset != 0;
     Ok(SolidFillOutcome::Paint {
         base,
@@ -464,8 +495,8 @@ enum CopyBitsOutcome {
 }
 
 fn decode_copy_bits(payload: &[u8]) -> std::io::Result<CopyBitsOutcome> {
-    let base = DrawBase::read(payload)?;
-    let src_pos = SpicePoint::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let src_pos = SpicePoint::decode(body)?;
     // Wire type is int32; source coords are logically unsigned
     // indices into the surface buffer. Clamp negatives to 0.
     let src_x = src_pos.x.max(0) as u32;
@@ -496,20 +527,19 @@ enum BlendOutcome {
 }
 
 fn decode_draw_blend(payload: &[u8]) -> std::io::Result<BlendOutcome> {
-    let base = DrawBase::read(payload)?;
-    let copy_start = base.end_offset;
-    if payload.len() < copy_start + 36 {
+    let (base, body) = read_draw_base(payload)?;
+    if body.len() < 36 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
             "Not enough data for SpiceBlend",
         ));
     }
-    let src_bitmap_offset = read_u32_le(payload, copy_start) as usize;
-    let src_top = read_u32_le(payload, copy_start + 4);
-    let src_left = read_u32_le(payload, copy_start + 8);
-    let src_bottom = read_u32_le(payload, copy_start + 12);
-    let src_right = read_u32_le(payload, copy_start + 16);
-    let rop = read_u16_le(payload, copy_start + 20);
+    let src_bitmap_offset = read_u32_le(body, 0) as usize;
+    let src_top = read_u32_le(body, 4);
+    let src_left = read_u32_le(body, 8);
+    let src_bottom = read_u32_le(body, 12);
+    let src_right = read_u32_le(body, 16);
+    let rop = read_u16_le(body, 20);
     // scale_mode and mask are parsed-through silently, matching
     // how handle_draw_copy treats them today.
 
@@ -550,8 +580,8 @@ enum OpaqueOutcome {
 }
 
 fn decode_draw_opaque(payload: &[u8]) -> std::io::Result<OpaqueOutcome> {
-    let base = DrawBase::read(payload)?;
-    let (opaque, _consumed) = SpiceOpaque::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let (opaque, _consumed) = SpiceOpaque::read(body)?;
 
     if opaque.rop_descriptor != ropd::OP_PUT {
         return Ok(OpaqueOutcome::SkipNonOpPut {
@@ -587,8 +617,8 @@ enum TransparentOutcome {
 }
 
 fn decode_draw_transparent(payload: &[u8]) -> std::io::Result<TransparentOutcome> {
-    let base = DrawBase::read(payload)?;
-    let transparent = SpiceTransparent::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let transparent = SpiceTransparent::read(body)?;
     // src_color is BGRX little-endian, same convention as brush colour.
     let chroma_rgba = [
         ((transparent.src_color >> 16) & 0xff) as u8,
@@ -630,8 +660,8 @@ enum AlphaBlendOutcome {
 }
 
 fn decode_draw_alpha_blend(payload: &[u8]) -> std::io::Result<AlphaBlendOutcome> {
-    let base = DrawBase::read(payload)?;
-    let ab = SpiceAlphaBlend::read(&payload[base.end_offset..])?;
+    let (base, body) = read_draw_base(payload)?;
+    let ab = SpiceAlphaBlend::read(body)?;
     if ab.alpha == 0 {
         return Ok(AlphaBlendOutcome::SkipZeroAlpha);
     }
@@ -1103,7 +1133,7 @@ impl DisplayChannel {
         };
 
         let mut payload = Vec::new();
-        init.write(&mut payload)?;
+        init.write(&mut payload);
         let msg = make_message(display_client::INIT, &payload);
 
         if self.log_config.verbose {
@@ -1123,7 +1153,11 @@ impl DisplayChannel {
     /// this to pick how it encodes server-driven image fills
     /// (LZ vs GLZ vs QUIC etc).
     async fn send_preferred_compression(&mut self, scheme: u8) -> Result<()> {
-        let payload = [scheme];
+        let mut payload = Vec::new();
+        PreferredCompression {
+            image_compression: scheme,
+        }
+        .write(&mut payload);
         let msg = make_message(display_client::PREFERRED_COMPRESSION, &payload);
         if self.log_config.verbose {
             logging::log_detail(&format!("image_compression={}", scheme));
@@ -1142,10 +1176,13 @@ impl DisplayChannel {
     /// (channel-display.c:621-642) is the reference encoder.
     /// Called once at link-up from `run_loop`.
     async fn send_preferred_video_codec_type(&mut self, codecs: &[u8]) -> Result<()> {
-        let mut payload = Vec::with_capacity(1 + codecs.len());
+        // The count is a u8, so at most the first 255 codecs are sent.
         let num = u8::try_from(codecs.len()).unwrap_or(u8::MAX);
-        payload.push(num);
-        payload.extend_from_slice(&codecs[..num as usize]);
+        let mut payload = Vec::with_capacity(1 + num as usize);
+        PreferredVideoCodecType {
+            codecs: codecs[..num as usize].to_vec(),
+        }
+        .write(&mut payload);
         let msg = make_message(display_client::PREFERRED_VIDEO_CODEC_TYPE, &payload);
         if self.log_config.verbose {
             logging::log_detail(&format!(
@@ -1203,7 +1240,7 @@ impl DisplayChannel {
 
         match msg_type {
             display_server::SURFACE_CREATE => {
-                let surface = SurfaceCreate::read(payload)?;
+                let surface = SurfaceCreate::decode(payload).context("malformed SURFACE_CREATE")?;
                 info!(
                     "display: surface created: channel={}, id={}, {}x{}",
                     self.channel_id, surface.surface_id, surface.width, surface.height
@@ -1231,8 +1268,8 @@ impl DisplayChannel {
             }
 
             display_server::SURFACE_DESTROY => {
-                if payload.len() >= 4 {
-                    let surface_id = read_u32_le(payload, 0);
+                // A short SURFACE_DESTROY is ignored.
+                if let Ok(SurfaceDestroy { surface_id }) = SurfaceDestroy::decode(payload) {
                     info!("display: surface destroyed: id={}", surface_id);
 
                     if self.log_config.verbose {
@@ -1321,31 +1358,30 @@ impl DisplayChannel {
             }
 
             display_server::MONITORS_CONFIG => {
-                if payload.len() >= 8 {
-                    let count = read_u16_le(payload, 0);
-                    let max_allowed = read_u16_le(payload, 2);
-                    info!(
-                        "display: monitors_config: count={}, max_allowed={}, channel_id={}",
-                        count, max_allowed, self.channel_id
-                    );
-                    let mut offset = 4;
-                    for i in 0..count {
-                        if offset + 28 > payload.len() {
-                            break;
-                        }
-                        let head_id = read_u32_le(payload, offset);
-                        let surface_id = read_u32_le(payload, offset + 4);
-                        let width = read_u32_le(payload, offset + 8);
-                        let height = read_u32_le(payload, offset + 12);
-                        let x = read_u32_le(payload, offset + 16);
-                        let y = read_u32_le(payload, offset + 20);
-                        let flags = read_u32_le(payload, offset + 24);
+                // Only logged, so a malformed one is only noted.
+                match DisplayMonitorsConfig::decode(payload) {
+                    Ok(config) => {
                         info!(
-                            "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
-                            i, head_id, surface_id, width, height, x, y, flags
+                            "display: monitors_config: count={}, max_allowed={}, channel_id={}",
+                            config.heads.len(),
+                            config.max_allowed,
+                            self.channel_id
                         );
-                        offset += 28;
+                        for (i, head) in config.heads.iter().enumerate() {
+                            info!(
+                                "display: monitors_config[{}]: head_id={}, surface_id={}, {}x{}, pos=({},{}), flags={:#x}",
+                                i,
+                                head.monitor_id,
+                                head.surface_id,
+                                head.width,
+                                head.height,
+                                head.x,
+                                head.y,
+                                head.flags
+                            );
+                        }
                     }
+                    Err(e) => debug!("display: malformed monitors_config: {}", e),
                 }
             }
 
@@ -1497,17 +1533,17 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_CREATE => {
-                if payload.len() >= 50 {
-                    let surface_id = read_u32_le(payload, 0);
-                    let stream_id = read_u32_le(payload, 4);
-                    let _flags = payload[8];
-                    let codec_type = payload[9];
-                    let stream_w = read_u32_le(payload, 18);
-                    let stream_h = read_u32_le(payload, 22);
-                    let dest_top = read_u32_le(payload, 34);
-                    let dest_left = read_u32_le(payload, 38);
-                    let dest_bottom = read_u32_le(payload, 42);
-                    let dest_right = read_u32_le(payload, 46);
+                // A malformed STREAM_CREATE is ignored, as a short one always
+                // was. The clip type is part of the message, so one that
+                // stops before it is malformed.
+                if let Ok(create) = StreamCreate::decode(payload) {
+                    let surface_id = create.surface_id;
+                    let stream_id = create.id;
+                    let codec_type = create.codec_type;
+                    let stream_w = create.stream_width;
+                    let stream_h = create.stream_height;
+                    // The wire's edges are signed; ryll keeps their bits.
+                    let (dest_left, dest_top, dest_right, dest_bottom) = ltrb(&create.dest);
 
                     info!(
                         "display: stream_create: id={}, surface={}, codec={}, {}x{}, \
@@ -1653,51 +1689,23 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_DATA | display_server::STREAM_DATA_SIZED => {
-                let (stream_id, frame_mm_time, dest, jpeg_data) =
-                    if msg_type == display_server::STREAM_DATA_SIZED {
-                        // SpiceMsgDisplayStreamDataSized layout (spice.proto):
-                        //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)
-                        //   offset  8: width (u32)
-                        //   offset 12: height (u32)
-                        //   offset 16: dest_top (u32)
-                        //   offset 20: dest_left (u32)
-                        //   offset 24: dest_bottom (u32)
-                        //   offset 28: dest_right (u32)
-                        //   offset 32: data_size (u32)
-                        //   offset 36: data
-                        if payload.len() < 36 {
-                            return Ok(());
-                        }
-                        let id = read_u32_le(payload, 0);
-                        let mm_time = read_u32_le(payload, 4);
-                        let dest_top = read_u32_le(payload, 16);
-                        let dest_left = read_u32_le(payload, 20);
-                        let dest_bottom = read_u32_le(payload, 24);
-                        let dest_right = read_u32_le(payload, 28);
-                        let data_size = read_u32_le(payload, 32) as usize;
-                        let data = &payload[36..36 + data_size.min(payload.len() - 36)];
-                        (
-                            id,
-                            mm_time,
-                            Some((dest_top, dest_left, dest_bottom, dest_right)),
-                            data,
-                        )
-                    } else {
-                        // SpiceMsgDisplayStreamData layout (spice.proto):
-                        //   offset  0: stream_id (u32)
-                        //   offset  4: multi_media_time (u32)
-                        //   offset  8: data_size (u32)
-                        //   offset 12: data
-                        if payload.len() < 12 {
-                            return Ok(());
-                        }
-                        let id = read_u32_le(payload, 0);
-                        let mm_time = read_u32_le(payload, 4);
-                        let data_size = read_u32_le(payload, 8) as usize;
-                        let data = &payload[12..12 + data_size.min(payload.len() - 12)];
-                        (id, mm_time, None, data)
+                // A malformed frame is ignored, as a short one always was.
+                // One whose data_size runs past the body is malformed.
+                let (base, dest, frame_data) = if msg_type == display_server::STREAM_DATA_SIZED {
+                    let Ok(frame) = StreamDataSized::decode(payload) else {
+                        return Ok(());
                     };
+                    // The wire's edges are signed; ryll keeps their bits.
+                    let (left, top, right, bottom) = ltrb(&frame.dest);
+                    (frame.base, Some((top, left, bottom, right)), frame.data)
+                } else {
+                    let Ok(frame) = StreamData::decode(payload) else {
+                        return Ok(());
+                    };
+                    (frame.base, None, frame.data)
+                };
+                let (stream_id, frame_mm_time) = (base.id, base.multi_media_time);
+                let jpeg_data = frame_data.as_slice();
 
                 // Evaluate STREAM_REPORT bookkeeping BEFORE the MJPEG
                 // decode dispatch — `report_num_frames` counts every
@@ -1891,15 +1899,15 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_CLIP => {
-                if payload.len() >= 4 {
-                    let stream_id = read_u32_le(payload, 0);
-                    debug!("display: stream_clip id={}", stream_id);
+                // Only logged; a malformed one is ignored.
+                if let Ok(clip) = StreamClip::decode(payload) {
+                    debug!("display: stream_clip id={}", clip.id);
                 }
             }
 
             display_server::STREAM_DESTROY => {
-                if payload.len() >= 4 {
-                    let stream_id = read_u32_le(payload, 0);
+                // A short STREAM_DESTROY is ignored.
+                if let Ok(StreamDestroy { id: stream_id }) = StreamDestroy::decode(payload) {
                     let now = self.traffic.elapsed().as_secs_f64();
                     if let Some(state) = self.streams.remove(&stream_id) {
                         self.retire_stream(stream_id, &state, now);
@@ -1935,23 +1943,19 @@ impl DisplayChannel {
             }
 
             display_server::STREAM_ACTIVATE_REPORT => {
-                // 16-byte payload per spice.proto's
-                // SpiceMsgDisplayStreamActivateReport:
-                //   offset  0: stream_id (u32)
-                //   offset  4: unique_id (u32)
-                //   offset  8: max_window_size (u32)
-                //   offset 12: timeout_ms (u32)
-                if payload.len() < 16 {
+                let Ok(StreamActivateReport {
+                    stream_id,
+                    unique_id,
+                    max_window_size: raw_max_window_size,
+                    timeout_ms: raw_timeout_ms,
+                }) = StreamActivateReport::decode(payload)
+                else {
                     warn!(
                         "display: short stream_activate_report payload ({} bytes)",
                         payload.len()
                     );
                     return Ok(());
-                }
-                let stream_id = read_u32_le(payload, 0);
-                let unique_id = read_u32_le(payload, 4);
-                let raw_max_window_size = read_u32_le(payload, 8);
-                let raw_timeout_ms = read_u32_le(payload, 12);
+                };
 
                 let (max_window_size, timeout_ms) =
                     clamp_stream_report_params(raw_max_window_size, raw_timeout_ms);
@@ -1999,7 +2003,7 @@ impl DisplayChannel {
     }
 
     async fn handle_draw_copy(&mut self, payload: &[u8]) -> Result<()> {
-        if payload.len() < 21 {
+        if payload.len() < DrawBase::MIN_SIZE {
             warn_once!(
                 "display:decode_failure:draw_copy:short_payload",
                 "display: draw_copy payload too short"
@@ -2007,19 +2011,21 @@ impl DisplayChannel {
             return Ok(());
         }
 
-        let base = DrawBase::read(payload)?;
-        let left = base.left;
-        let top = base.top;
+        // A DrawBase whose clip rectangles are cut short ends the channel,
+        // as every DrawBase failure does.
+        let mut r = BoundedReader::new(payload);
+        let base = DrawBase::read(&mut r).context("malformed DRAW_COPY base")?;
 
         if self.log_config.verbose {
+            let (left, top, right, bottom) = ltrb(&base.bbox);
             logging::log_detail(&format!(
                 "surface={}, rect=({},{}) to ({},{}), clip_type={}",
-                base.surface_id, left, top, base.right, base.bottom, base.clip_type
+                base.surface_id, left, top, right, bottom, base.clip.clip_type
             ));
         }
 
         // SpiceCopy starts with src_bitmap offset (u32) pointing to SpiceImage
-        let copy_start = base.end_offset;
+        let copy_start = r.position();
         if payload.len() < copy_start + 4 {
             warn_once!(
                 "display:decode_failure:draw_copy:short_spice_copy",
@@ -2059,8 +2065,8 @@ impl DisplayChannel {
                 mask_pos_x,
                 mask_pos_y,
                 mask_bitmap_offset,
-                base.clip_type,
-                base.clip_rects.len()
+                base.clip.clip_type,
+                base.clip.rects.len()
             );
         }
 
@@ -2136,8 +2142,8 @@ impl DisplayChannel {
              flags={}, data_bytes={}",
             op_name,
             base.surface_id,
-            base.left,
-            base.top,
+            base.bbox.left as u32,
+            base.bbox.top as u32,
             img_desc.width,
             img_desc.height,
             image_type,
@@ -2667,13 +2673,12 @@ impl DisplayChannel {
                 }
             }
 
-            let dest_left = base.left;
-            let dest_top = base.top;
+            let (dest_left, dest_top, _, _) = ltrb(&base.bbox);
             let dest_right = dest_left.saturating_add(out_width);
             let dest_bottom = dest_top.saturating_add(out_height);
 
-            if base.clip_type == 1 && !base.clip_rects.is_empty() {
-                for (clip_left, clip_top, clip_right, clip_bottom) in &base.clip_rects {
+            if base.clip.clip_type == clip_type::RECTS && !base.clip.rects.is_empty() {
+                for (clip_left, clip_top, clip_right, clip_bottom) in &clip_ltrb(base) {
                     let il = dest_left.max(*clip_left);
                     let it = dest_top.max(*clip_top);
                     let ir = dest_right.min(*clip_right);
@@ -2721,8 +2726,8 @@ impl DisplayChannel {
                         composite,
                         self.channel_id,
                         base.surface_id,
-                        base.left,
-                        base.top,
+                        dest_left,
+                        dest_top,
                         out_width,
                         out_height,
                         out_pixels,
@@ -2774,9 +2779,9 @@ impl DisplayChannel {
                     .emit(ChannelEvent::FillRect {
                         display_channel_id: self.channel_id,
                         surface_id: base.surface_id,
-                        rect: (base.left, base.top, base.right, base.bottom),
+                        rect: ltrb(&base.bbox),
                         colour,
-                        clip: base.clip_rects,
+                        clip: clip_ltrb(&base),
                         produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
                     .await;
@@ -2810,9 +2815,9 @@ impl DisplayChannel {
             .emit(ChannelEvent::FillRect {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: (base.left, base.top, base.right, base.bottom),
+                rect: ltrb(&base.bbox),
                 colour,
-                clip: base.clip_rects,
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2861,8 +2866,8 @@ impl DisplayChannel {
             .emit(ChannelEvent::Invert {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: (base.left, base.top, base.right, base.bottom),
-                clip: base.clip_rects,
+                rect: ltrb(&base.bbox),
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2880,8 +2885,8 @@ impl DisplayChannel {
                 surface_id: base.surface_id,
                 src_x,
                 src_y,
-                dest_rect: (base.left, base.top, base.right, base.bottom),
-                clip: base.clip_rects,
+                dest_rect: ltrb(&base.bbox),
+                clip: clip_ltrb(&base),
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -3187,18 +3192,21 @@ impl DisplayChannel {
             let last_frame_delay: i32 =
                 (stream.report_end_frame_mm_time as i64).wrapping_sub(now_mm_time as i64) as i32;
 
-            let mut buf = Vec::with_capacity(32);
-            buf.extend_from_slice(&stream_id.to_le_bytes());
-            buf.extend_from_slice(&stream.report_unique_id.to_le_bytes());
-            buf.extend_from_slice(&stream.report_start_frame_mm_time.to_le_bytes());
-            buf.extend_from_slice(&stream.report_end_frame_mm_time.to_le_bytes());
-            buf.extend_from_slice(&stream.report_num_frames.to_le_bytes());
-            buf.extend_from_slice(&stream.report_num_drops.to_le_bytes());
-            buf.extend_from_slice(&last_frame_delay.to_le_bytes());
-            // audio_delay = UINT32_MAX: no audio latency is
-            // surfaced yet, and measuring it was left out of
-            // scope for the stream-caps work.
-            buf.extend_from_slice(&u32::MAX.to_le_bytes());
+            let mut buf = Vec::with_capacity(StreamReport::SIZE);
+            StreamReport {
+                stream_id,
+                unique_id: stream.report_unique_id,
+                start_frame_mm_time: stream.report_start_frame_mm_time,
+                end_frame_mm_time: stream.report_end_frame_mm_time,
+                num_frames: stream.report_num_frames,
+                num_drops: stream.report_num_drops,
+                last_frame_delay,
+                // audio_delay = UINT32_MAX: no audio latency is
+                // surfaced yet, and measuring it was left out of
+                // scope for the stream-caps work.
+                audio_delay: u32::MAX,
+            }
+            .write(&mut buf);
 
             // Mirror counters into last_report_* and reset rolling.
             stream.last_report_num_frames = stream.report_num_frames;
@@ -3213,7 +3221,6 @@ impl DisplayChannel {
             stream.report_end_frame_mm_time = 0;
             stream.report_start_now_mm_time = 0;
 
-            debug_assert_eq!(buf.len(), 32, "STREAM_REPORT payload must be 32 bytes");
             Some(buf)
         } else {
             None
@@ -3403,10 +3410,10 @@ mod tests {
                 assert_eq!(colour, [0x12, 0x34, 0x56, 0xff]);
                 assert!(!masked_fallback);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
             }
             other => panic!("expected Paint, got {:?}", other),
         }
@@ -3490,10 +3497,10 @@ mod tests {
             } => {
                 assert!(!masked_fallback);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
             }
         }
     }
@@ -3553,10 +3560,10 @@ mod tests {
                 assert_eq!(src_x, 15);
                 assert_eq!(src_y, 7);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 50);
-                assert_eq!(base.left, 100);
-                assert_eq!(base.bottom, 70);
-                assert_eq!(base.right, 200);
+                assert_eq!(base.bbox.top, 50);
+                assert_eq!(base.bbox.left, 100);
+                assert_eq!(base.bbox.bottom, 70);
+                assert_eq!(base.bbox.right, 200);
             }
         }
     }
@@ -3634,10 +3641,10 @@ mod tests {
                 src_right,
             } => {
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
                 assert_eq!(src_bitmap_offset, 0x100);
                 assert_eq!(src_top, 1);
                 assert_eq!(src_left, 2);
@@ -3711,10 +3718,10 @@ mod tests {
                 src_right,
             } => {
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
-                assert_eq!(base.left, 20);
-                assert_eq!(base.bottom, 30);
-                assert_eq!(base.right, 40);
+                assert_eq!(base.bbox.top, 10);
+                assert_eq!(base.bbox.left, 20);
+                assert_eq!(base.bbox.bottom, 30);
+                assert_eq!(base.bbox.right, 40);
                 assert_eq!(src_bitmap_offset, 0x100);
                 assert_eq!(src_top, 1);
                 assert_eq!(src_left, 2);
@@ -3781,7 +3788,7 @@ mod tests {
             } => {
                 assert_eq!(chroma_rgba, [0xAB, 0xCD, 0xEF, 0xFF]);
                 assert_eq!(base.surface_id, 0);
-                assert_eq!(base.top, 10);
+                assert_eq!(base.bbox.top, 10);
                 assert_eq!(src_bitmap_offset, 0x100);
                 assert_eq!(src_top, 1);
                 assert_eq!(src_left, 2);
@@ -4172,23 +4179,28 @@ mod tests {
         assert!(!keys.contains(&"display:hexdump:108"));
     }
 
-    /// Minimum-length `SpiceMsgDisplayStreamCreate` payload.
-    ///
-    /// The handler requires 50 bytes and reads `surface_id`,
-    /// `stream_id`, `codec_type` and the stream / dest rectangles out
-    /// of fixed offsets; everything else is padding here.
+    /// A minimal 64x64 `SpiceMsgDisplayStreamCreate` payload, with no clip.
     fn stream_create_payload(stream_id: u32, codec_type: u8) -> Vec<u8> {
-        let mut v = vec![0u8; 50];
-        v[0..4].copy_from_slice(&0u32.to_le_bytes()); // surface_id
-        v[4..8].copy_from_slice(&stream_id.to_le_bytes());
-        v[8] = 0; // flags
-        v[9] = codec_type;
-        v[18..22].copy_from_slice(&64u32.to_le_bytes()); // stream_width
-        v[22..26].copy_from_slice(&64u32.to_le_bytes()); // stream_height
-        v[34..38].copy_from_slice(&0u32.to_le_bytes()); // dest_top
-        v[38..42].copy_from_slice(&0u32.to_le_bytes()); // dest_left
-        v[42..46].copy_from_slice(&64u32.to_le_bytes()); // dest_bottom
-        v[46..50].copy_from_slice(&64u32.to_le_bytes()); // dest_right
+        let mut v = Vec::new();
+        StreamCreate {
+            surface_id: 0,
+            id: stream_id,
+            flags: 0,
+            codec_type,
+            stamp: 0,
+            stream_width: 64,
+            stream_height: 64,
+            src_width: 0,
+            src_height: 0,
+            dest: Rect {
+                top: 0,
+                left: 0,
+                bottom: 64,
+                right: 64,
+            },
+            clip: shakenfist_spice_protocol::messages::Clip::none(),
+        }
+        .write(&mut v);
         v
     }
 
@@ -4790,5 +4802,114 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_, _, _, _, rgba) = &events[0];
         assert_eq!(rgba, &vec![115, 114, 113, 255]);
+    }
+
+    // -------------------------------------------------------------------------
+    // The bytes the display channel sends
+    //
+    // Pinned from what ryll sent before its client messages moved onto the
+    // protocol crate's writers, so that the move cannot change them.
+    // -------------------------------------------------------------------------
+
+    /// Read exactly `len` bytes the channel wrote to its socket.
+    async fn sent_bytes(peers: &mut TestChannelPeers, len: usize) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; len];
+        peers
+            ._peer
+            .read_exact(&mut buf)
+            .await
+            .expect("read what the channel sent");
+        buf
+    }
+
+    #[tokio::test]
+    async fn link_up_messages_are_unchanged() {
+        let (mut channel, mut peers) = test_display_channel().await;
+
+        channel.send_init().await.expect("send INIT");
+        assert_eq!(
+            sent_bytes(&mut peers, 6 + 14).await,
+            vec![
+                101, 0, 14, 0, 0, 0, // mini header: INIT, 14 bytes
+                1, // pixmap_cache_id
+                0x00, 0x00, 0x40, 0x01, 0, 0, 0, 0, // pixmap_cache_size: 20 MiB
+                1, // glz_dictionary_id
+                0x00, 0x00, 0x30, 0x00, // glz_dictionary_window_size: 3 MiB
+            ]
+        );
+
+        channel
+            .send_preferred_compression(image_compression::AUTO_GLZ)
+            .await
+            .expect("send PREFERRED_COMPRESSION");
+        assert_eq!(sent_bytes(&mut peers, 7).await, vec![103, 0, 1, 0, 0, 0, 2]);
+
+        channel
+            .send_preferred_video_codec_type(&[
+                SPICE_VIDEO_CODEC_TYPE_H264,
+                SPICE_VIDEO_CODEC_TYPE_MJPEG,
+            ])
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        assert_eq!(
+            sent_bytes(&mut peers, 9).await,
+            vec![105, 0, 3, 0, 0, 0, 2, 3, 1]
+        );
+
+        // More codecs than the u8 count can say: the first 255 are sent.
+        let codecs: Vec<u8> = (0..300).map(|i| (i % 7) as u8).collect();
+        channel
+            .send_preferred_video_codec_type(&codecs)
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        let sent = sent_bytes(&mut peers, 6 + 256).await;
+        assert_eq!(&sent[..7], &[105, 0, 0, 1, 0, 0, 255]);
+        assert_eq!(&sent[7..], &codecs[..255]);
+    }
+
+    #[tokio::test]
+    async fn stream_report_bytes_are_unchanged() {
+        let (mut channel, mut peers) = test_display_channel().await;
+
+        // A 51-byte STREAM_CREATE (the clip type ends it) for MJPEG
+        // stream 7, so that there is a stream to report on.
+        let mut create = vec![0u8; 51];
+        create[4..8].copy_from_slice(&7u32.to_le_bytes());
+        create[9] = SPICE_VIDEO_CODEC_TYPE_MJPEG;
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("stream_create");
+
+        let stream = channel.streams.get_mut(&7).expect("stream 7 exists");
+        stream.report_unique_id = 0xdead_beef;
+        stream.report_start_frame_mm_time = 100;
+        stream.report_end_frame_mm_time = 0;
+        stream.report_num_frames = 5;
+        stream.report_num_drops = 1;
+
+        channel
+            .send_stream_report(7)
+            .await
+            .expect("send STREAM_REPORT");
+        let sent = sent_bytes(&mut peers, 6 + 32).await;
+        assert_eq!(
+            &sent[..30],
+            &[
+                102, 0, 32, 0, 0, 0, // mini header: STREAM_REPORT, 32 bytes
+                7, 0, 0, 0, // stream_id
+                0xef, 0xbe, 0xad, 0xde, // unique_id
+                100, 0, 0, 0, // start_frame_mm_time
+                0, 0, 0, 0, // end_frame_mm_time
+                5, 0, 0, 0, // num_frames
+                1, 0, 0, 0, // num_drops
+            ]
+        );
+        // last_frame_delay is end_frame_mm_time minus the clock's now,
+        // which has advanced by however long the test took.
+        let delay = i32::from_le_bytes([sent[30], sent[31], sent[32], sent[33]]);
+        assert!((-60_000..=0).contains(&delay), "delay {delay}");
+        assert_eq!(&sent[34..], &[0xff, 0xff, 0xff, 0xff]); // audio_delay
     }
 }
