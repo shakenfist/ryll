@@ -156,7 +156,9 @@ pub mod capabilities {
     /// (SPICE_DISPLAY_CAP_CODEC_MJPEG).
     pub const DISPLAY_CODEC_MJPEG: u32 = 1 << 9;
     /// Client can decode H.264 video streams via openh264
-    /// (SPICE_DISPLAY_CAP_CODEC_H264).
+    /// (SPICE_DISPLAY_CAP_CODEC_H264). Defined and named for the
+    /// traffic viewer, but deliberately absent from
+    /// [`DEFAULT_DISPLAY`] until shakenfist/ryll#398 is fixed.
     pub const DISPLAY_CODEC_H264: u32 = 1 << 11;
     /// Client sends a preferred video-codec list via
     /// `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` at link-up
@@ -168,11 +170,27 @@ pub mod capabilities {
     // software path that produces far fewer display updates.
     // LZ4_COMPRESSION allows the server to choose LZ4 over Zlib
     // for static-UI regions, improving bandwidth efficiency.
-    // MULTI_CODEC + CODEC_MJPEG + CODEC_H264 tell the server it
-    // may use H.264 for video streams (smaller on the wire than
-    // MJPEG for sustained playback). PREF_COMPRESSION and
-    // PREF_VIDEO_CODEC_TYPE let us actively steer the server's
-    // choice via the matching MSGC opcodes at link-up.
+    // MULTI_CODEC + CODEC_MJPEG tell the server which video codecs
+    // it may stream to us. PREF_COMPRESSION and PREF_VIDEO_CODEC_TYPE
+    // let us actively steer the server's choice via the matching MSGC
+    // opcodes at link-up.
+    //
+    // CODEC_H264 is deliberately NOT advertised. H.264 streams from
+    // spice-server's GStreamer encoder never decode in ryll (openh264
+    // reports no parameter sets; shakenfist/ryll#398), so a video
+    // region streamed as H.264 stays black or stale. The capability,
+    // not the preference message, is what gates H.264: the display
+    // channel's encoder selection only reorders the server's codec
+    // list by the client's preference and then takes the first codec
+    // whose capability the client advertised and whose encoder
+    // starts, so H.264 stays eligible even when unlisted in the
+    // preference (for example a server configured with
+    // `video-codecs=gstreamer:h264` only). The streaming-agent path
+    // (spice-server's stream channel) ignores the preference message
+    // entirely and offers the guest agent every codec the client has
+    // the capability for. Leaving the bit out is the only way to keep
+    // both paths on MJPEG. Restore it, and H.264 in the display
+    // channel's codec preference, once #398 is fixed.
     pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
         | DISPLAY_MONITORS_CONFIG
         | DISPLAY_COMPOSITE
@@ -182,7 +200,6 @@ pub mod capabilities {
         | DISPLAY_PREF_COMPRESSION
         | DISPLAY_MULTI_CODEC
         | DISPLAY_CODEC_MJPEG
-        | DISPLAY_CODEC_H264
         | DISPLAY_PREF_VIDEO_CODEC_TYPE;
 
     /// Single source of truth mapping each known display-channel
