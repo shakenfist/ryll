@@ -13,8 +13,9 @@ decompression algorithms:
   raw LZ4 blocks with big-endian lengths, decoded with `lz4_flex`).
   Feature `lz4` (default), pulls in `lz4_flex`.
 - **Encoders** — feature `encode` (off by default, independent of
-  the decoder features), for SPICE servers. The encoders are new and
-  LZ4 (`encode_spice_lz4`, from a borrowed `Bgrx` image) is the first.
+  the decoder features), for SPICE servers. Both encoders take a
+  borrowed `Bgrx` image: LZ4 (`encode_spice_lz4`) and baseline 4:2:0
+  JPEG (`encode_spice_jpeg`, via the pure-Rust `jpeg-encoder`).
 
 The crate name covers both directions. Decompression is the
 default; compression is opt-in through `encode`.

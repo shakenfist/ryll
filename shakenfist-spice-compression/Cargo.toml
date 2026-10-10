@@ -20,8 +20,8 @@ lz = []
 lz4 = ["dep:lz4_flex"]
 # Image encoders, for SPICE servers. Independent of the decoder
 # features above, so `default-features = false, features = ["encode"]`
-# builds. LZ4 is the first encoder.
-encode = ["dep:lz4_flex"]
+# builds. LZ4 and JPEG are the encoders.
+encode = ["dep:lz4_flex", "dep:jpeg-encoder"]
 jpeg = ["dep:jpeg-decoder"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
@@ -38,6 +38,10 @@ thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.14", optional = true }
+# Pure-Rust JPEG encoder, for `encode_spice_jpeg`. Default features
+# are off; `simd` implies `std` and adds an AVX2 path chosen at run
+# time (`is_x86_feature_detected!`), with no build requirements.
+jpeg-encoder = { version = "0.7", optional = true, default-features = false, features = ["simd"] }
 # Byte-bounded LRU shared by the GLZ dictionary (this crate) and
 # the renderer's image_cache wrapper.  Same version pin as the
 # renderer's previous `lru` dep.
