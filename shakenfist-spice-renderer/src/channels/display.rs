@@ -1705,6 +1705,12 @@ impl DisplayChannel {
                         },
                     );
                     self.streams_created_total = self.streams_created_total.saturating_add(1);
+                } else {
+                    warn_once!(
+                        "display:decode_failure:stream_create:malformed",
+                        "display: stream_create: malformed message ignored ({} bytes)",
+                        payload.len()
+                    );
                 }
             }
 
@@ -1713,18 +1719,22 @@ impl DisplayChannel {
                 // One whose data_size runs past the body is malformed. The
                 // frame is borrowed from the payload, not copied.
                 let mut r = BoundedReader::new(payload);
-                let (base, dest, jpeg_data) = if msg_type == display_server::STREAM_DATA_SIZED {
-                    let Ok(frame) = StreamDataSizedRef::read(&mut r) else {
-                        return Ok(());
-                    };
-                    // The wire's edges are signed; ryll keeps their bits.
-                    let (left, top, right, bottom) = ltrb(&frame.dest);
-                    (frame.base, Some((top, left, bottom, right)), frame.data)
+                let frame = if msg_type == display_server::STREAM_DATA_SIZED {
+                    StreamDataSizedRef::read(&mut r).map(|frame| {
+                        // The wire's edges are signed; ryll keeps their bits.
+                        let (left, top, right, bottom) = ltrb(&frame.dest);
+                        (frame.base, Some((top, left, bottom, right)), frame.data)
+                    })
                 } else {
-                    let Ok(frame) = StreamDataRef::read(&mut r) else {
-                        return Ok(());
-                    };
-                    (frame.base, None, frame.data)
+                    StreamDataRef::read(&mut r).map(|frame| (frame.base, None, frame.data))
+                };
+                let Ok((base, dest, jpeg_data)) = frame else {
+                    warn_once!(
+                        "display:decode_failure:stream_data:malformed",
+                        "display: stream_data: malformed frame dropped ({} bytes)",
+                        payload.len()
+                    );
+                    return Ok(());
                 };
                 let (stream_id, frame_mm_time) = (base.id, base.multi_media_time);
 
@@ -4467,6 +4477,7 @@ mod tests {
             channel.streams[&7].frames_received, 0,
             "an ignored frame is not counted"
         );
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:stream_data:malformed"));
 
         channel
             .handle_message(display_server::STREAM_DESTROY, &[7, 0, 0])
@@ -4486,8 +4497,19 @@ mod tests {
             .handle_message(display_server::STREAM_CREATE, &create)
             .await
             .expect("a STREAM_CREATE without its clip is ignored");
+
+        // A RECTS clip claiming one rectangle, and no rectangle.
+        create.push(clip_type::RECTS);
+        create.extend_from_slice(&1u32.to_le_bytes());
+        channel
+            .handle_message(display_server::STREAM_CREATE, &create)
+            .await
+            .expect("a STREAM_CREATE with its clip rects cut short is ignored");
         assert!(channel.streams.is_empty());
         assert_eq!(channel.streams_created_total, 0);
+        assert!(
+            logging::warn_once_keys().contains(&"display:decode_failure:stream_create:malformed")
+        );
     }
 
     #[tokio::test]

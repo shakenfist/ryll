@@ -2,18 +2,19 @@
 
 use libfuzzer_sys::fuzz_target;
 use shakenfist_spice_protocol::messages::vd_agent::{
-    AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest, ClipboardWireType,
-    MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
+    AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
+    ClipboardWireType, MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
 };
 use shakenfist_spice_protocol::messages::{
-    AckSync, AgentTokens, Disconnecting, DisplayInit, KeyEvent, KeyModifiers, KeyScancode, MouseButton,
-    MouseModeRequest, MouseMotion, MousePosition, PreferredCompression, PreferredVideoCodecType, Pong, StreamReport,
-    WireType,
+    AckSync, AgentTokens, Disconnecting, DisplayInit, KeyEvent, KeyModifiers, KeyScancode,
+    MouseButton, MouseModeRequest, MouseMotion, MousePosition, Pong, PreferredCompression,
+    PreferredVideoCodecType, StreamReport, WireType,
 };
 
-// The readers andris runs on client-to-server messages. The first input byte
-// selects a reader and the rest is the body. If the reader accepts the body,
-// the value must survive write -> decode unchanged.
+// The readers a SPICE server or proxy (kerbside, andris) runs on
+// client-to-server messages. The first input byte selects a reader and the
+// rest is the body. If the reader accepts the body, the value must survive
+// write -> decode unchanged.
 fn check<T: WireType + PartialEq + std::fmt::Debug>(body: &[u8]) {
     if let Ok(value) = T::decode(body) {
         let mut written = Vec::new();

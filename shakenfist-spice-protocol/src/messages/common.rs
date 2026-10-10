@@ -60,8 +60,9 @@ pub struct Ping {
     pub id: u32,
     pub timestamp: u64,
     /// Bytes of padding after the fixed fields. The writer emits this many
-    /// zeros, so a sender chooses it and should keep it small: it is not
-    /// bounded here.
+    /// zeros, so a sender chooses it and should keep it small. The whole
+    /// body must fit the mini header's `u32` size, which the writer
+    /// debug-asserts; nothing tighter is enforced here.
     pub padding_len: usize,
 }
 
@@ -95,6 +96,10 @@ impl WireType for Ping {
     }
 
     fn write(&self, out: &mut Vec<u8>) {
+        debug_assert!(
+            self.padding_len <= u32::MAX as usize - Self::SIZE,
+            "a PING body must fit the mini header's u32 size"
+        );
         out.extend_from_slice(&self.id.to_le_bytes());
         out.extend_from_slice(&self.timestamp.to_le_bytes());
         out.resize(out.len() + self.padding_len, 0);

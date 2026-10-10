@@ -1496,8 +1496,7 @@ impl MainChannel {
                     return Ok(());
                 };
                 // A message too short for its layout is malformed and
-                // skipped. That includes a request whose type is missing,
-                // which therefore gets no NONE answer.
+                // skipped.
                 let msg = match GuestClipboard::decode(agent_type, payload, has_selection) {
                     Ok(msg) => msg,
                     Err(e) => {
@@ -1507,6 +1506,17 @@ impl MainChannel {
                             payload.len(),
                             e
                         );
+                        // A request whose type is missing is still answered
+                        // NONE when its selection is readable, so the guest
+                        // application asking for the paste is not left
+                        // waiting. A release is exactly a selection header.
+                        if agent_type == VD_AGENT_CLIPBOARD_REQUEST {
+                            if let Ok(header) =
+                                ClipboardRelease::decode_with(payload, has_selection)
+                            {
+                                self.send_clipboard_none(header.selection).await?;
+                            }
+                        }
                         return Ok(());
                     }
                 };
@@ -2354,6 +2364,35 @@ mod tests {
             assert!(!channel.send_clipboard_request().await.unwrap());
             assert!(!channel.send_clipboard_data("hi").await.unwrap());
             assert!(!channel.send_clipboard_none(0).await.unwrap());
+            assert_eq!(channel.agent_tokens, 10, "nothing was sent");
+        }
+
+        #[tokio::test]
+        async fn a_request_missing_its_type_is_answered_none() {
+            // With the selection header: NONE for the selection it names.
+            let (mut channel, mut peers) = clipboard_channel(true).await;
+            channel
+                .handle_agent_message(VD_AGENT_CLIPBOARD_REQUEST, &[1, 0, 0, 0])
+                .await
+                .unwrap();
+            let none = agent_data(4, &[1, 0, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(peers.read_sent(none.len()).await, none);
+
+            // Without it: NONE for CLIPBOARD, the only selection there is.
+            let (mut channel, mut peers) = clipboard_channel(false).await;
+            channel
+                .handle_agent_message(VD_AGENT_CLIPBOARD_REQUEST, &[])
+                .await
+                .unwrap();
+            let none = agent_data(4, &[0, 0, 0, 0]);
+            assert_eq!(peers.read_sent(none.len()).await, none);
+
+            // A selection header cut short names no selection to answer.
+            let (mut channel, _peers) = clipboard_channel(true).await;
+            channel
+                .handle_agent_message(VD_AGENT_CLIPBOARD_REQUEST, &[1, 0])
+                .await
+                .unwrap();
             assert_eq!(channel.agent_tokens, 10, "nothing was sent");
         }
     }

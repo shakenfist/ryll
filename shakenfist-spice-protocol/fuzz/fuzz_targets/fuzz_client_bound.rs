@@ -2,15 +2,16 @@
 
 use libfuzzer_sys::fuzz_target;
 use shakenfist_spice_protocol::messages::vd_agent::{
-    AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest, ClipboardWireType,
-    MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
+    AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
+    ClipboardWireType, MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
 };
 use shakenfist_spice_protocol::messages::{
-    AgentDisconnected, AgentTokens, BinaryData, BitmapHeader, BitmapPayload, ChannelsList, Clip, CursorInit,
-    CursorInvalOne, CursorMove, CursorSet, DisplayHead, DisplayMonitorsConfig, DrawBase, DrawCopy, ImageDescriptor,
-    InputsInit, KeyModifiers, MainInit, MainMouseMode, MultiMediaTime, Notify, Ping, Rect, SetAck, SpiceCopy,
-    SpiceImage, SpicePoint, SpiceQMask, StreamActivateReport, StreamClip, StreamCreate, StreamData, StreamDataSized,
-    StreamDestroy, SurfaceCreate, SurfaceDestroy, WireType,
+    AgentDisconnected, AgentTokens, BinaryData, BitmapHeader, BitmapPayload, ChannelsList, Clip,
+    CursorInit, CursorInvalOne, CursorMove, CursorSet, DisplayHead, DisplayMonitorsConfig,
+    DrawBase, DrawCopy, ImageDescriptor, InputsInit, KeyModifiers, MainInit, MainMouseMode,
+    MultiMediaTime, Notify, Ping, Rect, SetAck, SpiceCopy, SpiceImage, SpicePoint, SpiceQMask,
+    StreamActivateReport, StreamClip, StreamCreate, StreamData, StreamDataSized, StreamDestroy,
+    SurfaceCreate, SurfaceDestroy, WireType,
 };
 
 // The readers ryll runs on server-to-client messages, plus the layout types
