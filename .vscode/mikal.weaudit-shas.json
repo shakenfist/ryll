@@ -69,10 +69,6 @@
       "sha": "4f075c1b65ff62c072d9ed7a09fc5a20be23eb8a",
       "date": "2026-10-05"
     },
-    "ARCHITECTURE.md": {
-      "sha": "d03954d94190d6b3510ca67ce97c7896dbee3629",
-      "date": "2026-10-05"
-    },
     "Cargo.toml": {
       "sha": "a62383370b16751c4d9c5d5328e4883d7fbdebe9",
       "date": "2026-09-23"
@@ -153,10 +149,6 @@
       "sha": "81edb01125016cce7fda7b6edd14dc498a38836c",
       "date": "2026-10-10"
     },
-    "docs/rendering-pipeline.md": {
-      "sha": "b085b46e91088dd4f3b9af600571d6b34597196f",
-      "date": "2026-10-10"
-    },
     "docs/session-lifecycle.md": {
       "sha": "0ef7cd691c1a103460a8df67847c6af16b532aee",
       "date": "2026-10-05"
@@ -193,10 +185,6 @@
       "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
       "date": "2026-09-18"
     },
-    "ryll/src/app.rs": {
-      "sha": "208b8cd3edd7990256123ba9e09b31e9bec31d6f",
-      "date": "2026-10-10"
-    },
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
       "date": "2026-09-27"
@@ -216,10 +204,6 @@
     "ryll/src/config.rs": {
       "sha": "f9d3b46246498279f4d81d1de8b375f821d67d32",
       "date": "2026-10-05"
-    },
-    "ryll/src/display_gui.rs": {
-      "sha": "71a3226388f3929ec3b595f5b789b9f22cce800a",
-      "date": "2026-07-26"
     },
     "ryll/src/input_egui.rs": {
       "sha": "8b5c2d7a86274f4dc6895bdebeb1668aa9622e58",
@@ -485,10 +469,6 @@
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/lib.rs": {
-      "sha": "128f21bc2958ab4676ddb5a963591c6c1687be7f",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-renderer/src/log_config.rs": {
       "sha": "7339aea51a0a9ff9efbb09f489e17bae62df7315",
       "date": "2026-07-21"
@@ -520,10 +500,6 @@
     "shakenfist-spice-renderer/src/session_state.rs": {
       "sha": "7a3e2ae84a36cc7d91ac742b22e9f4c64c7274a1",
       "date": "2026-10-05"
-    },
-    "shakenfist-spice-renderer/src/surface_mirror.rs": {
-      "sha": "896a0b88832e80822e5477814e25ec44eb48edb6",
-      "date": "2026-07-21"
     },
     "shakenfist-spice-renderer/src/traffic.rs": {
       "sha": "ef5d6e5db8499bf3eddb2beaeb0419d18c3e522c",

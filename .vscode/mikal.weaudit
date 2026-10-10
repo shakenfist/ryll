@@ -120,10 +120,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/surface_mirror.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/traffic.rs",
       "author": "mikal"
     },
@@ -137,10 +133,6 @@
     },
     {
       "path": "shakenfist-spice-usbredir/src/parser.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/display_gui.rs",
       "author": "mikal"
     },
     {
@@ -824,10 +816,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
@@ -852,10 +840,6 @@
       "author": "mikal"
     },
     {
-      "path": "ARCHITECTURE.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/limits.rs",
       "author": "mikal"
     },
@@ -872,15 +856,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/rendering-pipeline.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/diagnostics.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/app.rs",
       "author": "mikal"
     },
     {
