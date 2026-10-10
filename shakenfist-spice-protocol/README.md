@@ -7,10 +7,12 @@ needed to implement a SPICE client, server, or proxy in Rust:
   `ChannelType`, `SpiceError`, `ImageType`, `NotifySeverity`,
   and the message-type opcode constants for every channel
   direction (main / display / inputs / cursor / spicevmc).
-- **`messages`** — wire-format structs with `read`/`write`
-  methods for every SPICE message type ryll knows about,
-  including the input event types (`KeyEvent`,
-  `MousePosition`, `MouseButton`, `KeyModifiers`).
+- **`messages`** — wire-format types implementing the
+  `WireType` trait (a bounds-checked `read` and an infallible
+  `write`) for every SPICE message type ryll knows about, in
+  per-channel submodules (common, main, display, cursor, inputs,
+  vd_agent). The types cover both directions, so a server or
+  proxy can build the messages a client reads.
 - **`link`** — SPICE link handshake (`SpiceLinkMess`,
   `SpiceLinkReply`, `perform_link`, `perform_auth`, and
   `perform_link_with_caps` to advertise caller-chosen,
