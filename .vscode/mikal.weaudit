@@ -676,14 +676,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/README.md",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/fuzz/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/fuzz/fuzz_targets/fuzz_parse_connect_response.rs",
       "author": "mikal"
     },
@@ -692,19 +684,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/fuzz/fuzz_targets",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/reader.rs",
-      "author": "mikal"
-    },
-    {
       "path": "PLAN-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "PUSH-AUDIT.md",
       "author": "mikal"
     },
     {
@@ -764,10 +744,6 @@
       "author": "mikal"
     },
     {
-      "path": "STYLEGUIDE.md",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/codeql-analysis.yml",
       "author": "mikal"
     },
@@ -796,35 +772,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/messages.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/cursor.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/display.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/inputs.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/usbredir.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/webdav.rs",
-      "author": "mikal"
-    },
-    {
       "path": "tools/mermaid-lint.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "AGENTS.md",
       "author": "mikal"
     },
     {
@@ -904,10 +852,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/channels/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/control/server.rs",
       "author": "mikal"
     },
@@ -964,23 +908,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/constants.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/spice-protocol.md",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/main_channel.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src",
       "author": "mikal"
     },
     {
@@ -1000,35 +928,7 @@
       "author": "mikal"
     },
     {
-      "path": "docs/troubleshooting.md",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/bugreport.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/channel-diagnostics-audit.md",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/snapshots.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels/playback.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/channels",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer",
       "author": "mikal"
     }
   ],
