@@ -158,7 +158,8 @@ pub mod capabilities {
     /// Client can decode H.264 video streams via openh264
     /// (SPICE_DISPLAY_CAP_CODEC_H264). Defined and named for the
     /// traffic viewer, but deliberately absent from
-    /// [`DEFAULT_DISPLAY`] until shakenfist/ryll#398 is fixed.
+    /// [`DEFAULT_DISPLAY`] until shakenfist/ryll#398 is fixed. Only
+    /// advertised when the user opts in with `--experimental-h264`.
     pub const DISPLAY_CODEC_H264: u32 = 1 << 11;
     /// Client sends a preferred video-codec list via
     /// `SPICE_MSGC_DISPLAY_PREFERRED_VIDEO_CODEC_TYPE` at link-up
@@ -190,7 +191,9 @@ pub mod capabilities {
     // entirely and offers the guest agent every codec the client has
     // the capability for. Leaving the bit out is the only way to keep
     // both paths on MJPEG. Restore it, and H.264 in the display
-    // channel's codec preference, once #398 is fixed.
+    // channel's codec preference, once #398 is fixed. Until then the
+    // `--experimental-h264` opt-in adds the bit back per session (see
+    // `link::display_channel_caps`); this constant stays without it.
     pub const DEFAULT_DISPLAY: u32 = DISPLAY_SIZED_STREAM
         | DISPLAY_MONITORS_CONFIG
         | DISPLAY_COMPOSITE

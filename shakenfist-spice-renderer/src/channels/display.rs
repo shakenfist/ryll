@@ -166,8 +166,27 @@ const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
 /// capabilities (see `capabilities::DEFAULT_DISPLAY`); this list just
 /// stays consistent with that. The H.264 decoder is kept, so restoring
 /// `SPICE_VIDEO_CODEC_TYPE_H264` here and the capability bit is the
-/// whole change once #398 is fixed.
+/// whole change once #398 is fixed. Until then `--experimental-h264`
+/// opts a session in; see [`EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS`].
 const PREFERRED_VIDEO_CODECS: &[u8] = &[SPICE_VIDEO_CODEC_TYPE_MJPEG];
+
+/// The video codec preference sent when the user opts in to H.264 from
+/// spice-server with `--experimental-h264`: H.264 then MJPEG, as ryll
+/// sent before #398 disabled it. The session also advertises
+/// `DISPLAY_CODEC_H264` in that case (`link::display_channel_caps`),
+/// which is what actually lets the server choose H.264.
+const EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS: &[u8] =
+    &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG];
+
+/// The video codec preference to send at link-up, given whether the
+/// `--experimental-h264` opt-in is on.
+fn preferred_video_codecs(experimental_h264: bool) -> &'static [u8] {
+    if experimental_h264 {
+        EXPERIMENTAL_H264_PREFERRED_VIDEO_CODECS
+    } else {
+        PREFERRED_VIDEO_CODECS
+    }
+}
 
 /// Sliding-window threshold for triggering a STREAM_REPORT
 /// early due to consecutive frame drops. Matches spice-gtk's
@@ -859,6 +878,11 @@ pub struct DisplayChannel {
     /// evaluates the STREAM_REPORT trigger predicate and computes
     /// `last_frame_delay` at send time.
     mm_clock: Arc<MmClock>,
+    /// Whether the user opted in to H.264 from spice-server with
+    /// `--experimental-h264` (ryll#398). Picks the link-up video codec
+    /// preference; the matching capability bit was chosen when the
+    /// channel linked.
+    experimental_h264: bool,
     /// Bounded ring of the most recent MJPEG decode durations in
     /// microseconds, newest at the back. Capped at `MAX_RECENT_DECODES`
     /// to match the non-stream recent-decode ring. Used by
@@ -918,6 +942,7 @@ impl DisplayChannel {
         glz_dictionary: SharedGlzDictionary,
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
+        experimental_h264: bool,
         image_cache_cap_bytes: usize,
         preferred_compression: u8,
     ) -> Self {
@@ -969,6 +994,7 @@ impl DisplayChannel {
             last_send_snapshot_publish: None,
             recently_destroyed_streams: VecDeque::new(),
             mm_clock,
+            experimental_h264,
             mjpeg_recent_durations: VecDeque::new(),
             mjpeg_decode_total_count: 0,
             mjpeg_decode_failed_count: 0,
@@ -1093,7 +1119,7 @@ impl DisplayChannel {
         // `auto-glz` is in docs/configuration.md.
         self.send_preferred_compression(self.preferred_compression)
             .await?;
-        self.send_preferred_video_codec_type(PREFERRED_VIDEO_CODECS)
+        self.send_preferred_video_codec_type(preferred_video_codecs(self.experimental_h264))
             .await?;
         Ok(())
     }
@@ -4214,6 +4240,7 @@ mod tests {
             DisplayChannel::new_shared_glz_dictionary(1024 * 1024),
             LogConfig::default(),
             Arc::new(MmClock::new()),
+            false,
             1024 * 1024,
             image_compression::AUTO_GLZ,
         );
@@ -5306,18 +5333,15 @@ mod tests {
         // What run_loop sends at link-up: MJPEG (1) only, until
         // shakenfist/ryll#398 is fixed. See PREFERRED_VIDEO_CODECS.
         channel
-            .send_preferred_video_codec_type(PREFERRED_VIDEO_CODECS)
+            .send_preferred_video_codec_type(preferred_video_codecs(false))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
         assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
 
-        // A multi-codec list keeps its order on the wire: H.264 (3)
-        // then MJPEG (1).
+        // With --experimental-h264: H.264 (3) then MJPEG (1), the
+        // multi-codec list keeping its order on the wire.
         channel
-            .send_preferred_video_codec_type(&[
-                SPICE_VIDEO_CODEC_TYPE_H264,
-                SPICE_VIDEO_CODEC_TYPE_MJPEG,
-            ])
+            .send_preferred_video_codec_type(preferred_video_codecs(true))
             .await
             .expect("send PREFERRED_VIDEO_CODEC_TYPE");
         assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
@@ -5331,6 +5355,20 @@ mod tests {
         let sent = peers.read_sent(6 + 256).await;
         assert_eq!(&sent[..7], &[105, 0, 0, 1, 0, 0, 255]);
         assert_eq!(&sent[7..], &codecs[..255]);
+    }
+
+    #[test]
+    fn preferred_video_codecs_follow_the_experimental_h264_opt_in() {
+        // Default: MJPEG only, until shakenfist/ryll#398 is fixed.
+        assert_eq!(
+            preferred_video_codecs(false),
+            &[SPICE_VIDEO_CODEC_TYPE_MJPEG]
+        );
+        // --experimental-h264: H.264 first, MJPEG as the fallback.
+        assert_eq!(
+            preferred_video_codecs(true),
+            &[SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG]
+        );
     }
 
     #[tokio::test]

@@ -712,6 +712,23 @@ pub fn default_channel_caps(channel_type: ChannelType) -> u32 {
     }
 }
 
+/// The display channel capability word ryll advertises, given whether
+/// the experimental H.264 opt-in (`--experimental-h264`) is on.
+///
+/// Off, this is [`capabilities::DEFAULT_DISPLAY`], which leaves out
+/// `DISPLAY_CODEC_H264` because H.264 from spice-server does not decode
+/// yet (shakenfist/ryll#398). On, it adds that bit back, which is what
+/// lets spice-server choose H.264 for a video stream: the capability,
+/// not the preferred-codec message, gates the server's choice. See the
+/// comment on `DEFAULT_DISPLAY`.
+pub fn display_channel_caps(experimental_h264: bool) -> u32 {
+    if experimental_h264 {
+        capabilities::DEFAULT_DISPLAY | capabilities::DISPLAY_CODEC_H264
+    } else {
+        capabilities::DEFAULT_DISPLAY
+    }
+}
+
 /// Perform the link handshake, advertising ryll's default capabilities:
 /// [`capabilities::DEFAULT_COMMON`] and [`default_channel_caps`] for
 /// `channel_type`. See [`perform_link_with_caps`] to advertise others.
@@ -1971,5 +1988,28 @@ mod tests {
             assert_eq!(default_channel_caps(other), capabilities::DEFAULT_OTHER);
         }
         assert_eq!(capabilities::DEFAULT_OTHER, 0b1001);
+    }
+
+    /// Without the opt-in the display channel advertises exactly the
+    /// defaults, so H.264 stays off (ryll#398).
+    #[test]
+    fn display_channel_caps_default_is_default_display() {
+        assert_eq!(display_channel_caps(false), capabilities::DEFAULT_DISPLAY);
+        assert_eq!(
+            display_channel_caps(false) & capabilities::DISPLAY_CODEC_H264,
+            0
+        );
+    }
+
+    /// The `--experimental-h264` opt-in adds `CODEC_H264` and changes
+    /// nothing else.
+    #[test]
+    fn display_channel_caps_experimental_h264_adds_only_codec_h264() {
+        let caps = display_channel_caps(true);
+        assert_ne!(caps & capabilities::DISPLAY_CODEC_H264, 0);
+        assert_eq!(
+            caps & !capabilities::DISPLAY_CODEC_H264,
+            capabilities::DEFAULT_DISPLAY
+        );
     }
 }

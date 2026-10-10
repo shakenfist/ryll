@@ -28,6 +28,8 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use shakenfist_spice_protocol::constants::capabilities;
+use shakenfist_spice_protocol::link::display_channel_caps;
 use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
 
 use crate::audio_sink::OpusPacketSink;
@@ -186,6 +188,11 @@ impl crate::control::StatusProvider for SessionStatus {
 /// agent state. The caller subscribes to it before calling this, and
 /// should create a fresh one for every attempt: its senders are dropped
 /// when this session ends.
+///
+/// `experimental_h264` is the `--experimental-h264` opt-in: each display
+/// channel then advertises `DISPLAY_CODEC_H264` and asks for H.264 ahead
+/// of MJPEG. Off by default because H.264 from spice-server does not
+/// decode yet (shakenfist/ryll#398).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_connection(
     config: ConnectionConfig,
@@ -209,6 +216,7 @@ pub async fn run_connection(
     cancel: Arc<AtomicBool>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
+    experimental_h264: bool,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
@@ -301,8 +309,16 @@ pub async fn run_connection(
         }
         match channel_type {
             ChannelType::Display => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
+                // Linked with the caps for this session rather than the
+                // defaults: `--experimental-h264` adds CODEC_H264.
+                let (stream, _reply) = client
+                    .connect_channel_with_caps(
+                        session_id,
+                        channel_type,
+                        channel_id,
+                        &[capabilities::DEFAULT_COMMON],
+                        &[display_channel_caps(experimental_h264)],
+                    )
                     .await?;
                 let mut channel = DisplayChannel::new(
                     channel_id,
@@ -315,6 +331,7 @@ pub async fn run_connection(
                     shared_glz_dictionary.clone(),
                     log_config,
                     mm_clock.clone(),
+                    experimental_h264,
                     image_cache_cap_bytes,
                     preferred_compression,
                 );
@@ -638,6 +655,7 @@ pub async fn run_headless(
     notifications: Arc<dyn NotificationSink>,
     log_config: LogConfig,
     cancel: Arc<AtomicBool>,
+    experimental_h264: bool,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
     preferred_compression: u8,
@@ -729,6 +747,7 @@ pub async fn run_headless(
             cancel_for_conn,
             None, // headless mode: no clipboard
             None, // headless mode: no opus sink (cpal output only)
+            experimental_h264,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
             preferred_compression,
