@@ -115,6 +115,45 @@ pub fn egui_key_to_logical(key: egui::Key) -> Option<LogicalKey> {
     }
 }
 
+/// ryll's own single-key shortcuts.
+///
+/// This is the one list of keys ryll keeps for itself. `RyllApp::ui`
+/// reads it to decide which key opens what, and `translate_key_events`
+/// reads it to keep those keys from the guest, so a new shortcut added
+/// here is withheld from the guest without anyone having to remember a
+/// second list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostShortcut {
+    /// Save the current display as PNG(s).
+    Screenshot,
+    /// Toggle the live traffic viewer side panel.
+    TrafficViewer,
+    /// Open or close the bug report dialog.
+    BugReport,
+}
+
+impl HostShortcut {
+    pub const ALL: [HostShortcut; 3] = [
+        HostShortcut::Screenshot,
+        HostShortcut::TrafficViewer,
+        HostShortcut::BugReport,
+    ];
+
+    /// The key that triggers this shortcut.
+    pub const fn key(self) -> egui::Key {
+        match self {
+            HostShortcut::Screenshot => egui::Key::F8,
+            HostShortcut::TrafficViewer => egui::Key::F11,
+            HostShortcut::BugReport => egui::Key::F12,
+        }
+    }
+
+    /// Whether `key` belongs to one of ryll's shortcuts.
+    pub fn is_shortcut_key(key: egui::Key) -> bool {
+        Self::ALL.iter().any(|shortcut| shortcut.key() == key)
+    }
+}
+
 /// The keys ryll has forwarded to the guest as pressed, keyed by the
 /// same key used for the scancode lookup.
 ///
@@ -151,7 +190,7 @@ impl HeldKeys {
 /// forwarded. Releases are always forwarded, even for a key not
 /// recorded as held. Losing window focus releases every held key,
 /// because the matching key-ups will be delivered to another window.
-/// F11 and F12 are ryll's own shortcuts and are never forwarded.
+/// Keys in [`HostShortcut`] are ryll's own and are never forwarded.
 pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
     let mut out = Vec::new();
     for event in events {
@@ -164,7 +203,7 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                 ..
             } => {
                 let lookup_key = physical_key.unwrap_or(*key);
-                if lookup_key == egui::Key::F11 || lookup_key == egui::Key::F12 {
+                if HostShortcut::is_shortcut_key(lookup_key) {
                     continue;
                 }
                 let Some((down_code, up_code)) =
@@ -298,14 +337,44 @@ mod tests {
 
     #[test]
     fn ryll_shortcuts_are_not_forwarded() {
+        for shortcut in HostShortcut::ALL {
+            let mut held = HeldKeys::default();
+            let k = shortcut.key();
+            let events = translate_key_events(
+                &[key(k, k, true, false), key(k, k, false, false)],
+                &mut held,
+            );
+            assert!(events.is_empty(), "{shortcut:?} ({k:?}) was forwarded");
+        }
+    }
+
+    #[test]
+    fn screenshot_key_is_not_forwarded() {
+        // F8 became a shortcut after the original exclusion list was
+        // written and was forwarded to the guest (#481). Pin it by
+        // name, not just through HostShortcut::ALL.
         let mut held = HeldKeys::default();
         let events = translate_key_events(
             &[
-                key(egui::Key::F12, egui::Key::F12, true, false),
-                key(egui::Key::F12, egui::Key::F12, false, false),
+                key(egui::Key::F8, egui::Key::F8, true, false),
+                key(egui::Key::F8, egui::Key::F8, false, false),
             ],
             &mut held,
         );
         assert!(events.is_empty());
+        assert!(held.release_all().is_empty());
+    }
+
+    #[test]
+    fn non_shortcut_function_key_is_forwarded() {
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::F7, egui::Key::F7, true, false),
+                key(egui::Key::F7, egui::Key::F7, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x41), (false, 0xC1)]);
     }
 }

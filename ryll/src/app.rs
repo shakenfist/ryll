@@ -27,7 +27,7 @@ use crate::bugreport::{
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::TextureCache;
-use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys};
+use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys, HostShortcut};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
@@ -3437,7 +3437,7 @@ impl eframe::App for RyllApp {
 
         // F12 toggles bug report dialog (not during region selection)
         if !self.region_select_active {
-            let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
+            let f12_pressed = ctx.input(|i| i.key_pressed(HostShortcut::BugReport.key()));
             if f12_pressed {
                 if self.show_bug_dialog {
                     self.show_bug_dialog = false;
@@ -3453,7 +3453,7 @@ impl eframe::App for RyllApp {
 
         // F11 toggles traffic viewer (not during region selection)
         if !self.region_select_active {
-            let f11_pressed = ctx.input(|i| i.key_pressed(egui::Key::F11));
+            let f11_pressed = ctx.input(|i| i.key_pressed(HostShortcut::TrafficViewer.key()));
             if f11_pressed {
                 self.show_traffic_viewer = !self.show_traffic_viewer;
             }
@@ -3461,7 +3461,7 @@ impl eframe::App for RyllApp {
 
         // F8 opens screenshot save dialog (not during region selection)
         if !self.region_select_active {
-            let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
+            let f8_pressed = ctx.input(|i| i.key_pressed(HostShortcut::Screenshot.key()));
             if f8_pressed {
                 self.open_screenshot_dialog();
             }
@@ -3797,14 +3797,20 @@ impl eframe::App for RyllApp {
                             ui.checkbox(&mut self.show_usb_panel, "USB");
                             ui.checkbox(&mut self.show_webdav_panel, "Folders");
                             if ui
-                                .add(egui::Button::new("Screenshot").shortcut_text("F8"))
+                                .add(
+                                    egui::Button::new("Screenshot")
+                                        .shortcut_text(HostShortcut::Screenshot.key().name()),
+                                )
                                 .clicked()
                             {
                                 self.open_screenshot_dialog();
                                 ui.close();
                             }
                             if ui
-                                .add(egui::Button::new("Report").shortcut_text("F12"))
+                                .add(
+                                    egui::Button::new("Report")
+                                        .shortcut_text(HostShortcut::BugReport.key().name()),
+                                )
                                 .clicked()
                             {
                                 self.show_bug_dialog = true;

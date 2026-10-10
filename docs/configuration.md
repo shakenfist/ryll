@@ -318,6 +318,7 @@ by ryll and not forwarded to the guest VM.
 
 | Shortcut | Action |
 |----------|--------|
+| F8 | Save the current display as PNG(s) via a native file dialog |
 | F11 | Toggle the live traffic viewer side panel |
 | F12 | Open / close the bug report dialog |
 | Escape | Close the bug report dialog, or skip region selection |
