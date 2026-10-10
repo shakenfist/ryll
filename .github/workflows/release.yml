@@ -133,12 +133,15 @@ jobs:
             # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            features: "--no-default-features"
+            # Windows drops only `capture` (pcap-file / etherparse /
+            # mp4 do not build here). --no-default-features also
+            # turns off gui and audio, so add those back explicitly.
+            features: "--no-default-features --features ryll/gui,ryll/audio"
           - name: Windows (aarch64)
             # audit-ok: github-hosted-runner -- no self-hosted Windows hardware
             os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            features: "--no-default-features"
+            features: "--no-default-features --features ryll/gui,ryll/audio"
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"

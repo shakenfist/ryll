@@ -28,15 +28,6 @@
 
 set -euo pipefail
 
-CRATES=(
-    ryll
-    shakenfist-spice-protocol
-    shakenfist-spice-compression
-    shakenfist-spice-usbredir
-    shakenfist-spice-renderer
-    shakenfist-spice-webrtc
-)
-
 err() { echo "error: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
@@ -61,6 +52,22 @@ command -v jq >/dev/null || err "jq not installed"
 
 cd "$(dirname "$0")/.."
 [[ -f Cargo.toml ]] || err "could not find repo root"
+
+# --- workspace crates ---
+
+# Derived from the workspace rather than listed here, so a new crate
+# cannot be missed. `publish = false` shows up as an empty list.
+mapfile -t CRATES < <(cargo metadata --no-deps --format-version 1 \
+    | jq -r '.packages[] | select(.publish != []) | .name')
+[[ ${#CRATES[@]} -gt 0 ]] || err "cargo metadata listed no publishable crates"
+
+# tools/publish-crates.sh has to list the crates by hand, because it
+# publishes them in dependency order. Catch a crate missing from it
+# here, before a tag exists, rather than in the release workflow.
+for crate in "${CRATES[@]}"; do
+    grep -qE "^[[:space:]]+${crate}"'( \\|;)' tools/publish-crates.sh \
+        || err "$crate is a workspace crate but tools/publish-crates.sh does not publish it"
+done
 
 # --- git state checks ---
 

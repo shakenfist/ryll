@@ -49,8 +49,8 @@ The **merge tier** runs on `merge_group` and gates `Can merge`:
 |-----|--------|--------------|
 | `Build (Linux aarch64)` | `ubuntu-24.04-arm` | Build, test, `--web` smokes, `.deb`, `.rpm` |
 | `Build (macOS aarch64)` | `macos-latest` | Build, test, tarball |
-| `Build (Windows x86_64)` | `windows-latest` | Build, test, zip (`--no-default-features`) |
-| `Build (Windows aarch64)` | `windows-11-arm` | Build, test, zip (`--no-default-features`) |
+| `Build (Windows x86_64)` | `windows-latest` | Build, test, zip (no `capture`) |
+| `Build (Windows aarch64)` | `windows-11-arm` | Build, test, zip (no `capture`) |
 
 In practice the smoke tier finishes in about ten minutes, paced
 by the Linux build, and the merge tier in about fifteen, paced

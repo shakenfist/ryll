@@ -31,7 +31,7 @@ which:
   `aarch64` (no QEMU).
 - Sigstore-signs the release tag (keyless, OIDC), gated on the
   `release` environment's manual approval.
-- Publishes all six workspace crates to crates.io in dependency
+- Publishes every workspace crate to crates.io in dependency
   order (see
   [tools/publish-crates.sh](https://github.com/shakenfist/ryll/blob/develop/tools/publish-crates.sh)):
   `shakenfist-spice-protocol` → `shakenfist-spice-compression` →
@@ -45,7 +45,7 @@ which:
 - Updates `shakenfist/homebrew-tap` with the new version and the
   SHA256 of the macOS tarball.
 
-All six workspace crates share a single version, bumped together.
+All workspace crates share a single version, bumped together.
 There is no way to release one crate at a new version without
 releasing the others at the same version — this is intentional.
 
@@ -69,7 +69,7 @@ Two secrets must be configured in the ryll repo settings:
 - **`CARGO_REGISTRY_TOKEN`** — a crates.io API token with
   `publish-new` and `publish-update` scopes, generated at
   <https://crates.io/settings/tokens>. Without it, the
-  `publish-crates` job fails and the six crates do not reach
+  `publish-crates` job fails and the crates do not reach
   crates.io. The GitHub Release and binary artifacts are still
   created.
 - **`HOMEBREW_TAP_TOKEN`** — a GitHub personal access token
@@ -167,8 +167,9 @@ The script will:
 2. Confirm the working tree is clean, the branch is `develop`
    and in sync with `origin/develop`, and neither `v0.2.0` nor
    `release-0.2.0` exist locally or on origin.
-3. Query crates.io for `0.2.0` on all six crates; bail if any
-   already exists.
+3. Query crates.io for `0.2.0` on every workspace crate (read from
+   `cargo metadata`), and check that `tools/publish-crates.sh` publishes
+   each of them; bail if any version already exists or any crate is missing.
 4. Create and switch to `release-0.2.0`.
 5. Run `pre-commit run --all-files`.
 6. Bump `[workspace.package].version` and the matching
@@ -208,7 +209,7 @@ The script will:
    landed). If it still reports the previous version, the PR
    has not merged yet — the script bails.
 4. Show the target SHA and subject line, spell out that
-   pushing the tag will publish all six crates to crates.io
+   pushing the tag will publish every workspace crate to crates.io
    irreversibly, and prompt `Create and push tag v0.2.0? [y/N]`.
 5. On confirmation: create the annotated tag at
    `origin/develop` and push it.
@@ -236,7 +237,7 @@ published.
 | Debian/Ubuntu | `ryll_{version}-1_amd64.deb`, `ryll_{version}-1_arm64.deb` | Binary + auto-detected deps |
 | Fedora/RHEL | `ryll-{version}-1.x86_64.rpm`, `ryll-{version}-1.aarch64.rpm` | Binary + auto-detected deps |
 | macOS (Apple Silicon) | `ryll-{version}-aarch64-apple-darwin.tar.gz` | Binary |
-| Windows | `ryll-{version}-x86_64-pc-windows-msvc.zip`, `ryll-{version}-aarch64-pc-windows-msvc.zip` | Binary (no `--capture`) |
+| Windows | `ryll-{version}-x86_64-pc-windows-msvc.zip`, `ryll-{version}-aarch64-pc-windows-msvc.zip` | GUI binary (no `--capture`) |
 | crates.io | `shakenfist-spice-protocol`, `shakenfist-spice-compression`, `shakenfist-spice-usbredir`, `shakenfist-spice-renderer`, `shakenfist-spice-webrtc`, `ryll` | Source crates |
 | PyPI | `ryll-{version}-py3-none-manylinux_2_28_x86_64.whl`, `ryll-{version}-py3-none-manylinux_2_28_aarch64.whl` | Embedded GUI binary (maturin `bindings = "bin"`); Linux `x86_64`/`aarch64`, glibc >= 2.28 |
 
