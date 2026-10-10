@@ -836,14 +836,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/renovate.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },

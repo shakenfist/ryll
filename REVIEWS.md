@@ -34,7 +34,7 @@ for how this works, including how to verify the attestations.
 | .github/workflows/proxmox-functional.yml | mikal | 2026-09-29 | c42f54754a55 | - |
 | .github/workflows/prune-reviews.yml | mikal | 2026-10-05 | 7fc119ce4625 | - |
 | .github/workflows/release.yml | mikal | 2026-09-26 | c359f63ea871 | - |
-| .github/workflows/renovate.yml | mikal | 2026-10-05 | ab84e6fb10de | - |
+| .github/workflows/renovate.yml | mikal | 2026-10-09 | d63b3b287257 | development@f2bc2590ba8a |
 | .github/workflows/supply-chain.yml | mikal | 2026-09-26 | c855b8e11619 | - |
 | .gitignore | mikal | 2026-09-23 | 699123a656b8 | - |
 | .pre-commit-config.yaml | mikal | 2026-10-05 | 4f075c1b65ff | - |
