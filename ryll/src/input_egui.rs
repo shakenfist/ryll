@@ -5,7 +5,7 @@
 /// SPICE-button representations.  A future web-frontend adapter
 /// will provide the same conversions for `KeyboardEvent.code` /
 /// browser mouse-button values without touching this file.
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use eframe::egui;
 
@@ -165,10 +165,17 @@ impl HostShortcut {
 /// never removed, and every later `:` is flagged as a repeat (and was
 /// dropped) until the window lost focus. Tracking presses here, by the
 /// physical key, keeps each press paired with its release.
+///
+/// It also remembers presses that were deliberately *not* forwarded
+/// because they were part of a host Cmd chord, so that their releases
+/// are withheld too and the guest never sees half of a key stroke.
 #[derive(Debug, Default)]
 pub struct HeldKeys {
     /// Held key -> the wire scancode that releases it.
     held: HashMap<egui::Key, u32>,
+    /// Keys whose press was withheld from the guest as part of a host
+    /// Cmd chord, so their release must be withheld as well.
+    suppressed: HashSet<egui::Key>,
 }
 
 impl HeldKeys {
@@ -176,6 +183,9 @@ impl HeldKeys {
     /// the guest does not see a key stuck down while ryll is not
     /// forwarding input to it.
     pub fn release_all(&mut self) -> Vec<InputEvent> {
+        // A withheld press whose release goes elsewhere must not
+        // swallow the next, unrelated release of the same key.
+        self.suppressed.clear();
         self.held
             .drain()
             .map(|(_, up_code)| InputEvent::KeyUp(up_code))
@@ -191,6 +201,14 @@ impl HeldKeys {
 /// recorded as held. Losing window focus releases every held key,
 /// because the matching key-ups will be delivered to another window.
 /// Keys in [`HostShortcut`] are ryll's own and are never forwarded.
+///
+/// On macOS a key pressed while Cmd is held is a host shortcut (Cmd+Q,
+/// Cmd+W, Cmd+Tab and so on). egui reports no key event for Cmd
+/// itself, so forwarding the rest of the chord would type a bare
+/// letter in the guest; those presses are withheld, and so are their
+/// releases. A key that was already held when Cmd went down is still
+/// released normally. `mac_cmd` is only ever set on macOS, so this
+/// costs nothing elsewhere.
 pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
     let mut out = Vec::new();
     for event in events {
@@ -200,6 +218,7 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                 key,
                 physical_key,
                 pressed,
+                modifiers,
                 ..
             } => {
                 let lookup_key = physical_key.unwrap_or(*key);
@@ -212,11 +231,25 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                     continue;
                 };
                 if *pressed {
-                    if held.held.insert(lookup_key, up_code).is_none() {
-                        out.push(InputEvent::KeyDown(down_code));
+                    if held.held.contains_key(&lookup_key) {
+                        // Auto-repeat of a key the guest already holds.
+                        continue;
                     }
+                    if modifiers.mac_cmd {
+                        held.suppressed.insert(lookup_key);
+                        continue;
+                    }
+                    held.suppressed.remove(&lookup_key);
+                    held.held.insert(lookup_key, up_code);
+                    out.push(InputEvent::KeyDown(down_code));
+                } else if held.held.remove(&lookup_key).is_some() {
+                    out.push(InputEvent::KeyUp(up_code));
+                } else if held.suppressed.remove(&lookup_key) || modifiers.mac_cmd {
+                    // The release of a withheld Cmd chord press. The
+                    // `mac_cmd` arm covers presses egui turned into
+                    // Copy / Cut / Paste events, which never reach
+                    // this function as key presses.
                 } else {
-                    held.held.remove(&lookup_key);
                     out.push(InputEvent::KeyUp(up_code));
                 }
             }
@@ -251,6 +284,22 @@ mod tests {
             pressed,
             repeat,
             modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// A key event with the macOS Cmd key held, as egui-winit reports
+    /// it on macOS (`command` mirrors `mac_cmd` there).
+    fn cmd_key(k: egui::Key, pressed: bool) -> egui::Event {
+        egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                mac_cmd: true,
+                command: true,
+                ..Default::default()
+            },
         }
     }
 
@@ -376,5 +425,90 @@ mod tests {
             &mut held,
         );
         assert_eq!(wire(events), vec![(true, 0x41), (false, 0xC1)]);
+    }
+
+    #[test]
+    fn cmd_chord_is_not_forwarded() {
+        // Cmd+Q, as captured in #480: Q down and up, both with Cmd
+        // held. The guest used to see a bare `q`.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[cmd_key(egui::Key::Q, true), cmd_key(egui::Key::Q, false)],
+            &mut held,
+        );
+        assert!(events.is_empty());
+        assert!(held.release_all().is_empty());
+    }
+
+    #[test]
+    fn cmd_released_before_chord_key_withholds_the_release() {
+        // Cmd+W, letting go of Cmd first: the W release arrives with
+        // no modifiers but must still be withheld, because its press
+        // never reached the guest.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                cmd_key(egui::Key::W, true),
+                key(egui::Key::W, egui::Key::W, false, false),
+            ],
+            &mut held,
+        );
+        assert!(events.is_empty());
+
+        // The next, ordinary W is forwarded as a full key stroke.
+        let events = translate_key_events(
+            &[
+                key(egui::Key::W, egui::Key::W, true, false),
+                key(egui::Key::W, egui::Key::W, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x11), (false, 0x91)]);
+    }
+
+    #[test]
+    fn cmd_copy_release_is_not_forwarded() {
+        // egui-winit turns the Cmd+C press into Event::Copy, so only
+        // the release reaches us as a key event.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[egui::Event::Copy, cmd_key(egui::Key::C, false)],
+            &mut held,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn key_held_before_cmd_is_still_released() {
+        // A is held and forwarded, then Cmd goes down. A's
+        // auto-repeat and release now carry Cmd, but the guest holds A
+        // and must be told when it comes up.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                key(egui::Key::A, egui::Key::A, true, false),
+                cmd_key(egui::Key::A, true),
+                cmd_key(egui::Key::A, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x1E), (false, 0x9E)]);
+    }
+
+    #[test]
+    fn suppressed_press_without_release_does_not_eat_next_stroke() {
+        // A Cmd chord press whose release never reaches ryll (Cmd+Tab
+        // hands the release to another app) must not cause the next
+        // ordinary stroke of that key to be dropped or half-sent.
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                cmd_key(egui::Key::Tab, true),
+                key(egui::Key::Tab, egui::Key::Tab, true, false),
+                key(egui::Key::Tab, egui::Key::Tab, false, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x0F), (false, 0x8F)]);
     }
 }

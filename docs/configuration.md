@@ -323,6 +323,13 @@ by ryll and not forwarded to the guest VM.
 | F12 | Open / close the bug report dialog |
 | Escape | Close the bug report dialog, or skip region selection |
 
+On macOS, Cmd chords belong to the host: a key pressed while Cmd is
+held (Cmd+Q, Cmd+W, Cmd+C and so on) is not forwarded to the guest,
+and neither is its release. ryll does not map Cmd to the guest's
+Super / Windows key, so there is currently no way to send a Super
+chord to the guest from the macOS GUI. A key that was already held
+when Cmd went down is still released in the guest normally.
+
 ## Environment Variables
 
 Currently, ryll does not use environment variables for configuration. All
