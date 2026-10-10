@@ -111,14 +111,18 @@ impl SurfaceMirror {
                 display_channel_id,
                 surface_id,
             } => {
-                info!(
-                    "surface_mirror: surface {}:{} destroyed",
-                    display_channel_id, surface_id
-                );
                 let key = (*display_channel_id, *surface_id);
                 if self.surfaces.remove(&key).is_some() {
+                    info!(
+                        "surface_mirror: surface {}:{} destroyed",
+                        display_channel_id, surface_id
+                    );
                     DrawOutcome::Destroyed { key }
                 } else {
+                    debug!(
+                        "surface_mirror: SurfaceDestroyed on unknown surface {}",
+                        surface_id
+                    );
                     DrawOutcome::UnknownSurface { key }
                 }
             }

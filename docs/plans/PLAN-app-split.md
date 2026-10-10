@@ -164,14 +164,14 @@ with web mode).
 1. **Answered in phase 1 (decision 1): the GUI holds a
    `SurfaceMirror` and a separate texture cache.** Original question:
    does the shared draw-op dispatch move `GuiSurface` onto
-   `SurfaceMirror`, or extract a common function both call?**
+   `SurfaceMirror`, or extract a common function both call?
    The GUI needs a texture invalidation per touched surface;
    the mirror does not. A `SurfaceMirror<S: SurfaceLike>` or a
    free `apply_draw_event(&mut DisplaySurface, &ChannelEvent)`
    returning which surface it touched are both plausible. Phase 1
    decides, with the renderer crate's egui-free rule (AGENTS.md)
    as a hard constraint: the shared code must not see a texture.
-2. **Answered in phase 1 (finding 6): no, it stays in ryll.**
+2. **Answered in phase 1 (decision 5): no, it stays in ryll.**
    Original question: does the reconnect state machine belong in
    the renderer crate? Today only the GUI auto-reconnects. If headless or web
    mode should (check `docs/multi-mode-parity.md` and
