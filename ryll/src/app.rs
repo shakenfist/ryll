@@ -26,7 +26,7 @@ use crate::bugreport::{
 };
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
-use crate::display_gui::GuiSurface;
+use crate::display_gui::TextureCache;
 use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
@@ -39,8 +39,8 @@ use shakenfist_spice_renderer::channels::VolumeControl;
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
-    ChannelEvent, ClipboardBackend, CursorImage, InputEvent, SessionState, SessionStateRx,
-    UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
+    ChannelEvent, ClipboardBackend, CursorImage, DrawOutcome, InputEvent, SessionState,
+    SessionStateRx, SurfaceMirror, UsbCommand, WebdavCommand, MOUSE_MODE_UNKNOWN,
 };
 
 use crate::clipboard_arboard::ArboardClipboard;
@@ -667,8 +667,9 @@ pub struct RyllApp {
     last_sent_resize: Option<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
 
-    // Display state
-    surfaces: HashMap<(u8, u32), GuiSurface>,
+    // Display state: the surfaces, and the egui textures drawn from them
+    surfaces: SurfaceMirror,
+    textures: TextureCache,
 
     // Cursor state
     cursor_pos: (u16, u16),
@@ -1284,7 +1285,8 @@ impl RyllApp {
             resize_tx: Some(resize_tx),
             last_sent_resize: None,
             volume_control,
-            surfaces: HashMap::new(),
+            surfaces: SurfaceMirror::new(),
+            textures: TextureCache::new(),
             cursor_pos: (0, 0),
             cursor_visible: true,
             cursor_image: None,
@@ -1440,7 +1442,8 @@ impl RyllApp {
         self.last_sent_resize = None;
         // volume_control is intentionally NOT replaced — see the
         // `vol_for_conn` binding below for the rationale.
-        self.surfaces.clear();
+        self.surfaces.surfaces.clear();
+        self.textures.clear();
         self.cursor_pos = (0, 0);
         self.cursor_visible = true;
         self.cursor_image = None;
@@ -1683,7 +1686,8 @@ impl RyllApp {
         // auto-snapshot task to stop capturing a dead session.
         self.connected = false;
         self.signal_auto_snapshot_retire();
-        self.surfaces.clear();
+        self.surfaces.surfaces.clear();
+        self.textures.clear();
         self.cursor_image = None;
         self.cursor_texture = None;
 
@@ -1976,186 +1980,57 @@ impl RyllApp {
                     }
                 }
 
-                ChannelEvent::SurfaceCreated {
-                    display_channel_id,
-                    surface_id,
-                    width,
-                    height,
-                } => {
-                    info!(
-                        "app: surface {}:{} created: {}x{}",
-                        display_channel_id, surface_id, width, height
-                    );
-                    self.surfaces.insert(
-                        (display_channel_id, surface_id),
-                        GuiSurface::new(surface_id, width, height),
-                    );
-                    if is_primary_surface(display_channel_id, surface_id) {
-                        if auto_fit_size_acceptable(width, height) {
-                            self.pending_resize = Some((width as f32, height as f32));
-                            self.pending_resolution_notify =
-                                Some(((width, height), Instant::now()));
-                        } else {
-                            warn!(
-                                "app: ignoring oversized primary surface {}x{} for auto-fit \
-                                 (limit {}px per axis)",
-                                width, height, MAX_AUTO_FIT_DIMENSION
-                            );
-                        }
-                    }
-                }
-
-                ChannelEvent::SurfaceDestroyed {
-                    display_channel_id,
-                    surface_id,
-                } => {
-                    info!(
-                        "app: surface {}:{} destroyed",
-                        display_channel_id, surface_id
-                    );
-                    self.surfaces.remove(&(display_channel_id, surface_id));
-                }
-
-                ChannelEvent::ImageReady {
-                    display_channel_id,
-                    surface_id,
-                    left,
-                    top,
-                    width,
-                    height,
-                    pixels,
-                    ..
-                } => {
-                    // Auto-create surface if the server draws before sending
-                    // SURFACE_CREATE (QEMU does this for the primary surface).
-                    let surface = match self.surfaces.entry((display_channel_id, surface_id)) {
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            let surf_w = left + width;
-                            let surf_h = top + height;
-                            info!(
-                                "app: auto-creating surface {} ({}x{}) from draw at ({},{})+{}x{}",
-                                surface_id, surf_w, surf_h, left, top, width, height
-                            );
-                            if is_primary_surface(display_channel_id, surface_id) {
-                                if auto_fit_size_acceptable(surf_w, surf_h) {
-                                    self.pending_resize = Some((surf_w as f32, surf_h as f32));
+                ChannelEvent::SurfaceCreated { .. }
+                | ChannelEvent::SurfaceDestroyed { .. }
+                | ChannelEvent::ImageReady { .. }
+                | ChannelEvent::ImageReadyChroma { .. }
+                | ChannelEvent::ImageReadyAlpha { .. }
+                | ChannelEvent::FillRect { .. }
+                | ChannelEvent::CopyBits { .. }
+                | ChannelEvent::Invert { .. } => {
+                    // The mirror applies (and logs) the draw op exactly
+                    // as headless and web mode do; the GUI layers
+                    // auto-fit, texture invalidation and frame stats on
+                    // what it reports.
+                    let outcome = self.surfaces.apply_event(&event);
+                    match outcome {
+                        DrawOutcome::Created { key, width, height }
+                        | DrawOutcome::AutoCreated { key, width, height } => {
+                            // A new surface must not inherit a texture
+                            // sized for the one it replaced.
+                            self.textures.remove(key);
+                            if is_primary_surface(key.0, key.1) {
+                                if auto_fit_size_acceptable(width, height) {
+                                    self.pending_resize = Some((width as f32, height as f32));
                                     self.pending_resolution_notify =
-                                        Some(((surf_w, surf_h), Instant::now()));
+                                        Some(((width, height), Instant::now()));
                                 } else {
+                                    let how = if matches!(outcome, DrawOutcome::AutoCreated { .. })
+                                    {
+                                        "auto-created"
+                                    } else {
+                                        "created"
+                                    };
                                     warn!(
-                                        "app: ignoring oversized auto-created primary surface \
-                                         {}x{} for auto-fit (limit {}px per axis)",
-                                        surf_w, surf_h, MAX_AUTO_FIT_DIMENSION
+                                        "app: ignoring oversized {} primary surface {}x{} for \
+                                         auto-fit (limit {}px per axis)",
+                                        how, width, height, MAX_AUTO_FIT_DIMENSION
                                     );
                                 }
                             }
-                            e.insert(GuiSurface::new(surface_id, surf_w, surf_h))
                         }
-                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        DrawOutcome::Destroyed { key } => self.textures.remove(key),
+                        DrawOutcome::Drawn { .. }
+                        | DrawOutcome::UnknownSurface { .. }
+                        | DrawOutcome::NotDisplay => {}
                     }
-                    .surface_mut();
-                    surface.blit(left, top, width, height, &pixels);
-                    self.stats.frames_received += 1;
-                    debug!(
-                        "app: blit surface={}, pos=({},{}), size={}x{}",
-                        surface_id, left, top, width, height
-                    );
-                }
-
-                ChannelEvent::ImageReadyChroma {
-                    display_channel_id,
-                    surface_id,
-                    left,
-                    top,
-                    width,
-                    height,
-                    pixels,
-                    chroma_rgba,
-                    ..
-                } => {
-                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
-                        gs.surface_mut().blit_chroma(
-                            left,
-                            top,
-                            width,
-                            height,
-                            &pixels,
-                            chroma_rgba,
-                        );
+                    // Every draw that lands counts, including the one
+                    // that auto-created its surface.
+                    if matches!(
+                        outcome,
+                        DrawOutcome::AutoCreated { .. } | DrawOutcome::Drawn { .. }
+                    ) {
                         self.stats.frames_received += 1;
-                    } else {
-                        debug!("app: ImageReadyChroma on unknown surface {}", surface_id);
-                    }
-                }
-
-                ChannelEvent::ImageReadyAlpha {
-                    display_channel_id,
-                    surface_id,
-                    left,
-                    top,
-                    width,
-                    height,
-                    pixels,
-                    alpha,
-                    ..
-                } => {
-                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
-                        gs.surface_mut()
-                            .blit_alpha(left, top, width, height, &pixels, alpha);
-                        self.stats.frames_received += 1;
-                    } else {
-                        debug!("app: ImageReadyAlpha on unknown surface {}", surface_id);
-                    }
-                }
-
-                ChannelEvent::FillRect {
-                    display_channel_id,
-                    surface_id,
-                    rect: (left, top, right, bottom),
-                    colour,
-                    clip,
-                    ..
-                } => {
-                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
-                        gs.surface_mut()
-                            .fill_rect(left, top, right, bottom, colour, &clip);
-                        self.stats.frames_received += 1;
-                    } else {
-                        debug!("app: FillRect on unknown surface {}", surface_id);
-                    }
-                }
-
-                ChannelEvent::CopyBits {
-                    display_channel_id,
-                    surface_id,
-                    src_x,
-                    src_y,
-                    dest_rect: (left, top, right, bottom),
-                    clip,
-                    ..
-                } => {
-                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
-                        gs.surface_mut()
-                            .copy_bits(src_x, src_y, left, top, right, bottom, &clip);
-                        self.stats.frames_received += 1;
-                    } else {
-                        debug!("app: CopyBits on unknown surface {}", surface_id);
-                    }
-                }
-
-                ChannelEvent::Invert {
-                    display_channel_id,
-                    surface_id,
-                    rect: (left, top, right, bottom),
-                    clip,
-                    ..
-                } => {
-                    if let Some(gs) = self.surfaces.get_mut(&(display_channel_id, surface_id)) {
-                        gs.surface_mut()
-                            .invert_rect(left, top, right, bottom, &clip);
-                        self.stats.frames_received += 1;
-                    } else {
-                        debug!("app: Invert on unknown surface {}", surface_id);
                     }
                 }
 
@@ -2173,8 +2048,8 @@ impl RyllApp {
                     if let Some(ref capture) = self.capture {
                         if let Some(surface) = self
                             .surfaces
+                            .surfaces
                             .values()
-                            .map(|gs| gs.surface())
                             .max_by_key(|s| (s.width as u64) * (s.height as u64))
                         {
                             if !capture.frame(0, surface.pixels(), surface.width, surface.height) {
@@ -2581,14 +2456,12 @@ impl RyllApp {
         snap.frames_received = self.stats.frames_received;
         snap.surfaces = self
             .surfaces
+            .surfaces
             .values()
-            .map(|gs| {
-                let s = gs.surface();
-                SurfaceInfo {
-                    surface_id: s.id,
-                    width: s.width,
-                    height: s.height,
-                }
+            .map(|s| SurfaceInfo {
+                surface_id: s.id,
+                width: s.width,
+                height: s.height,
             })
             .collect();
         snap.cursor_pos = self.cursor_pos;
@@ -2639,8 +2512,8 @@ impl RyllApp {
         // will also produce None when there's no surface).
         let Some(surface) = self
             .surfaces
+            .surfaces
             .values()
-            .map(|gs| gs.surface())
             .max_by_key(|s| (s.width as u64) * (s.height as u64))
         else {
             let slot = Arc::new(std::sync::Mutex::new(Some(Err(anyhow::anyhow!(
@@ -3014,8 +2887,8 @@ impl RyllApp {
             && (precomputed_png.is_none() || region.is_some());
         let surface = if surface_is_readable {
             self.surfaces
+                .surfaces
                 .values()
-                .map(|gs| gs.surface())
                 .max_by_key(|s| (s.width as u64) * (s.height as u64))
                 .map(|s| (s.pixels().to_vec(), s.width, s.height))
         } else {
@@ -3252,18 +3125,17 @@ impl RyllApp {
     ///
     /// Returns the list of paths that were successfully written.
     fn save_screenshots(&self, base_path: PathBuf) -> anyhow::Result<Vec<PathBuf>> {
-        if self.surfaces.is_empty() {
+        if self.surfaces.surfaces.is_empty() {
             anyhow::bail!("No display surfaces to capture");
         }
 
-        let mut sorted: Vec<_> = self.surfaces.iter().collect();
+        let mut sorted: Vec<_> = self.surfaces.surfaces.iter().collect();
         sorted.sort_by_key(|(k, _)| *k);
 
         let paths = screenshot_paths(&base_path, sorted.len());
 
         let mut written = Vec::new();
-        for ((_, gs), path) in sorted.into_iter().zip(paths) {
-            let surface = gs.surface();
+        for ((_, surface), path) in sorted.into_iter().zip(paths) {
             let png_bytes =
                 crate::bugreport::encode_png(surface.pixels(), surface.width, surface.height)?;
             std::fs::write(&path, &png_bytes)?;
@@ -3277,7 +3149,7 @@ impl RyllApp {
     ///
     /// If the dialog is cancelled, nothing happens.
     fn open_screenshot_dialog(&mut self) {
-        if self.surfaces.is_empty() {
+        if self.surfaces.surfaces.is_empty() {
             self.push_notification(
                 NotifySeverity::Warn,
                 NotificationSource::Internal,
@@ -4579,7 +4451,7 @@ impl eframe::App for RyllApp {
                     return;
                 }
 
-                let mut keys: Vec<(u8, u32)> = self.surfaces.keys().copied().collect();
+                let mut keys: Vec<(u8, u32)> = self.surfaces.surfaces.keys().copied().collect();
                 keys.sort_unstable();
                 let primary_key = keys
                     .iter()
@@ -4588,9 +4460,9 @@ impl eframe::App for RyllApp {
                     .or_else(|| keys.first().copied());
 
                 if let Some(primary_key) = primary_key {
-                    if let Some(gs) = self.surfaces.get_mut(&primary_key) {
-                        let (width, height) = (gs.surface().width, gs.surface().height);
-                        let texture = gs.texture(ctx);
+                    if let Some(surface) = self.surfaces.surfaces.get_mut(&primary_key) {
+                        let (width, height) = (surface.width, surface.height);
+                        let texture = self.textures.texture(ctx, primary_key, surface);
                         let size = egui::vec2(width as f32, height as f32);
 
                         let response = ui.add(
@@ -4701,7 +4573,7 @@ impl eframe::App for RyllApp {
                     }
                 }
 
-                if self.surfaces.is_empty() {
+                if self.surfaces.surfaces.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label("Waiting for display...");
                     });
