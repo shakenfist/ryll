@@ -25,10 +25,6 @@
       "sha": "7a223bb8c7f0875f3ecee14f61b63dee6c1338b2",
       "date": "2026-08-24"
     },
-    ".github/workflows/ci.yml": {
-      "sha": "60103e7f1e33648189cdf21cb5cd174f4c7d125e",
-      "date": "2026-09-26"
-    },
     ".github/workflows/codeql-analysis.yml": {
       "sha": "975f656d8135aefe12ba2f2094d8671460ef1a8a",
       "date": "2026-10-05"
@@ -39,10 +35,6 @@
     },
     ".github/workflows/fuzz.yml": {
       "sha": "2f83d312b9fd3bc5399aa16e1ddea91ae68d3337",
-      "date": "2026-09-26"
-    },
-    ".github/workflows/manual-build.yml": {
-      "sha": "c37b7ded5e75f0b8a130441b000b2edfcf015be3",
       "date": "2026-09-26"
     },
     ".github/workflows/mermaid-lint.yml": {
@@ -64,10 +56,6 @@
     ".github/workflows/prune-reviews.yml": {
       "sha": "7fc119ce46252ba56037d99ddf90ea9dc180e3b8",
       "date": "2026-10-05"
-    },
-    ".github/workflows/release.yml": {
-      "sha": "c359f63ea871d6c2d66b214eae9c4fd276074f1f",
-      "date": "2026-09-26"
     },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
@@ -93,10 +81,6 @@
       "sha": "da51f6b87f9a89d7ab7cdd19cac6a741bc04cd43",
       "date": "2026-10-05"
     },
-    "Makefile": {
-      "sha": "a8b2f3ecfb2f257e114d4553cb948456b262410b",
-      "date": "2026-09-23"
-    },
     "PLAN-TEMPLATE.md": {
       "sha": "fe1ec5dafbfdc3248459bdb106d51d992fe1b6d6",
       "date": "2026-09-28"
@@ -116,10 +100,6 @@
     "deny.toml": {
       "sha": "c952afb188490748898188583f4e7413fa43077a",
       "date": "2026-09-23"
-    },
-    "docs/ci.md": {
-      "sha": "e1a7dccf113a2701078451d632e684784c5efc5c",
-      "date": "2026-10-05"
     },
     "docs/configuration.md": {
       "sha": "3342c6aa2b06cbae30c9b54b31f1e6f49b921392",
@@ -172,14 +152,6 @@
     "docs/multi-mode-parity.md": {
       "sha": "81edb01125016cce7fda7b6edd14dc498a38836c",
       "date": "2026-10-10"
-    },
-    "docs/portability.md": {
-      "sha": "90130e736cb79aee967252b5155d489ee3d96317",
-      "date": "2026-07-31"
-    },
-    "docs/releasing.md": {
-      "sha": "eade1c912a8b368fdc0b5a3139d69b5edd31fbe7",
-      "date": "2026-10-05"
     },
     "docs/rendering-pipeline.md": {
       "sha": "b085b46e91088dd4f3b9af600571d6b34597196f",
@@ -733,10 +705,6 @@
       "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
       "date": "2026-07-26"
     },
-    "tools/propose-release.sh": {
-      "sha": "f4ec7f21a0026a76a345f244dd29728a9202fe83",
-      "date": "2026-09-23"
-    },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
       "date": "2026-10-05"
@@ -764,10 +732,6 @@
     "tools/start-desktop-qemu.sh": {
       "sha": "6d18104306851bcd1b1165fa47fa694da06af9f2",
       "date": "2026-09-23"
-    },
-    "tools/tag-release.sh": {
-      "sha": "76c49c6aa61676615864eb04c1b37e64e97b9a93",
-      "date": "2026-07-26"
     },
     "tools/test-fuzz-targets.sh": {
       "sha": "f78dea5e65a3012838a13930a5f781bfb4b8cf68",

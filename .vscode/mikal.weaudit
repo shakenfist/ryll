@@ -180,10 +180,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/tag-release.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/test_click.py",
       "author": "mikal"
     },
@@ -213,10 +209,6 @@
     },
     {
       "path": "docs/installation.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/portability.md",
       "author": "mikal"
     },
     {
@@ -480,10 +472,6 @@
       "author": "mikal"
     },
     {
-      "path": "Makefile",
-      "author": "mikal"
-    },
-    {
       "path": "tools/audit/audit-range.sh",
       "author": "mikal"
     },
@@ -525,10 +513,6 @@
     },
     {
       "path": "tools/measure-idle-cpu.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/propose-release.sh",
       "author": "mikal"
     },
     {
@@ -616,23 +600,11 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/manual-build.yml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/release.yml",
-      "author": "mikal"
-    },
-    {
       "path": ".github/workflows/supply-chain.yml",
       "author": "mikal"
     },
     {
       "path": ".github/actionlint.yaml",
-      "author": "mikal"
-    },
-    {
-      "path": ".github/workflows/ci.yml",
       "author": "mikal"
     },
     {
@@ -736,10 +708,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/releasing.md",
-      "author": "mikal"
-    },
-    {
       "path": "MERGE-TEMPLATE.md",
       "author": "mikal"
     },
@@ -829,10 +797,6 @@
     },
     {
       "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/ci.md",
       "author": "mikal"
     },
     {
