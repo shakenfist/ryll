@@ -6,13 +6,13 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pcap_file::pcap::{PcapHeader, PcapPacket, PcapWriter};
 use pcap_file::DataLink;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 // ── Pcap capture ────────────────────────────────────────
@@ -258,9 +258,9 @@ fn channel_static(name: &str) -> Option<&'static str> {
     CHANNELS.iter().copied().find(|&c| c == name)
 }
 
-// ── Pcap writer task ────────────────────────────────────
+// ── Pcap writer thread ──────────────────────────────────
 
-/// Bound on the queue feeding the dedicated pcap writer task. In
+/// Bound on the queue feeding the dedicated pcap writer thread. In
 /// steady state with a keeping-up writer the queue sits near zero;
 /// the cap exists so a slow disk burst is dropped rather than
 /// allowed to back-pressure the SPICE socket. See
@@ -276,9 +276,9 @@ enum PcapDirection {
 
 /// One queued pcap write. `payload` is `Arc<[u8]>` so the
 /// hot-path enqueue copies into a single allocation that the
-/// writer task consumes by reference. `elapsed` is captured at
+/// writer thread consumes by reference. `elapsed` is captured at
 /// enqueue time so pcap timestamps reflect wire arrival, not
-/// the writer task's later dequeue.
+/// the writer thread's later dequeue.
 #[derive(Debug)]
 struct PcapQueueItem {
     channel: &'static str,
@@ -287,19 +287,19 @@ struct PcapQueueItem {
     elapsed: Duration,
 }
 
-/// Long-lived task that owns every `PcapChannelWriter` and
-/// drains the shared mpsc queue. Exits when the sender is
-/// dropped (signalled by `CaptureSession::close`).
-async fn pcap_writer_task(
-    mut rx: mpsc::Receiver<PcapQueueItem>,
+/// Body of the long-lived thread that owns every
+/// `PcapChannelWriter` and drains the shared queue. Returns when
+/// the sender is dropped (signalled by `CaptureSession::close`).
+fn pcap_writer_loop(
+    rx: Receiver<PcapQueueItem>,
     mut writers: HashMap<&'static str, PcapChannelWriter>,
 ) {
-    while let Some(item) = rx.recv().await {
+    for item in rx {
         let Some(writer) = writers.get_mut(item.channel) else {
             // Channel name not in CHANNELS. channel_static would
             // have rejected this at enqueue time, but treat
             // defensively so a future channel-name typo doesn't
-            // panic the writer task.
+            // panic the writer thread.
             continue;
         };
         match item.direction {
@@ -307,7 +307,7 @@ async fn pcap_writer_task(
             PcapDirection::Received => writer.write_received(&item.payload, item.elapsed),
         }
     }
-    debug!("capture: pcap writer task drained and exiting");
+    debug!("capture: pcap writer thread drained and exiting");
 }
 
 // ── Video capture ───────────────────────────────────────
@@ -603,9 +603,9 @@ fn chrono_now() -> String {
     crate::bugreport::chrono_now()
 }
 
-// ── Video writer task ───────────────────────────────────
+// ── Video writer thread ─────────────────────────────────
 
-/// Bound on the queue feeding the dedicated video encoder task.
+/// Bound on the queue feeding the dedicated video encoder thread.
 /// Smaller than `PCAP_QUEUE_CAPACITY` because per-item payload is
 /// dominated by full RGBA surface bytes (~8 MB at 1080p, ~33 MB
 /// at 4K). Eight slots absorb ~100-250 ms of encoder backlog at
@@ -613,9 +613,9 @@ fn chrono_now() -> String {
 /// `docs/plans/PLAN-video-keeping-up.md`.
 const VIDEO_QUEUE_CAPACITY: usize = 8;
 
-/// One queued frame for the encoder task. `pixels` is
+/// One queued frame for the encoder thread. `pixels` is
 /// `Arc<[u8]>` so the egui hot-path enqueue copies the
-/// surface once and the encoder task consumes it by
+/// surface once and the encoder thread consumes it by
 /// reference. `timestamp_ms` is captured at enqueue time so
 /// MP4 presentation timestamps reflect when the frame was
 /// produced, not when the encoder caught up.
@@ -628,20 +628,20 @@ struct VideoQueueItem {
     timestamp_ms: u64,
 }
 
-/// Long-lived task that owns the `VideoWriter`. Lazily
+/// Body of the long-lived thread that owns the `VideoWriter`. Lazily
 /// initialises it from the first received frame's dimensions
 /// rather than requiring them up front. When the sender drops,
 /// drains any in-flight items, then finalises the MP4 by calling
 /// `VideoWriter::close()` — which writes the moov atom and makes
 /// the file playable.
-async fn video_writer_task(mut rx: mpsc::Receiver<VideoQueueItem>, dir: PathBuf) {
+fn video_writer_loop(rx: Receiver<VideoQueueItem>, dir: PathBuf) {
     let mut writer: Option<VideoWriter> = None;
     let mut init_attempted = false;
 
-    while let Some(item) = rx.recv().await {
+    for item in rx {
         // Only surface 0 is recorded today; non-primary
         // surfaces are dropped silently. The filter lives in
-        // the task so the hot-path enqueue stays uniformly
+        // the thread so the hot-path enqueue stays uniformly
         // cheap.
         if item.surface_id != 0 {
             debug!("capture: skipping non-primary surface {}", item.surface_id);
@@ -668,35 +668,65 @@ async fn video_writer_task(mut rx: mpsc::Receiver<VideoQueueItem>, dir: PathBuf)
     if let Some(mut vw) = writer.take() {
         vw.close();
     }
-    debug!("capture: video writer task drained and exiting");
+    debug!("capture: video writer thread drained and exiting");
 }
 
 // ── Capture session ─────────────────────────────────────
 
+/// Optional gate a writer thread waits on before it starts
+/// draining its queue. Production code passes `None`; tests hold
+/// the write lock to stop the writers draining, so they can fill
+/// the bounded queues deterministically, then drop the guard to
+/// release them.
+type StartGate = Option<Arc<RwLock<()>>>;
+
+/// Spawn a named writer thread that waits on `gate` (if any) and
+/// then runs `body` until its queue's sender is dropped.
+fn spawn_writer_thread<F>(name: &str, gate: StartGate, body: F) -> anyhow::Result<JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            if let Some(gate) = gate {
+                // A poisoned gate only means a test panicked while
+                // holding it; either way the gate is open now.
+                drop(gate.read());
+            }
+            body();
+        })?;
+    Ok(handle)
+}
+
 /// Holds state for an active capture session.
+///
+/// The pcap and MP4 writers each run on a dedicated OS thread
+/// owned by the session, not on a tokio task. The session is
+/// built in `main()` before any tokio runtime exists, and in GUI
+/// mode it outlives each per-connection runtime (a reconnect
+/// builds a fresh one), so it must not depend on whichever
+/// runtime happens to be current. The writers' work — unbuffered
+/// file writes and H.264 encoding — is blocking anyway.
 pub struct CaptureSession {
     /// Output directory for capture files.
     pub dir: PathBuf,
     /// Timestamp of session start, for relative timing.
     pub start: Instant,
     /// Sender side of the queue feeding the dedicated pcap
-    /// writer task. Held inside `Option<Mutex<>>` so `close()`
-    /// can `take()` it and drop it, signalling the writer task
+    /// writer thread. Held inside `Mutex<Option<>>` so `close()`
+    /// can `take()` it and drop it, signalling the writer thread
     /// to drain and exit.
-    queue_tx: Mutex<Option<mpsc::Sender<PcapQueueItem>>>,
-    /// Join handle for the writer task. Awaited by `close()`
-    /// after the sender is dropped to guarantee the queue has
-    /// drained before this `CaptureSession` is destroyed.
-    writer_handle: Mutex<Option<JoinHandle<()>>>,
+    queue_tx: Mutex<Option<SyncSender<PcapQueueItem>>>,
+    /// Join handle for the pcap writer thread. Joined by `Drop`.
+    pcap_thread: Option<JoinHandle<()>>,
     /// Sender side of the queue feeding the dedicated H.264/MP4
-    /// encoder task. Held inside `Option<Mutex<>>` so `close()`
-    /// can `take()` it and drop it, signalling the encoder task
+    /// encoder thread. Held inside `Mutex<Option<>>` so `close()`
+    /// can `take()` it and drop it, signalling the encoder thread
     /// to drain, finalise the MP4 (moov atom), and exit.
-    video_tx: Mutex<Option<mpsc::Sender<VideoQueueItem>>>,
-    /// Join handle for the encoder task. Detached at `close()` time;
-    /// the task continues on the runtime until it has drained the
-    /// queue and finalised the MP4.
-    video_handle: Mutex<Option<JoinHandle<()>>>,
+    video_tx: Mutex<Option<SyncSender<VideoQueueItem>>>,
+    /// Join handle for the encoder thread. Joined by `Drop`.
+    video_thread: Option<JoinHandle<()>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
 }
@@ -706,7 +736,8 @@ impl CaptureSession {
     ///
     /// Writes a `metadata.json` file with session context (platform,
     /// version, connection target) so that capture directories are
-    /// self-describing when shared for bug reports.
+    /// self-describing when shared for bug reports, then starts the
+    /// pcap and video writer threads. Needs no tokio runtime.
     ///
     /// `target` is [`ConnectionConfig::display_target`]
     /// (`shakenfist_spice_protocol::ConnectionConfig`), not a raw
@@ -715,6 +746,17 @@ impl CaptureSession {
     /// directory is exactly the kind of artefact that gets attached
     /// to a bug report, so the ticket must not land in it either.
     pub fn new(dir: PathBuf, target: &str, tls_port: Option<u16>) -> anyhow::Result<Self> {
+        Self::with_start_gate(dir, target, tls_port, None)
+    }
+
+    /// `new`, with an optional [`StartGate`] the writer threads
+    /// wait on before draining. Only tests pass `Some`.
+    fn with_start_gate(
+        dir: PathBuf,
+        target: &str,
+        tls_port: Option<u16>,
+        gate: StartGate,
+    ) -> anyhow::Result<Self> {
         fs::create_dir_all(&dir)?;
         info!("capture: writing to {}", dir.display());
 
@@ -729,19 +771,26 @@ impl CaptureSession {
             writers.insert(channel, writer);
         }
 
-        let (queue_tx, queue_rx) = mpsc::channel(PCAP_QUEUE_CAPACITY);
-        let writer_handle = tokio::spawn(pcap_writer_task(queue_rx, writers));
+        // If the second spawn fails, returning drops `queue_tx`,
+        // so the first thread drains its empty queue and exits.
+        let (queue_tx, queue_rx) = mpsc::sync_channel(PCAP_QUEUE_CAPACITY);
+        let pcap_thread = spawn_writer_thread("ryll-capture-pcap", gate.clone(), move || {
+            pcap_writer_loop(queue_rx, writers)
+        })?;
 
-        let (video_tx, video_rx) = mpsc::channel(VIDEO_QUEUE_CAPACITY);
-        let video_handle = tokio::spawn(video_writer_task(video_rx, dir.clone()));
+        let (video_tx, video_rx) = mpsc::sync_channel(VIDEO_QUEUE_CAPACITY);
+        let video_dir = dir.clone();
+        let video_thread = spawn_writer_thread("ryll-capture-video", gate, move || {
+            video_writer_loop(video_rx, video_dir)
+        })?;
 
         Ok(CaptureSession {
             dir,
             start: Instant::now(),
             queue_tx: Mutex::new(Some(queue_tx)),
-            writer_handle: Mutex::new(Some(writer_handle)),
+            pcap_thread: Some(pcap_thread),
             video_tx: Mutex::new(Some(video_tx)),
-            video_handle: Mutex::new(Some(video_handle)),
+            video_thread: Some(video_thread),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -793,7 +842,7 @@ impl CaptureSession {
 
     /// Record a packet sent by the client on the given channel.
     /// Returns `true` if the packet was queued to the writer
-    /// task, `false` if the queue was full (the packet was
+    /// thread, `false` if the queue was full (the packet was
     /// dropped) or the channel name is not in `CHANNELS` (no
     /// writer exists).
     pub fn packet_sent(&self, channel: &str, data: &[u8]) -> bool {
@@ -810,7 +859,7 @@ impl CaptureSession {
         let Some(channel) = channel_static(channel) else {
             // Channels not in CHANNELS (e.g. webdav, playback) have
             // no pcap writer. Matches today's silent-drop behaviour
-            // at the writer-task dispatch level, but avoids enqueue
+            // at the writer-thread dispatch level, but avoids enqueue
             // and Arc allocation overhead for these channels.
             return true;
         };
@@ -829,11 +878,11 @@ impl CaptureSession {
     }
 
     /// Record a display frame after a MARK boundary. Returns
-    /// `true` if the frame was enqueued to the encoder task,
+    /// `true` if the frame was enqueued to the encoder thread,
     /// `false` if the encoder's queue was full and the frame
     /// was dropped, or if the session has been closed. The
     /// surface-0 filter and lazy `VideoWriter::new()` both
-    /// run on the encoder task; this method only allocates
+    /// run on the encoder thread; this method only allocates
     /// the `Arc<[u8]>` for the pixel buffer and `try_send`s.
     pub fn frame(&self, surface_id: u32, pixels: &[u8], width: u32, height: u32) -> bool {
         let tx_guard = self.video_tx.lock().expect("lock poisoned");
@@ -850,55 +899,63 @@ impl CaptureSession {
         tx.try_send(item).is_ok()
     }
 
-    /// Finalise and close the capture session.
+    /// Stop accepting capture data and let the writers finish.
     ///
     /// Takes `&self` so it can be called through an `Arc`
     /// (including from the sync egui frame-update path).
-    /// Drops both queue senders; the dedicated writer tasks
+    /// Drops both queue senders; the dedicated writer threads
     /// observe the sender drop, drain any in-flight items,
-    /// and exit on their own. The encoder task additionally
+    /// and exit on their own. The encoder thread additionally
     /// runs `VideoWriter::close()` (writes the MP4 moov atom)
     /// after its loop exits.
     ///
-    /// We do *not* await the writer tasks' join handles here:
-    /// two of the four close call sites are inside the sync
-    /// egui `App::update` method, where awaiting is not
-    /// feasible. Dropping a `JoinHandle` does not abort the
-    /// task, so both writers keep running on the tokio
-    /// runtime until they drain naturally; in practice they
-    /// finish well before the runtime shuts down at process
-    /// exit.
+    /// `close()` does *not* wait for the writer threads: two of
+    /// the four close call sites are inside the egui
+    /// `App::update` method, which must not block on the encoder
+    /// draining its queue. The wait happens in `Drop` instead,
+    /// which joins both threads, so the MP4 is finalised by the
+    /// time the last `Arc<CaptureSession>` is gone.
     ///
     /// **Caveat**: MP4 finalisation is not synchronous with
     /// `close()`. A bug report assembled within milliseconds
     /// of `close()` may see a not-yet-finalised (unplayable)
-    /// MP4. At process exit the tokio runtime may also shut
-    /// down before the encoder task drains, in which case the
-    /// in-progress MP4 will be missing its moov atom and
-    /// unplayable regardless of `close()` timing. See
-    /// `docs/plans/PLAN-video-keeping-up.md` for the trade-off
-    /// and mitigation options.
+    /// MP4. See `docs/plans/PLAN-video-keeping-up.md` for the
+    /// trade-off.
     pub fn close(&self) {
         if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return; // already closed
         }
-        // Drop the pcap sender so its writer task drains and exits.
+        // Drop the pcap sender so its writer thread drains and exits.
         drop(self.queue_tx.lock().expect("lock poisoned").take());
-        let _ = self.writer_handle.lock().expect("lock poisoned").take();
-        // Drop the video sender so its encoder task drains,
+        // Drop the video sender so its encoder thread drains,
         // finalises the MP4 (writes the moov atom), and exits.
         drop(self.video_tx.lock().expect("lock poisoned").take());
-        let _ = self.video_handle.lock().expect("lock poisoned").take();
         info!("capture: session closed ({})", self.dir.display());
     }
 }
 
 impl Drop for CaptureSession {
     fn drop(&mut self) {
-        // close() is idempotent (guarded by self.closed); Drop just
-        // delegates so implicit shutdown gets the same best-effort
-        // sender-drop + video-finalize as an explicit close.
+        // close() is idempotent (guarded by self.closed), so an
+        // explicit close() followed by this is fine.
         self.close();
+        // Wait for both writers to drain. This is what makes the
+        // MP4 playable after a normal exit: without the join, the
+        // process could exit while the encoder thread is still
+        // writing the moov atom. The wait is bounded by the queue
+        // capacities (at most VIDEO_QUEUE_CAPACITY frames to
+        // encode).
+        let handles = [
+            ("pcap", self.pcap_thread.take()),
+            ("video", self.video_thread.take()),
+        ];
+        for (name, handle) in handles {
+            if let Some(handle) = handle {
+                if handle.join().is_err() {
+                    warn!("capture: {} writer thread panicked", name);
+                }
+            }
+        }
     }
 }
 
@@ -1050,7 +1107,7 @@ mod tests {
         );
     }
 
-    // ── Pcap writer-task tests ───────────────────────────
+    // ── Pcap writer-thread tests ─────────────────────────
 
     #[test]
     fn channel_static_resolves_known_channel_names() {
@@ -1075,7 +1132,7 @@ mod tests {
     }
 
     /// Open a pcap file and count its packets. Used by the
-    /// writer-task tests to assert end-to-end delivery without
+    /// writer-thread tests to assert end-to-end delivery without
     /// taking on a parser dependency.
     fn count_pcap_packets(path: &std::path::Path) -> usize {
         use pcap_file::pcap::PcapReader;
@@ -1089,8 +1146,8 @@ mod tests {
         count
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn pcap_writer_task_writes_all_enqueued_frames() {
+    #[test]
+    fn pcap_writer_loop_writes_all_enqueued_frames() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Build one writer per channel like CaptureSession::new.
         let mut writers: HashMap<&'static str, PcapChannelWriter> = HashMap::new();
@@ -1100,8 +1157,8 @@ mod tests {
             writers.insert(c, w);
         }
 
-        let (tx, rx) = mpsc::channel::<PcapQueueItem>(16);
-        let handle = tokio::spawn(pcap_writer_task(rx, writers));
+        let (tx, rx) = mpsc::sync_channel::<PcapQueueItem>(16);
+        let handle = std::thread::spawn(move || pcap_writer_loop(rx, writers));
 
         // Enqueue 3 received + 2 sent on display, 1 received on main.
         for i in 0..3 {
@@ -1111,7 +1168,6 @@ mod tests {
                 payload: Arc::from(vec![i as u8; 100].as_slice()),
                 elapsed: Duration::from_millis(i * 10),
             })
-            .await
             .unwrap();
         }
         for i in 0..2 {
@@ -1121,7 +1177,6 @@ mod tests {
                 payload: Arc::from(vec![i as u8; 50].as_slice()),
                 elapsed: Duration::from_millis(40 + i * 10),
             })
-            .await
             .unwrap();
         }
         tx.send(PcapQueueItem {
@@ -1130,12 +1185,11 @@ mod tests {
             payload: Arc::from(vec![0u8; 30].as_slice()),
             elapsed: Duration::from_millis(60),
         })
-        .await
         .unwrap();
 
-        // Drop sender; writer task should drain and exit.
+        // Drop sender; writer thread should drain and exit.
         drop(tx);
-        handle.await.expect("writer task join");
+        handle.join().expect("writer thread join");
 
         // Every enqueued item produces at least one pcap frame
         // (large payloads segment, small payloads stay as one).
@@ -1147,11 +1201,11 @@ mod tests {
         assert_eq!(count_pcap_packets(&dir.path().join("usbredir.pcap")), 0);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn pcap_writer_task_drops_unknown_channel_in_dispatch() {
-        // If a PcapQueueItem reaches the task with a channel
+    #[test]
+    fn pcap_writer_loop_drops_unknown_channel_in_dispatch() {
+        // If a PcapQueueItem reaches the thread with a channel
         // name that has no writer (shouldn't happen at the API
-        // layer because channel_static filters), the task must
+        // layer because channel_static filters), the thread must
         // skip it and keep processing the next item rather than
         // panic.
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1162,8 +1216,8 @@ mod tests {
             PcapChannelWriter::new(path, channel_port("display")).expect("writer"),
         );
 
-        let (tx, rx) = mpsc::channel::<PcapQueueItem>(8);
-        let handle = tokio::spawn(pcap_writer_task(rx, writers));
+        let (tx, rx) = mpsc::sync_channel::<PcapQueueItem>(8);
+        let handle = std::thread::spawn(move || pcap_writer_loop(rx, writers));
 
         // Mix one valid and one unknown-channel item.
         tx.send(PcapQueueItem {
@@ -1172,7 +1226,6 @@ mod tests {
             payload: Arc::from(vec![0u8; 10].as_slice()),
             elapsed: Duration::from_millis(0),
         })
-        .await
         .unwrap();
         tx.send(PcapQueueItem {
             channel: "display",
@@ -1180,35 +1233,35 @@ mod tests {
             payload: Arc::from(vec![0u8; 10].as_slice()),
             elapsed: Duration::from_millis(1),
         })
-        .await
         .unwrap();
 
         drop(tx);
-        handle.await.expect("writer task join");
+        handle.join().expect("writer thread join");
 
         // Only the valid item produced a frame.
         assert_eq!(count_pcap_packets(&dir.path().join("display.pcap")), 1);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn capture_session_enqueue_returns_false_when_queue_full() {
-        // Saturate the queue by holding the runtime in this
-        // task: the spawned writer task gets no chance to run
-        // until we await, so try_send fills the queue and then
-        // begins returning false. Validates the bool contract
-        // CaptureSink callers rely on.
+    #[test]
+    fn capture_session_enqueue_returns_false_when_queue_full() {
+        // Hold the writer threads at their start gate so the
+        // queue cannot drain: exactly PCAP_QUEUE_CAPACITY items
+        // are accepted and the rest are dropped. Validates the
+        // bool contract CaptureSink callers rely on.
         let dir = tempfile::tempdir().expect("tempdir");
-        let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
+        let gate = Arc::new(RwLock::new(()));
+        let held = gate.write().expect("gate lock");
+        let session = CaptureSession::with_start_gate(
+            dir.path().to_path_buf(),
+            "test:5900",
+            None,
+            Some(gate.clone()),
+        )
+        .expect("session new");
 
-        let mut accepted = 0u64;
-        let mut dropped = 0u64;
-        // Send more than PCAP_QUEUE_CAPACITY items without
-        // yielding so the writer task cannot drain. The exact
-        // accepted/dropped split depends on whether the writer
-        // task gets any cycles, but a multi-thousand burst on a
-        // current_thread runtime should produce both.
-        for i in 0..(PCAP_QUEUE_CAPACITY as u64 * 4) {
+        let mut accepted = 0usize;
+        let mut dropped = 0usize;
+        for i in 0..(PCAP_QUEUE_CAPACITY * 4) {
             let payload = vec![i as u8; 64];
             if session.packet_received("display", &payload) {
                 accepted += 1;
@@ -1216,25 +1269,21 @@ mod tests {
                 dropped += 1;
             }
         }
-        assert!(
-            accepted > 0,
-            "at least some packets should be accepted (got {})",
-            accepted
-        );
-        assert!(
-            dropped > 0,
-            "queue should overflow with the writer task starved (got {})",
-            dropped
-        );
+        assert_eq!(accepted, PCAP_QUEUE_CAPACITY);
+        assert_eq!(dropped, PCAP_QUEUE_CAPACITY * 3);
 
-        // Close cleanly so the test doesn't leak the task; on
-        // current_thread the task drains after this point as
-        // the runtime keeps running until the test returns.
-        session.close();
+        // Release the writers; dropping the session joins them,
+        // so every accepted packet is on disk afterwards.
+        drop(held);
+        drop(session);
+        assert_eq!(
+            count_pcap_packets(&dir.path().join("display.pcap")),
+            PCAP_QUEUE_CAPACITY
+        );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn capture_session_close_is_idempotent_and_stops_accepting() {
+    #[test]
+    fn capture_session_close_is_idempotent_and_stops_accepting() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
             CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
@@ -1248,7 +1297,7 @@ mod tests {
         assert!(!session.packet_received("display", &[0u8; 10]));
     }
 
-    // ── Video writer-task tests ──────────────────────────
+    // ── Video writer-thread tests ────────────────────────
 
     /// Build an RGBA pixel buffer of the requested size with
     /// a simple gradient. Content doesn't matter for H.264
@@ -1282,11 +1331,12 @@ mod tests {
         Ok((tracks, samples))
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn video_writer_task_encodes_and_finalises_mp4() {
+    #[test]
+    fn video_writer_loop_encodes_and_finalises_mp4() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (tx, rx) = mpsc::channel::<VideoQueueItem>(8);
-        let handle = tokio::spawn(video_writer_task(rx, dir.path().to_path_buf()));
+        let (tx, rx) = mpsc::sync_channel::<VideoQueueItem>(8);
+        let video_dir = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || video_writer_loop(rx, video_dir));
 
         let w: u32 = 64;
         let h: u32 = 64;
@@ -1300,13 +1350,12 @@ mod tests {
                 height: h,
                 timestamp_ms: i * 33,
             })
-            .await
             .unwrap();
         }
         drop(tx);
-        handle.await.expect("video task join");
+        handle.join().expect("video thread join");
 
-        // The encoder task should have finalised the MP4. Read it
+        // The encoder thread should have finalised the MP4. Read it
         // back and assert the moov atom is present (Mp4Reader
         // would otherwise fail) and that exactly one video track
         // exists with 3 samples.
@@ -1316,16 +1365,17 @@ mod tests {
         assert_eq!(samples, 3, "expected three samples (frames)");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn video_writer_task_skips_non_primary_surfaces() {
+    #[test]
+    fn video_writer_loop_skips_non_primary_surfaces() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (tx, rx) = mpsc::channel::<VideoQueueItem>(8);
-        let handle = tokio::spawn(video_writer_task(rx, dir.path().to_path_buf()));
+        let (tx, rx) = mpsc::sync_channel::<VideoQueueItem>(8);
+        let video_dir = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || video_writer_loop(rx, video_dir));
 
         let w: u32 = 64;
         let h: u32 = 64;
         let pixels = Arc::from(rgba_test_frame(w, h).as_slice());
-        // First item: non-primary surface — task should skip it
+        // First item: non-primary surface — thread should skip it
         // without consuming the lazy-init slot.
         tx.send(VideoQueueItem {
             surface_id: 7,
@@ -1334,7 +1384,6 @@ mod tests {
             height: h,
             timestamp_ms: 0,
         })
-        .await
         .unwrap();
         // Then a primary-surface frame that should init the writer.
         tx.send(VideoQueueItem {
@@ -1344,7 +1393,6 @@ mod tests {
             height: h,
             timestamp_ms: 33,
         })
-        .await
         .unwrap();
         // Then another non-primary that should be dropped post-init.
         tx.send(VideoQueueItem {
@@ -1354,10 +1402,9 @@ mod tests {
             height: h,
             timestamp_ms: 66,
         })
-        .await
         .unwrap();
         drop(tx);
-        handle.await.expect("video task join");
+        handle.join().expect("video thread join");
 
         // Only one surface-0 frame; expect exactly one sample.
         let mp4_path = dir.path().join("display.mp4");
@@ -1365,44 +1412,48 @@ mod tests {
         assert_eq!(samples, 1, "expected one sample from surface 0 only");
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn capture_session_frame_returns_false_when_video_queue_full() {
+    #[test]
+    fn capture_session_frame_returns_false_when_video_queue_full() {
+        // As for the pcap queue: hold the encoder thread at its
+        // start gate so exactly VIDEO_QUEUE_CAPACITY frames fit.
         let dir = tempfile::tempdir().expect("tempdir");
-        let session =
-            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
+        let gate = Arc::new(RwLock::new(()));
+        let held = gate.write().expect("gate lock");
+        let session = CaptureSession::with_start_gate(
+            dir.path().to_path_buf(),
+            "test:5900",
+            None,
+            Some(gate.clone()),
+        )
+        .expect("session new");
 
         let w: u32 = 64;
         let h: u32 = 64;
         let pixels = rgba_test_frame(w, h);
 
-        let mut accepted = 0u64;
-        let mut dropped = 0u64;
-        // Saturate the video queue without yielding. With a
-        // current_thread runtime the encoder task gets no cycles
-        // until we await, so try_send eventually returns
-        // Err(Full). Send more than VIDEO_QUEUE_CAPACITY items.
-        for _ in 0..(VIDEO_QUEUE_CAPACITY as u64 * 4) {
+        let mut accepted = 0usize;
+        let mut dropped = 0usize;
+        for _ in 0..(VIDEO_QUEUE_CAPACITY * 4) {
             if session.frame(0, &pixels, w, h) {
                 accepted += 1;
             } else {
                 dropped += 1;
             }
         }
-        assert!(
-            accepted > 0,
-            "at least some frames should be accepted (got {})",
-            accepted
-        );
-        assert!(
-            dropped > 0,
-            "queue should overflow with the encoder task starved (got {})",
-            dropped
-        );
-        session.close();
+        assert_eq!(accepted, VIDEO_QUEUE_CAPACITY);
+        assert_eq!(dropped, VIDEO_QUEUE_CAPACITY * 3);
+
+        // Release the encoder; dropping the session joins it, so
+        // the MP4 is finalised with every accepted frame.
+        drop(held);
+        drop(session);
+        let (_, samples) =
+            read_mp4_track1(&dir.path().join("display.mp4")).expect("read mp4 header");
+        assert_eq!(samples as usize, VIDEO_QUEUE_CAPACITY);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn capture_session_frame_returns_false_after_close() {
+    #[test]
+    fn capture_session_frame_returns_false_after_close() {
         let dir = tempfile::tempdir().expect("tempdir");
         let session =
             CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
@@ -1414,5 +1465,57 @@ mod tests {
         // Second close() is a no-op.
         session.close();
         assert!(!session.frame(0, &pixels, w, h));
+    }
+
+    // ── No tokio runtime required (shakenfist/ryll#399) ──
+
+    /// Record one packet on each of two channels and one
+    /// surface-0 frame, drop the session, and check everything
+    /// reached disk. Dropping joins the writer threads, so the
+    /// MP4 must already carry its moov atom.
+    fn record_and_verify(session: CaptureSession, dir: &std::path::Path) {
+        assert!(session.packet_received("display", &[1u8; 32]));
+        assert!(session.packet_sent("main", &[2u8; 16]));
+        let (w, h) = (64u32, 64u32);
+        assert!(session.frame(0, &rgba_test_frame(w, h), w, h));
+        drop(session);
+
+        assert_eq!(count_pcap_packets(&dir.join("display.pcap")), 1);
+        assert_eq!(count_pcap_packets(&dir.join("main.pcap")), 1);
+        let (_, samples) = read_mp4_track1(&dir.join("display.mp4")).expect("read mp4 header");
+        assert_eq!(samples, 1);
+    }
+
+    #[test]
+    fn capture_session_works_without_a_tokio_runtime() {
+        // main() builds the CaptureSession before any tokio
+        // runtime exists. While the writers were tokio tasks,
+        // CaptureSession::new panicked here with "there is no
+        // reactor running", in every mode.
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "this test must run outside a tokio runtime"
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session =
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new");
+        record_and_verify(session, dir.path());
+    }
+
+    #[test]
+    fn capture_session_outlives_the_runtime_it_was_built_in() {
+        // GUI mode builds a tokio runtime per connection and
+        // drops it on reconnect, while one capture session spans
+        // every connection. The writers must not belong to
+        // whichever runtime was current at construction.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        let session = runtime
+            .block_on(async { CaptureSession::new(dir.path().to_path_buf(), "test:5900", None) })
+            .expect("session new");
+        drop(runtime);
+        record_and_verify(session, dir.path());
     }
 }
