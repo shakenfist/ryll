@@ -154,6 +154,21 @@ const STREAM_REPORT_MAX_TIMEOUT_MS: u32 = 60_000;
 /// time without bloating channel-state.json.
 const MAX_RECENT_DESTROYED_STREAMS: usize = 16;
 
+/// The video codecs ryll asks the server to stream, most preferred
+/// first, sent once at link-up in `PREFERRED_VIDEO_CODEC_TYPE`.
+///
+/// MJPEG only. H.264 from spice-server's GStreamer encoder does not
+/// decode yet (shakenfist/ryll#398), so asking for it would leave video
+/// regions black or stale. Listing H.264 second would not be enough:
+/// spice-server only uses this list to reorder its own codec list, so a
+/// listed codec is never excluded. What actually keeps H.264 off the
+/// wire is leaving `DISPLAY_CODEC_H264` out of the advertised display
+/// capabilities (see `capabilities::DEFAULT_DISPLAY`); this list just
+/// stays consistent with that. The H.264 decoder is kept, so restoring
+/// `SPICE_VIDEO_CODEC_TYPE_H264` here and the capability bit is the
+/// whole change once #398 is fixed.
+const PREFERRED_VIDEO_CODECS: &[u8] = &[SPICE_VIDEO_CODEC_TYPE_MJPEG];
+
 /// Sliding-window threshold for triggering a STREAM_REPORT
 /// early due to consecutive frame drops. Matches spice-gtk's
 /// `STREAM_REPORT_DROP_SEQ_LEN_LIMIT` at
@@ -1078,11 +1093,8 @@ impl DisplayChannel {
         // `auto-glz` is in docs/configuration.md.
         self.send_preferred_compression(self.preferred_compression)
             .await?;
-        self.send_preferred_video_codec_type(&[
-            SPICE_VIDEO_CODEC_TYPE_H264,
-            SPICE_VIDEO_CODEC_TYPE_MJPEG,
-        ])
-        .await?;
+        self.send_preferred_video_codec_type(PREFERRED_VIDEO_CODECS)
+            .await?;
         Ok(())
     }
 
@@ -5263,7 +5275,9 @@ mod tests {
                 .await
                 .expect("send link-up preferences");
             assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
-            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+            // MJPEG (1) only until shakenfist/ryll#398 is fixed; see
+            // PREFERRED_VIDEO_CODECS.
+            assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
         }
     }
 
@@ -5289,6 +5303,16 @@ mod tests {
             .expect("send PREFERRED_COMPRESSION");
         assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, 2]);
 
+        // What run_loop sends at link-up: MJPEG (1) only, until
+        // shakenfist/ryll#398 is fixed. See PREFERRED_VIDEO_CODECS.
+        channel
+            .send_preferred_video_codec_type(PREFERRED_VIDEO_CODECS)
+            .await
+            .expect("send PREFERRED_VIDEO_CODEC_TYPE");
+        assert_eq!(peers.read_sent(8).await, vec![105, 0, 2, 0, 0, 0, 1, 1]);
+
+        // A multi-codec list keeps its order on the wire: H.264 (3)
+        // then MJPEG (1).
         channel
             .send_preferred_video_codec_type(&[
                 SPICE_VIDEO_CODEC_TYPE_H264,
