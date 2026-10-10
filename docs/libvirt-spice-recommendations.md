@@ -32,8 +32,8 @@ because that is the most common deployment path; the equivalent direct
 
     Install `spice-vdagent` in the guest for clipboard, absolute
     pointer, and dynamic monitor configuration. The GStreamer H.264
-    plugins on the hypervisor are not needed by ryll for now: it does
-    not currently accept H.264 streams from spice-server (see
+    plugins on the hypervisor are not needed by ryll for now: by
+    default it does not accept H.264 streams from spice-server (see
     [H.264 from spice-server is currently disabled](#h264-from-spice-server-is-currently-disabled)).
 
 The rest of this document explains why.
@@ -271,11 +271,24 @@ Installing the GStreamer H.264 plugins on the hypervisor
 (`gstreamer1.0-plugins-bad` and `gstreamer1.0-vaapi` on Debian/Ubuntu,
 `gstreamer1-plugins-bad-free-extras` and `gstreamer1-vaapi` on
 Fedora/RHEL) is therefore harmless but has no effect on ryll sessions
-for now. Other SPICE clients connected to the same guest may still use
-them. Once #398 is fixed, those plugins become a *necessary* (not
-sufficient) condition for H.264 again: without them spice-server can
+by default. Other SPICE clients connected to the same guest may still
+use them. Those plugins are a *necessary* (not sufficient) condition
+for H.264 whenever ryll does ask for it: without them spice-server can
 only encode MJPEG, and the streaming heuristic still has to fire in the
 first place.
+
+#### Opting back in with `--experimental-h264`
+
+To work on #398, or to try H.264 anyway, start ryll with
+`--experimental-h264`. It works the same in GUI, `--headless` and
+`--web` modes. With it, each display channel advertises `CODEC_H264`
+again and asks for H.264 ahead of MJPEG, which is what ryll did before
+H.264 was disabled; ryll logs a warning at startup saying H.264 from
+spice-server is enabled and experimental. Expect the failure described
+above: on a hypervisor with the GStreamer H.264 plugins, video regions
+streamed as H.264 are likely to go black or stale, and the bug report's
+`h264_decode_failed_count` climbs. The flag is off by default and will
+go away once #398 is fixed and H.264 is advertised again by default.
 
 This only concerns video *from* spice-server. Ryll's web mode encodes
 its own H.264 to send to the browser over WebRTC, which is unaffected.
