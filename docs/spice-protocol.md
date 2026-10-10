@@ -293,9 +293,10 @@ tracked per display channel and included in bug reports for performance analysis
 - **ZLIB_GLZ_RGB**: preceded by `glz_data_size` (u32 LE) +
   `compressed_size` (u32 LE), then zlib-compressed GLZ data.
 - **LZ4**: preceded by a 4-byte `data_size` (u32 LE), as a
-  `BinaryData` (spice.proto:558-561 and 612-613). Its data starts with
-  a 1-byte top-down flag and a 1-byte `SPICE_BITMAP_FMT_*` value, then
-  one or more LZ4 blocks, each with a 4-byte big-endian length prefix.
+  `BinaryData` (the `LZ4` case of spice.proto's `Image`). Its data
+  starts with a 1-byte top-down flag and a 1-byte
+  `SPICE_BITMAP_FMT_*` value, then one or more LZ4 blocks, each with a
+  4-byte big-endian length prefix.
 - **Pixmap**: preceded by a `BitmapData` header (format u8, flags u8,
   x u32, y u32, stride u32), then the palette reference, then raw pixel
   rows. The palette reference is a 4-byte `palette_addr` normally,
@@ -363,14 +364,16 @@ through kerbside.
 
 **LZ4** — Fast byte-oriented compression, which spice-server sends
 only to a client whose `PREFERRED_COMPRESSION` asks for exactly LZ4.
-The image is a `BinaryData` (spice.proto:558-561 and 612-613), so a
-4-byte little-endian `data_size` follows the descriptor. Its data is:
+The image is a `BinaryData` (the `LZ4` case of spice.proto's
+`Image`), so a 4-byte little-endian `data_size` follows the
+descriptor. Its data is:
 
 - a top-down byte: 1 when the first decoded row is the top row, 0
   when it is the bottom row (ryll treats any nonzero value as 1);
-- a `SPICE_BITMAP_FMT_*` byte (enums.h:216-229): 6 is 16-bit x555, a
-  little-endian u16 per pixel; 7 is 24-bit B,G,R; 8 is 32-bit B,G,R,X;
-  and 9 is B,G,R,A. ryll refuses any other value;
+- a `SPICE_BITMAP_FMT_*` byte (the `SpiceBitmapFmt` enum in
+  spice-protocol's `enums.h`): 6 is 16-bit x555, a little-endian u16
+  per pixel; 7 is 24-bit B,G,R; 8 is 32-bit B,G,R,X; and 9 is
+  B,G,R,A. ryll refuses any other value;
 - one or more blocks, each a **big-endian** u32 length followed by
   one raw LZ4 block, with no frame header and no checksum.
 
