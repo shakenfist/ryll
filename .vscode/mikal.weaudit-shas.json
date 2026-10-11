@@ -77,10 +77,6 @@
       "sha": "da51f6b87f9a89d7ab7cdd19cac6a741bc04cd43",
       "date": "2026-10-05"
     },
-    "PLAN-TEMPLATE.md": {
-      "sha": "fe1ec5dafbfdc3248459bdb106d51d992fe1b6d6",
-      "date": "2026-09-28"
-    },
     "README.md": {
       "sha": "9e3a0c73e3dc38c1679b9fa6a34ddadf65618d34",
       "date": "2026-08-18"
@@ -137,17 +133,9 @@
       "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
       "date": "2026-07-30"
     },
-    "docs/libvirt-spice-recommendations.md": {
-      "sha": "05ec3394d3124cb309a65d0508cf14c78f253bb6",
-      "date": "2026-10-05"
-    },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
-    },
-    "docs/multi-mode-parity.md": {
-      "sha": "81edb01125016cce7fda7b6edd14dc498a38836c",
-      "date": "2026-10-10"
     },
     "docs/session-lifecycle.md": {
       "sha": "0ef7cd691c1a103460a8df67847c6af16b532aee",
