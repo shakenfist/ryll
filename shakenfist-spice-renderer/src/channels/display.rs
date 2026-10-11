@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
+use crate::display::clip::{clip_area, ClipArea, Ltrb, MAX_CLIP_RECTS};
 use crate::image_cache::BoundedImageCache;
 use crate::mm_clock::MmClock;
 use crate::opcode_counters::OpcodeCounters;
@@ -19,7 +20,7 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, clip_type, ropd};
+use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -410,10 +411,32 @@ fn ltrb(rect: &Rect) -> (u32, u32, u32, u32) {
     )
 }
 
-/// A draw's clip rectangles as (left, top, right, bottom) tuples. Empty
-/// unless the clip type is RECTS.
-fn clip_ltrb(base: &DrawBase) -> Vec<(u32, u32, u32, u32)> {
-    base.clip.rects.iter().map(ltrb).collect()
+/// A draw's clip as the rectangle list its event carries: empty for an
+/// unclipped draw, otherwise the clip's union with `dest` as disjoint
+/// rectangles inside it (see [`clip_area`]). `None` means the draw
+/// paints nothing, either because the clip misses `dest` or because it
+/// needs more than [`MAX_CLIP_RECTS`] rectangles, which is warned about
+/// once per op.
+fn event_clip(base: &DrawBase, dest: Ltrb, op_name: &str) -> Option<Vec<Ltrb>> {
+    match clip_area(&base.clip, dest) {
+        ClipArea::Whole => Some(Vec::new()),
+        ClipArea::Rects(rects) => Some(rects),
+        ClipArea::Nothing => None,
+        ClipArea::TooComplex { sent } => {
+            logging::warn_once_impl(
+                logging::intern_key(format!(
+                    "display:decode_failure:{}:clip_too_complex",
+                    op_name
+                )),
+                &format!(
+                    "display: {}: clip of {} rectangles needs more than {} once merged; \
+                     skipping the draw",
+                    op_name, sent, MAX_CLIP_RECTS
+                ),
+            );
+            None
+        }
+    }
 }
 
 /// Read the `DrawBase` that opens a draw payload, returning it and the
@@ -2793,20 +2816,18 @@ impl DisplayChannel {
             let dest_right = dest_left.saturating_add(out_width);
             let dest_bottom = dest_top.saturating_add(out_height);
 
-            if base.clip.clip_type == clip_type::RECTS && !base.clip.rects.is_empty() {
-                for (clip_left, clip_top, clip_right, clip_bottom) in &clip_ltrb(base) {
-                    let il = dest_left.max(*clip_left);
-                    let it = dest_top.max(*clip_top);
-                    let ir = dest_right.min(*clip_right);
-                    let ib = dest_bottom.min(*clip_bottom);
-                    if ir <= il || ib <= it {
-                        continue;
-                    }
-
-                    // The intersection lies inside the destination box,
-                    // which is at most out_width x out_height (less where
-                    // saturating_add clipped it), so like the crop above
-                    // the sub-copy stays inside out_pixels.
+            let dest = (dest_left, dest_top, dest_right, dest_bottom);
+            let Some(clip) = event_clip(base, dest, op_name) else {
+                return Ok(());
+            };
+            if !clip.is_empty() {
+                for (il, it, ir, ib) in clip {
+                    // event_clip's rectangles are disjoint and inside the
+                    // destination box, which is at most out_width x
+                    // out_height (less where saturating_add clipped it), so
+                    // like the crop above each sub-copy stays inside
+                    // out_pixels, and together they copy at most the
+                    // image once.
                     let sub_w = (ir - il) as usize;
                     let sub_h = (ib - it) as usize;
                     let x_off = (il - dest_left) as usize;
@@ -2891,13 +2912,17 @@ impl DisplayChannel {
                         "display: draw_fill: non-null mask, painting unmasked"
                     );
                 }
+                let rect = ltrb(&base.bbox);
+                let Some(clip) = event_clip(&base, rect, "draw_fill") else {
+                    return Ok(());
+                };
                 self.events
                     .emit(ChannelEvent::FillRect {
                         display_channel_id: self.channel_id,
                         surface_id: base.surface_id,
-                        rect: ltrb(&base.bbox),
+                        rect,
                         colour,
-                        clip: clip_ltrb(&base),
+                        clip,
                         produced_at_secs: self.traffic.elapsed().as_secs_f64(),
                     })
                     .await;
@@ -2927,13 +2952,17 @@ impl DisplayChannel {
             );
         }
 
+        let rect = ltrb(&base.bbox);
+        let Some(clip) = event_clip(&base, rect, op_name) else {
+            return Ok(());
+        };
         self.events
             .emit(ChannelEvent::FillRect {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: ltrb(&base.bbox),
+                rect,
                 colour,
-                clip: clip_ltrb(&base),
+                clip,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2978,12 +3007,16 @@ impl DisplayChannel {
             );
         }
 
+        let rect = ltrb(&base.bbox);
+        let Some(clip) = event_clip(&base, rect, "draw_invers") else {
+            return Ok(());
+        };
         self.events
             .emit(ChannelEvent::Invert {
                 display_channel_id: self.channel_id,
                 surface_id: base.surface_id,
-                rect: ltrb(&base.bbox),
-                clip: clip_ltrb(&base),
+                rect,
+                clip,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -2994,6 +3027,10 @@ impl DisplayChannel {
     async fn handle_copy_bits(&mut self, payload: &[u8]) -> Result<()> {
         log_draw_base_if_verbose(self.log_config, payload, "copy_bits");
         let CopyBitsOutcome::Copy { base, src_x, src_y } = decode_copy_bits(payload)?;
+        let dest_rect = ltrb(&base.bbox);
+        let Some(clip) = event_clip(&base, dest_rect, "copy_bits") else {
+            return Ok(());
+        };
 
         self.events
             .emit(ChannelEvent::CopyBits {
@@ -3001,8 +3038,8 @@ impl DisplayChannel {
                 surface_id: base.surface_id,
                 src_x,
                 src_y,
-                dest_rect: ltrb(&base.bbox),
-                clip: clip_ltrb(&base),
+                dest_rect,
+                clip,
                 produced_at_secs: self.traffic.elapsed().as_secs_f64(),
             })
             .await;
@@ -3387,7 +3424,7 @@ impl DisplayChannel {
 mod tests {
     use super::*;
     use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
-    use shakenfist_spice_protocol::constants::image_compression;
+    use shakenfist_spice_protocol::constants::{clip_type, image_compression};
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
     };
@@ -4845,6 +4882,145 @@ mod tests {
                 .expect("a refused cache hit is not an error");
             assert!(drain_image_events(&mut peers).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn draw_copy_with_a_million_duplicate_clip_rects_copies_once() {
+        // #476: one DRAW_COPY of a cache hit with a million copies of a
+        // full-size clip rectangle. Applied per listed rectangle that
+        // copied the image a million times; merged, it is one copy.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
+        let full: WireRect = (0, 0, 2, 2);
+        let clip_rects = vec![full; 1_000_000];
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload(full, &clip_rects, &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (left, top, width, height, _) = &events[0];
+        assert_eq!((*left, *top, *width, *height), (0, 0, 2, 2));
+    }
+
+    #[tokio::test]
+    async fn draw_copy_with_overlapping_clip_rects_copies_each_pixel_once() {
+        // An L of two overlapping rectangles: the top row and the left
+        // column of a 2x2 image. Three pixels, each copied once.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[(0, 0, 1, 2), (0, 0, 2, 1)], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        let rects: Vec<_> = events
+            .iter()
+            .map(|(l, t, w, h, _)| (*l, *t, *w, *h))
+            .collect();
+        assert_eq!(rects, vec![(0, 0, 2, 1), (0, 1, 1, 1)]);
+    }
+
+    #[tokio::test]
+    async fn draw_copy_with_clip_rects_missing_the_destination_draws_nothing() {
+        // A RECTS clip with no rectangle over the destination, and one
+        // with no rectangles at all, both clip away the whole draw, as
+        // spice-common's region intersection does.
+        let (mut channel, mut peers) = test_display_channel().await;
+        cache_2x2_pixmap(&mut channel, &mut peers, 42).await;
+
+        let image = from_cache_image(ImageType::FromCache, 42, 2, 2);
+        let mut empty_rects = draw_copy_payload((0, 0, 2, 2), &[(0, 0, 1, 1)], &image);
+        // Rewrite the one-rectangle clip as a RECTS clip of none: drop
+        // the rectangle and zero the count. The clip starts after the
+        // surface id and the box.
+        let clip_at = 4 + Rect::SIZE;
+        assert_eq!(empty_rects[clip_at], clip_type::RECTS);
+        empty_rects.drain(clip_at + 5..clip_at + 5 + Rect::SIZE);
+        empty_rects[clip_at + 1..clip_at + 5].copy_from_slice(&0u32.to_le_bytes());
+
+        for payload in [
+            draw_copy_payload((0, 0, 2, 2), &[(10, 10, 20, 20)], &image),
+            empty_rects,
+        ] {
+            channel
+                .handle_message(display_server::DRAW_COPY, &payload)
+                .await
+                .expect("draw_copy must not error");
+            assert!(drain_image_events(&mut peers).is_empty());
+        }
+    }
+
+    /// A DRAW_BLACKNESS payload over `bbox` with `clip` and a null mask.
+    fn blackness_payload(bbox: WireRect, clip: Clip) -> Vec<u8> {
+        let mut v = Vec::new();
+        DrawBase {
+            surface_id: 0,
+            bbox: rect(bbox),
+            clip,
+        }
+        .write(&mut v);
+        v.extend_from_slice(&[0u8; SpiceBlackness::SIZE]);
+        v
+    }
+
+    /// The clip of each FillRect emitted so far.
+    fn drain_fill_clips(peers: &mut TestChannelPeers) -> Vec<Vec<(u32, u32, u32, u32)>> {
+        let mut out = Vec::new();
+        while let Ok(event) = peers.events.try_recv() {
+            if let ChannelEvent::FillRect { clip, .. } = event {
+                out.push(clip);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn fill_clip_is_merged_and_clamped_to_its_box() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let bbox: WireRect = (0, 0, 100, 100);
+        let clip = Clip::rects(vec![
+            rect((0, 0, 50, 50)),
+            rect((0, 0, 50, 50)),
+            rect((0, 50, 50, 500)),
+        ]);
+        channel
+            .handle_message(
+                display_server::DRAW_BLACKNESS,
+                &blackness_payload(bbox, clip),
+            )
+            .await
+            .expect("draw_blackness must not error");
+        assert_eq!(drain_fill_clips(&mut peers), vec![vec![(0, 0, 100, 50)]]);
+    }
+
+    #[tokio::test]
+    async fn fill_with_too_complex_a_clip_is_skipped() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let bbox: WireRect = (0, 0, 4096, 4096);
+        let rects: Vec<Rect> = (0..=MAX_CLIP_RECTS as u32)
+            .map(|i| rect((i, i, i + 1, i + 1)))
+            .collect();
+        channel
+            .handle_message(
+                display_server::DRAW_BLACKNESS,
+                &blackness_payload(bbox, Clip::rects(rects)),
+            )
+            .await
+            .expect("a refused clip is not an error");
+        assert!(drain_fill_clips(&mut peers).is_empty());
     }
 
     #[tokio::test]

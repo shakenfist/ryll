@@ -517,6 +517,37 @@ session. The `--pedantic` mode and always-visible
 `Gaps: N` status-bar counter surface these the moment
 they happen. See the pedantic-mode entry below.
 
+### Clip rectangles
+
+A draw's `RECTS` clip is a list of rectangles whose union is
+the area the draw may touch. The message size is the only
+bound on the count, and the rectangles may overlap, repeat
+or reach outside the destination. `DRAW_COPY`, `DRAW_BLEND`,
+`DRAW_FILL`, `DRAW_BLACKNESS`, `DRAW_WHITENESS`,
+`DRAW_INVERS` and `COPY_BITS` reduce the clip the way
+spice-common's canvas does (`canvas_clip_pixman()` builds a
+pixman region and intersects it with the destination): each
+rectangle is clamped to the destination, empty and duplicate
+ones are dropped, and their union is taken as disjoint
+rectangles. A draw therefore touches each destination pixel
+at most once however many rectangles the server sends, so a
+hostile server can no longer turn one message into millions
+of full-size copies, and an overlap is not inverted twice. A
+`RECTS` clip with no rectangles, or none that meet the
+destination, draws nothing.
+
+Neither spice-common nor spice-gtk caps the count, so ryll
+sets its own: a clip that needs more than 1024 rectangles
+(`MAX_CLIP_RECTS`), as distinct rectangles or in its union,
+is refused. The draw is skipped and a `warn_once!` fires
+under `display:decode_failure:<op>:clip_too_complex`. A real
+clip is the visible part of a drawable after others have
+covered it, usually a handful of rectangles. The code is in
+[`display/clip.rs`](https://github.com/shakenfist/ryll/blob/develop/shakenfist-spice-renderer/src/display/clip.rs).
+
+`DRAW_OPAQUE`, `DRAW_TRANSPARENT` and `DRAW_ALPHA_BLEND`
+ignore the clip and draw the whole destination.
+
 ### Colour byte-order convention
 
 All SPICE colour fields (brush colours, chroma keys, etc.)
