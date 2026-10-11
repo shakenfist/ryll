@@ -607,17 +607,17 @@ session. They come from the master plan
   stopped consuming server messages for that long, which
   applies SPICE-level backpressure on the server.
 - `writer_dropped_count` — number of pcap-capture packets the
-  dedicated writer task's bounded queue rejected because it
+  dedicated writer thread's bounded queue rejected because it
   was full. Zero unless `--capture` is active. A non-zero
   value implicates disk speed (or anything else slowing the
-  writer task) rather than decode CPU or socket-read pacing;
+  writer thread) rather than decode CPU or socket-read pacing;
   the rest of the SPICE pipeline keeps running because the
   enqueue is non-blocking.
 
 In `session.json` (a sibling artefact in the same zip):
 
 - `video_drop_count` — number of display frames dropped
-  because the H.264 encoder task's queue was full when the
+  because the H.264 encoder thread's queue was full when the
   egui frame loop tried to enqueue. Zero unless `--capture`
   is active. A non-zero value implicates encoder CPU (or MP4
   write speed) rather than the SPICE pipeline; the egui frame
@@ -637,12 +637,17 @@ In `session.json` (a sibling artefact in the same zip):
   `mean` is biased by batch size.
 
 **MP4 finalisation trade-off.** The MP4 moov atom is written
-by the encoder task after the sender drops, not synchronously by `CaptureSession::close()`.
-In practice the encoder task finalises within milliseconds of
+by the encoder thread after the sender drops, not synchronously by `CaptureSession::close()`.
+In practice the encoder thread finalises within milliseconds of
 close, but a bug report assembled in a very short window
-after a disconnect — or in the SIGINT abrupt-shutdown path —
-may see an unfinalised (unplayable) `display.mp4`. The pcap
-files and the rest of the report are unaffected.
+after a disconnect may see an unfinalised (unplayable)
+`display.mp4`. On a clean exit (window close or SIGINT) ryll
+waits up to five seconds for the encoder thread before the
+process exits, so the capture directory's own `display.mp4` is
+complete unless ryll was killed or crashed, or the encoder was
+wedged (the log then says the writer threads were still
+running). The pcap files and the rest of the report are
+unaffected.
 
 To read the report:
 
