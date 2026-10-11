@@ -98,6 +98,14 @@ jobs:
       - name: Check formatting and run clippy
         run: make lint
 
+      # Package every crate as crates.io would and build each from its
+      # tarball, so a change that would fail `cargo publish` fails here
+      # rather than halfway through a release. Here rather than in
+      # build-linux: this job is the shorter of the two, so the extra
+      # two minutes or so do not lengthen pull request feedback.
+      - name: Package and verify the crates
+        run: make package-check
+
   # A cheap proxy for the Windows builds in the merge tier: a cargo
   # check against the x86_64-pc-windows-gnu triple, cross-compiled from
   # the devcontainer (see docs/plans/PLAN-two-stage-ci.md for why the
