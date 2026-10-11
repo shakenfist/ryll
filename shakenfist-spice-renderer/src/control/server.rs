@@ -14,18 +14,23 @@
 //!
 //! # Lifecycle
 //!
-//! 1. `Server::run` is spawned as a tokio task from `run_headless`.
-//! 2. The server deletes any stale socket file, binds a new socket,
-//!    and `fchmod`s it to `0600`.
-//! 3. Accepts connections.  While a client is connected, additional
-//!    accept attempts receive a `busy` response and are closed.
-//! 4. When the `CancellationToken` fires (session shutdown), the
-//!    accept loop exits, the socket file is unlinked, and the task
-//!    returns.
+//! 1. `Server::bind` runs at startup, before the session connects. It
+//!    deletes any stale socket file, binds a new socket, and `fchmod`s
+//!    it to `0600`. Any failure here is returned to the caller, which
+//!    refuses to start: a caller that asked for a socket and drives
+//!    ryll through it would otherwise wait for one that never appears.
+//! 2. `Server::run` is spawned as a tokio task and accepts
+//!    connections.  While a client is connected, additional accept
+//!    attempts receive a `busy` response and are closed.
+//! 3. When the `CancellationToken` fires (session shutdown), the
+//!    accept loop exits and the task returns. The socket file is
+//!    unlinked when the `Server` is dropped, so a server that is
+//!    bound but never run, or whose task is aborted, does not leave
+//!    it behind either.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -65,18 +70,90 @@ pub trait StatusProvider: Send + Sync {
 
 // ── Server ────────────────────────────────────────────────────────
 
-/// Handle to the control socket configuration. Cheap to clone; the
-/// actual work happens in `run`.
+/// A bound control socket, ready to `run`.
+///
+/// Binding is separate from running so that a caller can do it at
+/// startup and refuse to start when it fails, rather than finding out
+/// from a warning logged by a task that has already been spawned.
 pub struct Server {
-    socket_path: PathBuf,
+    listener: std::os::unix::net::UnixListener,
+    socket_file: SocketFile,
+}
+
+/// Unlinks the socket file when dropped.
+struct SocketFile(PathBuf);
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => info!("control: removed socket {}", self.0.display()),
+            Err(e) => warn!(
+                "control: failed to remove socket {}: {}",
+                self.0.display(),
+                e
+            ),
+        }
+    }
 }
 
 impl Server {
-    pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+    /// Bind a Unix-domain socket at `socket_path`.
+    ///
+    /// A stale socket file at the path is removed first; any other
+    /// kind of file there is an error rather than being deleted. The
+    /// new socket's mode is set to `0600`. Fails when the path is too
+    /// long for `sockaddr_un`, its directory is missing or not
+    /// writable, or the mode cannot be set.
+    ///
+    /// Needs no tokio runtime, so it can run before one exists.
+    pub fn bind(socket_path: PathBuf) -> std::io::Result<Self> {
+        let path = &socket_path;
+
+        // Remove any stale socket file from a previous run — but only
+        // if it IS a socket; don't blindly remove regular files.
+        if path.exists() {
+            let metadata = std::fs::metadata(path)?;
+            // `metadata.file_type().is_socket()` works on Unix.
+            use std::os::unix::fs::FileTypeExt;
+            if metadata.file_type().is_socket() {
+                std::fs::remove_file(path)?;
+                info!("control: removed stale socket at {}", path.display());
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "control socket path {} exists and is not a socket",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+
+        let listener = std::os::unix::net::UnixListener::bind(path)?;
+        // From here on the file is ours, and is unlinked if anything
+        // below fails.
+        let socket_file = SocketFile(socket_path.clone());
+
+        // Set file mode 0600: owner read/write only.
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+
+        // tokio requires a non-blocking listener in `run`.
+        listener.set_nonblocking(true)?;
+
+        info!("control: listening on {}", path.display());
+        Ok(Self {
+            listener,
+            socket_file,
+        })
     }
 
-    /// Bind the socket and run the accept loop until `shutdown` fires.
+    /// The path the socket is bound at.
+    pub fn path(&self) -> &Path {
+        &self.socket_file.0
+    }
+
+    /// Run the accept loop until `shutdown` fires.
     ///
     /// `event_tx` is the broadcast bus that the headless event-loop
     /// fan-out publishes to.  Each accepted client subscribes a fresh
@@ -105,35 +182,9 @@ impl Server {
         surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
-        let path = &self.socket_path;
-
-        // Remove any stale socket file from a previous run — but only
-        // if it IS a socket; don't blindly remove regular files.
-        if path.exists() {
-            let metadata = std::fs::metadata(path)?;
-            // `metadata.file_type().is_socket()` works on Unix.
-            use std::os::unix::fs::FileTypeExt;
-            if metadata.file_type().is_socket() {
-                std::fs::remove_file(path)?;
-                info!("control: removed stale socket at {}", path.display());
-            } else {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "control socket path {} exists and is not a socket",
-                        path.display()
-                    ),
-                ));
-            }
-        }
-
-        let listener = UnixListener::bind(path)?;
-
-        // Set file mode 0600: owner read/write only.
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)?;
-
-        info!("control: listening on {}", path.display());
+        // Owned for the whole loop, so the socket file outlives it.
+        let socket_file = self.socket_file;
+        let listener = UnixListener::from_std(self.listener)?;
 
         // Single-client enforcement: true while a client connection
         // is being handled.
@@ -189,12 +240,8 @@ impl Server {
             }
         }
 
-        // Unlink the socket file on clean shutdown.
-        if let Err(e) = std::fs::remove_file(path) {
-            warn!("control: failed to remove socket {}: {}", path.display(), e);
-        } else {
-            info!("control: removed socket {}", path.display());
-        }
+        // Unlinks the socket file.
+        drop(socket_file);
 
         Ok(())
     }

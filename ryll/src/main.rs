@@ -512,11 +512,6 @@ fn run_web(
 ) -> Result<()> {
     info!("Running in web mode");
 
-    // --control-socket is Unix-only (see config.rs), so the field
-    // does not exist on Args elsewhere.
-    #[cfg(unix)]
-    let args_control_socket = args.control_socket.clone();
-
     let web_host = args.web_host.clone();
     let web_port = args.web_port;
     let web_tls_cert = args.web_tls_cert.clone();
@@ -531,6 +526,22 @@ fn run_web(
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
     let preferred_compression = args.preferred_compression.wire_value();
+
+    // --control-socket is Unix-only (see config.rs), so the field
+    // does not exist on Args elsewhere. Bound here, before the
+    // runtime starts and before anything connects, so a socket that
+    // cannot be created fails the launch: a harness driving ryll
+    // through it would otherwise wait for a socket that never
+    // appears.
+    #[cfg(unix)]
+    let control_server = args
+        .control_socket
+        .clone()
+        .map(|path| {
+            shakenfist_spice_renderer::control::Server::bind(path.clone())
+                .with_context(|| format!("cannot create control socket {}", path.display()))
+        })
+        .transpose()?;
 
     let runtime = tokio::runtime::Runtime::new()
         .with_context(|| "failed to construct tokio runtime for --web")?;
@@ -803,14 +814,14 @@ fn run_web(
         #[cfg(unix)]
         let control_cancel = shakenfist_spice_renderer::CancellationToken::new();
         #[cfg(unix)]
-        let control_handle = args_control_socket.map(|sock_path| {
+        let control_handle = control_server.map(|server| {
             let status: Arc<dyn shakenfist_spice_renderer::control::StatusProvider> =
                 Arc::new(shakenfist_spice_renderer::SessionStatus::new(
                     spice_connected.clone(),
                     session_state_rx.agent_connected.clone(),
                     surface_mirror.clone(),
                 ));
-            info!("web: control socket at {}", sock_path.display());
+            info!("web: control socket at {}", server.path().display());
             // The digest poller belongs with the socket, not with
             // the mode: it is what turns framebuffer content into
             // the `digest_updated` events the QR scenario tests
@@ -829,7 +840,7 @@ fn run_web(
                 cancel.clone(),
             );
             shakenfist_spice_renderer::spawn_control_socket(
-                sock_path,
+                server,
                 status,
                 event_broadcast_tx.clone(),
                 session_state_rx.agent_connected.clone(),

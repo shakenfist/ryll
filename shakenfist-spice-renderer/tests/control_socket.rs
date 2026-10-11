@@ -142,7 +142,9 @@ async fn spawn_server(
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
 
     let shutdown = CancellationToken::new();
-    let server = Server::new(socket_path.clone());
+    // Bound before the task is spawned, so the caller can connect at
+    // once.
+    let server = Server::bind(socket_path.clone()).expect("bind control socket");
     let task = tokio::spawn(server.run(
         status.clone(),
         event_tx.clone(),
@@ -151,9 +153,6 @@ async fn spawn_server(
         mirror.clone(),
         shutdown.clone(),
     ));
-
-    // Give the server a moment to bind before the caller connects.
-    tokio::time::sleep(Duration::from_millis(20)).await;
 
     (
         socket_path,
@@ -1377,4 +1376,60 @@ async fn agent_transition_survives_a_lagged_event_bus() {
     assert_eq!(ev["data"]["connected"], true);
 
     handle.stop().await;
+}
+
+// ── Binding ───────────────────────────────────────────────────────
+//
+// A socket that cannot be bound must be an error from `Server::bind`,
+// so the caller can refuse to start; see shakenfist/ryll#488.
+
+#[test]
+fn bind_in_a_missing_directory_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("no-such-dir").join("control.sock");
+    assert!(Server::bind(path).is_err());
+}
+
+#[test]
+fn bind_to_a_path_too_long_for_sockaddr_un_is_an_error() {
+    // sun_path is 108 bytes on Linux and 104 on macOS.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{}.sock", "x".repeat(200)));
+    assert!(Server::bind(path).is_err());
+}
+
+#[test]
+fn bind_over_a_regular_file_is_an_error_and_keeps_the_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("control.sock");
+    std::fs::write(&path, b"not a socket").expect("write file");
+
+    let err = Server::bind(path.clone())
+        .err()
+        .expect("binding over a regular file must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).expect("file kept"), b"not a socket");
+}
+
+#[test]
+fn bind_replaces_a_stale_socket_and_drop_unlinks_it() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("control.sock");
+    // A socket file left behind by a previous run that is gone.
+    drop(std::os::unix::net::UnixListener::bind(&path).expect("stale socket"));
+    assert!(path.exists());
+
+    let server = Server::bind(path.clone()).expect("bind over a stale socket");
+    assert_eq!(server.path(), path.as_path());
+    let metadata = std::fs::metadata(&path).expect("socket file");
+    assert!(metadata.file_type().is_socket());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+    drop(server);
+    assert!(
+        !path.exists(),
+        "dropping a bound server must unlink its socket"
+    );
 }

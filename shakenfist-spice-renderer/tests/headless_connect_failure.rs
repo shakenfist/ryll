@@ -6,8 +6,13 @@
 //! become ready together when `run_connection` returns). The race is
 //! decided at random on each run, so the test repeats the connect
 //! enough times that a regression cannot hide behind a lucky draw.
+//!
+//! A control socket that cannot be bound must fail the run too, and
+//! before it connects, rather than being logged by a task that has
+//! already been spawned (shakenfist/ryll#488).
 
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +49,7 @@ fn closed_port() -> u16 {
         .port()
 }
 
-async fn headless_against(port: u16) -> anyhow::Result<()> {
+async fn headless_against(port: u16, control_socket: Option<PathBuf>) -> anyhow::Result<()> {
     let config = ConnectionConfig {
         host: "127.0.0.1".to_string(),
         port,
@@ -73,7 +78,7 @@ async fn headless_against(port: u16) -> anyhow::Result<()> {
         64 * 1024 * 1024,
         64 * 1024 * 1024,
         2, // AUTO_GLZ
-        None,
+        control_socket,
     )
     .await
 }
@@ -85,7 +90,7 @@ async fn headless_connect_failure_is_an_error() {
         // Windows retries a refused SYN before reporting it, so even a
         // loopback refusal takes about two seconds there. The limit only
         // has to catch a hang, not a slow refusal.
-        let result = tokio::time::timeout(Duration::from_secs(10), headless_against(port))
+        let result = tokio::time::timeout(Duration::from_secs(10), headless_against(port, None))
             .await
             .unwrap_or_else(|_| panic!("attempt {}: run_headless did not return", attempt));
         let err = result.expect_err("a refused connect must be an Err");
@@ -102,4 +107,26 @@ async fn headless_connect_failure_is_an_error() {
             err
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn headless_control_socket_bind_failure_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket = dir.path().join("no-such-dir").join("control.sock");
+
+    // The port refuses connections too. The error must name the
+    // socket, which shows the bind was tried, and failed the run,
+    // before the connect.
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        headless_against(closed_port(), Some(socket.clone())),
+    )
+    .await
+    .expect("run_headless did not return")
+    .expect_err("a control socket that cannot be bound must be an Err");
+    assert_eq!(
+        err.to_string(),
+        format!("cannot create control socket {}", socket.display())
+    );
 }
