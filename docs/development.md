@@ -47,9 +47,11 @@ first: `fetch` is `--locked` and every compile is `--frozen`, so
 without it the next build stops with "the lock file needs to be
 updated". The cache lives in `.cargo-cache`;
 override `CARGO_CACHE` to move it (for example to a location a CI
-runner keeps between jobs). `make clean` removes the cache only
-when it sits inside the checkout, so a shared out-of-tree cache
-survives.
+runner keeps between jobs). `make clean` removes the build output,
+including the fuzz crate's separate `target/`, and removes the
+cache only when it sits inside the checkout, so a shared
+out-of-tree cache survives. Fuzzing corpora and crash artifacts
+are kept.
 
 ## Building with a local Rust installation
 

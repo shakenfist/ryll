@@ -412,8 +412,14 @@ macos-release: macos-prereqs
 # checkout (see its comment at the top of this file), and `clean` has
 # no business deleting that. An empty CARGO_CACHE is rejected at parse
 # time, so this recipe only has to decide in-tree versus out-of-tree.
+#
+# The fuzz crate is its own workspace with its own target directory,
+# which `fuzz-build-%` and `fuzz-smoke-%` fill. Its corpus/ and
+# artifacts/ are kept: they are fuzzing results (an artifact is a
+# crash reproducer), not build output.
 clean:
 	rm -rf target/
+	rm -rf shakenfist-spice-protocol/fuzz/target/
 	@case "$(CARGO_CACHE_DIR)/" in \
 		"$(CURDIR)"/?*) rm -rf "$(CARGO_CACHE_DIR)/" ;; \
 		*) echo "Kept $(CARGO_CACHE_DIR) (not below $(CURDIR); delete by hand)" ;; \
