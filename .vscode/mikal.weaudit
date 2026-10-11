@@ -344,10 +344,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/logging.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/channels/watchdog.rs",
       "author": "mikal"
     },
@@ -685,14 +681,6 @@
     },
     {
       "path": "shakenfist-spice-compression/src/limits.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/bugreport.rs",
       "author": "mikal"
     }
   ],

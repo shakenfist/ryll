@@ -137,10 +137,6 @@
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
       "date": "2026-09-27"
     },
-    "ryll/src/bugreport.rs": {
-      "sha": "f0101c2da5762447179089ac9cacc0187b1443ce",
-      "date": "2026-10-10"
-    },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
@@ -272,14 +268,6 @@
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
-    },
-    "shakenfist-spice-protocol/src/link.rs": {
-      "sha": "c40100ae2593a6c538c37a6831a4efd605791712",
-      "date": "2026-10-06"
-    },
-    "shakenfist-spice-protocol/src/logging.rs": {
-      "sha": "69fcdbc8cd6907d5ad014e36275224ecdf252095",
-      "date": "2026-09-18"
     },
     "shakenfist-spice-protocol/src/parse.rs": {
       "sha": "d203d9a6b371d431247c0037edd3851936369a61",
