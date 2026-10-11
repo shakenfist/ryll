@@ -18,6 +18,14 @@ rsa = "0.9"
 [dependencies.shakenfist-spice-protocol]
 path = ".."
 
+# For the `fuzz_lz4_decode` target. Only the LZ4 decoder is needed, so the
+# default decoder set (and mozjpeg's C build) is left out. openh264 is not a
+# feature yet, so its C build is still pulled in (ryll#499).
+[dependencies.shakenfist-spice-compression]
+path = "../../shakenfist-spice-compression"
+default-features = false
+features = ["lz4"]
+
 # Detach this crate from the parent Cargo workspace. cargo-fuzz needs
 # nightly and its own dependency resolution; without this empty
 # `[workspace]` table, `cargo build --workspace` / `cargo test
@@ -76,6 +84,13 @@ bench = false
 [[bin]]
 name = "fuzz_client_bound"
 path = "fuzz_targets/fuzz_client_bound.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lz4_decode"
+path = "fuzz_targets/fuzz_lz4_decode.rs"
 test = false
 doc = false
 bench = false

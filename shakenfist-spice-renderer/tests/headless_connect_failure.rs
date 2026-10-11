@@ -72,6 +72,7 @@ async fn headless_against(port: u16) -> anyhow::Result<()> {
         Arc::new(AtomicBool::new(false)),
         64 * 1024 * 1024,
         64 * 1024 * 1024,
+        2, // AUTO_GLZ
         None,
     )
     .await

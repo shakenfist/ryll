@@ -88,10 +88,16 @@ confidence-threshold = 0.93
 # `allow`; IJG needs the per-crate exception). IJG is FSF-Free and
 # OSI-recognised; widely accepted for redistribution, including in
 # Debian/Ubuntu where libjpeg-turbo ships under it.
+#
+# `jpeg-encoder` (the pure-Rust JPEG encoder behind `encode_spice_jpeg`)
+# declares `(MIT OR Apache-2.0) AND IJG`: the IJG term covers its DCT
+# (and the AVX2 version of it), which are ported from mozjpeg. Same
+# licence, same reasoning as the mozjpeg entries above.
 exceptions = [
     { allow = ["Ubuntu-font-1.0"], crate = "epaint_default_fonts" },
     { allow = ["IJG"], crate = "mozjpeg" },
     { allow = ["IJG"], crate = "mozjpeg-sys" },
+    { allow = ["IJG"], crate = "jpeg-encoder" },
 ]
 
 [bans]

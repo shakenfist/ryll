@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), extracted from the ryll SPICE client."
+description = "Pure-Rust SPICE image decompression algorithms (QUIC, GLZ, LZ, LZ4), and LZ4 and JPEG encoders for servers, from the ryll SPICE client."
 readme = "README.md"
 
 [lints]
@@ -18,6 +18,10 @@ quic = []
 glz = ["dep:tokio"]
 lz = []
 lz4 = ["dep:lz4_flex"]
+# Image encoders, for SPICE servers. Independent of the decoder
+# features above, so `default-features = false, features = ["encode"]`
+# builds. LZ4 and JPEG are the encoders.
+encode = ["dep:lz4_flex", "dep:jpeg-encoder"]
 jpeg = ["dep:jpeg-decoder"]
 # Cross-platform SIMD-accelerated JPEG decode via the `mozjpeg`
 # crate. The `with_simd` feature on `mozjpeg-sys` is enabled by
@@ -34,6 +38,10 @@ thiserror = "2"
 tracing = "0.1"
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 lz4_flex = { version = "0.14", optional = true }
+# Pure-Rust JPEG encoder, for `encode_spice_jpeg`. Default features
+# are off; `simd` implies `std` and adds an AVX2 path chosen at run
+# time (`is_x86_feature_detected!`), with no build requirements.
+jpeg-encoder = { version = "0.7", optional = true, default-features = false, features = ["simd"] }
 # Byte-bounded LRU shared by the GLZ dictionary (this crate) and
 # the renderer's image_cache wrapper.  Same version pin as the
 # renderer's previous `lru` dep.
@@ -114,3 +122,8 @@ windows = { version = "0.62", features = [
 # mozjpeg / pure-Rust chain.
 [target.'cfg(target_os = "linux")'.dependencies]
 libloading = "0.9"
+
+[dev-dependencies]
+# Property tests. Only `std` is needed: the default features add
+# process forking and timeouts we do not use, and their dependencies.
+proptest = { version = "1", default-features = false, features = ["std"] }

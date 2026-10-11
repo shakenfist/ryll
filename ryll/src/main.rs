@@ -359,6 +359,7 @@ fn run_headless(
     let monitors = args.monitors;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
+    let preferred_compression = args.preferred_compression.wire_value();
 
     // Build the host-side scaffolding the renderer's `run_headless`
     // expects. Notifications, traffic, snapshots, and the byte
@@ -458,6 +459,7 @@ fn run_headless(
             cancel,
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
+            preferred_compression,
             control_socket_arg,
         )
         .await;
@@ -528,6 +530,7 @@ fn run_web(
     let monitors = args.monitors;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
+    let preferred_compression = args.preferred_compression.wire_value();
 
     let runtime = tokio::runtime::Runtime::new()
         .with_context(|| "failed to construct tokio runtime for --web")?;
@@ -724,6 +727,7 @@ fn run_web(
                 /* opus_sink */ Some(opus_sink_dyn),
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
+                preferred_compression,
             )
             .await;
             // Nothing else reads this result until shutdown, so a
@@ -982,6 +986,7 @@ fn run_gui(
     let auto_snapshot_cap = args.auto_snapshot_cap;
     let image_cache_cap_bytes = mib_to_usize_bytes(args.image_cache_cap_mib);
     let glz_dictionary_cap_bytes = mib_to_usize_bytes(args.glz_dictionary_cap_mib);
+    let preferred_compression = args.preferred_compression.wire_value();
 
     if let Some(interval) = auto_snapshot_interval {
         if interval < 10 {
@@ -1016,6 +1021,7 @@ fn run_gui(
                 auto_snapshot_cap,
                 image_cache_cap_bytes,
                 glz_dictionary_cap_bytes,
+                preferred_compression,
             )))
         }),
     )

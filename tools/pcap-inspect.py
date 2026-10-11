@@ -86,6 +86,7 @@ IMAGE_TYPES = {
     106: "FROM_CACHE_LOSSLESS",
     107: "ZLIB_GLZ_RGB",
     108: "JPEG_ALPHA",
+    109: "LZ4",
 }
 
 # ── Pcap reassembly ──────────────────────────────────────────
@@ -183,6 +184,49 @@ def _parse_draw_base(payload: bytes) -> tuple[int, int, int, int, int, int] | No
     return (sid, top, left, bot, right, o)
 
 
+IMAGE_TYPE_LZ4 = 109
+
+
+def _describe_lz4(data: bytes) -> str:
+    """Describe a SpiceLZ4Data body (after the 18-byte image descriptor).
+
+    Layout: u32 LE data_size, then data_size bytes made of a top-down flag
+    byte, a SPICE_BITMAP_FMT byte, and blocks of (u32 BE length, bytes).
+    """
+    if len(data) < 4:
+        return "truncated before data_size"
+    (data_size,) = struct.unpack("<I", data[:4])
+    body = data[4 : 4 + data_size]
+    if len(body) < 2:
+        return f"data_size={data_size} but only {len(body)} bytes follow"
+    out = f"data_size={data_size} top_down={body[0]} format={body[1]}"
+    if len(body) < data_size:
+        out += f" (TRUNCATED: {len(body)} of {data_size} bytes present)"
+    blocks: list[int] = []
+    o = 2
+    problem = None
+    while o < len(body):
+        if o + 4 > len(body):
+            problem = f"{len(body) - o} stray bytes at offset {o}"
+            break
+        (n,) = struct.unpack(">I", body[o : o + 4])
+        o += 4
+        if o + n > len(body):
+            problem = f"block {len(blocks)} claims {n} bytes but only {len(body) - o} remain"
+            break
+        blocks.append(n)
+        o += n
+    out += f" blocks={len(blocks)} lengths={blocks}"
+    if problem is not None:
+        out += f" LENGTHS DO NOT ADD UP: {problem}"
+    elif sum(blocks) + 4 * len(blocks) != data_size - 2:
+        out += (
+            f" LENGTHS DO NOT ADD UP: blocks total {sum(blocks) + 4 * len(blocks)}"
+            f" bytes, expected data_size - 2 = {data_size - 2}"
+        )
+    return out
+
+
 def _parse_draw_copy(payload: bytes) -> dict | None:
     b = _parse_draw_base(payload)
     if b is None:
@@ -197,6 +241,7 @@ def _parse_draw_copy(payload: bytes) -> dict | None:
     rop = struct.unpack("<H", payload[o + 20 : o + 22])[0]
     scale = payload[o + 22]
     image = None
+    lz4 = None
     if src_bitmap_off and src_bitmap_off + 18 <= len(payload):
         iid = struct.unpack("<Q", payload[src_bitmap_off : src_bitmap_off + 8])[0]
         itype = payload[src_bitmap_off + 8]
@@ -205,6 +250,8 @@ def _parse_draw_copy(payload: bytes) -> dict | None:
             "<II", payload[src_bitmap_off + 10 : src_bitmap_off + 18]
         )
         image = (iid, itype, iflags, iw, ih)
+        if itype == IMAGE_TYPE_LZ4:
+            lz4 = _describe_lz4(payload[src_bitmap_off + 18 :])
     return {
         "surface_id": sid,
         "rect": (left, top, right, bot),
@@ -212,6 +259,7 @@ def _parse_draw_copy(payload: bytes) -> dict | None:
         "rop": rop,
         "scale": scale,
         "image": image,
+        "lz4": lz4,
     }
 
 
@@ -273,6 +321,8 @@ def cmd_draw_copy(args: argparse.Namespace) -> int:
             f"  type={itype} {name}: idx={i} surf={d['surface_id']} "
             f"rect={d['rect']} src={d['src_rect']} img={d['image']}"
         )
+        if d["lz4"] is not None:
+            print(f"    lz4: {d['lz4']}")
     return 0
 
 

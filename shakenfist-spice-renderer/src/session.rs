@@ -211,6 +211,7 @@ pub async fn run_connection(
     opus_sink: Option<Arc<dyn OpusPacketSink>>,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
+    preferred_compression: u8,
 ) -> Result<()> {
     // When the `audio` feature is off, `volume_control` and
     // `opus_sink` are never read (the playback channel arm is
@@ -315,6 +316,7 @@ pub async fn run_connection(
                     log_config,
                     mm_clock.clone(),
                     image_cache_cap_bytes,
+                    preferred_compression,
                 );
                 handles.push((
                     ChannelType::Display,
@@ -638,6 +640,7 @@ pub async fn run_headless(
     cancel: Arc<AtomicBool>,
     image_cache_cap_bytes: usize,
     glz_dictionary_cap_bytes: usize,
+    preferred_compression: u8,
     control_socket_path: Option<PathBuf>,
 ) -> Result<()> {
     info!("Running in headless mode");
@@ -728,6 +731,7 @@ pub async fn run_headless(
             None, // headless mode: no opus sink (cpal output only)
             image_cache_cap_bytes,
             glz_dictionary_cap_bytes,
+            preferred_compression,
         )
         .await;
         spice_connected_for_conn.store(false, Ordering::Relaxed);

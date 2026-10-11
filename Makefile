@@ -269,19 +269,20 @@ endif
 test: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		cargo test --frozen --workspace
+		cargo test --frozen --workspace --features shakenfist-spice-compression/encode
 
-# Run linting checks (rustfmt + clippy)
+# Run linting checks (rustfmt + clippy). The second clippy builds the
+# encoders the way a server-role consumer does, with no decoders.
 lint: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets -- -D warnings"
+		sh -c "cargo fmt --all --check && cargo clippy --frozen --workspace --all-targets --features shakenfist-spice-compression/encode -- -D warnings && cargo clippy --frozen -p shakenfist-spice-compression --no-default-features --features encode -- -D warnings"
 
 # Run linting with auto-fix
 lint-fix: fetch
 	$(DOCKER_RUN_OFFLINE) \
 		$(RYLL_IMAGE) \
-		sh -c "cargo fmt --all && cargo clippy --fix --frozen --allow-dirty --workspace --all-targets -- -D warnings"
+		sh -c "cargo fmt --all && cargo clippy --fix --frozen --allow-dirty --workspace --all-targets --features shakenfist-spice-compression/encode -- -D warnings"
 
 # Package the release binary as a .deb. cargo-deb is baked into the
 # devcontainer image; --no-build packages the binary produced by

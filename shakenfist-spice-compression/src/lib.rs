@@ -22,6 +22,9 @@ pub mod byte_bounded_lru;
 
 pub mod limits;
 
+#[cfg(feature = "encode")]
+pub mod encode;
+
 #[cfg(feature = "glz")]
 pub mod glz;
 
@@ -49,6 +52,9 @@ pub mod video;
 pub use byte_bounded_lru::{ByteBoundedLru, InsertOutcome, RefusedReason};
 
 pub use limits::{rgba_len, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS};
+
+#[cfg(feature = "encode")]
+pub use encode::{encode_spice_jpeg, encode_spice_lz4, Bgrx};
 
 #[cfg(feature = "glz")]
 pub use glz::{decompress_glz, GlzDictionary};

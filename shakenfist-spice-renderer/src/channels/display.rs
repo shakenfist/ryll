@@ -19,9 +19,7 @@ use shakenfist_spice_compression::{
     video, DecompressedImage, GlzDictionary, JpegDecoder, VideoDecoder, VideoDecoderError,
     SPICE_VIDEO_CODEC_TYPE_H264, SPICE_VIDEO_CODEC_TYPE_MJPEG,
 };
-use shakenfist_spice_protocol::constants::{
-    bitmap_flags, bitmap_fmt, clip_type, image_compression, ropd,
-};
+use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, clip_type, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
@@ -878,6 +876,9 @@ pub struct DisplayChannel {
     /// confirm the preference actually went out. One-shot per channel
     /// lifetime.
     pref_compression_sent: bool,
+    /// `SPICE_IMAGE_COMPRESSION_*` value sent in the link-up
+    /// `PREFERRED_COMPRESSION` message; chosen by `--preferred-compression`.
+    preferred_compression: u8,
     /// Set to true after we have successfully sent the link-up
     /// `PREFERRED_VIDEO_CODEC_TYPE` (opcode 105) message. Mirrored into
     /// `DisplaySnapshot::pref_video_codec_type_sent`. One-shot per channel
@@ -903,6 +904,7 @@ impl DisplayChannel {
         log_config: LogConfig,
         mm_clock: Arc<MmClock>,
         image_cache_cap_bytes: usize,
+        preferred_compression: u8,
     ) -> Self {
         DisplayChannel {
             channel_id,
@@ -958,6 +960,7 @@ impl DisplayChannel {
             h264_recent_durations: VecDeque::new(),
             h264_decode_total_count: 0,
             h264_decode_failed_count: 0,
+            preferred_compression,
             pref_compression_sent: false,
             pref_video_codec_type_sent: false,
         }
@@ -1059,12 +1062,9 @@ impl DisplayChannel {
         result
     }
 
-    async fn run_loop(&mut self) -> Result<()> {
-        info!("display: channel started");
-
-        // Send display init message
-        self.send_init().await?;
-
+    /// Send the one-shot link-up preference messages: image compression
+    /// then video codec types.
+    async fn send_link_up_preferences(&mut self) -> Result<()> {
         // One-shot link-up preference messages. spice-gtk fires both right
         // after the channel reaches STATE_LINKED (channel-display.c:984-995).
         // In ryll the channel is already linked by the time run_loop starts
@@ -1073,20 +1073,26 @@ impl DisplayChannel {
         // falls back to its default codec / compression choice if the
         // messages never arrive — but we propagate any IO error since it
         // indicates the socket is unhealthy and the read loop is about to
-        // fail anyway. Session 006 measurement: advertising AUTO_LZ here
-        // caused the server to stop using GLZ entirely (006c vs 006a:
-        // glz_dictionary_entries 23 → 0, evictions 1345 → 0, bytes_in 2.78 GB
-        // → 3.51 GB = +25%). For our UI-heavy workload the GLZ shared
-        // dictionary is the win; AUTO_GLZ lets the server still pick QUIC for
-        // photographic content but keep the dictionary for repeating UI
-        // elements.
-        self.send_preferred_compression(image_compression::AUTO_GLZ)
+        // fail anyway. The compression scheme is whatever the session was
+        // configured with (`--preferred-compression`); why the default is
+        // `auto-glz` is in docs/configuration.md.
+        self.send_preferred_compression(self.preferred_compression)
             .await?;
         self.send_preferred_video_codec_type(&[
             SPICE_VIDEO_CODEC_TYPE_H264,
             SPICE_VIDEO_CODEC_TYPE_MJPEG,
         ])
         .await?;
+        Ok(())
+    }
+
+    async fn run_loop(&mut self) -> Result<()> {
+        info!("display: channel started");
+
+        // Send display init message
+        self.send_init().await?;
+
+        self.send_link_up_preferences().await?;
 
         loop {
             // Read data into buffer
@@ -2498,17 +2504,35 @@ impl DisplayChannel {
                 }
             }
             Some(ImageType::Lz4) => {
-                // SPICE LZ4 format:
-                //   1 byte: top_down flag
-                //   1 byte: spice bitmap format
-                //   then per-row blocks: 4-byte BE size + LZ4 compressed row
-                //
-                // Note: unlike LZ_RGB/GLZ_RGB, the LZ4 data does NOT have
-                // a data_size u32 prefix — the pixel data starts immediately
-                // after the ImageDescriptor.
-                let width = img_desc.width as usize;
-                let height = img_desc.height as usize;
-                decompress_spice_lz4(image_data, width, height)
+                // LZ4: BinaryData wrapper (4-byte data_size, then a
+                // top-down byte, a bitmap format byte and big-endian
+                // length-prefixed LZ4 blocks, which the decoder reads).
+                if let Ok(lz4_data) = BinaryData::read_data(&mut BoundedReader::new(image_data)) {
+                    let decoded = decompress_spice_lz4(
+                        lz4_data,
+                        img_desc.width as usize,
+                        img_desc.height as usize,
+                    );
+                    // The decoder logs which check failed; this records
+                    // the gap once a session.
+                    if decoded.is_none() {
+                        warn_once!(
+                            "display:decode_failure:lz4:decode_failed",
+                            "display: LZ4 decode failed ({}x{})",
+                            img_desc.width,
+                            img_desc.height
+                        );
+                    }
+                    decoded
+                } else {
+                    // Shorter than its size field, or than the size it
+                    // declares.
+                    warn_once!(
+                        "display:decode_failure:lz4:short_data",
+                        "display: LZ4 data too short"
+                    );
+                    None
+                }
             }
             Some(ImageType::FromCache) | Some(ImageType::FromCacheLossless) => {
                 // FromCacheLossless names an entry the server knows is
@@ -2687,6 +2711,16 @@ impl DisplayChannel {
                 image_type,
                 Some(ImageType::GlzRgb) | Some(ImageType::ZlibGlzRgb)
             );
+            // A GLZ image's id comes from its own header, and names its
+            // entry in the GLZ dictionary. Every other image is known by
+            // its descriptor's id: some decoders (LZ, LZ4) do not set
+            // one, and the descriptor's id is what a later FromCache
+            // names.
+            let image_id = if is_glz {
+                img.image_id
+            } else {
+                img_desc.image_id
+            };
             if is_glz {
                 // GLZ images are always cached -- they form the shared
                 // dictionary that cross-frame references depend on.
@@ -2716,7 +2750,7 @@ impl DisplayChannel {
                 // Only cache non-GLZ images when the server requests it.
                 // insert() replaces an existing entry, which is all
                 // CACHE_REPLACE_ME asks for.
-                let _ = self.image_cache.insert(img.image_id, img.pixels.clone());
+                let _ = self.image_cache.insert(image_id, img.pixels.clone());
             }
 
             let mut out_width = img.width;
@@ -2797,7 +2831,7 @@ impl DisplayChannel {
                             sub_w as u32,
                             sub_h as u32,
                             sub_pixels,
-                            img.image_id,
+                            image_id,
                             self.traffic.elapsed().as_secs_f64(),
                         ))
                         .await;
@@ -2813,7 +2847,7 @@ impl DisplayChannel {
                         out_width,
                         out_height,
                         out_pixels,
-                        img.image_id,
+                        image_id,
                         self.traffic.elapsed().as_secs_f64(),
                     ))
                     .await;
@@ -3353,6 +3387,7 @@ impl DisplayChannel {
 mod tests {
     use super::*;
     use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
+    use shakenfist_spice_protocol::constants::image_compression;
     use shakenfist_spice_protocol::messages::{
         BitmapPalette, BitmapPayload, Clip, DrawCopyBuilder, ImagePayload, SpiceImage,
     };
@@ -4168,6 +4203,7 @@ mod tests {
             LogConfig::default(),
             Arc::new(MmClock::new()),
             1024 * 1024,
+            image_compression::AUTO_GLZ,
         );
         (channel, peers)
     }
@@ -4957,6 +4993,185 @@ mod tests {
         assert_eq!(rgba, &vec![115, 114, 113, 255]);
     }
 
+    /// A top-down 32-bit LZ4 image of `pixels` (B,G,R,X), as one block.
+    fn lz4_image(id: u64, flags: u8, width: u32, height: u32, pixels: &[u8]) -> SpiceImage {
+        let block = lz4_flex::block::compress(pixels);
+        let mut body = vec![1, bitmap_fmt::BIT32];
+        body.extend_from_slice(&(block.len() as u32).to_be_bytes());
+        body.extend_from_slice(&block);
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::Lz4, flags, width, height),
+            payload: ImagePayload::Lz4(BinaryData { data: body }),
+        }
+    }
+
+    #[tokio::test]
+    async fn lz4_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // The LZ4 decoder does not know the image's id, so the cache
+        // must key it by the descriptor's, which is what a later
+        // FromCache names.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let expected = vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255];
+        let image = lz4_image(0x1234, IMAGE_FLAGS_CACHE_ME, 2, 2, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        let (_, _, width, height, rgba) = &events[0];
+        assert_eq!((*width, *height), (2, 2));
+        assert_eq!(rgba, &expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    #[tokio::test]
+    async fn pixmap_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // Non-GLZ images are cached under the id in their descriptor,
+        // which is what a later FromCache names.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let expected = vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255];
+        let image = pixmap_image(0x1234, IMAGE_FLAGS_CACHE_ME, 2, 2, 8, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    /// A top-down 2x2 LZ_RGB32 image of four literal BGR pixels: a
+    /// little-endian data_size, the 28-byte big-endian LZ header, one
+    /// control byte (four literals follow), then the pixels.
+    fn lz_rgb_image(id: u64, flags: u8, bgr: &[u8; 12]) -> SpiceImage {
+        let mut lz = Vec::new();
+        lz.extend_from_slice(b"  ZL");
+        lz.extend_from_slice(&1u16.to_be_bytes());
+        lz.extend_from_slice(&0u16.to_be_bytes());
+        lz.extend_from_slice(&[0, 0, 0]);
+        lz.push(8); // LZ_IMAGE_TYPE_RGB32
+        for value in [2u32, 2, 8, 1] {
+            // width, height, stride, top_down
+            lz.extend_from_slice(&value.to_be_bytes());
+        }
+        lz.push(3);
+        lz.extend_from_slice(bgr);
+        let mut data = (lz.len() as u32).to_le_bytes().to_vec();
+        data.extend_from_slice(&lz);
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::LzRgb, flags, 2, 2),
+            payload: ImagePayload::Other(data),
+        }
+    }
+
+    #[tokio::test]
+    async fn lz_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // Like LZ4, the LZ decoder does not know the image's id.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let bgr: [u8; 12] = std::array::from_fn(|i| i as u8 + 1);
+        let expected = vec![3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255];
+        let image = lz_rgb_image(0x1234, IMAGE_FLAGS_CACHE_ME, &bgr);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    #[tokio::test]
+    async fn lz4_data_size_past_the_payload_warns_and_is_skipped() {
+        let (mut channel, mut peers) = test_display_channel().await;
+        let pixels: Vec<u8> = (1..=16).collect();
+        let image = lz4_image(1, 0, 2, 2, &pixels);
+        let ImagePayload::Lz4(lz4) = &image.payload else {
+            unreachable!()
+        };
+        // The image ends the payload, so its data_size is just before
+        // its body; claim one byte more than there is.
+        let mut payload = draw_copy_payload((0, 0, 2, 2), &[], &image);
+        let size_at = payload.len() - lz4.data.len() - 4;
+        payload[size_at..size_at + 4].copy_from_slice(&(lz4.data.len() as u32 + 1).to_le_bytes());
+        channel
+            .handle_message(display_server::DRAW_COPY, &payload)
+            .await
+            .expect("a short LZ4 image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:lz4:short_data"));
+    }
+
+    #[tokio::test]
+    async fn lz4_image_that_does_not_decode_warns_and_is_skipped() {
+        // Three pixels' worth of data for a 2x2 image.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let image = lz4_image(1, 0, 2, 2, &[0; 12]);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("an undecodable LZ4 image is not an error");
+
+        assert!(drain_image_events(&mut peers).is_empty());
+        assert!(logging::warn_once_keys().contains(&"display:decode_failure:lz4:decode_failed"));
+    }
+
     #[tokio::test]
     async fn draw_blend_with_op_put_draws_like_a_copy() {
         // DRAW_BLEND's body is DRAW_COPY's, and its image is found the
@@ -5031,6 +5246,26 @@ mod tests {
     // Pinned from what ryll sent before its client messages moved onto the
     // protocol crate's writers, so that the move cannot change them.
     // -------------------------------------------------------------------------
+
+    // The scheme asked for at link-up comes from configuration: AUTO_GLZ by
+    // default, and exactly LZ4 when asked, since spice-server only sends LZ4
+    // images to a client that requests that scheme.
+    #[tokio::test]
+    async fn link_up_sends_the_configured_compression() {
+        for (scheme, wire) in [
+            (image_compression::AUTO_GLZ, 2u8),
+            (image_compression::LZ4, 7u8),
+        ] {
+            let (mut channel, mut peers) = test_display_channel().await;
+            channel.preferred_compression = scheme;
+            channel
+                .send_link_up_preferences()
+                .await
+                .expect("send link-up preferences");
+            assert_eq!(peers.read_sent(7).await, vec![103, 0, 1, 0, 0, 0, wire]);
+            assert_eq!(peers.read_sent(9).await, vec![105, 0, 3, 0, 0, 0, 2, 3, 1]);
+        }
+    }
 
     #[tokio::test]
     async fn link_up_messages_are_unchanged() {
