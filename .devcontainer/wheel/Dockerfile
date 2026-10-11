@@ -14,7 +14,8 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH}
 # required to link today. The GUI/EGL/wayland/xcb/xkb and opus -devel
 # packages are belt-and-braces -- those libraries are dlopen'd, not
 # DT_NEEDED -- kept so a future crate bump that starts hard-linking one
-# of them still builds.
+# of them still links, and reaches the DT_NEEDED check in
+# tools/build-ryll-wheel-in-container.sh, which says what went wrong.
 RUN dnf -y install epel-release \
     && dnf config-manager --set-enabled powertools \
     && dnf -y install \

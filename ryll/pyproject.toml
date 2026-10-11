@@ -6,10 +6,11 @@
 # `pip install ryll` puts a working `ryll` on PATH with no runtime
 # download (unlike a fetch-on-first-run launcher). Because it carries a
 # compiled binary the wheel is platform-tagged, one per arch
-# (manylinux_2_28_x86_64 / _aarch64); see tools/build-ryll-wheel.sh and
-# docs/plans/PLAN-pip-distribution.md for the build recipe and why the
-# manylinux_2_28 tag is honest (the GUI/audio libraries are dlopen'd at
-# runtime, not DT_NEEDED, and the glibc floor is 2.28).
+# (manylinux_2_28_x86_64 / _aarch64); see tools/build-ryll-wheel.sh for
+# the build recipe. The tag's glibc floor is real and the GUI libraries
+# are dlopen'd, but libasound.so.2 is DT_NEEDED and outside the
+# manylinux policy, so the tag is partly asserted rather than earned;
+# docs/releasing.md ("The PyPI wheel's platform tag") explains why.
 #
 # The version is inherited from the crate (version.workspace = true, so
 # whatever the release tag stamped into [workspace.package]) via
