@@ -27,12 +27,20 @@ rustc --version
 maturin --version
 
 # --frozen: build from Cargo.lock as fetched, and fail rather than reach
-# for a network that is not there.
+# for a network that is not there. The wheel is written to the
+# container's filesystem and copied into the checkout only once the
+# check below passes, so a failed check leaves no wheel behind.
+WHEEL_DIR=/build/wheels
 cd /work/ryll
 maturin build --release --frozen \
     --compatibility manylinux_2_28 \
     --skip-auditwheel \
-    --out /work/target/wheels
+    --out "${WHEEL_DIR}"
+WHEELS=("${WHEEL_DIR}"/*.whl)
+if [ "${#WHEELS[@]}" -ne 1 ] || [ ! -f "${WHEELS[0]}" ]; then
+    echo "expected one wheel in ${WHEEL_DIR}, found: ${WHEELS[*]}" >&2
+    exit 1
+fi
 
 # The manylinux_2_28 library allowlist, read from the policy of the
 # auditwheel this image ships rather than copied by hand, so it follows
@@ -52,8 +60,31 @@ print(" ".join(found[0]))
 ')"
 read -ra ALLOWED <<< "${POLICY_LIBS}"
 ALLOWED+=(ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 libasound.so.2)
-mapfile -t NEEDED < <(readelf -d "${CARGO_TARGET_DIR}/release/ryll" \
-    | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
+
+# Check the binary the wheel ships rather than the one in the cargo
+# target directory, so the check cannot drift from the artifact. Each
+# step is a plain assignment, which set -e sees fail. An empty DT_NEEDED
+# is an error too: every dynamically linked glibc binary needs
+# libc.so.6, so an empty list means nothing was read, not a pass.
+BINARY="$(python3 -I - "${WHEELS[0]}" /build/wheel-contents <<'EOF'
+import sys
+import zipfile
+
+wheel, dest = sys.argv[1:]
+with zipfile.ZipFile(wheel) as zf:
+    names = [n for n in zf.namelist() if n.endswith('.data/scripts/ryll')]
+    if len(names) != 1:
+        sys.exit(f'expected one ryll binary in {wheel}, found {names}')
+    print(zf.extract(names[0], dest))
+EOF
+)"
+DYNAMIC="$(readelf -d "${BINARY}")"
+NEEDED_LIBS="$(sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' <<< "${DYNAMIC}")"
+if [ -z "${NEEDED_LIBS}" ]; then
+    echo "no DT_NEEDED entries read from ${BINARY}; the check did not run" >&2
+    exit 1
+fi
+mapfile -t NEEDED <<< "${NEEDED_LIBS}"
 UNEXPECTED=()
 for lib in "${NEEDED[@]}"; do
     if [[ " ${ALLOWED[*]} " != *" ${lib} "* ]]; then
@@ -66,3 +97,4 @@ if [ "${#UNEXPECTED[@]}" -gt 0 ]; then
     exit 1
 fi
 echo "DT_NEEDED is within the manylinux_2_28 policy plus libasound: ${NEEDED[*]}"
+cp "${WHEELS[0]}" /work/target/wheels/
