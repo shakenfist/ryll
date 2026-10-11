@@ -156,10 +156,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/pcap-inspect.py",
-      "author": "mikal"
-    },
-    {
       "path": "tools/publish-crates.sh",
       "author": "mikal"
     },
@@ -364,10 +360,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/logging.rs",
       "author": "mikal"
     },
@@ -568,15 +560,7 @@
       "author": "mikal"
     },
     {
-      "path": "deny.toml",
-      "author": "mikal"
-    },
-    {
       "path": "Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/development.md",
       "author": "mikal"
     },
     {
@@ -648,10 +632,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/tests/headless_connect_failure.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/proxy.rs",
       "author": "mikal"
     },
@@ -668,19 +648,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz.rs",
       "author": "mikal"
     },
     {
       "path": "shakenfist-spice-compression/src/quic.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/README.md",
       "author": "mikal"
     },
     {
@@ -712,15 +684,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-compression/src/lz4.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/video.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
       "author": "mikal"
     },
     {
@@ -776,14 +740,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/configuration.md",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/config.rs",
-      "author": "mikal"
-    },
-    {
       "path": "docs/web-mode-internals.md",
       "author": "mikal"
     },
@@ -804,23 +760,11 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/session.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/tests",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/main.rs",
       "author": "mikal"
     },
     {
@@ -833,10 +777,6 @@
     },
     {
       "path": "shakenfist-spice-compression/src/limits.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-compression/src",
       "author": "mikal"
     },
     {

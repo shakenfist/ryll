@@ -89,14 +89,6 @@
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
-    "deny.toml": {
-      "sha": "c952afb188490748898188583f4e7413fa43077a",
-      "date": "2026-09-23"
-    },
-    "docs/configuration.md": {
-      "sha": "3342c6aa2b06cbae30c9b54b31f1e6f49b921392",
-      "date": "2026-10-05"
-    },
     "docs/control-socket-protocol.md": {
       "sha": "0ea0323dfedd1af2f8b26336cf5d104261472f91",
       "date": "2026-10-05"
@@ -108,10 +100,6 @@
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
-    },
-    "docs/development.md": {
-      "sha": "f86a2246334d917e3c02e9af0b0c64c854395ac1",
-      "date": "2026-09-23"
     },
     "docs/device-redirection.md": {
       "sha": "20847c5e743120d0b7dd98a1209ba286d9b9f855",
@@ -189,16 +177,8 @@
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
       "date": "2026-09-18"
     },
-    "ryll/src/config.rs": {
-      "sha": "f9d3b46246498279f4d81d1de8b375f821d67d32",
-      "date": "2026-10-05"
-    },
     "ryll/src/input_egui.rs": {
       "sha": "8b5c2d7a86274f4dc6895bdebeb1668aa9622e58",
-      "date": "2026-10-05"
-    },
-    "ryll/src/main.rs": {
-      "sha": "5e3bf79c1b6f979f1860bc4caf89aea55458574c",
       "date": "2026-10-05"
     },
     "ryll/src/notifications.rs": {
@@ -269,14 +249,6 @@
       "sha": "ed18e13bae620b5e684caf735f361982d52b32fb",
       "date": "2026-08-02"
     },
-    "shakenfist-spice-compression/Cargo.toml": {
-      "sha": "a9a45dc18064ce6e2a380c8ab78e125c70616625",
-      "date": "2026-09-18"
-    },
-    "shakenfist-spice-compression/README.md": {
-      "sha": "7165d97f89b1ad14776bbc7fb4f876f08d92d16a",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-compression/src/byte_bounded_lru.rs": {
       "sha": "7a7323cc6153643991583fd44ba6ab04cdb5cded",
       "date": "2026-09-18"
@@ -289,20 +261,12 @@
       "sha": "f2362f5376b1bf702f63d65e5d6490d4b16bf29a",
       "date": "2026-10-05"
     },
-    "shakenfist-spice-compression/src/lib.rs": {
-      "sha": "ac3aa41b9cc0de8a27b38e5e77d74c7bf91ea26f",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-compression/src/limits.rs": {
       "sha": "03bb2f6465215504529f969ded79f6139baeb0c4",
       "date": "2026-10-05"
     },
     "shakenfist-spice-compression/src/lz.rs": {
       "sha": "3cc1dec2f027ae1c76ae93f1609be9fc513b1f6c",
-      "date": "2026-10-05"
-    },
-    "shakenfist-spice-compression/src/lz4.rs": {
-      "sha": "b218307a6dc5d6048cac4106b04588c7633fd110",
       "date": "2026-10-05"
     },
     "shakenfist-spice-compression/src/quic.rs": {
@@ -481,10 +445,6 @@
       "sha": "6f04c73ca1a65cfe0cb5bda88a53e2633dfb0d02",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/session.rs": {
-      "sha": "cf0cc38765e2f8ab28af20dc567d2e9ff95442fa",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-renderer/src/session_state.rs": {
       "sha": "7a3e2ae84a36cc7d91ac742b22e9f4c64c7274a1",
       "date": "2026-10-05"
@@ -524,10 +484,6 @@
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
       "date": "2026-08-18"
-    },
-    "shakenfist-spice-renderer/tests/headless_connect_failure.rs": {
-      "sha": "248393531b3f0e2cea628f706b94eb4a067e6e81",
-      "date": "2026-09-29"
     },
     "shakenfist-spice-renderer/tests/webrtc_h264_smoke.rs": {
       "sha": "6ee8eb06a3e01cd7997f1e62f3ec4ec4c27d8710",
@@ -664,10 +620,6 @@
     "tools/mermaid-lint.sh": {
       "sha": "22f14bf915f76875950bb5589212b55ab0a91db1",
       "date": "2026-10-05"
-    },
-    "tools/pcap-inspect.py": {
-      "sha": "4528143c62804dba5deef14a982625c7c8a6f08d",
-      "date": "2026-07-26"
     },
     "tools/proxmox-smoke.py": {
       "sha": "63a243a0d330982e367945942ef188ef58b4d4e3",
