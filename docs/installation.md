@@ -110,8 +110,9 @@ to resolve it. pip does not check for them: the wheel's `manylinux_2_28`
 tag promises the glibc floor, not these libraries, so `pip install`
 succeeds on a host without them. ALSA is linked directly, so without
 `libasound2` ryll does not start at all, even with `--headless`; see
-[the PyPI wheel's platform tag](releasing.md#the-pypi-wheels-platform-tag). `remote-viewer` is the fallback whenever ryll can't be
-installed or run on a given platform.
+[the PyPI wheel's platform tag](releasing.md#the-pypi-wheels-platform-tag).
+`remote-viewer` is the fallback whenever ryll can't be installed or run
+on a given platform.
 
 See [plans/PLAN-pip-distribution.md](plans/PLAN-pip-distribution.md)
 for the full design rationale.

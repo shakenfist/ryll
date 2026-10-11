@@ -281,7 +281,9 @@ To keep the exception to that one library,
 `DT_NEEDED` after every build. It fails the release build if
 anything outside the `manylinux_2_28` allowlist other than
 `libasound.so.2` shows up there, for example after a dependency
-bump starts hard-linking xcb or wayland.
+bump starts hard-linking xcb or wayland. The allowlist is read from
+the policy of the auditwheel the build image ships, so it follows
+the base image rather than a copy that could drift from it.
 
 ## Troubleshooting
 

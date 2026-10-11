@@ -34,18 +34,24 @@ maturin build --release --frozen \
     --skip-auditwheel \
     --out /work/target/wheels
 
-# The manylinux_2_28 library allowlist, from auditwheel 6.8.2's
-# manylinux-policy.json in this image, plus the dynamic linker, plus
-# the one deliberate exception, libasound.so.2.
-ALLOWED=(
-    libgcc_s.so.1 libstdc++.so.6 libm.so.6 libmvec.so.1 libdl.so.2
-    librt.so.1 libc.so.6 libnsl.so.1 libutil.so.1 libpthread.so.0
-    libresolv.so.2 libanl.so.1 libatomic.so.1 libexpat.so.1 libz.so.1
-    libX11.so.6 libXext.so.6 libXrender.so.1 libICE.so.6 libSM.so.6
-    libGL.so.1 libgobject-2.0.so.0 libgthread-2.0.so.0
-    libglib-2.0.so.0 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1
-    libasound.so.2
-)
+# The manylinux_2_28 library allowlist, read from the policy of the
+# auditwheel this image ships rather than copied by hand, so it follows
+# the base image. Then the dynamic linker, which the policy leaves
+# implicit, and the one deliberate exception, libasound.so.2. The
+# python is auditwheel's own venv's, the only one it is importable
+# from; it exits non-zero unless it finds exactly one non-empty list.
+AUDITWHEEL_PYTHON="$(dirname "$(readlink -f "$(command -v auditwheel)")")/python"
+POLICY_LIBS="$("${AUDITWHEEL_PYTHON}" -I -c '
+import importlib.resources, json, sys
+policies = json.loads(importlib.resources.files("auditwheel.policy")
+                      .joinpath("manylinux-policy.json").read_text())
+found = [p["lib_whitelist"] for p in policies if p["name"] == "manylinux_2_28"]
+if len(found) != 1 or not found[0]:
+    sys.exit("no manylinux_2_28 lib_whitelist in auditwheel policy")
+print(" ".join(found[0]))
+')"
+read -ra ALLOWED <<< "${POLICY_LIBS}"
+ALLOWED+=(ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 libasound.so.2)
 mapfile -t NEEDED < <(readelf -d "${CARGO_TARGET_DIR}/release/ryll" \
     | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
 UNEXPECTED=()

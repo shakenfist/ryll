@@ -887,9 +887,10 @@ runs `cargo fetch --locked` in it with the network up, then the
 `maturin build --frozen` with `--network none` and the cache
 mounted read-only, as the invoking user. That matters most for the
 wheel, because it is a shipped artifact: it is what `pip install
-ryll` gets. The job runs only on a release tag, so a change to
-the wheel build is first exercised by the next release unless
-someone runs `tools/build-ryll-wheel.sh` by hand.
+ryll` gets. No pull request CI builds it: release.yml builds it
+on a tag, and manual-build.yml's opt-in `wheel-x86_64` and
+`wheel-aarch64` platforms build it the same way on any branch, so
+a change to the wheel build can be exercised before a release.
 
 Because those jobs write the cargo cache with the network up,
 they save it under their own `actions/cache` key prefix
