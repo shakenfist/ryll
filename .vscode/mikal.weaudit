@@ -288,10 +288,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/design-decisions.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development-macos.md",
       "author": "mikal"
     },
@@ -584,10 +580,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/capture.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/Cargo.toml",
       "author": "mikal"
     },
@@ -668,10 +660,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/session-lifecycle.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-protocol/src/client.rs",
       "author": "mikal"
     },
@@ -741,10 +729,6 @@
     },
     {
       "path": "shakenfist-spice-protocol/src/link.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/diagnostics.md",
       "author": "mikal"
     },
     {

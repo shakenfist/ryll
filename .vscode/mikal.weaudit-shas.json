@@ -93,17 +93,9 @@
       "sha": "0ea0323dfedd1af2f8b26336cf5d104261472f91",
       "date": "2026-10-05"
     },
-    "docs/design-decisions.md": {
-      "sha": "5a943f62bbcdca4aa9dcd631dd629a10a88e0d4f",
-      "date": "2026-09-17"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
-    },
-    "docs/diagnostics.md": {
-      "sha": "6ca1bd2c94b5beee5d0f8ce54e9fc17b1894775d",
-      "date": "2026-10-10"
     },
     "docs/features.md": {
       "sha": "0702cc7a9350c4818534d5f50e1b2aa71fd15e38",
@@ -120,10 +112,6 @@
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
-    },
-    "docs/session-lifecycle.md": {
-      "sha": "0ef7cd691c1a103460a8df67847c6af16b532aee",
-      "date": "2026-10-05"
     },
     "docs/web-frontend.md": {
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
@@ -160,10 +148,6 @@
     "ryll/src/bugreport.rs": {
       "sha": "f0101c2da5762447179089ac9cacc0187b1443ce",
       "date": "2026-10-10"
-    },
-    "ryll/src/capture.rs": {
-      "sha": "768a13052f69062a164e084896d7002944365f5c",
-      "date": "2026-09-27"
     },
     "ryll/src/clipboard_arboard.rs": {
       "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
