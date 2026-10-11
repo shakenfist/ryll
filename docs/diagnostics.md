@@ -247,8 +247,31 @@ closes and the app enters **region selection mode**:
 3. The user drags a rectangle; a translucent red overlay shows
    the selection.
 4. On mouse release, the report is generated with the region
-   coordinates in the metadata.
+   coordinates in the metadata. A click without a drag stays in
+   region selection and says so in a notification.
 5. Pressing Escape skips selection and generates without a region.
+
+The dialog says, while Display is selected, that Capture will ask
+for a region, and entering region selection also posts a
+notification, because a user who misses the banner otherwise sees
+a window that ignores the guest and appears stuck.
+
+Every way out of region selection writes the report, and the log
+records which one it was (`app: region selection completed`,
+`skipped with Escape`, `abandoned by a reconnect` or `abandoned by
+the window closing`), next to `app: bug report waiting for region
+selection` on the way in. A reconnect clears the surface being
+selected from, and closing the window ends the session, so both
+write the report without a region rather than dropping it. Closing
+the window also writes a report still waiting for its runtime
+metrics sample, after at most a second past the end of its sample
+window.
+
+While a selection is in progress, **Menu → Report** and **Menu →
+Screenshot** are disabled, as F12 and F8 are, and the USB and
+connection error dialogs' report buttons are refused with a
+notification: opening a second report would replace the pending
+one's trigger snapshot.
 
 ### Trigger-time snapshot
 

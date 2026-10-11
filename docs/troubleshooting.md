@@ -551,7 +551,11 @@ Use a bug report when you see:
 For Display reports, after clicking Capture you enter **region
 selection mode**: drag a rectangle over the area of corruption.
 A red overlay shows your selection.  Press **Escape** to skip and
-capture without highlighting a specific region.
+capture without highlighting a specific region.  The report is not
+written until you do one or the other; until then the guest gets
+no input, and the menu's Report and Screenshot entries are
+disabled.  If the window closes or ryll reconnects first, the
+report is written without a region.
 
 ### What the zip file contains
 
