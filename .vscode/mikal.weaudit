@@ -228,10 +228,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/device-redirection.md",
-      "author": "mikal"
-    },
-    {
       "path": "docs/index.md",
       "author": "mikal"
     },
@@ -633,10 +629,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/display",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/input_egui.rs",
       "author": "mikal"
     },
     {
