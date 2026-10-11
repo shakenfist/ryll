@@ -190,6 +190,46 @@ still recorded on `MainSnapshot` as passive diagnostics, next to the token
 and queue fields; the "Guest agent diagnostics" section in
 [troubleshooting.md](troubleshooting.md) explains each one.
 
+#### Guest agent message reassembly
+
+The other direction is split the same way. A guest agent message is a
+20-byte `VDAgentMessage` header followed by `size` bytes of body, and
+spice-server forwards guest agent data in `AGENT_DATA` messages of at most
+`VD_AGENT_MAX_DATA_SIZE` (2048) bytes. A guest clipboard copy larger than
+about 2 KB therefore arrives as several `AGENT_DATA`s, and only the first
+carries the header. The main channel feeds every `AGENT_DATA` body to an
+`AgentReassembler` (`messages::agent_stream` in the protocol crate), which
+hands back each message once all of its bytes are in.
+
+The reassembler treats the bodies as one byte stream, as spice-gtk does: a
+header may be split between two `AGENT_DATA`s, and one `AGENT_DATA` may
+carry the end of one message and the start of the next. spice-server never
+does either, because its own filter (`agent-msg-filter.c`) starts every
+message on an `AGENT_DATA` boundary, but other servers may. Because the
+server is untrusted, the reassembler also differs from spice-gtk in three
+ways:
+
+- **Size cap.** A message whose header declares a body over
+  `MAX_AGENT_MESSAGE_SIZE` is not buffered. That cap is spice-gtk's default
+  `max-clipboard` (100 MiB) plus 4 KiB for the clipboard headers in front
+  of the data, so any clipboard spice-gtk accepts, ryll accepts too. The
+  oversized message's bytes are counted off and dropped as they arrive, as
+  spice-server's filter discards a message it will not forward, so the
+  message after it is still found. ryll logs the drop once per session
+  (`main:agent_data:oversized`).
+- **No allocation from the header alone.** A message's buffer grows as its
+  bytes arrive, so a header claiming a large body costs nothing until the
+  data behind it does.
+- **Protocol check.** A header whose `protocol` is not `VD_AGENT_PROTOCOL`
+  means the stream is out of step; spice-server forwards nothing else. The
+  rest of that `AGENT_DATA` is dropped and reassembly restarts at the next
+  one, where spice-server starts a message (`main:agent_data:bad_protocol`).
+
+A message cut short when the agent goes away must not be completed by the
+next agent's data, so `AGENT_DISCONNECTED`, `AGENT_CONNECTED` and
+`AGENT_CONNECTED_TOKENS` all reset the reassembler. A reconnect builds a new
+main channel, and with it a new reassembler.
+
 ## Server role
 
 The protocol crate serves both ends of the wire: ryll uses it as a client,

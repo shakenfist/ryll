@@ -6,7 +6,8 @@
 //! header's type selects. spice-server forwards guest agent data to the
 //! client in AGENT_DATA messages of at most 2048 bytes
 //! (spice-common's `SPICE_AGENT_MAX_DATA_SIZE`), so a long agent message
-//! spans several of them; reassembling them is the caller's job.
+//! spans several of them. [`AgentReassembler`](super::agent_stream::AgentReassembler)
+//! puts it back together.
 //!
 //! The clipboard messages start with a selection header only when the peer
 //! announced
