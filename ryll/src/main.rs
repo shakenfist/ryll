@@ -33,8 +33,6 @@ mod capture {
         }
         /// Only the GUI's `App::update` calls the non-blocking close.
         #[cfg(feature = "gui")]
-        /// Only the GUI's `App::update` calls the non-blocking close.
-        #[cfg(feature = "gui")]
         pub fn close(&self) {}
         pub fn close_and_wait(&self) {}
     }

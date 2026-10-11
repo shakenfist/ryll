@@ -43,8 +43,10 @@ on a dedicated thread and the egui frame loop enqueues frames via
 that thread after the sender drops. Every exit path in `main` (GUI,
 headless and web) calls `CaptureSession::close_and_wait`, which blocks
 until both writer threads have drained, so a clean exit (window close
-or SIGINT) leaves a playable MP4. A process that dies without returning
-through `main` (SIGKILL, a crash) can still leave it unfinalised. See
+or SIGINT) leaves a playable MP4. The wait gives up after five seconds,
+so a wedged encoder or a stalled disk cannot stop the process exiting,
+at the cost of that MP4. A process that dies without returning through
+`main` (SIGKILL, a crash) can also leave it unfinalised. See
 [the troubleshooting guide](troubleshooting.md) for the trade-off.
 
 ## Reconnection

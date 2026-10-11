@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -680,15 +680,43 @@ fn video_writer_loop(rx: Receiver<VideoQueueItem>, dir: PathBuf) {
 /// release them.
 type StartGate = Option<Arc<RwLock<()>>>;
 
+/// How long [`CaptureSession::close_and_wait`] waits for the
+/// writer threads before giving up. A healthy encoder drains its
+/// at most `VIDEO_QUEUE_CAPACITY` frames and writes the moov atom
+/// in well under a second; this bound only matters when an
+/// encode or a write is wedged (a stalled network filesystem,
+/// say), and stops that from hanging process exit. The Ctrl+C
+/// handler only raises a flag, so a second Ctrl+C would not help.
+const WRITER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The writer threads, and a way to wait for them with a timeout.
+struct WriterThreads {
+    /// Every writer thread holds a clone of this channel's sender
+    /// for its whole life and nothing ever sends on it, so a
+    /// receive disconnects once every writer has exited. That
+    /// includes exiting by panic: unwinding drops the sender too.
+    /// `JoinHandle::join` has no timeout; this does.
+    exited: Receiver<()>,
+    /// Join handles, labelled for the panic log.
+    handles: Vec<(&'static str, JoinHandle<()>)>,
+}
+
 /// Spawn a named writer thread that waits on `gate` (if any) and
-/// then runs `body` until its queue's sender is dropped.
-fn spawn_writer_thread<F>(name: &str, gate: StartGate, body: F) -> anyhow::Result<JoinHandle<()>>
+/// then runs `body` until its queue's sender is dropped. The
+/// thread holds `exited` until it ends; see [`WriterThreads`].
+fn spawn_writer_thread<F>(
+    name: &str,
+    gate: StartGate,
+    exited: Sender<()>,
+    body: F,
+) -> anyhow::Result<JoinHandle<()>>
 where
     F: FnOnce() + Send + 'static,
 {
     let handle = std::thread::Builder::new()
         .name(name.to_string())
         .spawn(move || {
+            let _exited = exited;
             if let Some(gate) = gate {
                 // A poisoned gate only means a test panicked while
                 // holding it; either way the gate is open now.
@@ -723,11 +751,11 @@ pub struct CaptureSession {
     /// can `take()` it and drop it, signalling the encoder thread
     /// to drain, finalise the MP4 (moov atom), and exit.
     video_tx: Mutex<Option<SyncSender<VideoQueueItem>>>,
-    /// Join handles for the pcap and encoder threads, labelled
-    /// for the panic log. Taken (and joined) by the first
-    /// `close_and_wait()`, so later calls and `Drop` find it
-    /// empty and return at once.
-    writer_threads: Mutex<Vec<(&'static str, JoinHandle<()>)>>,
+    /// The pcap and encoder threads. Taken by the first
+    /// `close_and_wait()`, which holds the lock while it waits,
+    /// so a concurrent caller blocks until that wait is over and
+    /// later calls and `Drop` find `None` and return at once.
+    writer_threads: Mutex<Option<WriterThreads>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
 }
@@ -772,16 +800,21 @@ impl CaptureSession {
             writers.insert(channel, writer);
         }
 
+        let (exited_tx, exited_rx) = mpsc::channel();
+
         // If the second spawn fails, returning drops `queue_tx`,
         // so the first thread drains its empty queue and exits.
         let (queue_tx, queue_rx) = mpsc::sync_channel(PCAP_QUEUE_CAPACITY);
-        let pcap_thread = spawn_writer_thread("ryll-capture-pcap", gate.clone(), move || {
-            pcap_writer_loop(queue_rx, writers)
-        })?;
+        let pcap_thread = spawn_writer_thread(
+            "ryll-capture-pcap",
+            gate.clone(),
+            exited_tx.clone(),
+            move || pcap_writer_loop(queue_rx, writers),
+        )?;
 
         let (video_tx, video_rx) = mpsc::sync_channel(VIDEO_QUEUE_CAPACITY);
         let video_dir = dir.clone();
-        let video_thread = spawn_writer_thread("ryll-capture-video", gate, move || {
+        let video_thread = spawn_writer_thread("ryll-capture-video", gate, exited_tx, move || {
             video_writer_loop(video_rx, video_dir)
         })?;
 
@@ -790,7 +823,10 @@ impl CaptureSession {
             start: Instant::now(),
             queue_tx: Mutex::new(Some(queue_tx)),
             video_tx: Mutex::new(Some(video_tx)),
-            writer_threads: Mutex::new(vec![("pcap", pcap_thread), ("video", video_thread)]),
+            writer_threads: Mutex::new(Some(WriterThreads {
+                exited: exited_rx,
+                handles: vec![("pcap", pcap_thread), ("video", video_thread)],
+            })),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -936,7 +972,12 @@ impl CaptureSession {
 
     /// `close()`, then block until both writer threads have
     /// drained their queues and exited, so the MP4 carries its
-    /// moov atom when this returns. Idempotent.
+    /// moov atom when this returns. Gives up with a warning
+    /// after [`WRITER_EXIT_TIMEOUT`], leaving the threads
+    /// detached and the MP4 possibly unfinalised, rather than
+    /// hang process exit on a wedged encoder or write.
+    /// Idempotent, and safe to call concurrently: a second caller
+    /// blocks until the first has finished waiting.
     ///
     /// The process exit paths in `main` call this on the main
     /// thread. They cannot rely on `Drop` alone: in GUI mode a
@@ -950,9 +991,35 @@ impl CaptureSession {
     /// milliseconds at 4K — so do not call it from the egui
     /// `App::update` path or a tokio worker.
     pub fn close_and_wait(&self) {
+        self.close_and_wait_for(WRITER_EXIT_TIMEOUT);
+    }
+
+    /// [`close_and_wait`] with an explicit timeout, so tests need
+    /// not wait out the production one.
+    ///
+    /// [`close_and_wait`]: CaptureSession::close_and_wait
+    fn close_and_wait_for(&self, timeout: Duration) {
         self.close();
-        let handles = std::mem::take(&mut *self.writer_threads.lock().expect("lock poisoned"));
-        for (name, handle) in handles {
+        // Held for the whole wait: see `writer_threads`.
+        let mut guard = self.writer_threads.lock().expect("lock poisoned");
+        let Some(writers) = guard.take() else {
+            return;
+        };
+        match writers.exited.recv_timeout(timeout) {
+            // Nothing sends, so `Ok` cannot happen; disconnection
+            // means every writer thread has exited.
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                warn!(
+                    "capture: writer threads still running after {:?}, not waiting; \
+                     display.mp4 in {} may be unfinalised",
+                    timeout,
+                    self.dir.display()
+                );
+                return;
+            }
+        }
+        for (name, handle) in writers.handles {
             if handle.join().is_err() {
                 warn!("capture: {} writer thread panicked", name);
             }
@@ -965,7 +1032,7 @@ impl Drop for CaptureSession {
     /// [`CaptureSession::close_and_wait`]. When an exit path has
     /// already called that, there is nothing left to wait for;
     /// otherwise this blocks whichever thread drops the last
-    /// `Arc`.
+    /// `Arc`, for at most [`WRITER_EXIT_TIMEOUT`].
     fn drop(&mut self) {
         self.close_and_wait();
     }
@@ -1512,6 +1579,109 @@ mod tests {
             read_mp4_track1(&dir.path().join("display.mp4")).expect("read mp4 header");
         assert_eq!(samples, 1);
         drop(still_shared);
+    }
+
+    #[test]
+    fn capture_session_close_and_wait_gives_up_on_stuck_writers() {
+        // A wedged writer must not hang process exit: the wait
+        // gives up after its timeout and leaves the threads
+        // detached. Writers held at the start gate stand in for
+        // a stuck encoder.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = Arc::new(RwLock::new(()));
+        // Declared before `held`: see
+        // capture_session_enqueue_returns_false_when_queue_full.
+        let session;
+        let held = gate.write().expect("gate lock");
+        session = CaptureSession::with_start_gate(
+            dir.path().to_path_buf(),
+            "test:5900",
+            None,
+            Some(gate.clone()),
+        )
+        .expect("session new");
+
+        let timeout = Duration::from_millis(100);
+        let started = Instant::now();
+        session.close_and_wait_for(timeout);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= timeout,
+            "returned before the timeout: {:?}",
+            elapsed
+        );
+        // Given up for good: Drop must not wait again.
+        assert!(session.writer_threads.lock().expect("lock").is_none());
+
+        drop(held);
+        drop(session);
+    }
+
+    #[test]
+    fn capture_session_concurrent_close_and_wait_both_wait() {
+        // Two concurrent callers must both block until the
+        // writers have exited, not just the one that took the
+        // join handles.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = Arc::new(RwLock::new(()));
+        // Declared before `held`: see
+        // capture_session_enqueue_returns_false_when_queue_full.
+        let session;
+        let held = gate.write().expect("gate lock");
+        session = Arc::new(
+            CaptureSession::with_start_gate(
+                dir.path().to_path_buf(),
+                "test:5900",
+                None,
+                Some(gate.clone()),
+            )
+            .expect("session new"),
+        );
+        assert!(session.packet_received("display", &[1u8; 32]));
+
+        let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let callers: Vec<_> = (0..2)
+            .map(|_| {
+                let session = session.clone();
+                let finished = finished.clone();
+                std::thread::spawn(move || {
+                    session.close_and_wait();
+                    finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        // Both callers are waiting by now (one on the writers,
+        // one on the lock). A slow start can only hide a
+        // regression, never fail a correct implementation.
+        std::thread::sleep(Duration::from_millis(200));
+        let early = finished.load(std::sync::atomic::Ordering::SeqCst);
+        drop(held);
+        for caller in callers {
+            caller.join().expect("caller thread");
+        }
+        assert_eq!(
+            early, 0,
+            "a caller returned while the writers were still held"
+        );
+        assert_eq!(count_pcap_packets(&dir.path().join("display.pcap")), 1);
+    }
+
+    #[test]
+    fn writer_thread_exit_is_observed_when_it_panics() {
+        // close_and_wait relies on a panicking writer still
+        // dropping its `exited` sender during unwinding;
+        // otherwise a panic would cost the full timeout.
+        let (exited_tx, exited_rx) = mpsc::channel();
+        let handle = spawn_writer_thread("test-panicking-writer", None, exited_tx, || {
+            panic!("deliberate test panic");
+        })
+        .expect("spawn");
+        assert_eq!(
+            exited_rx.recv_timeout(Duration::from_secs(30)),
+            Err(RecvTimeoutError::Disconnected)
+        );
+        assert!(handle.join().is_err());
     }
 
     // ── No tokio runtime required (shakenfist/ryll#399) ──

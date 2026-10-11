@@ -642,10 +642,12 @@ In practice the encoder thread finalises within milliseconds of
 close, but a bug report assembled in a very short window
 after a disconnect may see an unfinalised (unplayable)
 `display.mp4`. On a clean exit (window close or SIGINT) ryll
-waits for the encoder thread before the process exits, so the
-capture directory's own `display.mp4` is complete unless ryll
-was killed or crashed. The pcap files and the rest of the
-report are unaffected.
+waits up to five seconds for the encoder thread before the
+process exits, so the capture directory's own `display.mp4` is
+complete unless ryll was killed or crashed, or the encoder was
+wedged (the log then says the writer threads were still
+running). The pcap files and the rest of the report are
+unaffected.
 
 To read the report:
 

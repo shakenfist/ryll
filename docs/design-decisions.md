@@ -50,9 +50,11 @@ produced.
    `CaptureSession::close()` may see an unfinalised MP4. That was accepted
    deliberately: finalising synchronously would have blocked the caller (the
    egui update loop among them) on the encoder draining. The exit paths in
-   `main` call `CaptureSession::close_and_wait`, which joins both threads,
-   so the MP4 is complete after a clean exit even though a detached GUI
-   connection thread may still hold a reference to the session. See
+   `main` call `CaptureSession::close_and_wait`, which waits up to five
+   seconds for both threads to exit, so the MP4 is complete after a clean
+   exit even though a detached GUI connection thread may still hold a
+   reference to the session; a wedged writer costs the MP4 rather than
+   hanging exit. See
    [`PLAN-video-keeping-up.md`](plans/PLAN-video-keeping-up.md) for the
    trade-off.
 

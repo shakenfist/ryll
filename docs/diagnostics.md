@@ -363,16 +363,18 @@ shutdown and again from the `Drop` implementation. `close()`
 does not block: it drops both writer senders and returns, and
 the writer threads finish on their own (pcap flush is a no-op
 since pcap I/O is unbuffered; MP4 writes the moov atom).
-`close_and_wait()` additionally joins both threads; the exit
-paths in `main` call it so the MP4 is finalised before the
-process exits, even while a detached GUI connection thread
-still holds a clone of the session. The egui update path only
-ever calls the non-blocking `close()`.
-`Drop` then joins both threads, so once the last
-`Arc<CaptureSession>` is gone the MP4 is finalised. MP4
-finalisation is still not synchronous with `close()` itself —
-a bug report assembled within milliseconds of close may see
-an unfinalised MP4. The
+`close_and_wait()` also waits for both threads to exit; the
+exit paths in `main` call it so the MP4 is finalised before
+the process exits, even while a detached GUI connection
+thread still holds a clone of the session. The wait gives up
+with a warning after five seconds, so a wedged encoder or a
+stalled disk leaves an unfinalised MP4 rather than a process
+that will not exit. The egui update path only ever calls the
+non-blocking `close()`. Separately, `Drop` waits the same way,
+so the MP4 is also finalised once the last
+`Arc<CaptureSession>` is gone. MP4 finalisation is still not
+synchronous with `close()` itself — a bug report assembled
+within milliseconds of close may see an unfinalised MP4. The
 [troubleshooting guide](troubleshooting.md) records the
 trade-off rationale.
 
