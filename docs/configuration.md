@@ -160,7 +160,7 @@ port=5900
 | `tls-port` | No* | SPICE TLS port for secure connections |
 | `password` | No | SPICE password for authentication |
 | `ca` | No | Inline PEM CA certificate for TLS verification. When present it is the only trust anchor for the connection -- the public CA roots are not trusted as well |
-| `host-subject` | No | Server certificate subject; enforced -- the connection fails if the server's certificate subject does not match, and a malformed value is rejected at startup |
+| `host-subject` | No | Server certificate subject; enforced -- the connection fails if the server's certificate subject does not match, and a malformed value is rejected at startup. Without it, a `ca` connection whose certificate name does not match is trusted on the CA alone, and ryll warns (see [troubleshooting](troubleshooting.md#warning-certificate-accepted-on-the-ca-alone)) |
 | `proxy` | No | HTTP CONNECT proxy to tunnel the connection through (e.g. Proxmox VE's `spiceproxy`); see [HTTP CONNECT proxy](#http-connect-proxy) below |
 
 ### Ticket lifecycle keys

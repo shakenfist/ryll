@@ -66,7 +66,7 @@ pub mod parse;
 pub mod proxy;
 pub mod reader;
 
-pub use client::SpiceClient;
+pub use client::{SpiceClient, CA_ALONE_WARNING};
 
 // Re-export the most commonly used items at the crate root
 // for convenience.

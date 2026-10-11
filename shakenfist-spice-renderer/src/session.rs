@@ -28,7 +28,9 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use shakenfist_spice_protocol::{ChannelType, ConnectionConfig, SpiceClient};
+use shakenfist_spice_protocol::{
+    ChannelType, ConnectionConfig, NotifySeverity, SpiceClient, CA_ALONE_WARNING,
+};
 
 use crate::audio_sink::OpusPacketSink;
 use crate::byte_counter::ByteCounter;
@@ -43,6 +45,7 @@ use crate::clipboard::ClipboardBackend;
 use crate::device_config::{ShareDirConfig, VirtualDiskConfig};
 use crate::log_config::LogConfig;
 use crate::mm_clock::MmClock;
+use crate::notification::{NotificationEntry, NotificationSource};
 use crate::notification_sink::NotificationSink;
 use crate::session_state::SessionState;
 use crate::snapshots::ChannelSnapshots;
@@ -247,6 +250,20 @@ pub async fn run_connection(
     let main_stream = client.connect_channel(0, ChannelType::Main, 0).await?;
 
     let events = EventSink::new(event_tx, repaint_notify);
+
+    // The main channel's handshake is the session's first, so by now
+    // the verifier knows whether the CA was the only identity check
+    // (ryll#359). It has logged that once; show it once as well, since
+    // a log line at any level is easy to miss.
+    if client.trusted_by_ca_alone() {
+        events
+            .emit(ChannelEvent::Notification(NotificationEntry::new(
+                NotifySeverity::Warn,
+                NotificationSource::Connection,
+                format!("TLS: {CA_ALONE_WARNING}"),
+            )))
+            .await;
+    }
 
     let mut main_channel = MainChannel::new(
         main_stream,

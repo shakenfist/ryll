@@ -112,6 +112,32 @@ Error: TLS handshake with <host>:<port>: invalid peer certificate: UnknownIssuer
    and the certificate's name must match the host connected to,
    because the name is then all that identifies the backend.
 
+### Warning: certificate accepted on the CA alone
+
+**Symptom:** A warning in the log, and in the GUI's notifications
+panel, once per connection:
+```
+TLS: certificate accepted on the CA alone: its name does not match the server and ...
+```
+
+**Cause:** The connection uses a `ca=` field, the server's certificate
+does not carry the name ryll dialled (usual for a SPICE backend
+reached by IP), and no `host-subject` is set. The CA is then the only
+identity check: any certificate that CA has issued, to any host in
+the same PKI, would have been accepted. A compromised host inside the
+cluster could answer for this one. Shaken Fist produces exactly this
+shape unless the operator has configured a certificate subject.
+
+The connection still proceeds. Refusing it would break every
+deployment that publishes no subject, so ryll warns instead.
+
+**Solution:** Pin the server's identity with `host-subject` in the
+.vv file, set to the server certificate's full subject (see
+[Configuration](configuration.md#supported-fields)). For Shaken Fist,
+set `spice_server_cert_subject` so the subject is published in the
+.vv file. A pinned connection does not warn, and fails if the
+certificate's subject does not match.
+
 ### Session drops when pasting large text into the guest
 
 **Symptom:** Every channel disconnects at once, without a TLS
