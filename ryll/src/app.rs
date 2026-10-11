@@ -136,6 +136,24 @@ const BUG_REPORT_METRICS_WINDOW: Duration = Duration::from_secs(2);
 /// the rest of the session.
 const BUG_REPORT_METRICS_DEADLINE: Duration = Duration::from_secs(8);
 
+/// How long past the end of its sample window a bug report still
+/// being sampled when the window closes is waited for, before it is
+/// written without the sample. Far shorter than
+/// `BUG_REPORT_METRICS_DEADLINE`: the user has asked to quit, and a
+/// window that lingers for eight seconds after its close button
+/// looks hung.
+const BUG_REPORT_EXIT_GRACE: Duration = Duration::from_secs(1);
+
+/// Shown when a Display report enters region selection, so the
+/// mode is announced somewhere that outlives the banner.
+const REGION_SELECT_PROMPT: &str = "Drag a rectangle over the problem to finish the bug report, \
+     or press Escape to save it without a region";
+
+/// Shown when something tries to open the bug report dialog while a
+/// Display report is still waiting for its region.
+const REGION_SELECT_PENDING: &str = "A Display bug report is waiting for its region: drag a \
+     rectangle over the problem, or press Escape to save it without one";
+
 /// How many retiring auto-snapshot threads may be outstanding before
 /// a new session declines to spawn another.
 ///
@@ -623,6 +641,75 @@ struct TriggerSnapshot {
     /// or an `Err` on encode failure. `None` while the worker is
     /// still running.
     png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
+}
+
+/// How a Display report's region selection ended. Every ending
+/// writes the report; only a completed drag gives it a region. A
+/// selection the user never finishes -- the window closes, or a
+/// reconnect clears the surface out from under it -- still has a
+/// report the user asked for behind it, so it is written without a
+/// region rather than dropped, and the log says which ending it was.
+#[derive(Debug, Clone)]
+enum RegionSelectEnd {
+    /// A drag was released over a rectangle with non-zero area.
+    Selected(ReportRegion),
+    /// Escape: the user chose to save without a region.
+    Skipped,
+    /// A reconnect is about to clear the surface being selected
+    /// from.
+    Reconnecting,
+    /// The connection was lost, and its surfaces are about to be
+    /// cleared.
+    Disconnected,
+    /// The window is closing.
+    WindowClosed,
+}
+
+impl RegionSelectEnd {
+    /// The region the report is written with.
+    fn region(&self) -> Option<ReportRegion> {
+        match self {
+            RegionSelectEnd::Selected(region) => Some(region.clone()),
+            _ => None,
+        }
+    }
+
+    /// How the selection ended, for the log line.
+    fn describe(&self) -> &'static str {
+        match self {
+            RegionSelectEnd::Selected(_) => "completed",
+            RegionSelectEnd::Skipped => "skipped with Escape; saving without a region",
+            RegionSelectEnd::Reconnecting => "abandoned by a reconnect; saving without a region",
+            RegionSelectEnd::Disconnected => {
+                "abandoned by a lost connection; saving without a region"
+            }
+            RegionSelectEnd::WindowClosed => {
+                "abandoned by the window closing; saving without a region"
+            }
+        }
+    }
+}
+
+/// Wait until `deadline` for a bug report's metrics sampler to fill
+/// its slot, and take the sample. `None` if it has not landed by
+/// then. Used only at exit, where there is no next frame to poll
+/// from.
+fn wait_for_metrics_sample(
+    slot: &std::sync::Mutex<Option<RuntimeMetrics>>,
+    deadline: Instant,
+) -> Option<RuntimeMetrics> {
+    loop {
+        if let Ok(mut guard) = slot.lock() {
+            if let Some(metrics) = guard.take() {
+                return Some(metrics);
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        std::thread::sleep((deadline - now).min(Duration::from_millis(20)));
+    }
 }
 
 /// A GUI-submitted bug report waiting on its runtime-metrics
@@ -1423,6 +1510,12 @@ impl RyllApp {
     }
 
     fn reconnect(&mut self) {
+        // The surfaces are cleared below, which would leave a region
+        // selection running with nothing to select from: its overlay
+        // is drawn over the surface, so it vanishes, while guest
+        // input and F8/F11/F12 stay suppressed. Write the report now,
+        // while the submit-time surface still exists.
+        self.end_region_select(RegionSelectEnd::Reconnecting);
         // Signal the previous attempt (if any) to exit before
         // spawning the next. The previous run_connection sees the
         // flag in its 100 ms select branch and breaks out, which
@@ -1705,6 +1798,10 @@ impl RyllApp {
         // auto-snapshot task to stop capturing a dead session.
         self.connected = false;
         self.signal_auto_snapshot_retire();
+        // As in `reconnect`: end any region selection while the surface
+        // it was started over still exists, rather than leave it running
+        // over an empty canvas until a reconnect or Escape ends it.
+        self.end_region_select(RegionSelectEnd::Disconnected);
         self.surfaces.surfaces.clear();
         self.textures.clear();
         self.cursor_image = None;
@@ -3020,7 +3117,10 @@ impl RyllApp {
             .pending_bug_report
             .take()
             .expect("pending bug report checked immediately above");
+        self.write_pending_bug_report(pending, metrics);
+    }
 
+    fn write_pending_bug_report(&mut self, pending: PendingBugReport, metrics: RuntimeMetrics) {
         match self.generate_bug_report(pending, metrics) {
             Ok(path) => {
                 let msg = format!("Bug report saved to {}", path.display());
@@ -3033,6 +3133,76 @@ impl RyllApp {
                 self.push_notification(NotifySeverity::Error, NotificationSource::BugReport, msg);
             }
         }
+    }
+
+    /// Write a bug report that is still waiting for its metrics
+    /// sample when the window closes. `poll_pending_bug_report`
+    /// runs once per frame and there are no more frames, so a
+    /// report submitted in the last couple of seconds -- including
+    /// one whose region selection the close has just ended -- is
+    /// otherwise lost without a log line.
+    fn flush_pending_bug_report_at_exit(&mut self) {
+        let Some(pending) = self.pending_bug_report.take() else {
+            return;
+        };
+        let deadline = pending.started_at + BUG_REPORT_METRICS_WINDOW + BUG_REPORT_EXIT_GRACE;
+        info!("app: window closing; writing the bug report still being captured");
+        let metrics =
+            wait_for_metrics_sample(&pending.metrics_slot, deadline).unwrap_or_else(|| {
+                RuntimeMetrics::unavailable(
+                    "the window closed before the metrics sample completed".to_string(),
+                )
+            });
+        self.write_pending_bug_report(pending, metrics);
+    }
+
+    /// Open the bug report dialog, unless a Display report is still
+    /// waiting for its region. Opening it then would start a new
+    /// trigger snapshot over the pending report's and restart the
+    /// report the user is half way through.
+    fn open_bug_dialog(&mut self, report_type: BugReportType, description: String) {
+        if self.region_select_active {
+            self.push_notification(
+                NotifySeverity::Warn,
+                NotificationSource::BugReport,
+                REGION_SELECT_PENDING,
+            );
+            return;
+        }
+        self.show_bug_dialog = true;
+        self.bug_report_type = report_type;
+        self.bug_description = description;
+        self.begin_trigger_snapshot();
+    }
+
+    /// Enter region selection for a Display report whose dialog was
+    /// just submitted.
+    fn begin_region_select(&mut self) {
+        self.region_select_active = true;
+        self.region_drag_start = None;
+        self.region_drag_end = None;
+        info!("app: bug report waiting for region selection");
+        self.push_notification(
+            NotifySeverity::Info,
+            NotificationSource::BugReport,
+            REGION_SELECT_PROMPT,
+        );
+    }
+
+    /// Leave region selection and write the report. A no-op when no
+    /// selection is in progress, so callers on teardown paths need
+    /// not check.
+    fn end_region_select(&mut self, how: RegionSelectEnd) {
+        if !self.region_select_active {
+            return;
+        }
+        self.region_select_active = false;
+        self.region_drag_start = None;
+        self.region_drag_end = None;
+        info!("app: region selection {}", how.describe());
+        let report_type = self.bug_report_type.clone();
+        let description = self.bug_description.clone();
+        self.finish_bug_report(report_type, description, how.region());
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
@@ -3225,6 +3395,15 @@ fn window_focused(ctx: &egui::Context) -> bool {
 }
 
 impl eframe::App for RyllApp {
+    // A bug report the user has started must not be lost to the
+    // window closing: a Display report waiting for its region is
+    // written without one, and a report whose metrics sample is still
+    // running is waited for briefly and written.
+    fn on_exit(&mut self) {
+        self.end_region_select(RegionSelectEnd::WindowClosed);
+        self.flush_pending_bug_report_at_exit();
+    }
+
     // Work that must keep ticking whether or not the window is drawn.
     //
     // eframe calls this before every `ui` pass, and on its own when the
@@ -3435,12 +3614,7 @@ impl eframe::App for RyllApp {
         if self.region_select_active {
             let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
-                let report_type = self.bug_report_type.clone();
-                let description = self.bug_description.clone();
-                self.finish_bug_report(report_type, description, None);
-                self.region_select_active = false;
-                self.region_drag_start = None;
-                self.region_drag_end = None;
+                self.end_region_select(RegionSelectEnd::Skipped);
             }
         }
 
@@ -3452,10 +3626,7 @@ impl eframe::App for RyllApp {
                     self.show_bug_dialog = false;
                     self.discard_trigger_snapshot();
                 } else {
-                    self.show_bug_dialog = true;
-                    self.bug_report_type = BugReportType::Display;
-                    self.bug_description.clear();
-                    self.begin_trigger_snapshot();
+                    self.open_bug_dialog(BugReportType::Display, String::new());
                 }
             }
         }
@@ -3817,11 +3988,16 @@ impl eframe::App for RyllApp {
                             ui.checkbox(&mut self.show_traffic_viewer, "Traffic");
                             ui.checkbox(&mut self.show_usb_panel, "USB");
                             ui.checkbox(&mut self.show_webdav_panel, "Folders");
+                            // Disabled during region selection, as
+                            // their F8 and F12 shortcuts are.
+                            let menu_enabled = !self.region_select_active;
                             if ui
-                                .add(
+                                .add_enabled(
+                                    menu_enabled,
                                     egui::Button::new("Screenshot")
                                         .shortcut_text(HostShortcut::Screenshot.key().name()),
                                 )
+                                .on_disabled_hover_text(REGION_SELECT_PENDING)
                                 .clicked()
                             {
                                 // Opened next frame, after that frame's
@@ -3831,16 +4007,15 @@ impl eframe::App for RyllApp {
                                 ui.close();
                             }
                             if ui
-                                .add(
+                                .add_enabled(
+                                    menu_enabled,
                                     egui::Button::new("Report")
                                         .shortcut_text(HostShortcut::BugReport.key().name()),
                                 )
+                                .on_disabled_hover_text(REGION_SELECT_PENDING)
                                 .clicked()
                             {
-                                self.show_bug_dialog = true;
-                                self.bug_report_type = BugReportType::Display;
-                                self.bug_description.clear();
-                                self.begin_trigger_snapshot();
+                                self.open_bug_dialog(BugReportType::Display, String::new());
                                 ui.close();
                             }
                             if self.enable_paste {
@@ -4340,10 +4515,8 @@ impl eframe::App for RyllApp {
 
             // Open bug report dialog for USB error (two-pass)
             if open_usb_bug_report {
-                self.show_bug_dialog = true;
-                self.bug_report_type = BugReportType::Usb;
-                self.bug_description = self.usb_error_message.clone().unwrap_or_default();
-                self.begin_trigger_snapshot();
+                let description = self.usb_error_message.clone().unwrap_or_default();
+                self.open_bug_dialog(BugReportType::Usb, description);
             }
         }
 
@@ -4622,10 +4795,8 @@ impl eframe::App for RyllApp {
 
         // Open bug report dialog for channel error (two-pass)
         if open_channel_bug_report {
-            self.show_bug_dialog = true;
-            self.bug_report_type = BugReportType::Connection;
-            self.bug_description = self.error_message.clone().unwrap_or_default();
-            self.begin_trigger_snapshot();
+            let description = self.error_message.clone().unwrap_or_default();
+            self.open_bug_dialog(BugReportType::Connection, description);
         }
 
         // Bug report dialog (two-pass: render then act)
@@ -4688,6 +4859,14 @@ impl eframe::App for RyllApp {
                     ui.label("Description (optional):");
                     ui.text_edit_singleline(&mut self.bug_description);
 
+                    if self.bug_report_type == BugReportType::Display {
+                        ui.add_space(4.0);
+                        ui.label(
+                            "After Capture, drag a rectangle over the problem. \
+                             Escape saves the report without one.",
+                        );
+                    }
+
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Capture").clicked() {
@@ -4703,11 +4882,17 @@ impl eframe::App for RyllApp {
         // Execute dialog action outside the closure
         match dialog_action {
             Some(true) => {
-                if self.bug_report_type == BugReportType::Display {
-                    // Enter region selection mode for display reports
-                    self.region_select_active = true;
-                    self.region_drag_start = None;
-                    self.region_drag_end = None;
+                // While another report is still sampling, a Display report
+                // goes straight to `finish_bug_report`, which refuses it
+                // with a notification, rather than into a region
+                // selection whose ending would then be refused out of the
+                // user's sight (on a reconnect, or as the window closes).
+                // Nothing can start a report during a selection, so one
+                // begun with none pending ends with none pending.
+                if self.bug_report_type == BugReportType::Display
+                    && self.pending_bug_report.is_none()
+                {
+                    self.begin_region_select();
                 } else {
                     // Non-display: generate immediately
                     let report_type = self.bug_report_type.clone();
@@ -4839,12 +5024,7 @@ impl eframe::App for RyllApp {
             ) {
                 match validate_region(sx, sy, ex, ey) {
                     Some(region) => {
-                        let report_type = self.bug_report_type.clone();
-                        let description = self.bug_description.clone();
-                        self.finish_bug_report(report_type, description, Some(region));
-                        self.region_select_active = false;
-                        self.region_drag_start = None;
-                        self.region_drag_end = None;
+                        self.end_region_select(RegionSelectEnd::Selected(region));
                     }
                     None => {
                         // Click without drag, or any other
@@ -4857,7 +5037,7 @@ impl eframe::App for RyllApp {
                             NotifySeverity::Warn,
                             NotificationSource::BugReport,
                             "Drag a region with non-zero area, or press \
-                             Escape to cancel."
+                             Escape to save the report without one."
                                 .to_string(),
                         );
                         self.region_drag_start = None;
@@ -6170,6 +6350,84 @@ mod tests {
         assert_eq!(r.top, 20);
         assert_eq!(r.right, 40);
         assert_eq!(r.bottom, 60);
+    }
+
+    // ── Region selection endings ───────────────────────────
+
+    #[test]
+    fn region_select_end_only_a_drag_carries_a_region() {
+        let region = validate_region(10, 20, 40, 60).expect("valid region");
+        let r = RegionSelectEnd::Selected(region)
+            .region()
+            .expect("a completed drag carries its region");
+        assert_eq!((r.left, r.top, r.right, r.bottom), (10, 20, 40, 60));
+        for how in [
+            RegionSelectEnd::Skipped,
+            RegionSelectEnd::Reconnecting,
+            RegionSelectEnd::Disconnected,
+            RegionSelectEnd::WindowClosed,
+        ] {
+            assert!(how.region().is_none(), "{:?}", how);
+        }
+    }
+
+    #[test]
+    fn region_select_end_says_unfinished_selections_still_save() {
+        // The log line is the only record of how a selection ended,
+        // and every ending must save.
+        assert_eq!(
+            RegionSelectEnd::Selected(validate_region(0, 0, 1, 1).unwrap()).describe(),
+            "completed"
+        );
+        for how in [
+            RegionSelectEnd::Skipped,
+            RegionSelectEnd::Reconnecting,
+            RegionSelectEnd::Disconnected,
+            RegionSelectEnd::WindowClosed,
+        ] {
+            assert!(
+                how.describe().ends_with("saving without a region"),
+                "{:?}: {}",
+                how,
+                how.describe()
+            );
+        }
+    }
+
+    #[test]
+    fn wait_for_metrics_sample_takes_a_sample_already_landed() {
+        let slot = std::sync::Mutex::new(Some(RuntimeMetrics::unavailable("test".to_string())));
+        // A deadline already past must still take a landed sample.
+        let got = wait_for_metrics_sample(&slot, Instant::now());
+        assert!(got.is_some());
+        assert!(
+            slot.lock().unwrap().is_none(),
+            "the sample is taken, not copied"
+        );
+    }
+
+    #[test]
+    fn wait_for_metrics_sample_waits_for_a_late_sample() {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let writer = Arc::clone(&slot);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            *writer.lock().unwrap() = Some(RuntimeMetrics::unavailable("late".to_string()));
+        });
+        let got = wait_for_metrics_sample(&slot, Instant::now() + Duration::from_secs(5));
+        handle.join().unwrap();
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn wait_for_metrics_sample_gives_up_at_the_deadline() {
+        let slot: std::sync::Mutex<Option<RuntimeMetrics>> = std::sync::Mutex::new(None);
+        let start = Instant::now();
+        let got = wait_for_metrics_sample(&slot, start + Duration::from_millis(60));
+        assert!(got.is_none());
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_millis(60), "{:?}", waited);
+        assert!(waited < Duration::from_secs(2), "{:?}", waited);
     }
 
     // ── Connection-event message formats ───────────────────
