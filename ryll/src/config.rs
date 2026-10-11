@@ -278,6 +278,15 @@ pub struct Args {
     /// `--image-cache-cap-mib`.
     #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u64).range(1..))]
     pub glz_dictionary_cap_mib: u64,
+
+    /// Experimental: let spice-server stream video as H.264. Off by
+    /// default because H.264 from spice-server does not decode yet
+    /// (shakenfist/ryll#398), so video regions go black or stale. With
+    /// it, the display channel advertises the H.264 capability and asks
+    /// for H.264 ahead of MJPEG. For work on #398; see
+    /// docs/libvirt-spice-recommendations.md.
+    #[arg(long, default_value_t = false)]
+    pub experimental_h264: bool,
 }
 
 /// The WebRTC media socket binding policy `--web-media-addr` and
@@ -802,6 +811,19 @@ fn validate_disk_path(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // H.264 from spice-server stays off unless asked for (ryll#398).
+    #[test]
+    fn experimental_h264_defaults_off() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900"]);
+        assert!(!args.experimental_h264);
+    }
+
+    #[test]
+    fn experimental_h264_flag_turns_it_on() {
+        let args = Args::parse_from(["ryll", "--direct", "host:5900", "--experimental-h264"]);
+        assert!(args.experimental_h264);
+    }
 
     // The "obey guest size hints" toggle defaults to ON;
     // --no-obey-guest-size flips it OFF. main.rs inverts
