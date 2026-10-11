@@ -1,6 +1,7 @@
 /// SPICE client connection management
 use anyhow::{anyhow, Context, Result};
 use socket2::SockRef;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -55,6 +56,11 @@ struct SpiceCaVerifier {
     webpki: Arc<WebPkiServerVerifier>,
     provider: Arc<CryptoProvider>,
     expected_subject: Option<ExpectedSubject>,
+    /// Set the first time a certificate is accepted on the CA alone:
+    /// its name did not match and no subject is pinned. Shared with
+    /// the owning [`SpiceClient`], which reports it through
+    /// [`SpiceClient::trusted_by_ca_alone`].
+    ca_alone: Arc<AtomicBool>,
 }
 
 impl SpiceCaVerifier {
@@ -62,6 +68,7 @@ impl SpiceCaVerifier {
         roots: Arc<RootCertStore>,
         provider: Arc<CryptoProvider>,
         expected_subject: Option<ExpectedSubject>,
+        ca_alone: Arc<AtomicBool>,
     ) -> Result<Self> {
         let webpki =
             WebPkiServerVerifier::builder_with_provider(roots, provider.clone()).build()?;
@@ -69,7 +76,25 @@ impl SpiceCaVerifier {
             webpki,
             provider,
             expected_subject,
+            ca_alone,
         })
+    }
+
+    /// Record a certificate accepted despite its name. With a pinned
+    /// subject that is the designed path and worth only `info!`. With
+    /// none, any certificate the CA issued -- to any host in the
+    /// cluster PKI -- would have been accepted here, so warn, naming
+    /// the remedy. A SPICE session runs this once per channel, so the
+    /// warning is logged once per verifier, which is once per
+    /// [`SpiceClient`], and later channels log at `debug!`.
+    fn note_name_mismatch_accepted(&self) {
+        if self.expected_subject.is_some() {
+            info!("TLS: accepting certificate despite hostname mismatch: pinned subject matches");
+        } else if !self.ca_alone.swap(true, Ordering::Relaxed) {
+            warn!("TLS: {CA_ALONE_WARNING}");
+        } else {
+            debug!("TLS: accepting certificate on the CA alone (already warned)");
+        }
     }
 
     /// Enforce the pinned subject, if one is configured, against the
@@ -131,7 +156,7 @@ impl ServerCertVerifier for SpiceCaVerifier {
                 CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
             )) => {
                 self.check_subject(end_entity)?;
-                info!("TLS: accepting certificate despite hostname mismatch");
+                self.note_name_mismatch_accepted();
                 Ok(ServerCertVerified::assertion())
             }
             // Other errors (expired, unknown CA, bad signature) are
@@ -174,6 +199,17 @@ impl ServerCertVerifier for SpiceCaVerifier {
             .supported_schemes()
     }
 }
+
+/// What ryll logs, and a host may show, when a TLS connection's only
+/// identity check was the CA: the certificate's name did not match the
+/// server and no `host-subject` is pinned. Any certificate the CA has
+/// issued, to any host in that PKI, would have been accepted. Refusing
+/// the connection instead is deliberately not done: Shaken Fist
+/// publishes no subject unless the operator configured one, so the
+/// unpinned case is the common one (see ryll#359).
+pub const CA_ALONE_WARNING: &str = "certificate accepted on the CA alone: its name does not \
+     match the server and no host-subject is pinned, so any certificate this CA issued would \
+     have been accepted. Set host-subject in the .vv file to pin the server's identity.";
 
 /// The trust anchors for a SPICE TLS connection, and which of the two
 /// kinds they are. They travel together because a caller needs both:
@@ -287,6 +323,9 @@ pub struct SpiceClient {
     dial_timeout: Duration,
     /// [`HANDSHAKE_TIMEOUT`], held per client so tests can shorten it.
     handshake_timeout: Duration,
+    /// Shared with this client's [`SpiceCaVerifier`], if it has one;
+    /// see [`SpiceClient::trusted_by_ca_alone`].
+    ca_alone: Arc<AtomicBool>,
 }
 
 impl SpiceClient {
@@ -332,8 +371,13 @@ impl SpiceClient {
             }
         }
 
+        let ca_alone = Arc::new(AtomicBool::new(false));
         let tls_connector = if config.tls_port.is_some() {
-            Some(Self::create_tls_connector(&config, expected_subject)?)
+            Some(Self::create_tls_connector(
+                &config,
+                expected_subject,
+                ca_alone.clone(),
+            )?)
         } else {
             None
         };
@@ -343,7 +387,19 @@ impl SpiceClient {
             tls_connector,
             dial_timeout: DIAL_TIMEOUT,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            ca_alone,
         })
+    }
+
+    /// Whether a channel of this client has accepted a certificate on
+    /// its CA alone: a private CA, a name that did not match, and no
+    /// pinned `host_subject` (see [`CA_ALONE_WARNING`]). Always false
+    /// for plaintext, for the public roots (whose name check is never
+    /// forgiven), and with a pin. The verifier has already logged it;
+    /// this is for a host that wants to show it as well, and is
+    /// meaningful once the first channel has connected.
+    pub fn trusted_by_ca_alone(&self) -> bool {
+        self.ca_alone.load(Ordering::Relaxed)
     }
 
     /// Create TLS connector with optional CA certificate and optional
@@ -351,6 +407,7 @@ impl SpiceClient {
     fn create_tls_connector(
         config: &ConnectionConfig,
         expected_subject: Option<ExpectedSubject>,
+        ca_alone: Arc<AtomicBool>,
     ) -> Result<TlsConnector> {
         // A custom CA replaces the public roots rather than joining
         // them; `build_root_store` reports which case it took so the
@@ -374,8 +431,12 @@ impl SpiceClient {
                     )
                 })?
                 .clone();
-            let verifier =
-                SpiceCaVerifier::new(Arc::new(anchors.store), provider, expected_subject)?;
+            let verifier = SpiceCaVerifier::new(
+                Arc::new(anchors.store),
+                provider,
+                expected_subject,
+                ca_alone,
+            )?;
             ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(verifier))
@@ -796,8 +857,13 @@ mod tests {
             ],
         );
         let expected = parse_host_subject("C=US,O=Kerbside CI,CN=hv1").unwrap();
-        let verifier =
-            SpiceCaVerifier::new(root_store(&ca.der), crypto_provider(), Some(expected)).unwrap();
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            Some(expected),
+            Arc::default(),
+        )
+        .unwrap();
 
         assert!(verify(&verifier, &leaf, "localhost").is_ok());
     }
@@ -807,8 +873,13 @@ mod tests {
         let ca = make_ca("cluster ca");
         let leaf = leaf_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8("other"))]);
         let expected = parse_host_subject("CN=hv1").unwrap();
-        let verifier =
-            SpiceCaVerifier::new(root_store(&ca.der), crypto_provider(), Some(expected)).unwrap();
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            Some(expected),
+            Arc::default(),
+        )
+        .unwrap();
 
         let result = verify(&verifier, &leaf, "localhost");
         assert!(matches!(
@@ -830,8 +901,13 @@ mod tests {
         let ca = make_ca("cluster ca");
         let leaf = leaf_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8("hv1"))]);
         let expected = parse_host_subject("CN=hv1").unwrap();
-        let verifier =
-            SpiceCaVerifier::new(root_store(&ca.der), crypto_provider(), Some(expected)).unwrap();
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            Some(expected),
+            Arc::default(),
+        )
+        .unwrap();
 
         assert!(verify(&verifier, &leaf, "definitely-not-the-cert.example").is_ok());
     }
@@ -847,7 +923,9 @@ mod tests {
             &ca.params,
             &[(DnType::CommonName, utf8("whatever"))],
         );
-        let verifier = SpiceCaVerifier::new(root_store(&ca.der), crypto_provider(), None).unwrap();
+        let verifier =
+            SpiceCaVerifier::new(root_store(&ca.der), crypto_provider(), None, Arc::default())
+                .unwrap();
 
         assert!(verify(&verifier, &leaf, "definitely-not-the-cert.example").is_ok());
     }
@@ -899,7 +977,8 @@ mod tests {
                 .unwrap()
                 .store,
         );
-        let verifier = SpiceCaVerifier::new(store, crypto_provider(), None).unwrap();
+        let verifier =
+            SpiceCaVerifier::new(store, crypto_provider(), None, Arc::default()).unwrap();
         let err = verify(&verifier, &leaf, "attacker.example").unwrap_err();
         assert!(
             matches!(
@@ -912,8 +991,13 @@ mod tests {
         // The same leaf against a store that does trust its issuer is
         // accepted, so the rejection above is the trust anchor set
         // talking rather than some unrelated defect in the fixture.
-        let verifier =
-            SpiceCaVerifier::new(root_store(&public_ca.der), crypto_provider(), None).unwrap();
+        let verifier = SpiceCaVerifier::new(
+            root_store(&public_ca.der),
+            crypto_provider(),
+            None,
+            Arc::default(),
+        )
+        .unwrap();
         assert!(verify(&verifier, &leaf, "attacker.example").is_ok());
     }
 
@@ -927,12 +1011,144 @@ mod tests {
         let leaf = leaf_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8("hv1"))]);
 
         let store = Arc::new(build_root_store(Some(&ca.vv_ca_field)).unwrap().store);
-        let verifier = SpiceCaVerifier::new(store.clone(), crypto_provider(), None).unwrap();
+        let verifier =
+            SpiceCaVerifier::new(store.clone(), crypto_provider(), None, Arc::default()).unwrap();
         assert!(verify(&verifier, &leaf, "192.0.2.10").is_ok());
 
         let expected = parse_host_subject("CN=hv1").unwrap();
-        let verifier = SpiceCaVerifier::new(store, crypto_provider(), Some(expected)).unwrap();
+        let verifier =
+            SpiceCaVerifier::new(store, crypto_provider(), Some(expected), Arc::default()).unwrap();
         assert!(verify(&verifier, &leaf, "192.0.2.10").is_ok());
+    }
+
+    // ── Trust by CA alone (ryll#359) ────────────────────────────────
+
+    #[test]
+    fn unpinned_name_mismatch_is_trust_by_ca_alone() {
+        // The common Shaken Fist shape: a cluster CA, an IP address, no
+        // pin. Still accepted, but recorded, and a second channel's
+        // handshake leaves it recorded rather than warning again.
+        let ca = make_ca("cluster ca");
+        let leaf = leaf_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8("hv1"))]);
+        let ca_alone = Arc::new(AtomicBool::new(false));
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            None,
+            ca_alone.clone(),
+        )
+        .unwrap();
+
+        assert!(verify(&verifier, &leaf, "192.0.2.10").is_ok());
+        assert!(ca_alone.load(Ordering::Relaxed));
+        assert!(verify(&verifier, &leaf, "192.0.2.10").is_ok());
+        assert!(ca_alone.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn pinned_name_mismatch_is_not_trust_by_ca_alone() {
+        // The pin is the identity check, so the forgiven name is the
+        // designed path, not a weakness worth a warning.
+        let ca = make_ca("cluster ca");
+        let leaf = leaf_signed_by(&ca.key, &ca.params, &[(DnType::CommonName, utf8("hv1"))]);
+        let expected = parse_host_subject("CN=hv1").unwrap();
+        let ca_alone = Arc::new(AtomicBool::new(false));
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            Some(expected),
+            ca_alone.clone(),
+        )
+        .unwrap();
+
+        assert!(verify(&verifier, &leaf, "192.0.2.10").is_ok());
+        assert!(!ca_alone.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn unpinned_name_match_is_not_trust_by_ca_alone() {
+        // A certificate whose name matches the server was identified by
+        // that name, so nothing was forgiven.
+        let ca = make_ca("cluster ca");
+        let leaf = leaf_with_san(&ca.key, &ca.params, "hv1.example");
+        let ca_alone = Arc::new(AtomicBool::new(false));
+        let verifier = SpiceCaVerifier::new(
+            root_store(&ca.der),
+            crypto_provider(),
+            None,
+            ca_alone.clone(),
+        )
+        .unwrap();
+
+        assert!(verify(&verifier, &leaf, "hv1.example").is_ok());
+        assert!(!ca_alone.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn rejected_certificate_is_not_trust_by_ca_alone() {
+        // Only an accepted certificate can have been trusted.
+        let cluster_ca = make_ca("cluster ca");
+        let other_ca = make_ca("other ca");
+        let leaf = leaf_signed_by(
+            &other_ca.key,
+            &other_ca.params,
+            &[(DnType::CommonName, utf8("hv1"))],
+        );
+        let ca_alone = Arc::new(AtomicBool::new(false));
+        let verifier = SpiceCaVerifier::new(
+            root_store(&cluster_ca.der),
+            crypto_provider(),
+            None,
+            ca_alone.clone(),
+        )
+        .unwrap();
+
+        assert!(verify(&verifier, &leaf, "192.0.2.10").is_err());
+        assert!(!ca_alone.load(Ordering::Relaxed));
+    }
+
+    /// Open one TLS transport to a backend presenting a CN=hv1 leaf from
+    /// a cluster CA, dialled by IP, and report what the client recorded.
+    async fn trusted_by_ca_alone_after_handshake(host_subject: Option<&str>) -> bool {
+        install_crypto_provider();
+        let ca = make_ca("cluster ca");
+        let (port, backend) = tls_backend(&ca, "hv1").await;
+        let client = SpiceClient::new(ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port,
+            tls_port: Some(port),
+            ca_cert: Some(ca.vv_ca_field.clone()),
+            host_subject: host_subject.map(str::to_string),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!client.trusted_by_ca_alone());
+        let mut stream = client.open_transport(true, port).await.unwrap();
+        let mut hello = [0u8; 5];
+        stream.read_exact(&mut hello).await.unwrap();
+        assert!(backend.await.unwrap());
+        client.trusted_by_ca_alone()
+    }
+
+    #[tokio::test]
+    async fn client_reports_trust_by_ca_alone_without_a_pin() {
+        assert!(trusted_by_ca_alone_after_handshake(None).await);
+    }
+
+    #[tokio::test]
+    async fn client_does_not_report_trust_by_ca_alone_with_a_pin() {
+        assert!(!trusted_by_ca_alone_after_handshake(Some("CN=hv1")).await);
+    }
+
+    #[test]
+    fn plaintext_client_never_reports_trust_by_ca_alone() {
+        let client = SpiceClient::new(ConnectionConfig {
+            host: "127.0.0.1".into(),
+            port: 5900,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!client.trusted_by_ca_alone());
     }
 
     #[test]
@@ -1447,6 +1663,7 @@ mod tests {
             tls_connector: None,
             dial_timeout: DIAL_TIMEOUT,
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            ca_alone: Arc::default(),
         };
         let err = match client.open_transport(false, 5900).await {
             Err(e) => e,
