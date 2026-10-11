@@ -876,15 +876,19 @@ only run `cargo fmt` and compile nothing. So do `deb`, `rpm` and
 the `web-smoke` targets, which repackage or run the binary
 `release` already produced.)
 
-Outside the Makefile entirely: release's `build-ryll-wheels` job
-runs `tools/build-ryll-wheel.sh`, which builds ryll with maturin
-inside `quay.io/pypa/manylinux_2_28_*` rather than the
-devcontainer, with network and without `--frozen`. That is a
-shipped artifact — it is what `pip install ryll` gets — so it is
-the most significant gap here. Closing it needs the same
-fetch/compile split inside the manylinux image, tracked in
-shakenfist/ryll#305; until then the wheel is built on the same
-terms as before this change.
+Outside the Makefile but under the same split: release's
+`build-ryll-wheels` job runs `tools/build-ryll-wheel.sh`, which
+builds ryll with maturin in an image derived from
+`quay.io/pypa/manylinux_2_28_*` (`.devcontainer/wheel/Dockerfile`)
+rather than the devcontainer. That image carries the toolchain and
+maturin, so nothing needs downloading at compile time. The script
+runs `cargo fetch --locked` in it with the network up, then the
+`maturin build --frozen` with `--network none` and the cache
+mounted read-only, as the invoking user. That matters most for the
+wheel, because it is a shipped artifact: it is what `pip install
+ryll` gets. The job runs only on a release tag, so a change to
+the wheel build is first exercised by the next release unless
+someone runs `tools/build-ryll-wheel.sh` by hand.
 
 Because those jobs write the cargo cache with the network up,
 they save it under their own `actions/cache` key prefix
