@@ -133,10 +133,6 @@
       "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
       "date": "2026-09-17"
     },
-    "docs/web-mode-internals.md": {
-      "sha": "4f3aa3999f94665694ec0d5bfaadcee39be86b35",
-      "date": "2026-10-05"
-    },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
       "date": "2026-09-17"
@@ -236,10 +232,6 @@
     "ryll/src/web/server.rs": {
       "sha": "551e4b082b1d9f20c755bc84f26333244693efa9",
       "date": "2026-10-05"
-    },
-    "ryll/src/web/signalling.rs": {
-      "sha": "44ae35563974812b068953f94ee67bea51eed186",
-      "date": "2026-09-18"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -413,10 +405,6 @@
       "sha": "6441925b54f82bd7964235031aaf0b45b727a0e6",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/encoder/task.rs": {
-      "sha": "14f399c9ced2689e9b8e1054c16900b8207866e4",
-      "date": "2026-09-19"
-    },
     "shakenfist-spice-renderer/src/image_cache.rs": {
       "sha": "96afd58b68815692f90d4c7fed1ae6b98d52063c",
       "date": "2026-09-19"
@@ -525,10 +513,6 @@
       "sha": "03a8a93721957eef128a027ec0505554f88223e9",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-webrtc/src/bridge.rs": {
-      "sha": "69a4e4be837b87d20d4c1943486c165ca01bd461",
-      "date": "2026-09-26"
-    },
     "shakenfist-spice-webrtc/src/lib.rs": {
       "sha": "f4ae5da82db95cfaf142f4bd59f52460c233d255",
       "date": "2026-09-19"
@@ -536,10 +520,6 @@
     "shakenfist-spice-webrtc/src/sticky.rs": {
       "sha": "fd60aa65416f0231bae4b185cc18183bba6210cc",
       "date": "2026-09-19"
-    },
-    "shakenfist-spice-webrtc/src/test_client.rs": {
-      "sha": "1e940b3e85dd1bad369a48522bb3b254cde48412",
-      "date": "2026-09-26"
     },
     "shakenfist-spice-webrtc/tests/lifecycle.rs": {
       "sha": "358f02d4af6b88acd5491765c494aefb31f750b6",
