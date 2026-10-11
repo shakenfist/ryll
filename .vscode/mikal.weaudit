@@ -604,10 +604,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/control-socket-protocol.md",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz.rs",
       "author": "mikal"
     },
@@ -696,19 +692,7 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/control/server.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/session_state.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/tests/control_socket.rs",
       "author": "mikal"
     },
     {

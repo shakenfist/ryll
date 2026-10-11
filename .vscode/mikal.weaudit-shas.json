@@ -89,10 +89,6 @@
       "sha": "154626ef4e81f6aa3e7c271ef613fe017ad658f9",
       "date": "2026-09-23"
     },
-    "docs/control-socket-protocol.md": {
-      "sha": "0ea0323dfedd1af2f8b26336cf5d104261472f91",
-      "date": "2026-10-05"
-    },
     "docs/development-macos.md": {
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
@@ -349,10 +345,6 @@
       "sha": "3f2f75abfe5ba66229e112df157164a9cc029cf7",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/control/server.rs": {
-      "sha": "8ab5e14067174e4fa77c8714df761e821d2dc532",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-renderer/src/device_config.rs": {
       "sha": "908c55fe61f547a541546bf450d3835820e76370",
       "date": "2026-07-21"
@@ -440,10 +432,6 @@
     "shakenfist-spice-renderer/src/webdav/server.rs": {
       "sha": "7f87d7fcda4646aef034dbae3ca07aa775d1d483",
       "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/tests/control_socket.rs": {
-      "sha": "714cebb5d35270e017e51c483e32c8f206e8e18d",
-      "date": "2026-10-05"
     },
     "shakenfist-spice-renderer/tests/encoder_smoke.rs": {
       "sha": "ddf75a7edc8fef716eaf555e4577a64a65ed4375",
