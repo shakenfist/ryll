@@ -283,9 +283,10 @@ tracked per display channel and included in bug reports for performance analysis
   rows. The palette reference is a 4-byte `palette_addr` normally,
   making the header 18 bytes. When `PAL_FROM_CACHE` is set in the flags
   it is instead a u64 palette id, making the header 22 bytes
-  (spice.proto:549-554). ryll draws only 32-bit bitmaps, which carry no
-  palette. Only 32-bit formats (BGRX=8, RGBA=9) are supported. The
-  `top_down` flag (bit 2 of flags) controls row ordering.
+  (the `pal` switch in spice.proto's `BitmapData`). ryll draws only
+  32-bit bitmaps, which carry no palette. Only 32-bit formats (BGRX=8,
+  RGBA=9) are supported. The `top_down` flag (bit 2 of flags) controls
+  row ordering.
 - **JPEG**: preceded by a 4-byte `data_size` (u32 LE), then a standard
   JPEG stream. Decoded via the `image` crate and converted to RGBA.
 - **FromCache** and **FromCacheLossless**: no data at all after the
