@@ -372,10 +372,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/capture_sink.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/digest.rs",
       "author": "mikal"
     },
@@ -641,10 +637,6 @@
     },
     {
       "path": "renovate.json",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/features.md",
       "author": "mikal"
     },
     {

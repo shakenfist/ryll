@@ -93,10 +93,6 @@
       "sha": "9fef25179d5ec56bb52e4a5b5edeecadcff74097",
       "date": "2026-09-17"
     },
-    "docs/features.md": {
-      "sha": "0702cc7a9350c4818534d5f50e1b2aa71fd15e38",
-      "date": "2026-10-05"
-    },
     "docs/index.md": {
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
@@ -308,10 +304,6 @@
     "shakenfist-spice-renderer/src/byte_counter.rs": {
       "sha": "d9b32a0b373832330a33bbff2e950273eac1e34e",
       "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/capture_sink.rs": {
-      "sha": "8f8879516aee5d1f6b534c06f5a2d92a2b55af20",
-      "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/channels/agent_queue.rs": {
       "sha": "00b3a1a61efee562e224e750312b38ff23cc12f6",
