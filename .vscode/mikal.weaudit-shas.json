@@ -345,10 +345,6 @@
       "sha": "11f9647ca7f5957b6df3583b9a5065884e650e5c",
       "date": "2026-09-19"
     },
-    "shakenfist-spice-renderer/src/display/mod.rs": {
-      "sha": "970f2a1daf31ac2804c4e949e1e6f46258ba7bec",
-      "date": "2026-07-21"
-    },
     "shakenfist-spice-renderer/src/display/surface.rs": {
       "sha": "7b5b437c638f3d5fff6576f1ceeed5d47fdcf9c0",
       "date": "2026-10-05"

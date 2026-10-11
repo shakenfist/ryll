@@ -76,10 +76,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/display/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/webdav/mod.rs",
       "author": "mikal"
     },
@@ -613,10 +609,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/display/surface.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/display",
       "author": "mikal"
     },
     {
