@@ -1,6 +1,8 @@
 //! Trait surface for the `--capture` pipeline.
 //!
-//! Channels call into this trait to record packets and frames.
+//! Channels call into this trait to record packets. Frames are
+//! recorded by the host's own frame loop (ryll's egui loop), not by
+//! the renderer, so `run_headless` produces no video.
 //! The host (ryll) implements it on `CaptureSession` (pcap +
 //! H.264/MP4). Other consumers can drop the sink (no-op) or
 //! implement a different sink (e.g. a streaming encoder for the
