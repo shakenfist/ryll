@@ -895,11 +895,13 @@ mod tests {
         assert_eq!(message_names::display_cap_name(10), None);
     }
 
-    // Guard against DEFAULT_DISPLAY accidentally dropping any of the
-    // three new codec caps, which would silently stop the server
-    // from offering H.264 streams.
+    // Guard against DEFAULT_DISPLAY accidentally dropping the codec
+    // caps that make the server stream MJPEG to us, and against
+    // CODEC_H264 coming back before shakenfist/ryll#398 is fixed:
+    // advertising it lets the server stream H.264 that ryll cannot
+    // yet decode. See the comment on DEFAULT_DISPLAY.
     #[test]
-    fn default_display_includes_codec_caps() {
+    fn default_display_codec_caps() {
         use crate::constants::capabilities;
         let d = capabilities::DEFAULT_DISPLAY;
         assert_ne!(
@@ -912,10 +914,10 @@ mod tests {
             0,
             "DEFAULT_DISPLAY must include DISPLAY_CODEC_MJPEG"
         );
-        assert_ne!(
+        assert_eq!(
             d & capabilities::DISPLAY_CODEC_H264,
             0,
-            "DEFAULT_DISPLAY must include DISPLAY_CODEC_H264"
+            "DEFAULT_DISPLAY must not include DISPLAY_CODEC_H264 until ryll#398 is fixed"
         );
     }
 

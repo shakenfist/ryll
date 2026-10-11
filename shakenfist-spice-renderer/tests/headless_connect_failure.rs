@@ -75,6 +75,7 @@ async fn headless_against(port: u16, control_socket: Option<PathBuf>) -> anyhow:
         Arc::new(NullNotifications),
         LogConfig::default(),
         Arc::new(AtomicBool::new(false)),
+        false, // experimental_h264
         64 * 1024 * 1024,
         64 * 1024 * 1024,
         2, // AUTO_GLZ

@@ -2086,6 +2086,7 @@ mod tests {
             // Link-up preference-message send markers.
             pref_compression_sent: true,
             pref_video_codec_type_sent: true,
+            experimental_h264: true,
             ..Default::default()
         };
         snap.recent_decodes.push_back(DecodeResult {
@@ -2286,10 +2287,11 @@ mod tests {
         assert_eq!(v["h264_decode_failed_count"], json!(1));
         // Link-up preference-message send markers must appear in
         // channel-state.json so a bug-report reader can confirm the client
-        // asked for AUTO_LZ and the H264/MJPEG codec ordering without
-        // reading the pcap.
+        // sent its image compression and video codec preferences, and
+        // whether H.264 was among them, without reading the pcap.
         assert_eq!(v["pref_compression_sent"], json!(true));
         assert_eq!(v["pref_video_codec_type_sent"], json!(true));
+        assert_eq!(v["experimental_h264"], json!(true));
         // Bounded image-cache eviction and cap fields. These must appear in
         // bug reports so an operator can tell how much eviction pressure the
         // session experienced and what cap was in effect.
