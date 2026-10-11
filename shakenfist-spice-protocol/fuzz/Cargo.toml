@@ -94,3 +94,10 @@ path = "fuzz_targets/fuzz_lz4_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_agent_reassembly"
+path = "fuzz_targets/fuzz_agent_reassembly.rs"
+test = false
+doc = false
+bench = false

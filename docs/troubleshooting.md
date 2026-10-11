@@ -129,6 +129,21 @@ one and disconnects the client. Neither the guest nor ryll has crashed.
 returns tokens. On an affected build, copy something short on the host
 before pasting into the guest.
 
+### Text copied in the guest arrives on the host cut short
+
+**Symptom:** Copying a short piece of text in the guest works, but copying
+more than about 2 KB puts only the first part on the host clipboard.
+
+**Cause:** Builds without the fix for issue #474 took each 2048-byte
+`AGENT_DATA` message from the server to be a whole guest agent message, so
+a larger message was cut to its first chunk and its later chunks were
+misread as new messages. ryll now reassembles the chunks; see
+[spice-protocol.md](spice-protocol.md).
+
+**Solution:** Upgrade. On a fixed build a guest clipboard copy is dropped
+only if it exceeds 100 MiB, and the log then carries one
+`agent message from guest dropped` warning.
+
 ## Display Issues
 
 ### "Waiting for display..." stays forever
