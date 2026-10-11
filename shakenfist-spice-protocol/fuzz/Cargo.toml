@@ -19,7 +19,8 @@ rsa = "0.9"
 path = ".."
 
 # For the `fuzz_lz4_decode` target. Only the LZ4 decoder is needed, so the
-# default decoder set (and mozjpeg's C build) is left out.
+# default decoder set (and mozjpeg's C build) is left out. openh264 is not a
+# feature yet, so its C build is still pulled in (ryll#499).
 [dependencies.shakenfist-spice-compression]
 path = "../../shakenfist-spice-compression"
 default-features = false

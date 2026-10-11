@@ -1074,8 +1074,8 @@ impl DisplayChannel {
         // messages never arrive — but we propagate any IO error since it
         // indicates the socket is unhealthy and the read loop is about to
         // fail anyway. The compression scheme is whatever the session was
-        // configured with (`--preferred-compression`); the default and the
-        // reason for it are documented on `Args::preferred_compression`.
+        // configured with (`--preferred-compression`); why the default is
+        // `auto-glz` is in docs/configuration.md.
         self.send_preferred_compression(self.preferred_compression)
             .await?;
         self.send_preferred_video_codec_type(&[
@@ -5050,6 +5050,63 @@ mod tests {
         let pixels: Vec<u8> = (1..=16).collect();
         let expected = vec![3, 2, 1, 255, 7, 6, 5, 255, 11, 10, 9, 255, 15, 14, 13, 255];
         let image = pixmap_image(0x1234, IMAGE_FLAGS_CACHE_ME, 2, 2, 8, &pixels);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].4, expected);
+
+        let image = from_cache_image(ImageType::FromCache, 0x1234, 2, 2);
+        channel
+            .handle_message(
+                display_server::DRAW_COPY,
+                &draw_copy_payload((0, 0, 2, 2), &[], &image),
+            )
+            .await
+            .expect("draw_copy must not error");
+
+        let events = drain_image_events(&mut peers);
+        assert_eq!(events.len(), 1, "the cache hit is drawn");
+        assert_eq!(events[0].4, expected);
+    }
+
+    /// A top-down 2x2 LZ_RGB32 image of four literal BGR pixels: a
+    /// little-endian data_size, the 28-byte big-endian LZ header, one
+    /// control byte (four literals follow), then the pixels.
+    fn lz_rgb_image(id: u64, flags: u8, bgr: &[u8; 12]) -> SpiceImage {
+        let mut lz = Vec::new();
+        lz.extend_from_slice(b"  ZL");
+        lz.extend_from_slice(&1u16.to_be_bytes());
+        lz.extend_from_slice(&0u16.to_be_bytes());
+        lz.extend_from_slice(&[0, 0, 0]);
+        lz.push(8); // LZ_IMAGE_TYPE_RGB32
+        for value in [2u32, 2, 8, 1] {
+            // width, height, stride, top_down
+            lz.extend_from_slice(&value.to_be_bytes());
+        }
+        lz.push(3);
+        lz.extend_from_slice(bgr);
+        let mut data = (lz.len() as u32).to_le_bytes().to_vec();
+        data.extend_from_slice(&lz);
+        SpiceImage {
+            descriptor: image_descriptor(id, ImageType::LzRgb, flags, 2, 2),
+            payload: ImagePayload::Other(data),
+        }
+    }
+
+    #[tokio::test]
+    async fn lz_image_is_drawn_and_cached_under_its_descriptor_id() {
+        // Like LZ4, the LZ decoder does not know the image's id.
+        let (mut channel, mut peers) = test_display_channel().await;
+        let bgr: [u8; 12] = std::array::from_fn(|i| i as u8 + 1);
+        let expected = vec![3, 2, 1, 255, 6, 5, 4, 255, 9, 8, 7, 255, 12, 11, 10, 255];
+        let image = lz_rgb_image(0x1234, IMAGE_FLAGS_CACHE_ME, &bgr);
         channel
             .handle_message(
                 display_server::DRAW_COPY,
