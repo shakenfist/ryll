@@ -643,15 +643,6 @@ struct TriggerSnapshot {
     png_slot: Arc<std::sync::Mutex<Option<anyhow::Result<Vec<u8>>>>>,
 }
 
-/// A GUI-submitted bug report waiting on its runtime-metrics
-/// sample.
-///
-/// `metrics::sample` blocks for `BUG_REPORT_METRICS_WINDOW`, so
-/// the UI thread hands the sample to a worker and parks the rest
-/// of the submission here. Everything is captured at submit time
-/// rather than re-read when the sample lands, so the zip
-/// describes the frame the user was looking at when they pressed
-/// Capture and not the one two seconds later.
 /// How a Display report's region selection ended. Every ending
 /// writes the report; only a completed drag gives it a region. A
 /// selection the user never finishes -- the window closes, or a
@@ -667,6 +658,9 @@ enum RegionSelectEnd {
     /// A reconnect is about to clear the surface being selected
     /// from.
     Reconnecting,
+    /// The connection was lost, and its surfaces are about to be
+    /// cleared.
+    Disconnected,
     /// The window is closing.
     WindowClosed,
 }
@@ -686,6 +680,9 @@ impl RegionSelectEnd {
             RegionSelectEnd::Selected(_) => "completed",
             RegionSelectEnd::Skipped => "skipped with Escape; saving without a region",
             RegionSelectEnd::Reconnecting => "abandoned by a reconnect; saving without a region",
+            RegionSelectEnd::Disconnected => {
+                "abandoned by a lost connection; saving without a region"
+            }
             RegionSelectEnd::WindowClosed => {
                 "abandoned by the window closing; saving without a region"
             }
@@ -715,6 +712,15 @@ fn wait_for_metrics_sample(
     }
 }
 
+/// A GUI-submitted bug report waiting on its runtime-metrics
+/// sample.
+///
+/// `metrics::sample` blocks for `BUG_REPORT_METRICS_WINDOW`, so
+/// the UI thread hands the sample to a worker and parks the rest
+/// of the submission here. Everything is captured at submit time
+/// rather than re-read when the sample lands, so the zip
+/// describes the frame the user was looking at when they pressed
+/// Capture and not the one two seconds later.
 struct PendingBugReport {
     report_type: BugReportType,
     description: String,
@@ -1792,6 +1798,10 @@ impl RyllApp {
         // auto-snapshot task to stop capturing a dead session.
         self.connected = false;
         self.signal_auto_snapshot_retire();
+        // As in `reconnect`: end any region selection while the surface
+        // it was started over still exists, rather than leave it running
+        // over an empty canvas until a reconnect or Escape ends it.
+        self.end_region_select(RegionSelectEnd::Disconnected);
         self.surfaces.surfaces.clear();
         self.textures.clear();
         self.cursor_image = None;
@@ -4872,7 +4882,16 @@ impl eframe::App for RyllApp {
         // Execute dialog action outside the closure
         match dialog_action {
             Some(true) => {
-                if self.bug_report_type == BugReportType::Display {
+                // While another report is still sampling, a Display report
+                // goes straight to `finish_bug_report`, which refuses it
+                // with a notification, rather than into a region
+                // selection whose ending would then be refused out of the
+                // user's sight (on a reconnect, or as the window closes).
+                // Nothing can start a report during a selection, so one
+                // begun with none pending ends with none pending.
+                if self.bug_report_type == BugReportType::Display
+                    && self.pending_bug_report.is_none()
+                {
                     self.begin_region_select();
                 } else {
                     // Non-display: generate immediately
@@ -6345,6 +6364,7 @@ mod tests {
         for how in [
             RegionSelectEnd::Skipped,
             RegionSelectEnd::Reconnecting,
+            RegionSelectEnd::Disconnected,
             RegionSelectEnd::WindowClosed,
         ] {
             assert!(how.region().is_none(), "{:?}", how);
@@ -6362,6 +6382,7 @@ mod tests {
         for how in [
             RegionSelectEnd::Skipped,
             RegionSelectEnd::Reconnecting,
+            RegionSelectEnd::Disconnected,
             RegionSelectEnd::WindowClosed,
         ] {
             assert!(

@@ -258,14 +258,21 @@ a window that ignores the guest and appears stuck.
 
 Every way out of region selection writes the report, and the log
 records which one it was (`app: region selection completed`,
-`skipped with Escape`, `abandoned by a reconnect` or `abandoned by
-the window closing`), next to `app: bug report waiting for region
-selection` on the way in. A reconnect clears the surface being
-selected from, and closing the window ends the session, so both
-write the report without a region rather than dropping it. Closing
-the window also writes a report still waiting for its runtime
-metrics sample, after at most a second past the end of its sample
-window.
+`skipped with Escape`, `abandoned by a reconnect`, `abandoned by a
+lost connection` or `abandoned by the window closing`), next to
+`app: bug report waiting for region selection` on the way in. A
+reconnect or a lost connection clears the surface being selected
+from, and closing the window ends the session, so each writes the
+report without a region rather than dropping it. Closing the
+window also writes a report still waiting for its runtime metrics
+sample, after at most a second past the end of its sample window.
+
+Only one report is captured at a time. Pressing Capture on a
+Display report while an earlier report is still sampling its
+metrics (the two seconds after its Capture) does not enter region
+selection: the report is refused at once with "A bug report is
+already being captured", so a selection never ends with a report
+that cannot be written.
 
 While a selection is in progress, **Menu → Report** and **Menu →
 Screenshot** are disabled, as F12 and F8 are, and the USB and
