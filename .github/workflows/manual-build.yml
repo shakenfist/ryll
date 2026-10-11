@@ -5,6 +5,10 @@ name: Manual build
 # but skips version checks, packaging, GitHub Release creation,
 # crates.io publish, and the Homebrew tap update — just builds the
 # binary on each requested platform and uploads it as an artifact.
+# It can also build the PyPI wheels (wheel-x86_64, wheel-aarch64),
+# which release.yml otherwise only builds once a release tag exists.
+# They are opt-in, not in the default list, because the manylinux
+# image build makes them slow.
 #
 # Fire from Actions → Manual build → Run workflow → pick branch +
 # platforms. Download the resulting artifact from the run's
@@ -14,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'Comma-separated subset of: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64 (default: all)'
+        description: 'Comma-separated subset of: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64, windows-aarch64, wheel-x86_64, wheel-aarch64 (default: all but the wheels)'
         required: false
         default: 'linux-x86_64,linux-aarch64,macos-aarch64,windows-x86_64,windows-aarch64'
 
@@ -27,6 +31,7 @@ jobs:
     outputs:
       include: ${{ steps.build-matrix.outputs.include }}
       linux_x86_64: ${{ steps.build-matrix.outputs.linux_x86_64 }}
+      wheels: ${{ steps.build-matrix.outputs.wheels }}
     steps:
       - id: build-matrix
         env:
@@ -80,7 +85,19 @@ jobs:
                   'features': '--no-default-features --features ryll/gui,ryll/audio',
               },
           }
-          valid = ['linux-x86_64'] + list(hosted_platforms)
+          # Keep in sync with release.yml's build-ryll-wheels matrix.
+          wheel_platforms = {
+              'wheel-x86_64': {
+                  'arch': 'x86_64',
+                  'runs-on': ['self-hosted', 'vm', 'debian-13-docker', 'l'],
+              },
+              'wheel-aarch64': {
+                  'arch': 'aarch64',
+                  # audit-ok: github-hosted-runner -- no self-hosted aarch64 Linux hardware, and the arm wheel must build natively, not under QEMU
+                  'runs-on': 'ubuntu-24.04-arm',
+              },
+          }
+          valid = ['linux-x86_64'] + list(hosted_platforms) + list(wheel_platforms)
           wanted = [p.strip() for p in os.environ['PLATFORMS'].split(',') if p.strip()]
           unknown = [p for p in wanted if p not in valid]
           if unknown:
@@ -88,6 +105,7 @@ jobs:
           include = [hosted_platforms[p] for p in wanted if p in hosted_platforms]
           print('include=' + json.dumps(include))
           print('linux_x86_64=' + ('true' if 'linux-x86_64' in wanted else 'false'))
+          print('wheels=' + json.dumps([wheel_platforms[p] for p in wanted if p in wheel_platforms]))
           EOF
 
   # Linux x86_64 builds on an l-size self-hosted runner inside the
@@ -197,3 +215,33 @@ jobs:
         with:
           name: ryll-${{ matrix.target }}-${{ env.SHORT_SHA }}
           path: target/release/ryll-*.zip
+
+  # The PyPI wheels, built exactly as release.yml's build-ryll-wheels
+  # job builds them, so a change to the wheel build can be tested on
+  # a branch before a release tag runs it for the first time.
+  build-ryll-wheels:
+    name: Build ryll wheel (${{ matrix.arch }})
+    needs: resolve-matrix
+    if: needs.resolve-matrix.outputs.wheels != '[]'
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.resolve-matrix.outputs.wheels) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get short sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Build wheel
+        run: tools/build-ryll-wheel.sh ${{ matrix.arch }}
+
+      - name: Upload ryll wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ryll-wheel-${{ matrix.arch }}-${{ env.SHORT_SHA }}
+          path: target/wheels/*.whl

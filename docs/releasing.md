@@ -219,7 +219,11 @@ The script will:
 The pushed tag runs `check-version`, then builds the `.deb`/
 `.rpm`/tarball/zip artifacts and the per-arch `ryll` PyPI wheels
 (`build-ryll-wheels`, natively on `x86_64` and `aarch64`, no
-QEMU) in parallel. Once all builds succeed, the workflow pauses
+QEMU) in parallel. No pull request CI builds the wheels, so if
+the wheel build has changed since the last release, run
+`manual-build.yml` on `develop` with the `wheel-x86_64` and
+`wheel-aarch64` platforms before tagging. Once all builds
+succeed, the workflow pauses
 at `sign-tag` for approval on the `release` environment — this is
 where `gh run watch` will sit until a required reviewer approves
 the run. On approval, `sign-tag` Sigstore-signs and force-pushes

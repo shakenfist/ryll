@@ -671,6 +671,7 @@ lands, so a push-triggered run would only repeat it.
 | Binaries for a pull request | The `Build (Linux x86_64)` job's artifacts on the pull request's CI run (`.deb` and `.rpm`, 30-day retention) |
 | Binaries for a `develop` SHA | The `merge_group` CI run that landed it — all four platform builds attach their artifacts there |
 | Binaries for an arbitrary branch | Run `manual-build.yml` (Actions → Manual build) and pick the platforms |
+| PyPI wheels for a branch | Run `manual-build.yml` with the opt-in `wheel-x86_64` and `wheel-aarch64` platforms; it builds them exactly as `release.yml` does |
 | Release binaries | `release.yml`, triggered by a `v*` tag — see [releasing.md](releasing.md) |
 
 ## Branch protection and the bot
