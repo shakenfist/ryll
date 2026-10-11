@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -525,9 +525,13 @@ pub async fn run_connection(
 /// session found four input bugs that a control-socket scenario test
 /// would have caught, and could not have run.
 ///
-/// Takes a [`CancellationToken`] rather than being aborted, because
-/// the server unlinks its socket file on the way out and an abort
-/// would skip that.
+/// Takes a server that is already bound (see
+/// [`crate::control::Server::bind`]), so that a socket that cannot be
+/// created stops the caller at startup rather than being reported by
+/// this task after the session has started.
+///
+/// Takes a [`CancellationToken`] rather than being aborted, so the
+/// server can stop accepting and wind its clients down cleanly.
 ///
 /// `agent_connected` is the session's `SessionStateRx::agent_connected`,
 /// which the `agent_connected` event is translated from. It is not on the
@@ -537,7 +541,7 @@ pub async fn run_connection(
 /// no Windows equivalent in this shape.
 #[cfg(unix)]
 pub fn spawn_control_socket(
-    sock_path: PathBuf,
+    server: crate::control::Server,
     status: Arc<dyn crate::control::StatusProvider>,
     event_tx: broadcast::Sender<ChannelEvent>,
     agent_connected: watch::Receiver<bool>,
@@ -545,7 +549,6 @@ pub fn spawn_control_socket(
     surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
-    let server = crate::control::Server::new(sock_path);
     tokio::spawn(async move {
         if let Err(e) = server
             .run(
@@ -621,6 +624,9 @@ pub fn spawn_digest_poller(
 /// A session that ends because the host raised `cancel` or the
 /// main channel disconnected returns `Ok` unless the connection
 /// task itself failed, or `--paste-text` did.
+///
+/// A `control_socket_path` that cannot be bound is an `Err` before
+/// anything connects.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_headless(
     config: ConnectionConfig,
@@ -644,6 +650,18 @@ pub async fn run_headless(
     control_socket_path: Option<PathBuf>,
 ) -> Result<()> {
     info!("Running in headless mode");
+
+    // Bind the control socket before anything else, so a socket that
+    // cannot be created fails the run before it connects. A caller
+    // that asked for one and drives the session through it would
+    // otherwise wait for a socket that never appears.
+    #[cfg(unix)]
+    let control_server = control_socket_path
+        .map(|path| {
+            crate::control::Server::bind(path.clone())
+                .with_context(|| format!("cannot create control socket {}", path.display()))
+        })
+        .transpose()?;
 
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
@@ -777,10 +795,10 @@ pub async fn run_headless(
         None
     };
 
-    // Control socket task — spawned when --control-socket is set.
-    // A `CancellationToken` is used so the server can exit cleanly
-    // when the SPICE session ends (rather than being aborted, which
-    // would skip the socket-file unlink).
+    // Control socket task — spawned when --control-socket is set, on
+    // the server bound at the top of this function. A
+    // `CancellationToken` is used so the server can exit cleanly when
+    // the SPICE session ends.
     //
     // The control socket is Unix-only: it uses tokio::net::UnixListener
     // which has no Windows equivalent in the same shape.  On non-Unix
@@ -788,14 +806,14 @@ pub async fn run_headless(
     #[cfg(unix)]
     let control_cancel = CancellationToken::new();
     #[cfg(unix)]
-    let control_handle = control_socket_path.map(|sock_path| {
+    let control_handle = control_server.map(|server| {
         let status: Arc<dyn crate::control::StatusProvider> = Arc::new(SessionStatus::new(
             spice_connected.clone(),
             session_state_rx.agent_connected.clone(),
             surface_mirror.clone(),
         ));
         spawn_control_socket(
-            sock_path,
+            server,
             status,
             event_broadcast_tx.clone(),
             session_state_rx.agent_connected.clone(),

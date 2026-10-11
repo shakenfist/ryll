@@ -181,7 +181,7 @@ shakenfist-spice-renderer/src/
 │   │                    #   docs/control-socket-protocol.md)
 │   ├── mod.rs           # Re-exports: Server, StatusProvider
 │   ├── protocol.rs      # Request/Response/Event wire types
-│   └── server.rs        # Server::run: bind, accept, dispatch verbs
+│   └── server.rs        # Server::bind, Server::run: accept, dispatch
 ├── display/
 │   └── surface.rs       # DisplaySurface pixel buffer + draw-op API
 ├── encoder/
