@@ -28,7 +28,8 @@ use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::TextureCache;
 use crate::input_egui::{
-    mouse_button_to_spice, paste_shortcut_pressed, translate_key_events, HeldKeys, HostShortcut,
+    modifier_events, mouse_button_to_spice, paste_shortcut_pressed, translate_key_events, HeldKeys,
+    HostShortcut,
 };
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
@@ -3052,32 +3053,9 @@ impl RyllApp {
         ctx.input(|i| {
             let mods = i.modifiers;
             let prev = self.last_modifiers.unwrap_or_default();
-
-            if mods.ctrl != prev.ctrl {
-                let code = 0x1D; // Left Ctrl
-                if mods.ctrl {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
+            for ev in modifier_events(prev, mods) {
+                let _ = input_tx.try_send(ev);
             }
-            if mods.shift != prev.shift {
-                let code = 0x2A; // Left Shift
-                if mods.shift {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
-            }
-            if mods.alt != prev.alt {
-                let code = 0x38; // Left Alt
-                if mods.alt {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
-            }
-
             self.last_modifiers = Some(mods);
 
             for ev in translate_key_events(&i.events, &mut self.held_keys) {
@@ -3095,11 +3073,7 @@ impl RyllApp {
     fn release_guest_keys(&mut self) {
         let mut events = self.held_keys.release_all();
         if let Some(prev) = self.last_modifiers.take() {
-            for (down, code) in [(prev.ctrl, 0x1D), (prev.shift, 0x2A), (prev.alt, 0x38)] {
-                if down {
-                    events.push(InputEvent::KeyUp(code | 0x80));
-                }
-            }
+            events.extend(modifier_events(prev, egui::Modifiers::default()));
         }
         if let Some(tx) = &self.input_tx {
             for ev in events {
@@ -3529,6 +3503,10 @@ impl eframe::App for RyllApp {
         if !paste_triggered {
             self.handle_input(ctx);
         }
+        // Whether or not this frame's keys were translated, the clipboard
+        // chord tracking must see the modifiers it ended with.
+        let modifiers = ctx.input(|i| i.modifiers);
+        self.held_keys.end_frame(modifiers);
 
         // Only now, with this frame's keys forwarded, is it safe to block
         // in the screenshot save dialog (see `open_screenshot_dialog`).

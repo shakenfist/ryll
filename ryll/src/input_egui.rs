@@ -179,15 +179,6 @@ impl ClipboardChord {
         ClipboardChord::Paste,
     ];
 
-    fn from_event(event: &egui::Event) -> Option<Self> {
-        match event {
-            egui::Event::Cut => Some(ClipboardChord::Cut),
-            egui::Event::Copy => Some(ClipboardChord::Copy),
-            egui::Event::Paste(_) => Some(ClipboardChord::Paste),
-            _ => None,
-        }
-    }
-
     /// The key whose press egui-winit replaced, judged from the
     /// modifiers held when it did, or `None` for a dedicated Cut / Copy
     /// / Paste key (which has no scancode).
@@ -263,7 +254,11 @@ pub struct HeldKeys {
     /// `None` if the press was withheld.
     clipboard: HashMap<ClipboardChord, Option<egui::Key>>,
     /// The modifiers as of the latest event, because egui attaches none
-    /// to clipboard events.
+    /// to clipboard events. egui-winit decides a press is a clipboard
+    /// chord from its own copy of the modifiers, which it reports in
+    /// `Event::ModifiersChanged` whenever it changes, except on focus
+    /// loss; this follows those events, and `end_frame` keeps it
+    /// current across frames whose events are never translated.
     modifiers: egui::Modifiers,
 }
 
@@ -280,6 +275,18 @@ impl HeldKeys {
             .drain()
             .map(|(_, up_code)| InputEvent::KeyUp(up_code))
             .collect()
+    }
+
+    /// Record the modifiers a frame ended with (egui's `i.modifiers`).
+    ///
+    /// Call this once every frame, including the frames whose events
+    /// are not passed to `translate_key_events` (a dialog is open, the
+    /// session is not connected yet, ryll consumed the frame as its own
+    /// paste shortcut). A modifier change in one of those frames would
+    /// otherwise be missed, and a later Ctrl+C judged as if Ctrl were
+    /// not held, which drops the press.
+    pub fn end_frame(&mut self, modifiers: egui::Modifiers) {
+        self.modifiers = modifiers;
     }
 
     /// Withhold the release of the paste chord ryll has just consumed as
@@ -358,18 +365,23 @@ impl HeldKeys {
 /// C, X or V (Dvorak, say) the guest sees the key at that position; the
 /// release is still paired with it. When a paste chord's press left
 /// no event at all because the host clipboard had no text, the press is
-/// sent together with the release.
+/// sent together with the release; if Ctrl was let go before V that
+/// release looks like any stray one, so only the V release is sent and
+/// the stroke is lost. ryll's own Ctrl+Alt+V is never sent this way.
 pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
     let mut out = Vec::new();
     for event in events {
         match event {
-            egui::Event::WindowFocused(false) => out.extend(held.release_all()),
-            egui::Event::ModifiersChanged(modifiers) => held.modifiers = *modifiers,
-            egui::Event::Cut | egui::Event::Copy | egui::Event::Paste(_) => {
-                if let Some(chord) = ClipboardChord::from_event(event) {
-                    held.press_clipboard_chord(chord, &mut out);
-                }
+            egui::Event::WindowFocused(false) => {
+                out.extend(held.release_all());
+                // egui-winit forgets its modifiers on focus loss without
+                // emitting `ModifiersChanged`; do the same.
+                held.modifiers = egui::Modifiers::default();
             }
+            egui::Event::ModifiersChanged(modifiers) => held.modifiers = *modifiers,
+            egui::Event::Cut => held.press_clipboard_chord(ClipboardChord::Cut, &mut out),
+            egui::Event::Copy => held.press_clipboard_chord(ClipboardChord::Copy, &mut out),
+            egui::Event::Paste(_) => held.press_clipboard_chord(ClipboardChord::Paste, &mut out),
             egui::Event::Key {
                 key,
                 physical_key,
@@ -415,10 +427,14 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
                     held.suppressed.remove(&lookup_key);
                     held.held.insert(lookup_key, up_code);
                     out.push(InputEvent::KeyDown(down_code));
-                } else if held.suppressed.remove(&lookup_key) || modifiers.mac_cmd {
+                } else if held.suppressed.remove(&lookup_key)
+                    || modifiers.mac_cmd
+                    || (is_paste_shortcut_modifiers(*modifiers) && *key == egui::Key::V)
+                {
                     // The release of a withheld Cmd chord press. The
-                    // `mac_cmd` arm covers a Cmd+V whose press left no
-                    // event at all because the clipboard held no text.
+                    // other two arms cover a Cmd+V, or ryll's own
+                    // Ctrl+Alt+V, whose press left no event at all
+                    // because the host clipboard held no text.
                 } else {
                     if ClipboardChord::is_guest_paste(*key, *modifiers) {
                         // A paste chord whose press egui-winit swallowed
@@ -443,10 +459,10 @@ pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<
 /// V press of Ctrl+Alt+V as `Event::Paste` rather than as a key press,
 /// and looking for the key press alone never sees it. (When the host
 /// clipboard holds no text it reports nothing, but then there is
-/// nothing to paste either.)
+/// nothing to paste either, and `translate_key_events` withholds the V
+/// release from the guest.)
 pub fn paste_shortcut_pressed(modifiers: egui::Modifiers, events: &[egui::Event]) -> bool {
-    modifiers.ctrl
-        && modifiers.alt
+    is_paste_shortcut_modifiers(modifiers)
         && events.iter().any(|event| {
             matches!(
                 event,
@@ -458,6 +474,44 @@ pub fn paste_shortcut_pressed(modifiers: egui::Modifiers, events: &[egui::Event]
                     }
             )
         })
+}
+
+/// Whether `modifiers` are those of ryll's paste-as-keystrokes chord,
+/// Ctrl+Alt+V.
+fn is_paste_shortcut_modifiers(modifiers: egui::Modifiers) -> bool {
+    modifiers.ctrl && modifiers.alt
+}
+
+/// Whether one modifier is held in a set of egui modifiers.
+type ModifierHeld = fn(egui::Modifiers) -> bool;
+
+/// The modifiers egui reports as state rather than as key events, with
+/// the left-hand key's press scancode that stands in for each in the
+/// guest. A release is the same code with 0x80 set.
+const GUEST_MODIFIERS: [(ModifierHeld, u32); 3] = [
+    (|m| m.ctrl, 0x1D),  // Left Ctrl
+    (|m| m.shift, 0x2A), // Left Shift
+    (|m| m.alt, 0x38),   // Left Alt
+];
+
+/// The key events that take the guest from modifiers `prev` to `now`.
+///
+/// egui sends no key events for the modifier keys themselves, so
+/// `RyllApp::handle_input` presses and releases them from the change in
+/// state between frames. Passing `egui::Modifiers::default()` as `now`
+/// releases every modifier the guest was told is held.
+pub fn modifier_events(prev: egui::Modifiers, now: egui::Modifiers) -> Vec<InputEvent> {
+    GUEST_MODIFIERS
+        .iter()
+        .filter(|(held, _)| held(prev) != held(now))
+        .map(|(held, code)| {
+            if held(now) {
+                InputEvent::KeyDown(*code)
+            } else {
+                InputEvent::KeyUp(*code | 0x80)
+            }
+        })
+        .collect()
 }
 
 /// Convert an egui pointer button to the SPICE wire button flag.
@@ -899,6 +953,86 @@ mod tests {
             );
             assert!(events.is_empty(), "{release_mods:?}");
         }
+    }
+
+    #[test]
+    fn ctrl_alt_v_with_empty_host_clipboard_is_not_forwarded() {
+        // Ctrl+Alt+V is ryll's own paste shortcut. With no text on the
+        // host clipboard egui-winit reports nothing for the press, and
+        // the release must not be mistaken for the guest's Ctrl+V.
+        let ctrl_alt = egui::Modifiers { alt: true, ..CTRL };
+        let mut held = HeldKeys::default();
+        let events = translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(ctrl_alt),
+                key_with(egui::Key::V, egui::Key::V, false, ctrl_alt),
+            ],
+            &mut held,
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn clipboard_chord_after_untranslated_frame_sees_its_modifiers() {
+        // Ctrl went down in a frame whose events ryll never translated
+        // (a dialog was open), so no ModifiersChanged reaches
+        // translate_key_events before the Ctrl+C press.
+        let mut held = HeldKeys::default();
+        held.end_frame(CTRL);
+        let events = translate_key_events(
+            &[
+                egui::Event::Copy,
+                key_with(egui::Key::C, egui::Key::C, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(wire(events), vec![(true, 0x2E), (false, 0xAE)]);
+    }
+
+    #[test]
+    fn focus_loss_forgets_modifiers() {
+        // egui-winit clears its modifiers on focus loss without a
+        // ModifiersChanged; the tracked copy must follow.
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::WindowFocused(false),
+            ],
+            &mut held,
+        );
+        assert_eq!(held.modifiers, egui::Modifiers::default());
+    }
+
+    #[test]
+    fn modifier_events_follow_the_change_in_state() {
+        let ctrl_shift = egui::Modifiers {
+            shift: true,
+            ..CTRL
+        };
+        let alt = egui::Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let none = egui::Modifiers::default();
+        assert_eq!(
+            wire(modifier_events(none, ctrl_shift)),
+            vec![(true, 0x1D), (true, 0x2A)]
+        );
+        assert_eq!(
+            wire(modifier_events(ctrl_shift, alt)),
+            vec![(false, 0x9D), (false, 0xAA), (true, 0x38)]
+        );
+        assert!(modifier_events(alt, alt).is_empty());
+        // Releasing everything, as RyllApp::release_guest_keys does.
+        let all = egui::Modifiers {
+            alt: true,
+            ..ctrl_shift
+        };
+        assert_eq!(
+            wire(modifier_events(all, none)),
+            vec![(false, 0x9D), (false, 0xAA), (false, 0xB8)]
+        );
     }
 
     #[test]
