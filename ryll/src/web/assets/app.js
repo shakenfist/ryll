@@ -403,7 +403,7 @@
         // cursor-position updates because it expects the client to
         // already know. Drawing the overlay only from what the
         // server reports leaves it frozen wherever it last was; the
-        // GUI makes the same distinction in ryll/src/app.rs.
+        // GUI makes the same distinction in ryll/src/app/.
         if (mouseMode === MOUSE_MODE_CLIENT) {
             cursorLastNorm = { x: norm.x_norm, y: norm.y_norm };
             positionCursor(norm.x_norm, norm.y_norm);

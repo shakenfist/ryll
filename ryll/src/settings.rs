@@ -5,7 +5,7 @@
 /// time. The globals remain for the few host-side callers that
 /// have not yet been threaded with `LogConfig` (e.g. the GUI
 /// stats panel and bug-report assembly), and as the source of
-/// truth that `app.rs::reconnect()` reads to build a
+/// truth that `RyllApp::reconnect()` in `ryll/src/app/` reads to build a
 /// `LogConfig` for the channels it spawns.
 use std::sync::atomic::{AtomicBool, Ordering};
 

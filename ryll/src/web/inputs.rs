@@ -192,7 +192,7 @@ pub async fn run_input_relay(
                 // Which message the server will actually act on
                 // depends on the mouse mode, and it ignores the
                 // wrong one without complaint — see
-                // `ryll/src/app.rs`, which makes the same choice
+                // `ryll/src/app/`, which makes the same choice
                 // for the GUI.
                 //
                 // Client mode means the guest has a vdagent and
