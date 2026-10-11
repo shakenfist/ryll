@@ -117,6 +117,7 @@ and to record the answer to open question 4.
 | 2b | medium | sonnet | none | Move `session_init.rs` and `notification_snapshots.rs`. Detail below. |
 | 2c | medium | sonnet | none | Move `reconnect.rs`. Detail below. |
 | 2d | medium | sonnet | none | Move `stats.rs` and `resize.rs`. Detail below. |
+| 2e | low | sonnet | none | Update live references to the old `ryll/src/app.rs` path. Added during execution; detail below. |
 
 Every step: build and test with `make lint` and `make test` (cargo runs
 in the devcontainer; never install Rust on the host), run
@@ -193,6 +194,24 @@ Commit: "Move the reconnect state machine out of app."
 
 Commit: "Move stats and resize helpers out of app."
 
+### Step 2e: references to the old path
+
+Added during execution: the rename in step 2a left 27 references to
+`ryll/src/app.rs` in live documentation and code comments (found
+with `git grep -n 'app\.rs' -- ':!docs/plans/'`). Plan files are
+historical records and keep their references.
+
+* Items that moved in this phase name their new file
+  (`LatencyTracker` in `ryll/src/app/stats.rs`, the reconnect tests
+  in `ryll/src/app/reconnect.rs`, and so on).
+* Items still in `mod.rs` are named by symbol with the module
+  directory (`RyllApp::reconnect` in `ryll/src/app/`), so phases 3
+  and 4 do not break the reference again.
+* `ARCHITECTURE.md`'s source tree shows the `app/` directory and its
+  modules.
+
+Commit: "Point references at the app/ module."
+
 ## Risks and mitigations
 
 * **A "move" that quietly edits code.** Mitigation: the move-check
@@ -211,6 +230,8 @@ Commit: "Move stats and resize helpers out of app."
 
 ## Definition of done
 
+* `git grep -n 'app\.rs' -- ':!docs/plans/'` finds no reference
+  to the old path.
 * `ryll/src/app.rs` does not exist; `ryll/src/app/` holds `mod.rs`,
   `session_init.rs`, `notification_snapshots.rs`, `reconnect.rs`,
   `stats.rs` and `resize.rs`.
