@@ -15,7 +15,7 @@
 //! Both functions are renderer-substrate: they do not depend on
 //! `eframe`/`egui` and have no knowledge of host-policy concerns
 //! like Ctrl+C, the in-app notification store, or pedantic
-//! bug-report assembly. The host (ryll's `main.rs` and `app.rs`)
+//! bug-report assembly. The host (ryll's `main.rs` and `ryll/src/app/`)
 //! constructs the trait objects and wraps the orchestrator.
 
 use std::path::PathBuf;
@@ -50,7 +50,7 @@ use crate::surface_mirror::SurfaceMirror;
 use crate::traffic::TrafficSink;
 
 /// Channel buffer sizes used by `run_headless`. The GUI side
-/// (in `ryll/src/app.rs`) keeps its own copies because the egui
+/// (in `ryll/src/app/`) keeps its own copies because the egui
 /// loop sizes them as part of its own setup; these defaults are
 /// the headless-mode shape and are exposed for hosts that want
 /// to match.

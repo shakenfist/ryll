@@ -130,8 +130,15 @@ the channels reaching back into global settings state.
 ```
 ryll/src/
 ├── main.rs              # CLI entry, mode selection, Ctrl+C handler
-├── app.rs               # egui App, event loop, GUI panels, headless
-│                        #   runner, reconnect, egui trait impls
+├── app/                 # egui GUI application
+│   ├── mod.rs           #   RyllApp: egui App, event loop, panels,
+│   │                    #   connection lifecycle, egui trait impls
+│   ├── notification_snapshots.rs
+│   │                    #   NotificationSnapshotStore
+│   ├── reconnect.rs     #   ReconnectState / ReconnectPolicy, modal variants
+│   ├── resize.rs        #   Auto-fit and outgoing-resize decisions
+│   ├── session_init.rs  #   SessionInitialized classification, respawn limit
+│   └── stats.rs         #   Statistics, bandwidth/latency trackers
 ├── auto_snapshot.rs     # --auto-snapshot-interval background task,
 │                        #   rolling auto-snapshots/ directory + cap
 ├── bugreport.rs         # Traffic ring buffer (TrafficBuffers,
