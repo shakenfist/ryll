@@ -27,7 +27,10 @@ use crate::bugreport::{
 use crate::capture::CaptureSession;
 use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::TextureCache;
-use crate::input_egui::{mouse_button_to_spice, translate_key_events, HeldKeys};
+use crate::input_egui::{
+    modifier_events, mouse_button_to_spice, paste_shortcut_pressed, translate_key_events, HeldKeys,
+    HostShortcut,
+};
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
     NotificationSource, NotificationStore, SharedNotifications,
@@ -727,6 +730,11 @@ pub struct RyllApp {
     // suppressed or the window loses focus.
     held_keys: HeldKeys,
 
+    // A screenshot was asked for (F8 or the menu) and its save dialog
+    // has not been opened yet. The dialog is opened after the frame's
+    // input has been forwarded; see `open_screenshot_dialog`.
+    screenshot_requested: bool,
+
     // Bitmask of mouse buttons we have forwarded as pressed to the
     // inputs channel.  Used to send synthetic releases when input
     // forwarding is suppressed (e.g. bug report dialog opens).
@@ -1313,6 +1321,7 @@ impl RyllApp {
             last_mouse_pos: None,
             last_modifiers: None,
             held_keys: HeldKeys::default(),
+            screenshot_requested: false,
             forwarded_buttons: 0,
             pending_resize: None,
             last_auto_resize: None,
@@ -3030,11 +3039,7 @@ impl RyllApp {
         // Don't forward input to the SPICE server when
         // the bug report dialog or region selection is active.
         if self.show_bug_dialog || self.region_select_active {
-            if let Some(tx) = &self.input_tx {
-                for ev in self.held_keys.release_all() {
-                    let _ = tx.try_send(ev);
-                }
-            }
+            self.release_guest_keys();
             return;
         }
 
@@ -3048,38 +3053,33 @@ impl RyllApp {
         ctx.input(|i| {
             let mods = i.modifiers;
             let prev = self.last_modifiers.unwrap_or_default();
-
-            if mods.ctrl != prev.ctrl {
-                let code = 0x1D; // Left Ctrl
-                if mods.ctrl {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
+            for ev in modifier_events(prev, mods) {
+                let _ = input_tx.try_send(ev);
             }
-            if mods.shift != prev.shift {
-                let code = 0x2A; // Left Shift
-                if mods.shift {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
-            }
-            if mods.alt != prev.alt {
-                let code = 0x38; // Left Alt
-                if mods.alt {
-                    let _ = input_tx.try_send(InputEvent::KeyDown(code));
-                } else {
-                    let _ = input_tx.try_send(InputEvent::KeyUp(code | 0x80));
-                }
-            }
-
             self.last_modifiers = Some(mods);
 
             for ev in translate_key_events(&i.events, &mut self.held_keys) {
                 let _ = input_tx.try_send(ev);
             }
         });
+    }
+
+    /// Release every key the guest has been told is held: the keys in
+    /// `held_keys` and the Ctrl / Shift / Alt modifiers forwarded by
+    /// `handle_input`. Used whenever ryll stops forwarding input or may
+    /// have missed the releases, so the guest is not left auto-repeating
+    /// a key nobody is holding. A modifier still held afterwards is
+    /// pressed again by the next `handle_input`.
+    fn release_guest_keys(&mut self) {
+        let mut events = self.held_keys.release_all();
+        if let Some(prev) = self.last_modifiers.take() {
+            events.extend(modifier_events(prev, egui::Modifiers::default()));
+        }
+        if let Some(tx) = &self.input_tx {
+            for ev in events {
+                let _ = tx.try_send(ev);
+            }
+        }
     }
 
     fn handle_cadence(&mut self) {
@@ -3158,6 +3158,14 @@ impl RyllApp {
     /// Open a native save dialog and write the current surface(s) as PNG(s).
     ///
     /// If the dialog is cancelled, nothing happens.
+    ///
+    /// The dialog is synchronous: it runs the native panel's modal loop
+    /// inside `ui()`, and any key released while it is open goes to the
+    /// panel, so egui never sees the release. Every key the guest holds
+    /// is therefore released once the dialog returns. The caller must
+    /// open the dialog only after the frame's input has been forwarded,
+    /// or a press from this frame would be sent after that release and
+    /// stick.
     fn open_screenshot_dialog(&mut self) {
         if self.surfaces.surfaces.is_empty() {
             self.push_notification(
@@ -3176,6 +3184,7 @@ impl RyllApp {
         let picked = rfd::FileDialog::new()
             .set_file_name(&default_name)
             .save_file();
+        self.release_guest_keys();
 
         if let Some(path) = picked {
             match self.save_screenshots(path) {
@@ -3437,7 +3446,7 @@ impl eframe::App for RyllApp {
 
         // F12 toggles bug report dialog (not during region selection)
         if !self.region_select_active {
-            let f12_pressed = ctx.input(|i| i.key_pressed(egui::Key::F12));
+            let f12_pressed = ctx.input(|i| i.key_pressed(HostShortcut::BugReport.key()));
             if f12_pressed {
                 if self.show_bug_dialog {
                     self.show_bug_dialog = false;
@@ -3453,7 +3462,7 @@ impl eframe::App for RyllApp {
 
         // F11 toggles traffic viewer (not during region selection)
         if !self.region_select_active {
-            let f11_pressed = ctx.input(|i| i.key_pressed(egui::Key::F11));
+            let f11_pressed = ctx.input(|i| i.key_pressed(HostShortcut::TrafficViewer.key()));
             if f11_pressed {
                 self.show_traffic_viewer = !self.show_traffic_viewer;
             }
@@ -3461,9 +3470,9 @@ impl eframe::App for RyllApp {
 
         // F8 opens screenshot save dialog (not during region selection)
         if !self.region_select_active {
-            let f8_pressed = ctx.input(|i| i.key_pressed(egui::Key::F8));
+            let f8_pressed = ctx.input(|i| i.key_pressed(HostShortcut::Screenshot.key()));
             if f8_pressed {
-                self.open_screenshot_dialog();
+                self.screenshot_requested = true;
             }
         }
 
@@ -3481,16 +3490,28 @@ impl eframe::App for RyllApp {
         let mut paste_triggered = false;
         if !self.region_select_active && !self.show_bug_dialog && self.paste_error_message.is_none()
         {
-            let ctrl_alt_v =
-                ctx.input(|i| i.modifiers.ctrl && i.modifiers.alt && i.key_pressed(egui::Key::V));
+            let ctrl_alt_v = ctx.input(|i| paste_shortcut_pressed(i.modifiers, &i.events));
             if ctrl_alt_v {
                 paste_triggered = self.trigger_paste();
+                if paste_triggered {
+                    self.held_keys.withhold_paste_release();
+                }
             }
         }
 
         // Handle input (skip if paste was triggered this frame)
         if !paste_triggered {
             self.handle_input(ctx);
+        }
+        // Whether or not this frame's keys were translated, the clipboard
+        // chord tracking must see the modifiers it ended with.
+        let modifiers = ctx.input(|i| i.modifiers);
+        self.held_keys.end_frame(modifiers);
+
+        // Only now, with this frame's keys forwarded, is it safe to block
+        // in the screenshot save dialog (see `open_screenshot_dialog`).
+        if std::mem::take(&mut self.screenshot_requested) {
+            self.open_screenshot_dialog();
         }
 
         // Refresh traffic viewer entries periodically
@@ -3797,14 +3818,23 @@ impl eframe::App for RyllApp {
                             ui.checkbox(&mut self.show_usb_panel, "USB");
                             ui.checkbox(&mut self.show_webdav_panel, "Folders");
                             if ui
-                                .add(egui::Button::new("Screenshot").shortcut_text("F8"))
+                                .add(
+                                    egui::Button::new("Screenshot")
+                                        .shortcut_text(HostShortcut::Screenshot.key().name()),
+                                )
                                 .clicked()
                             {
-                                self.open_screenshot_dialog();
+                                // Opened next frame, after that frame's
+                                // input is forwarded.
+                                self.screenshot_requested = true;
+                                ui.ctx().request_repaint();
                                 ui.close();
                             }
                             if ui
-                                .add(egui::Button::new("Report").shortcut_text("F12"))
+                                .add(
+                                    egui::Button::new("Report")
+                                        .shortcut_text(HostShortcut::BugReport.key().name()),
+                                )
                                 .clicked()
                             {
                                 self.show_bug_dialog = true;
