@@ -49,8 +49,10 @@ produced.
    drops, so a bug report assembled within milliseconds of
    `CaptureSession::close()` may see an unfinalised MP4. That was accepted
    deliberately: finalising synchronously would have blocked the caller (the
-   egui update loop among them) on the encoder draining. `Drop` joins both
-   threads, so the MP4 is complete once the session itself is gone. See
+   egui update loop among them) on the encoder draining. The exit paths in
+   `main` call `CaptureSession::close_and_wait`, which joins both threads,
+   so the MP4 is complete after a clean exit even though a detached GUI
+   connection thread may still hold a reference to the session. See
    [`PLAN-video-keeping-up.md`](plans/PLAN-video-keeping-up.md) for the
    trade-off.
 

@@ -31,7 +31,12 @@ mod capture {
         pub fn frame(&self, _id: u32, _px: &[u8], _w: u32, _h: u32) -> bool {
             true
         }
+        /// Only the GUI's `App::update` calls the non-blocking close.
+        #[cfg(feature = "gui")]
+        /// Only the GUI's `App::update` calls the non-blocking close.
+        #[cfg(feature = "gui")]
         pub fn close(&self) {}
+        pub fn close_and_wait(&self) {}
     }
     impl shakenfist_spice_renderer::CaptureSink for CaptureSession {
         fn packet_sent(&self, channel: &str, data: &[u8]) -> bool {
@@ -466,10 +471,11 @@ fn run_headless(
         res
     });
 
-    // Close capture session (flushes MP4 moov atom) on the host side
-    // since the renderer no longer holds the concrete `CaptureSession`.
+    // Close capture session on the host side since the renderer no
+    // longer holds the concrete `CaptureSession`, and wait for the
+    // writers so the MP4 has its moov atom before the process exits.
     if let Some(ref capture) = capture {
-        capture.close();
+        capture.close_and_wait();
     }
 
     result
@@ -944,10 +950,10 @@ fn run_web(
         server_result
     });
 
-    // Close capture session on the host side, mirroring
-    // `run_headless`.
+    // Close capture session on the host side and wait for the
+    // writers, mirroring `run_headless`.
     if let Some(ref capture) = capture {
-        capture.close();
+        capture.close_and_wait();
     }
 
     result
@@ -994,7 +1000,12 @@ fn run_gui(
         }
     }
 
-    eframe::run_native(
+    // The app's connection threads are detached and each holds a
+    // clone of the capture session, so the last `Arc` can outlive
+    // `run_native`. Keep one here to wait on the writers explicitly.
+    let capture_for_exit = capture.clone();
+
+    let result = eframe::run_native(
         "Ryll - SPICE Client",
         native_options,
         Box::new(move |cc| {
@@ -1019,7 +1030,13 @@ fn run_gui(
             )))
         }),
     )
-    .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
+    .map_err(|e| anyhow::anyhow!("eframe error: {}", e));
+
+    if let Some(ref capture) = capture_for_exit {
+        capture.close_and_wait();
+    }
+
+    result
 }
 
 #[cfg(test)]

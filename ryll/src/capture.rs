@@ -718,15 +718,16 @@ pub struct CaptureSession {
     /// can `take()` it and drop it, signalling the writer thread
     /// to drain and exit.
     queue_tx: Mutex<Option<SyncSender<PcapQueueItem>>>,
-    /// Join handle for the pcap writer thread. Joined by `Drop`.
-    pcap_thread: Option<JoinHandle<()>>,
     /// Sender side of the queue feeding the dedicated H.264/MP4
     /// encoder thread. Held inside `Mutex<Option<>>` so `close()`
     /// can `take()` it and drop it, signalling the encoder thread
     /// to drain, finalise the MP4 (moov atom), and exit.
     video_tx: Mutex<Option<SyncSender<VideoQueueItem>>>,
-    /// Join handle for the encoder thread. Joined by `Drop`.
-    video_thread: Option<JoinHandle<()>>,
+    /// Join handles for the pcap and encoder threads, labelled
+    /// for the panic log. Taken (and joined) by the first
+    /// `close_and_wait()`, so later calls and `Drop` find it
+    /// empty and return at once.
+    writer_threads: Mutex<Vec<(&'static str, JoinHandle<()>)>>,
     /// Guard against duplicate close() calls (explicit + Drop).
     closed: std::sync::atomic::AtomicBool,
 }
@@ -788,9 +789,8 @@ impl CaptureSession {
             dir,
             start: Instant::now(),
             queue_tx: Mutex::new(Some(queue_tx)),
-            pcap_thread: Some(pcap_thread),
             video_tx: Mutex::new(Some(video_tx)),
-            video_thread: Some(video_thread),
+            writer_threads: Mutex::new(vec![("pcap", pcap_thread), ("video", video_thread)]),
             closed: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -912,9 +912,10 @@ impl CaptureSession {
     /// `close()` does *not* wait for the writer threads: two of
     /// the four close call sites are inside the egui
     /// `App::update` method, which must not block on the encoder
-    /// draining its queue. The wait happens in `Drop` instead,
-    /// which joins both threads, so the MP4 is finalised by the
-    /// time the last `Arc<CaptureSession>` is gone.
+    /// draining its queue. Use [`close_and_wait`] where blocking
+    /// is acceptable.
+    ///
+    /// [`close_and_wait`]: CaptureSession::close_and_wait
     ///
     /// **Caveat**: MP4 finalisation is not synchronous with
     /// `close()`. A bug report assembled within milliseconds
@@ -932,30 +933,41 @@ impl CaptureSession {
         drop(self.video_tx.lock().expect("lock poisoned").take());
         info!("capture: session closed ({})", self.dir.display());
     }
+
+    /// `close()`, then block until both writer threads have
+    /// drained their queues and exited, so the MP4 carries its
+    /// moov atom when this returns. Idempotent.
+    ///
+    /// The process exit paths in `main` call this on the main
+    /// thread. They cannot rely on `Drop` alone: in GUI mode a
+    /// detached connection thread holds its own clone of the
+    /// session, so the last `Arc` may still be alive when `main`
+    /// returns, and the process would exit with the encoder
+    /// mid-finalisation.
+    ///
+    /// Blocks for as long as the encoder takes to drain at most
+    /// `VIDEO_QUEUE_CAPACITY` frames — up to hundreds of
+    /// milliseconds at 4K — so do not call it from the egui
+    /// `App::update` path or a tokio worker.
+    pub fn close_and_wait(&self) {
+        self.close();
+        let handles = std::mem::take(&mut *self.writer_threads.lock().expect("lock poisoned"));
+        for (name, handle) in handles {
+            if handle.join().is_err() {
+                warn!("capture: {} writer thread panicked", name);
+            }
+        }
+    }
 }
 
 impl Drop for CaptureSession {
+    /// Closes the session and waits for the writers, as
+    /// [`CaptureSession::close_and_wait`]. When an exit path has
+    /// already called that, there is nothing left to wait for;
+    /// otherwise this blocks whichever thread drops the last
+    /// `Arc`.
     fn drop(&mut self) {
-        // close() is idempotent (guarded by self.closed), so an
-        // explicit close() followed by this is fine.
-        self.close();
-        // Wait for both writers to drain. This is what makes the
-        // MP4 playable after a normal exit: without the join, the
-        // process could exit while the encoder thread is still
-        // writing the moov atom. The wait is bounded by the queue
-        // capacities (at most VIDEO_QUEUE_CAPACITY frames to
-        // encode).
-        let handles = [
-            ("pcap", self.pcap_thread.take()),
-            ("video", self.video_thread.take()),
-        ];
-        for (name, handle) in handles {
-            if let Some(handle) = handle {
-                if handle.join().is_err() {
-                    warn!("capture: {} writer thread panicked", name);
-                }
-            }
-        }
+        self.close_and_wait();
     }
 }
 
@@ -1250,8 +1262,14 @@ mod tests {
         // bool contract CaptureSink callers rely on.
         let dir = tempfile::tempdir().expect("tempdir");
         let gate = Arc::new(RwLock::new(()));
+        // `session` is declared before `held` so it drops after
+        // the guard. Locals drop in reverse order; if an assertion
+        // below panics, the gate must open before Drop joins the
+        // writer threads waiting on it, or the test hangs instead
+        // of failing.
+        let session;
         let held = gate.write().expect("gate lock");
-        let session = CaptureSession::with_start_gate(
+        session = CaptureSession::with_start_gate(
             dir.path().to_path_buf(),
             "test:5900",
             None,
@@ -1418,8 +1436,14 @@ mod tests {
         // start gate so exactly VIDEO_QUEUE_CAPACITY frames fit.
         let dir = tempfile::tempdir().expect("tempdir");
         let gate = Arc::new(RwLock::new(()));
+        // `session` is declared before `held` so it drops after
+        // the guard. Locals drop in reverse order; if an assertion
+        // below panics, the gate must open before Drop joins the
+        // writer threads waiting on it, or the test hangs instead
+        // of failing.
+        let session;
         let held = gate.write().expect("gate lock");
-        let session = CaptureSession::with_start_gate(
+        session = CaptureSession::with_start_gate(
             dir.path().to_path_buf(),
             "test:5900",
             None,
@@ -1465,6 +1489,29 @@ mod tests {
         // Second close() is a no-op.
         session.close();
         assert!(!session.frame(0, &pixels, w, h));
+    }
+
+    #[test]
+    fn capture_session_close_and_wait_finalises_while_shared() {
+        // In GUI mode a detached connection thread holds a clone
+        // of the session, so the last Arc can outlive main().
+        // close_and_wait() must finalise the MP4 regardless.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let session = Arc::new(
+            CaptureSession::new(dir.path().to_path_buf(), "test:5900", None).expect("session new"),
+        );
+        let still_shared = session.clone();
+        let (w, h) = (64u32, 64u32);
+        assert!(session.frame(0, &rgba_test_frame(w, h), w, h));
+        session.close_and_wait();
+        // Idempotent: the writers are already joined.
+        session.close_and_wait();
+        assert!(!still_shared.frame(0, &rgba_test_frame(w, h), w, h));
+
+        let (_, samples) =
+            read_mp4_track1(&dir.path().join("display.mp4")).expect("read mp4 header");
+        assert_eq!(samples, 1);
+        drop(still_shared);
     }
 
     // ── No tokio runtime required (shakenfist/ryll#399) ──

@@ -641,10 +641,11 @@ by the encoder thread after the sender drops, not synchronously by `CaptureSessi
 In practice the encoder thread finalises within milliseconds of
 close, but a bug report assembled in a very short window
 after a disconnect may see an unfinalised (unplayable)
-`display.mp4`. Dropping the capture session waits for the
-encoder thread, so the capture directory's own `display.mp4`
-is normally complete after a clean exit. The pcap
-files and the rest of the report are unaffected.
+`display.mp4`. On a clean exit (window close or SIGINT) ryll
+waits for the encoder thread before the process exits, so the
+capture directory's own `display.mp4` is complete unless ryll
+was killed or crashed. The pcap files and the rest of the
+report are unaffected.
 
 To read the report:
 

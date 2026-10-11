@@ -40,9 +40,11 @@ longer back-pressures the SPICE socket.
 The MP4 video writer also uses unbuffered `File` I/O. The encoder runs
 on a dedicated thread and the egui frame loop enqueues frames via
 `try_send`. MP4 finalisation (`write_end` for the moov atom) runs on
-that thread after the sender drops, and dropping the last reference to
-the `CaptureSession` waits for it. A process that exits before that
-point (SIGKILL, a crash) can still leave the MP4 unfinalised. See
+that thread after the sender drops. Every exit path in `main` (GUI,
+headless and web) calls `CaptureSession::close_and_wait`, which blocks
+until both writer threads have drained, so a clean exit (window close
+or SIGINT) leaves a playable MP4. A process that dies without returning
+through `main` (SIGKILL, a crash) can still leave it unfinalised. See
 [the troubleshooting guide](troubleshooting.md) for the trade-off.
 
 ## Reconnection
