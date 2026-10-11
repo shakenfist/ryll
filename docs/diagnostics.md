@@ -330,7 +330,9 @@ pcap file never triggers a length-overflow panic.
 
 `display.mp4` contains an H.264 encoded video of the primary
 surface (surface 0). Frames are emitted on MARK boundaries
-with real timestamps for variable-rate playback.
+with real timestamps for variable-rate playback. Only the GUI
+records it: frames come from the egui frame loop, and headless
+mode, which paints no surface, writes the pcaps alone.
 
 Implementation: `capture::VideoWriter` is owned exclusively by
 a dedicated OS thread (`ryll-capture-video`, running

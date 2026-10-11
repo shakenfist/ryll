@@ -175,7 +175,7 @@ around it.
 | Open side panels survive reconnect | available | n/a — intrinsic (no GUI) | n/a — intrinsic (no side panels in web MVP) |
 | **Capture Mode** | | | |
 | Protocol pcap capture (`--capture`) | available | available | missing (out of MVP scope; see PLAN-web-frontend.md §Out of MVP scope "Recording / capture") |
-| Display video capture (`display.mp4` via openh264) | available | available (capture session is passed through and VideoWriter fires on DisplayMark events even in headless) | missing (out of MVP scope) |
+| Display video capture (`display.mp4` via openh264) | available | missing (only the GUI's frame loop calls `CaptureSink::frame`; headless keeps no continuously-painted surface to encode, so `--capture` writes the pcaps but no `display.mp4`) | missing (out of MVP scope) |
 | Session metadata (`metadata.json`) | available | available | missing (out of MVP scope) |
 | **Diagnostics / Verbose Logging** | | | |
 | Verbose logging to stderr (`-v`) | available | available | available (stdout logging works regardless of mode) |
