@@ -3328,6 +3328,7 @@ impl DisplayChannel {
         // having to read the pcap.
         snap.pref_compression_sent = self.pref_compression_sent;
         snap.pref_video_codec_type_sent = self.pref_video_codec_type_sent;
+        snap.experimental_h264 = self.experimental_h264;
 
         self.opcodes.publish_into(&mut *snap);
     }

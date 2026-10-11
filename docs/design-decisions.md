@@ -64,7 +64,8 @@ produced.
    CODEC_MJPEG (9) and PREF_VIDEO_CODEC_TYPE (12). CODEC_H264 (11) is
    deliberately not advertised for now, because H.264 streams from
    spice-server do not yet decode in ryll
-   ([#398](https://github.com/shakenfist/ryll/issues/398)). Without COMPOSITE, the guest QXL driver
+   ([#398](https://github.com/shakenfist/ryll/issues/398)).
+   Without COMPOSITE, the guest QXL driver
    falls back to a slow software rendering path that sends only raw Pixmap
    data via `draw_copy`, making keyboard input appear to have no effect
    because the client is overwhelmed with uncompressed frames. The newer

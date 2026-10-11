@@ -287,7 +287,9 @@ H.264 was disabled; ryll logs a warning at startup saying H.264 from
 spice-server is enabled and experimental. Expect the failure described
 above: on a hypervisor with the GStreamer H.264 plugins, video regions
 streamed as H.264 are likely to go black or stale, and the bug report's
-`h264_decode_failed_count` climbs. The flag is off by default and will
+`h264_decode_failed_count` climbs. The display channel's
+`channel-state.json` records `experimental_h264`, so a bug report shows
+whether H.264 was on offer at all. The flag is off by default and will
 go away once #398 is fixed and H.264 is advertised again by default.
 
 This only concerns video *from* spice-server. Ryll's web mode encodes
