@@ -2024,10 +2024,19 @@ impl WebrtcBridge {
     /// for ICE gathering to complete, and return the fully-resolved
     /// SDP string. Mirrors what a browser would do before sending
     /// its offer to the server.
+    ///
+    /// Bounded the same way as `TestPeer::offer_and_gather`, and for
+    /// the same reason: a test should fail with a diagnosis rather
+    /// than hang if gathering never completes.
     pub(crate) async fn create_offer_and_gather(&self) -> Result<String> {
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
-        self.wait_for_gathering().await;
+        crate::test_client::wait_for_gathering(
+            &self.pc,
+            &self.gathered,
+            crate::test_client::GATHER_TIMEOUT,
+        )
+        .await?;
         let local = self
             .pc
             .local_description()
@@ -2063,7 +2072,68 @@ impl WebrtcBridge {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Poll until the control datachannel is open, or `timeout`
+    /// elapses.
+    ///
+    /// The channel opens *after* the peer connection reports
+    /// `Connected`: `Connected` means ICE and DTLS are up, and only
+    /// then does the SCTP association form and the out-of-band
+    /// channel get its stream. Until it has one, `send_control`
+    /// fails with "data channel is not open yet". A test that sends
+    /// straight after `Connected` must wait for this rather than for
+    /// a guessed interval -- a fixed 200 ms sleep stood in for it
+    /// and flaked on loaded macOS and Windows runners (#439).
+    ///
+    /// Reads `ready_state` rather than watching for the open event,
+    /// because the event belongs to the control-DC pump `new`
+    /// spawns, and a second consumer of `poll()` would steal its
+    /// messages. The state is what `send` itself checks, so `Open`
+    /// here means the next send will not be refused for being early.
+    ///
+    /// A channel seen `Closing` or `Closed` errors at once rather
+    /// than burning the timeout, as `TestPeer::wait_until_connected`
+    /// does for a terminal peer state. Both errors carry the state
+    /// observed.
+    pub(crate) async fn wait_for_control_open(&self, timeout: std::time::Duration) -> Result<()> {
+        use webrtc::data_channel::RTCDataChannelState;
+
+        let outcome = tokio::time::timeout(timeout, async {
+            loop {
+                let state = self
+                    .control_dc
+                    .ready_state()
+                    .await
+                    .map_err(|e| anyhow!("control DC ready_state: {}", e))?;
+                match state {
+                    RTCDataChannelState::Open => return Ok(()),
+                    RTCDataChannelState::Closing | RTCDataChannelState::Closed => {
+                        return Err(anyhow!(
+                            "control DC reached {state:?} while waiting for Open"
+                        ));
+                    }
+                    _ => {}
+                }
+                tokio::time::sleep(DC_OPEN_POLL_INTERVAL).await;
+            }
+        })
+        .await;
+
+        match outcome {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!(
+                "control DC did not open within {:?} (state={:?})",
+                timeout,
+                self.control_dc.ready_state().await,
+            )),
+        }
+    }
 }
+
+/// How often [`WebrtcBridge::wait_for_control_open`] re-reads the
+/// channel state. Matches `TestPeer`'s connection-state poll.
+#[cfg(test)]
+const DC_OPEN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[cfg(test)]
 mod tests {
@@ -2629,10 +2699,21 @@ mod tests {
             "PCs did not reach Connected within timeout"
         );
 
-        // Give the datachannel a moment to open after PC Connected.
-        // The DC open event is asynchronous and slightly lags the
-        // connection state change.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // `Connected` is not enough to send on: the datachannel only
+        // opens once the SCTP association forms on top of DTLS, and
+        // that lags the state change by however long a loaded runner
+        // takes. Wait for it on both ends -- the client sends first,
+        // and the server replies -- rather than sleeping a guessed
+        // interval, which is what this test did until it flaked
+        // (#439).
+        client
+            .wait_for_control_open(Duration::from_secs(10))
+            .await
+            .expect("client control DC");
+        server
+            .wait_for_control_open(Duration::from_secs(10))
+            .await
+            .expect("server control DC");
 
         // Client → server "ping".
         client
@@ -2658,6 +2739,35 @@ mod tests {
 
         server.close().await.expect("server close");
         client.close().await.expect("client close");
+    }
+
+    /// `wait_for_control_open` has to actually wait, and has to fail
+    /// when the channel never opens.
+    ///
+    /// The round-trip test above relies on it in place of a sleep. A
+    /// helper that returned `Ok` for a channel still `Connecting`
+    /// would put that test straight back where it was -- sending
+    /// before the channel can take it -- while looking fixed. A
+    /// bridge that has never negotiated anything has no SCTP
+    /// association, so its control channel cannot be open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_for_control_open_times_out_on_an_unnegotiated_bridge() {
+        let (tx, _rx) = mpsc::channel::<EncoderControl>(4);
+        let bridge = WebrtcBridge::new(WebrtcBridgeConfig::for_tests(tx))
+            .await
+            .expect("bridge");
+
+        let err = bridge
+            .wait_for_control_open(Duration::from_millis(200))
+            .await
+            .expect_err("an unnegotiated control DC must not report Open");
+        assert!(
+            err.to_string().contains("did not open"),
+            "unexpected error: {}",
+            err
+        );
+
+        bridge.close().await.expect("bridge close");
     }
 
     /// `accept_offer` must return an answer carrying every gathered

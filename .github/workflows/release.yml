@@ -11,6 +11,7 @@ jobs:
   check-version:
     name: Verify version matches tag
     runs-on: [self-hosted, static]
+    timeout-minutes: 10
     permissions:
       contents: read
       issues: write
@@ -143,6 +144,10 @@ jobs:
             target: aarch64-pc-windows-msvc
             features: "--no-default-features --features ryll/gui,ryll/audio"
     runs-on: ${{ matrix.os }}
+    # A normal leg takes 10-20 minutes. Without a bound, a test that
+    # hangs runs into GitHub's six-hour job ceiling instead (#330 did,
+    # repeatedly, in ci.yml's copy of this job) and holds the release.
+    timeout-minutes: 60
     env:
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       # See ci.yml for rationale: CMake 4.x rejects libopus's bundled
@@ -300,6 +305,7 @@ jobs:
     needs: [build, build-linux, build-ryll-wheels]
     # audit-ok: github-hosted-runner -- ephemeral runner for tag signing; installs gitsign via sudo and writes global git config, so it must be throwaway rather than the shared self-hosted pool
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment: release
     permissions:
       contents: write
@@ -345,6 +351,7 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-linux, sign-tag]
     runs-on: [self-hosted, static]
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -393,6 +400,7 @@ jobs:
     # static runner used by the JS-action jobs (github-release,
     # update-homebrew).
     runs-on: [self-hosted, vm, debian-13-docker, l]
+    timeout-minutes: 15
     environment: release
     permissions:
       id-token: write
@@ -419,6 +427,7 @@ jobs:
     name: Update Homebrew tap
     needs: github-release
     runs-on: [self-hosted, static]
+    timeout-minutes: 10
     continue-on-error: true
     permissions:
       contents: read
