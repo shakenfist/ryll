@@ -273,17 +273,9 @@
       "sha": "4fe7778cc81abf246495fb0aa741089f99d66238",
       "date": "2026-09-27"
     },
-    "shakenfist-spice-protocol/src/client.rs": {
-      "sha": "ac8b284bb00979be81ac2dc0dca9edbfd5311282",
-      "date": "2026-10-05"
-    },
     "shakenfist-spice-protocol/src/host_subject.rs": {
       "sha": "af96836e04851d493d60e8aabe229ca3163dbd7d",
       "date": "2026-07-18"
-    },
-    "shakenfist-spice-protocol/src/lib.rs": {
-      "sha": "425ca4a5d0ccf636ac164b84f609c323c5795fb8",
-      "date": "2026-10-05"
     },
     "shakenfist-spice-protocol/src/link.rs": {
       "sha": "c40100ae2593a6c538c37a6831a4efd605791712",

@@ -656,14 +656,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-protocol/src/client.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-protocol/src/lib.rs",
-      "author": "mikal"
-    },
-    {
       "path": ".pre-commit-config.yaml",
       "author": "mikal"
     },
