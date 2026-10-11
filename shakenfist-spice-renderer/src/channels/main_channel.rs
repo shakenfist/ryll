@@ -25,7 +25,7 @@ use shakenfist_spice_protocol::constants::vd_agent::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::agent_stream::{
-    AgentMessage, AgentReassembler, AgentStreamItem, MAX_AGENT_MESSAGE_SIZE,
+    AgentMessage, AgentReassembler, AgentStreamItem,
 };
 use shakenfist_spice_protocol::messages::vd_agent::{
     AnnounceCapabilities, Clipboard, ClipboardGrab, ClipboardRelease, ClipboardRequest,
@@ -1126,7 +1126,9 @@ impl MainChannel {
                 // at most 2048 bytes, so one agent message (a clipboard
                 // copy, typically) can span many of them, and only the
                 // first carries its header. The reassembler buffers them
-                // until the whole message is in; see `agent_stream`.
+                // until the whole message is in; see `agent_stream`. A
+                // handler error is a failed send, which ends the channel,
+                // so any later items from the same push are moot.
                 for item in self.agent_stream.push(payload) {
                     self.handle_agent_stream_item(item).await?;
                 }
@@ -1495,7 +1497,7 @@ impl MainChannel {
                     "main: agent message from guest dropped: type={}, size={} is over the {}-byte limit",
                     header.message_type,
                     header.size,
-                    MAX_AGENT_MESSAGE_SIZE
+                    self.agent_stream.max_message_size()
                 );
             }
             AgentStreamItem::BadProtocol(header) => {
@@ -2492,34 +2494,47 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn agent_disconnect_drops_a_half_received_message() {
-            let recorder = Arc::new(RecordingClipboard::default());
-            let (mut channel, _peers) =
-                test_main_channel_with_clipboard(Some(recorder.clone())).await;
-            channel.agent_connected = true;
-            channel.guest_clipboard_selection = Some(true);
+        async fn agent_lifecycle_messages_drop_a_half_received_message() {
+            // Each of these means a different agent instance may own the
+            // stream from here, so a message half-sent before it must not
+            // be completed by the data that follows.
+            let lifecycle: [(u16, &[u8]); 3] = [
+                (main_server::AGENT_DISCONNECTED, &[0, 0, 0, 0]),
+                (main_server::AGENT_CONNECTED, &[]),
+                (main_server::AGENT_CONNECTED_TOKENS, &[10, 0, 0, 0]),
+            ];
+            for (msg_type, body) in lifecycle {
+                let name = message_names::main_server(msg_type);
+                let recorder = Arc::new(RecordingClipboard::default());
+                let (mut channel, _peers) =
+                    test_main_channel_with_clipboard(Some(recorder.clone())).await;
+                channel.agent_connected = true;
+                channel.agent_tokens = 10;
+                channel.guest_clipboard_selection = Some(true);
 
-            let first = guest_clipboard_chunks(&"x".repeat(5000));
-            channel
-                .handle_message(main_server::AGENT_DATA, &first[0])
-                .await
-                .unwrap();
-            channel
-                .handle_message(main_server::AGENT_DISCONNECTED, &0u32.to_le_bytes())
-                .await
-                .unwrap();
-            assert!(channel.agent_stream.at_message_boundary());
-
-            // The next agent's first message is read from its own header.
-            channel.agent_connected = true;
-            channel.guest_clipboard_selection = Some(true);
-            for chunk in guest_clipboard_chunks("after") {
+                let first = guest_clipboard_chunks(&"x".repeat(5000));
                 channel
-                    .handle_message(main_server::AGENT_DATA, &chunk)
+                    .handle_message(main_server::AGENT_DATA, &first[0])
                     .await
                     .unwrap();
+                channel.handle_message(msg_type, body).await.unwrap();
+                assert!(channel.agent_stream.at_message_boundary(), "{name}");
+
+                // The next agent's first message is read from its own header.
+                channel.agent_connected = true;
+                channel.guest_clipboard_selection = Some(true);
+                for chunk in guest_clipboard_chunks("after") {
+                    channel
+                        .handle_message(main_server::AGENT_DATA, &chunk)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    *recorder.written.lock().unwrap(),
+                    vec!["after".to_string()],
+                    "{name}"
+                );
             }
-            assert_eq!(*recorder.written.lock().unwrap(), vec!["after".to_string()]);
         }
     }
 }

@@ -118,6 +118,12 @@ impl AgentReassembler {
         }
     }
 
+    /// The largest body this reassembler accepts, in bytes.
+    #[must_use]
+    pub fn max_message_size(&self) -> usize {
+        self.max_message_size
+    }
+
     /// Forget any partly received message, so the next byte pushed is taken
     /// as the start of a header.
     pub fn reset(&mut self) {
@@ -437,7 +443,8 @@ mod tests {
         let mut r = AgentReassembler::default();
         let mut bad = wire(VD_AGENT_CLIPBOARD, &body(50));
         bad[0] = 9; // protocol
-                    // Trailing bytes in the same AGENT_DATA are dropped with it.
+
+        // Trailing bytes in the same AGENT_DATA are dropped with it.
         bad.extend(wire(VD_AGENT_REPLY, &[1, 2]));
         let out = r.push(&bad);
         assert_eq!(out.len(), 1);
