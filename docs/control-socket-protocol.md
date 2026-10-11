@@ -109,10 +109,12 @@ On startup, before it connects to the SPICE server, Ryll:
    previous run does not block startup). Any other kind of file at
    the path is left alone, and is an error.
 2. Creates a new socket file and calls `bind()`.
-3. Sets the file mode to **0600** (owner read/write only) before
-   calling `listen()`. File permissions are the sole access-control
-   mechanism; protect the path accordingly.
-4. Begins accepting connections.
+3. Sets the file mode to **0600** (owner read/write only). A socket
+   that is bound but not yet listening refuses every connection, so
+   there is no moment at which anyone but the owner can connect,
+   whatever the process umask. File permissions are the sole
+   access-control mechanism; protect the path accordingly.
+4. Calls `listen()` and begins accepting connections.
 
 If any of these steps fails, Ryll exits non-zero with an error naming
 the path, without connecting. Common causes are a path longer than
@@ -1145,13 +1147,16 @@ growing separate implementations.
 | `protocol.rs` | Wire-level types: `Request`, `Response`, `Event`, verb params and result structs, serialisation helpers |
 | `server.rs` | `Server::bind`, which binds the socket at startup, and `Server::run`, the tokio task that accepts one client at a time and dispatches verbs |
 
-**Runtime shape.** `Server::bind` binds a Unix listener at the
-supplied path with file mode `0600` (owner read/write only). It needs
-no tokio runtime, so web mode binds before its runtime starts.
-`Server::run` hands the listener to tokio. The socket file is
-unlinked when the `Server` is dropped, so a server that is bound but
-never run, or whose task is aborted, does not leave it behind.
-File permissions are the sole access-control mechanism; no
+**Runtime shape.** `Server::bind` binds a Unix socket at the
+supplied path, sets its file mode to `0600` (owner read/write only),
+and only then listens. It uses `socket2` for this because
+`std::os::unix::net::UnixListener::bind` binds and listens in one
+call, which would leave the socket connectable with the umask's mode
+until a later `chmod`. It needs no tokio runtime, so web mode binds
+before its runtime starts. `Server::run` hands the listener to tokio.
+The socket file is unlinked when the `Server` is dropped, so a server
+that is bound but never run, or whose task is aborted, does not leave
+it behind. File permissions are the sole access-control mechanism; no
 authentication is performed on the wire. Exactly one client is
 accepted at a time; a second connection attempt while a client is
 active receives a `{"ok": false, "error": {"code": "busy", ...}}`
