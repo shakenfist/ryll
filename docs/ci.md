@@ -671,6 +671,7 @@ lands, so a push-triggered run would only repeat it.
 | Binaries for a pull request | The `Build (Linux x86_64)` job's artifacts on the pull request's CI run (`.deb` and `.rpm`, 30-day retention) |
 | Binaries for a `develop` SHA | The `merge_group` CI run that landed it — all four platform builds attach their artifacts there |
 | Binaries for an arbitrary branch | Run `manual-build.yml` (Actions → Manual build) and pick the platforms |
+| PyPI wheels for a branch | Run `manual-build.yml` with the opt-in `wheel-x86_64` and `wheel-aarch64` platforms; it builds them exactly as `release.yml` does |
 | Release binaries | `release.yml`, triggered by a `v*` tag — see [releasing.md](releasing.md) |
 
 ## Branch protection and the bot
@@ -887,15 +888,20 @@ only run `cargo fmt` and compile nothing. So do `deb`, `rpm` and
 the `web-smoke` targets, which repackage or run the binary
 `release` already produced.)
 
-Outside the Makefile entirely: release's `build-ryll-wheels` job
-runs `tools/build-ryll-wheel.sh`, which builds ryll with maturin
-inside `quay.io/pypa/manylinux_2_28_*` rather than the
-devcontainer, with network and without `--frozen`. That is a
-shipped artifact — it is what `pip install ryll` gets — so it is
-the most significant gap here. Closing it needs the same
-fetch/compile split inside the manylinux image, tracked in
-shakenfist/ryll#305; until then the wheel is built on the same
-terms as before this change.
+Outside the Makefile but under the same split: release's
+`build-ryll-wheels` job runs `tools/build-ryll-wheel.sh`, which
+builds ryll with maturin in an image derived from
+`quay.io/pypa/manylinux_2_28_*` (`.devcontainer/wheel/Dockerfile`)
+rather than the devcontainer. That image carries the toolchain and
+maturin, so nothing needs downloading at compile time. The script
+runs `cargo fetch --locked` in it with the network up, then the
+`maturin build --frozen` with `--network none` and the cache
+mounted read-only, as the invoking user. That matters most for the
+wheel, because it is a shipped artifact: it is what `pip install
+ryll` gets. No pull request CI builds it: release.yml builds it
+on a tag, and manual-build.yml's opt-in `wheel-x86_64` and
+`wheel-aarch64` platforms build it the same way on any branch, so
+a change to the wheel build can be exercised before a release.
 
 Because those jobs write the cargo cache with the network up,
 they save it under their own `actions/cache` key prefix

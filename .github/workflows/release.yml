@@ -271,7 +271,9 @@ jobs:
   # tools/build-ryll-wheel.sh and docs/plans/PLAN-pip-distribution.md).
   # Each leg must build natively on a runner matching its arch (no
   # QEMU), so it only needs check-version and can build in parallel
-  # with the Rust jobs above.
+  # with the Rust jobs above. manual-build.yml carries a copy of this
+  # matrix (its wheel-* platforms) so a branch can be tested before a
+  # tag; keep the two in sync.
   build-ryll-wheels:
     name: Build ryll wheel (${{ matrix.arch }})
     needs: check-version

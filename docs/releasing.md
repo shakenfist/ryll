@@ -223,7 +223,11 @@ The script will:
 The pushed tag runs `check-version`, then builds the `.deb`/
 `.rpm`/tarball/zip artifacts and the per-arch `ryll` PyPI wheels
 (`build-ryll-wheels`, natively on `x86_64` and `aarch64`, no
-QEMU) in parallel. Once all builds succeed, the workflow pauses
+QEMU) in parallel. No pull request CI builds the wheels, so if
+the wheel build has changed since the last release, run
+`manual-build.yml` on `develop` with the `wheel-x86_64` and
+`wheel-aarch64` platforms before tagging. Once all builds
+succeed, the workflow pauses
 at `sign-tag` for approval on the `release` environment — this is
 where `gh run watch` will sit until a required reviewer approves
 the run. On approval, `sign-tag` Sigstore-signs and force-pushes
@@ -244,6 +248,46 @@ published.
 | Windows | `ryll-{version}-x86_64-pc-windows-msvc.zip`, `ryll-{version}-aarch64-pc-windows-msvc.zip` | GUI binary (no `--capture`) |
 | crates.io | `shakenfist-spice-protocol`, `shakenfist-spice-compression`, `shakenfist-spice-usbredir`, `shakenfist-spice-renderer`, `shakenfist-spice-webrtc`, `ryll` | Source crates |
 | PyPI | `ryll-{version}-py3-none-manylinux_2_28_x86_64.whl`, `ryll-{version}-py3-none-manylinux_2_28_aarch64.whl` | Embedded GUI binary (maturin `bindings = "bin"`); Linux `x86_64`/`aarch64`, glibc >= 2.28 |
+
+## The PyPI wheel's platform tag
+
+The wheels are tagged `manylinux_2_28`, but only part of that tag
+is earned, and the rest is asserted. `tools/build-ryll-wheel.sh`
+builds in the `manylinux_2_28` image, so the glibc floor is real.
+The GUI libraries (GL/EGL, wayland, xcb, xkbcommon, X11) and opus
+are loaded with `dlopen` at runtime, so they are not in the
+binary's `DT_NEEDED`. But `libasound.so.2` is: cpal links ALSA
+directly through `alsa-sys`. ALSA is not on the manylinux
+allowlist, so by auditwheel's own definition the wheel is plain
+`linux_<arch>`, and the build passes `--skip-auditwheel` to assert
+the tag anyway.
+
+The alternatives are worse for a release:
+
+- **Tag it `linux_<arch>`.** PyPI refuses uploads with that tag.
+- **Vendor `libasound.so.2`** (let auditwheel repair the wheel).
+  That would ship AlmaLinux 8's ALSA library to hosts whose ALSA
+  configuration and plugins (PipeWire or PulseAudio on most
+  desktops) were built for their own copy, so audio would likely
+  break where it works today.
+- **Load ALSA with `dlopen`** like the GUI libraries. This is the
+  real fix, but `alsa-sys` has no such mode, so it means changing
+  or replacing the audio backend.
+
+The cost is that pip installs the wheel on a host with no ALSA
+runtime (a slim container or a minimal server), and ryll then
+fails at start with `error while loading shared libraries:
+libasound.so.2`. The [pip install instructions](installation.md#pip-python-linux-only)
+list `libasound2` as a runtime requirement for that reason.
+
+To keep the exception to that one library,
+`tools/build-ryll-wheel-in-container.sh` checks the built binary's
+`DT_NEEDED` after every build. It fails the release build if
+anything outside the `manylinux_2_28` allowlist other than
+`libasound.so.2` shows up there, for example after a dependency
+bump starts hard-linking xcb or wayland. The allowlist is read from
+the policy of the auditwheel the build image ships, so it follows
+the base image rather than a copy that could drift from it.
 
 ## Troubleshooting
 
