@@ -14,8 +14,8 @@ use shakenfist_spice_protocol::constants::{cursor_flags, cursor_type};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, CursorHeader, CursorInitHead, CursorInvalOne, CursorMove,
-    CursorSetHead, Notify as NotifyMessage, Ping, SetAck, SpiceCursor, SpiceCursorRef, WireType,
+    make_message, CursorHeader, CursorInitHead, CursorInvalOne, CursorMove, CursorSetHead,
+    Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, SpiceCursor, SpiceCursorRef, WireType,
 };
 use shakenfist_spice_protocol::reader::BoundedReader;
 use shakenfist_spice_protocol::{cursor_client, cursor_server, ChannelType, NotifySeverity};
@@ -25,7 +25,7 @@ use super::{ChannelEvent, CursorImage, EventSink, MAX_MESSAGE_BODY};
 pub struct CursorChannel {
     stream: SpiceStream,
     events: EventSink,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     cursor_cache: HashMap<u64, CursorImage>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
@@ -66,7 +66,7 @@ impl CursorChannel {
         CursorChannel {
             stream,
             events,
-            buffer: Vec::with_capacity(65536),
+            buffer: ReceiveBuffer::with_capacity(65536),
             cursor_cache: HashMap::new(),
             capture,
             byte_counter,
@@ -152,7 +152,7 @@ impl CursorChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "cursor",

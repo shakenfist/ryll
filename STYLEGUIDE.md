@@ -315,12 +315,16 @@ wrong geometry downstream. Treat that `None` as a decode failure.
 
 ### Message framing
 
-Channel read loops split messages off their receive buffer with
-`take_message` (`shakenfist-spice-protocol/src/messages/common.rs`), passing
-`MAX_MESSAGE_BODY` (`shakenfist-spice-renderer/src/channels/mod.rs`).
-Do not re-implement the header-then-body loop in a channel: the
-server-declared `message_size` is a `u32`, and the shared helper is
-what refuses an oversized body before buffering it. The cap is the
+Channel read loops keep their received bytes in a `ReceiveBuffer`
+(`shakenfist-spice-protocol/src/messages/common.rs`) and take messages
+off it with `ReceiveBuffer::take_message`, passing `MAX_MESSAGE_BODY`
+(`shakenfist-spice-renderer/src/channels/mod.rs`). Do not
+re-implement the header-then-body loop in a channel, or frame from a
+plain `Vec<u8>`: the server-declared `message_size` is a `u32`, and
+the shared helper is what refuses an oversized body before buffering
+it. It also takes each message by advancing an offset, where draining
+the front of a `Vec` per message costs quadratic time when one read
+delivers thousands of small messages. The cap is the
 largest pixmap the display channel will decode plus headroom, so it
 never refuses a message the renderer would otherwise accept.
 

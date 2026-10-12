@@ -32,8 +32,8 @@ use shakenfist_spice_protocol::messages::vd_agent::{
     ClipboardWireType, MonConfig, MonitorsConfig, VdAgentMessageHeader, VdAgentReply,
 };
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, AgentDisconnected, AgentTokens, ChannelsList, Disconnecting,
-    MainInit, MainMouseMode, MouseModeRequest, MultiMediaTime, Notify, Ping, SetAck, WireType,
+    make_message, AgentDisconnected, AgentTokens, ChannelsList, Disconnecting, MainInit,
+    MainMouseMode, MouseModeRequest, MultiMediaTime, Notify, Ping, ReceiveBuffer, SetAck, WireType,
 };
 use shakenfist_spice_protocol::reader::LinkError;
 use shakenfist_spice_protocol::{
@@ -273,7 +273,7 @@ pub struct MainChannel {
     /// than as events so a stalled UI cannot lose them; see
     /// `crate::session_state`.
     state: SessionState,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     session_id: Option<u32>,
     agent_connected: bool,
     agent_tokens: u32,
@@ -408,7 +408,7 @@ impl MainChannel {
             stream,
             events,
             state,
-            buffer: Vec::with_capacity(65536),
+            buffer: ReceiveBuffer::with_capacity(65536),
             session_id: None,
             agent_connected: false,
             agent_tokens: 0,
@@ -734,7 +734,7 @@ impl MainChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "main",

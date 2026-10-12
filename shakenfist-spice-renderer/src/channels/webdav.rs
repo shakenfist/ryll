@@ -23,7 +23,7 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, Notify as NotifyMessage, Ping, SetAck, WireType,
+    make_message, Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{spicevmc_client, spicevmc_server, ChannelType, NotifySeverity};
 
@@ -52,7 +52,7 @@ pub struct WebdavChannel {
     stream: SpiceStream,
     events: EventSink,
     webdav_rx: mpsc::Receiver<WebdavCommand>,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
     /// See `UsbredirChannel::traffic` — used only for `elapsed()`.
@@ -130,7 +130,7 @@ impl WebdavChannel {
             stream,
             events,
             webdav_rx,
-            buffer: Vec::with_capacity(65536),
+            buffer: ReceiveBuffer::with_capacity(65536),
             capture,
             byte_counter,
             traffic,
@@ -277,7 +277,7 @@ impl WebdavChannel {
     // ── SPICE message processing ───────────────────────
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let msg_type = message.header.message_type;
 
             self.message_count += 1;

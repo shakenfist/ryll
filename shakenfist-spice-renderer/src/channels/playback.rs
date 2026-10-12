@@ -14,7 +14,7 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, MessageHeader, Notify as NotifyMessage, Ping, SetAck, WireType,
+    make_message, MessageHeader, Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
     main_client, playback_server, warn_once, ChannelType, NotifySeverity,
@@ -774,7 +774,7 @@ impl AudioThread {
 pub struct PlaybackChannel {
     stream: SpiceStream,
     events: EventSink,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     byte_counter: Arc<ByteCounter>,
     traffic: Arc<dyn TrafficSink>,
     log_config: LogConfig,
@@ -875,7 +875,7 @@ impl PlaybackChannel {
         PlaybackChannel {
             stream,
             events,
-            buffer: Vec::with_capacity(65536),
+            buffer: ReceiveBuffer::with_capacity(65536),
             byte_counter,
             traffic,
             log_config,
@@ -1004,7 +1004,7 @@ impl PlaybackChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let header = &message.header;
             let payload = message.payload();
             let msg_type = header.message_type;
