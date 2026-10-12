@@ -132,10 +132,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/settings.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/build.rs",
       "author": "mikal"
     },
@@ -297,10 +293,6 @@
     },
     {
       "path": "ryll/src/web/audio.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/control.rs",
       "author": "mikal"
     },
     {
@@ -476,10 +468,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/web/assets/app.js",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/assets/index.html",
       "author": "mikal"
     },
@@ -649,10 +637,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/inputs.rs",
       "author": "mikal"
     },
     {
