@@ -21,9 +21,10 @@
 #   load        1-minute figure from /proc/loadavg
 #
 # The host figures are per-sample and deliberate: these soaks run on a
-# shared machine, and phase 01's second run caught an external spike to
-# 29% busy. Recording it inline means contamination is visible in the
-# data rather than folded into the result.
+# shared machine, and the baseline soak before the webrtc-rs 0.20
+# upgrade caught an external spike to 29% busy on 16 cores. Recording
+# it inline means contamination is visible in the data rather than
+# folded into the result.
 #
 # Usage:
 #   tools/web-soak.sh --pid <ryll-pid> [options]

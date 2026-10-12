@@ -1112,11 +1112,12 @@ delete-this-file=1\n";
 
     /// A control socket is allowed in web mode.
     ///
-    /// It was a CLI error until phase 04, and that is why the
-    /// QR-digest scenario tests -- which drive a session through the
-    /// control socket and read back what the guest received -- could
-    /// never observe web mode, the one mode with its own scancode
-    /// table. Four input bugs shipped behind that gap.
+    /// It was a CLI error until #312 (the webrtc-rs 0.20 soak), and
+    /// that is why the QR-digest scenario tests -- which drive a
+    /// session through the control socket and read back what the
+    /// guest received -- could never observe web mode, the one mode
+    /// with its own scancode table. Four input bugs shipped behind
+    /// that gap.
     #[cfg(unix)]
     #[test]
     fn a_control_socket_is_allowed_alongside_web() {

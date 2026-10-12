@@ -819,9 +819,9 @@ fn run_web(
         // the same reason headless can: everything the server needs
         // -- an event bus, an input sender, the surface mirror --
         // already exists here. It was barred from web mode until a
-        // browser session in phase 04 found four input bugs that a
-        // control-socket scenario test would have caught and could
-        // not have been written.
+        // browser session during the webrtc-rs 0.20 soak (#312) found
+        // four input bugs that a control-socket scenario test would
+        // have caught and could not have been written.
         #[cfg(unix)]
         let control_cancel = shakenfist_spice_renderer::CancellationToken::new();
         #[cfg(unix)]

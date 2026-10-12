@@ -1,8 +1,5 @@
-# Homebrew formula for ryll.
-#
-# This template is used by the release workflow to generate
-# the formula published to shakenfist/homebrew-tap. To use
-# the tap:
+# Homebrew formula for ryll, as first published to
+# shakenfist/homebrew-tap. To use the tap:
 #
 #   brew tap shakenfist/tap
 #   brew install ryll
@@ -11,9 +8,12 @@
 #
 #   brew install shakenfist/tap/ryll
 #
-# The PLACEHOLDER_URL and PLACEHOLDER_SHA256 values are
-# replaced by the release automation (Phase 7) with the
-# actual GitHub Release asset URL and checksum.
+# Nothing reads this file any more. release.yml's
+# update-homebrew job edits the tap's own Formula/ryll.rb in
+# place, rewriting its `version` and `sha256` lines on every
+# release; the tap's url interpolates #{version}, so it needs
+# no rewriting. The PLACEHOLDER_URL and PLACEHOLDER_SHA256
+# values below are never substituted.
 
 class Ryll < Formula
   desc "A Rust SPICE VDI client"
