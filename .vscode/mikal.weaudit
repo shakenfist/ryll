@@ -140,14 +140,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/build-ryll-wheel-in-container.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/build-ryll-wheel.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/check-bidi.sh",
       "author": "mikal"
     },
@@ -189,10 +181,6 @@
     },
     {
       "path": "REVIEW-STATE-TEMPLATE.md",
-      "author": "mikal"
-    },
-    {
-      "path": "docs/installation.md",
       "author": "mikal"
     },
     {
@@ -280,10 +268,6 @@
       "author": "mikal"
     },
     {
-      "path": ".devcontainer",
-      "author": "mikal"
-    },
-    {
       "path": "docs/development-macos.md",
       "author": "mikal"
     },
@@ -301,10 +285,6 @@
     },
     {
       "path": "examples",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/pyproject.toml",
       "author": "mikal"
     },
     {

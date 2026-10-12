@@ -97,10 +97,6 @@
       "sha": "433a4b2d9aa945247f0bde4f98cc6b948463c486",
       "date": "2026-08-17"
     },
-    "docs/installation.md": {
-      "sha": "0f95f14fdb04cee2dce6e2ff2e92dd479a6e2017",
-      "date": "2026-07-30"
-    },
     "docs/macos-metrics-verification.md": {
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
@@ -128,10 +124,6 @@
     "ryll/build.rs": {
       "sha": "b0803d125978073b943df8c6a6207879c41f5157",
       "date": "2026-07-26"
-    },
-    "ryll/pyproject.toml": {
-      "sha": "7505541a4f3d4e8b1f753e17d0558805e1f69e7d",
-      "date": "2026-09-18"
     },
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
@@ -492,14 +484,6 @@
     "tools/browser-offer-probe.py": {
       "sha": "7e3d345aa050de2ee9bde9c0a38cdab439d576f2",
       "date": "2026-09-23"
-    },
-    "tools/build-ryll-wheel-in-container.sh": {
-      "sha": "5ba9e12fb8821f29faca82c23cb84b74aaeab70c",
-      "date": "2026-07-26"
-    },
-    "tools/build-ryll-wheel.sh": {
-      "sha": "d60ed8ba56332b8cf39097d12df55c93318e0167",
-      "date": "2026-07-26"
     },
     "tools/check-bidi.sh": {
       "sha": "ea7d6b5bc018c5be3c40f270ea6c5b222631cea7",
