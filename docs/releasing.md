@@ -29,6 +29,10 @@ which:
   `.tar.gz`, and Windows `.zip` (both Windows arches) artifacts.
 - Builds the per-arch `ryll` PyPI wheel natively for `x86_64` and
   `aarch64` (no QEMU).
+- Packages every workspace crate and builds each from its tarball
+  (`make package-check`, in the Linux x86_64 build job), so a crate
+  that `cargo publish` would reject fails the run before anything
+  is signed or published.
 - Sigstore-signs the release tag (keyless, OIDC), gated on the
   `release` environment's manual approval.
 - Publishes every workspace crate to crates.io in dependency
@@ -269,6 +273,17 @@ then fails on usbredir, the first two are live on crates.io and
 cannot be replaced — only yanked. Fix the underlying issue and
 cut the next patch version through the normal flow (`make
 propose-release 0.2.1`); do not try to re-publish `0.2.0`.
+
+v0.1.6 failed this way: protocol, compression and usbredir
+published, then the renderer was rejected for a git dependency
+with no `version`, so the renderer, webrtc and ryll never reached
+crates.io at 0.1.6. `make package-check` now runs every crate
+through the same manifest checks and a build from its tarball in
+pull request CI (the `Lint` job) and again in the release's Linux
+x86_64 build job, before `sign-tag`, so this class of failure
+stops the release before the first upload. Run it locally to
+reproduce one. What it cannot catch is anything about crates.io
+itself: the token, the network, or a version that already exists.
 
 Common causes:
 

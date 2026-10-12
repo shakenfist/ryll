@@ -33,7 +33,7 @@ enqueue` status check:
 
 | Job | Runner | What it does |
 |-----|--------|--------------|
-| `Lint` | self-hosted `l` | `make lint` (rustfmt + clippy) |
+| `Lint` | self-hosted `l` | `make lint` (rustfmt + clippy) and `make package-check` (every crate packaged and built from its tarball, as `cargo publish` would) |
 | `Cross-check Windows` | self-hosted `l` | `make check-windows` |
 | `Build (Linux x86_64)` | self-hosted `l` | `make release`, both `--web` smoke tests, `make test`, `.deb` and `.rpm` |
 | `cargo audit` | self-hosted `s` | RustSec advisory check |
@@ -843,9 +843,9 @@ compiles. To contain that, the Makefile splits the build in two:
   `Cargo.lock` but compiles nothing, so no build script runs. It
   is the only build step allowed network access.
 - the targets that compile the workspace — `build`,
-  `build-tokio-console`, `release`, `check-windows`, `test`, `lint`
-  and `lint-fix` — then run in the devcontainer with `--network
-  none` and the cargo cache mounted read-only. A malicious build
+  `build-tokio-console`, `release`, `check-windows`, `test`, `lint`,
+  `lint-fix` and `package-check` — then run in the devcontainer with
+  `--network none` and the cargo cache mounted read-only. A malicious build
   script cannot reach a C2 or exfiltrate secrets (its download call
   fails and the build aborts loudly), and it cannot poison the
   cache for the rest of the job.
@@ -870,6 +870,17 @@ lanes they serve are real: `fuzz` runs nightly and
 - `publish-crates` runs `cargo publish`, which builds each crate as
   part of its verify step and genuinely needs the network to
   upload. This one cannot be isolated.
+
+`package-check` builds what `publish-crates` would, offline, so a
+crate that cannot publish fails in pull request CI rather than
+mid-release. It needs one writable directory the read-only cache
+cannot give it: `cargo package --workspace` unpacks the workspace's
+own packaged crates into `$CARGO_HOME/registry/src`, and when that is
+read-only cargo fails with a misleading "no hash listed for
+<crate>". `tools/package-check-verify.sh` therefore runs cargo
+against a throwaway `CARGO_HOME` inside the container, with the
+shared registry linked in read-only and only `registry/src` itself
+writable.
 
 (`fuzz-fmt-check` and `fuzz-fmt` also run networked, but they
 only run `cargo fmt` and compile nothing. So do `deb`, `rpm` and

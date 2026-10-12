@@ -90,6 +90,13 @@ jobs:
       - name: Run tests
         run: make test
 
+      # The crates.io publish cannot be undone, and publishes one crate
+      # at a time, so check that every crate packages and builds from
+      # its tarball before sign-tag (which needs this job) lets
+      # publish-crates start. See the package-check target.
+      - name: Package and verify the crates
+        run: make package-check
+
       - name: Build .deb package
         run: make deb
 
@@ -341,7 +348,8 @@ jobs:
           key-prefix: publish-cargo-cache
 
       # tools/publish-crates.sh publishes the six workspace crates
-      # serially in dependency order inside the devcontainer.
+      # serially in dependency order inside the devcontainer. build-linux
+      # has already packaged and verified all six (make package-check).
       - name: Publish workspace crates
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

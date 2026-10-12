@@ -108,7 +108,7 @@ DOCKER_RUN_OFFLINE := docker run --rm --network none $(DOCKER_BASE_ARGS) $(CACHE
 
 .PHONY: all build release propose-release tag-release clean clean-testdata \
 	devcontainer fuzz-devcontainer ensure-cache fetch lock lint lint-fix test help \
-	deb rpm web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt publish-crates \
+	deb rpm web-smoke web-smoke-tls fuzz-fmt-check fuzz-fmt package-check publish-crates \
 	test-qemu test-qemu-usb test-qemu-desktop test-qemu-stop test-k1-idle \
 	macos-prereqs macos-build macos-release \
 	build-tokio-console check-windows
@@ -127,6 +127,7 @@ help:
 	@echo "  make lint                   - Run rustfmt and clippy checks"
 	@echo "  make lint-fix               - Run rustfmt and clippy with auto-fix"
 	@echo "  make check-windows          - Cross-check the Windows (gnu) target"
+	@echo "  make package-check          - Package and verify every crate as crates.io would"
 	@echo "  make deb                    - Package the release binary as a .deb"
 	@echo "  make rpm                    - Package the release binary as an .rpm"
 	@echo "  make web-smoke              - Smoke-test ryll --web (plain HTTP)"
@@ -351,9 +352,23 @@ fuzz-smoke-%: ensure-cache fuzz-devcontainer
 		$(RYLL_FUZZ_IMAGE) \
 		cargo +nightly fuzz run $* -- -max_total_time=30 -runs=100000
 
+# Package every workspace crate the way `cargo publish` would, and
+# build each one from its tarball, without uploading anything. A
+# release publishes the crates one at a time and crates.io cannot take
+# a publish back, so a crate that fails cargo's checks after its
+# dependencies are already up leaves a half-published release; v0.1.6
+# stopped that way at the renderer (a dependency with no version).
+# `--workspace` packages the crates together, so each dependent is
+# verified against its siblings' packages rather than against whatever
+# crates.io holds. Offline and read-only like every other compile; see
+# tools/package-check-verify.sh for the one writable directory it
+# needs.
+package-check: fetch
+	$(DOCKER_RUN_OFFLINE) $(RYLL_IMAGE) tools/package-check-verify.sh
+
 # Publish all workspace crates to crates.io in dependency order.
 # Requires CARGO_REGISTRY_TOKEN in the environment; used by the
-# release workflow.
+# release workflow, after its build-linux job has run package-check.
 publish-crates: ensure-cache
 	$(DOCKER_RUN) \
 		-e CARGO_REGISTRY_TOKEN \
