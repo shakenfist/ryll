@@ -1053,22 +1053,6 @@ pub struct PerChannelDiagnostics {
     pub ping_recv_count: u32,
     pub pong_send_count: u32,
     pub last_ping_recv_ts_secs: Option<f64>,
-    /// Idle keepalives this client sent on this channel, or `None`
-    /// when the channel has no client-side keepalive mechanism at
-    /// all. The field stays on every entry for a uniform JSON shape.
-    ///
-    /// Only the inputs channel implements one. The main channel used
-    /// to, and `MainChannel::send_idle_keepalive` has since been
-    /// removed — reporting a bare `0` for it claimed the mechanism had
-    /// run and never fired, which is precisely the wrong answer to
-    /// give someone reading a main-channel disconnect report. `None`
-    /// says "no such mechanism"; `Some(0)` says "it exists and never
-    /// fired".
-    pub client_keepalive_send_count: Option<u32>,
-    /// Session-relative timestamp of the most recent idle keepalive
-    /// this client sent on this channel. `None` when none has been
-    /// sent, or when the channel has no keepalive mechanism.
-    pub last_client_keepalive_send_ts_secs: Option<f64>,
 }
 
 /// Structured cause record for an auto-disconnect bug report.
@@ -1121,8 +1105,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1137,8 +1119,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1153,8 +1133,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: Some(s.client_keepalive_send_count),
-                    last_client_keepalive_send_ts_secs: s.last_client_keepalive_send_ts_secs,
                 },
             );
         }
@@ -1169,8 +1147,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1185,8 +1161,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1201,8 +1175,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -1217,8 +1189,6 @@ impl DisconnectCause {
                     ping_recv_count: s.ping_recv_count,
                     pong_send_count: s.pong_send_count,
                     last_ping_recv_ts_secs: s.last_ping_recv_ts_secs,
-                    client_keepalive_send_count: None,
-                    last_client_keepalive_send_ts_secs: None,
                 },
             );
         }
@@ -3927,44 +3897,6 @@ mod tests {
             "main", "display", "inputs", "cursor", "playback", "usbredir", "webdav",
         ] {
             assert!(per_channel.contains_key(ch), "per_channel missing {}", ch);
-        }
-    }
-
-    #[test]
-    fn test_collect_per_channel_surfaces_keepalive_fields() {
-        let snapshots = ChannelSnapshots::new();
-        {
-            let mut s = snapshots.inputs.lock().unwrap();
-            s.client_keepalive_send_count = 7;
-            s.last_client_keepalive_send_ts_secs = Some(305.5);
-        }
-
-        let per_channel = DisconnectCause::collect_per_channel(&snapshots);
-
-        let inputs = per_channel.get("inputs").expect("inputs entry missing");
-        assert_eq!(inputs.client_keepalive_send_count, Some(7));
-        assert_eq!(inputs.last_client_keepalive_send_ts_secs, Some(305.5));
-
-        // Only the inputs channel implements a client-side keepalive.
-        // Every other channel must report None, not Some(0): the main
-        // channel's keepalive was removed, and a zero there would read
-        // as "the mechanism ran and never fired".
-        for ch in [
-            "main", "display", "cursor", "playback", "usbredir", "webdav",
-        ] {
-            let entry = per_channel
-                .get(ch)
-                .unwrap_or_else(|| panic!("missing {}", ch));
-            assert_eq!(
-                entry.client_keepalive_send_count, None,
-                "{} has no keepalive mechanism and must report None",
-                ch
-            );
-            assert_eq!(
-                entry.last_client_keepalive_send_ts_secs, None,
-                "{} should report no last-keepalive-send timestamp",
-                ch
-            );
         }
     }
 

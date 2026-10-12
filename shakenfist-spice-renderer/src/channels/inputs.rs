@@ -147,21 +147,6 @@ pub struct InputsChannel {
     /// Bounded per-opcode message counters; flushed to the
     /// snapshot by `update_snapshot`. See `OpcodeCounters`.
     opcodes: OpcodeCounters,
-    /// Most recent KEY_MODIFIERS value we've sent. Restated by the
-    /// idle keepalive, with the same value to keep the inputs channel
-    /// non-idle without changing guest state.
-    last_modifiers_sent: u16,
-    /// Wall-clock time (tokio runtime) of the last inbound *or*
-    /// outbound activity on the channel. The idle keepalive
-    /// fires at `last_activity + KEEPALIVE_IDLE`. Updated on
-    /// every recv and every send via `mark_activity()`.
-    last_activity: tokio::time::Instant,
-    /// Number of idle keepalive messages sent. Surfaced via the
-    /// snapshot for disconnect-cause diagnostics.
-    client_keepalive_send_count: u32,
-    /// Session-relative seconds at the most recent keepalive
-    /// send.
-    last_client_keepalive_send_ts_secs: Option<f64>,
     enable_paste: bool,
     ctrl_held: bool,
     shift_held: bool,
@@ -170,12 +155,6 @@ pub struct InputsChannel {
     /// See `MainChannel::capture_dropped_count`.
     capture_dropped_count: u64,
 }
-
-/// Idle window before the inputs-channel keepalive fires.
-/// Conservative against the empirically observed 300 s
-/// server-side per-channel silence threshold (see session-001b
-/// data); 10 s leaves ample headroom for jitter and clock skew.
-const KEEPALIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl InputsChannel {
     #[allow(clippy::too_many_arguments)]
@@ -216,10 +195,6 @@ impl InputsChannel {
                 message_names::inputs_server,
                 message_names::inputs_client,
             ),
-            last_modifiers_sent: 0,
-            last_activity: tokio::time::Instant::now(),
-            client_keepalive_send_count: 0,
-            last_client_keepalive_send_ts_secs: None,
             enable_paste,
             ctrl_held: false,
             shift_held: false,
@@ -245,15 +220,19 @@ impl InputsChannel {
     async fn run_loop(&mut self) -> Result<()> {
         info!("inputs: channel started");
 
-        // Send initial key modifiers (NumLock on)
+        // Set the guest's locks once, at open: Num Lock on, Caps Lock
+        // and Scroll Lock off. spice-gtk sends the client machine's
+        // real lock state here instead; the renderer cannot read the
+        // host's locks (egui and winit expose none, and headless and
+        // web mode have no local keyboard), so this asserts the most
+        // common host state. It is the only KEY_MODIFIERS ryll sends:
+        // the server toggles each lock that differs from its own
+        // record, so a later one could only undo a lock changed from
+        // inside the guest or by another client sharing the desktop.
         self.send_key_modifiers(keyboard_modifiers::NUM_LOCK)
             .await?;
 
         loop {
-            // Capture before reborrows so the closure can move it
-            // into the keepalive branch without a self conflict.
-            let keepalive_deadline = self.last_activity + KEEPALIVE_IDLE;
-
             // Borrow fields separately to avoid borrow checker issues in select!
             let stream = &mut self.stream;
             let buffer = &mut self.buffer;
@@ -306,7 +285,6 @@ impl InputsChannel {
                         }
                         Ok(_) => {
                             self.last_recv_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-                            self.last_activity = tokio::time::Instant::now();
                             self.process_messages().await?;
                         }
                         Err(e) => {
@@ -385,17 +363,6 @@ impl InputsChannel {
                     }
                 } => {
                     self.advance_paste().await?;
-                }
-
-                // Idle keepalive. When the channel has been silent in both
-                // directions for KEEPALIVE_IDLE, re-send the most recent
-                // KEY_MODIFIERS value. The guest sees no change (same modifier
-                // state); the server sees a client→server byte and resets its
-                // per-channel idle timer. Hypothesis under test: keeping inputs
-                // busy may also keep main alive, sidestepping the K1
-                // main-channel rcc disconnect.
-                _ = tokio::time::sleep_until(keepalive_deadline) => {
-                    self.send_idle_keepalive().await?;
                 }
             }
         }
@@ -947,8 +914,6 @@ impl InputsChannel {
         snap.ping_recv_count = self.ping_recv_count;
         snap.pong_send_count = self.pong_send_count;
         snap.last_ping_recv_ts_secs = self.last_ping_recv_ts_secs;
-        snap.client_keepalive_send_count = self.client_keepalive_send_count;
-        snap.last_client_keepalive_send_ts_secs = self.last_client_keepalive_send_ts_secs;
         snap.writer_dropped_count = self.capture_dropped_count;
         self.opcodes.publish_into(&mut *snap);
     }
@@ -957,28 +922,7 @@ impl InputsChannel {
         let mut payload = Vec::new();
         KeyModifiers { modifiers }.write(&mut payload);
         let msg = make_message(inputs_client::KEY_MODIFIERS, &payload);
-        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg)
-            .await?;
-        self.last_modifiers_sent = modifiers;
-        Ok(())
-    }
-
-    /// Restate the last KEY_MODIFIERS we sent. Triggered by the
-    /// idle-keepalive select branch in `run()` after
-    /// `KEEPALIVE_IDLE` of channel silence. Re-sending the same
-    /// modifier value is a no-op for the guest but generates a
-    /// client→server byte on the inputs channel, which keeps the
-    /// channel non-idle from the server's perspective.
-    async fn send_idle_keepalive(&mut self) -> Result<()> {
-        let modifiers = self.last_modifiers_sent;
-        self.send_key_modifiers(modifiers).await?;
-        self.client_keepalive_send_count = self.client_keepalive_send_count.saturating_add(1);
-        // last_send_ts_secs is updated by send_with_log via
-        // update_snapshot; mirror the fact here for the dedicated
-        // keepalive timestamp.
-        self.last_client_keepalive_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-        self.update_snapshot();
-        Ok(())
+        self.send_with_log(inputs_client::KEY_MODIFIERS, &msg).await
     }
 
     async fn send_with_log(&mut self, msg_type: u16, data: &[u8]) -> Result<()> {
@@ -1005,7 +949,6 @@ impl InputsChannel {
         self.stream.flush().await?;
         self.bytes_out += data.len() as u64;
         self.last_send_ts_secs = Some(self.traffic.elapsed().as_secs_f64());
-        self.last_activity = tokio::time::Instant::now();
         Ok(())
     }
 
@@ -2449,11 +2392,17 @@ mod tests {
     mod failure_policy {
         use std::sync::{Arc, Mutex};
 
-        use shakenfist_spice_protocol::inputs_server;
-        use shakenfist_spice_protocol::messages::{InputsInit, KeyModifiers, Ping, SetAck};
+        use std::time::Duration;
+
+        use shakenfist_spice_protocol::messages::{
+            make_message, InputsInit, KeyModifiers, MessageHeader, Ping, ReceiveBuffer, SetAck,
+            WireType,
+        };
+        use shakenfist_spice_protocol::{inputs_client, inputs_server, keyboard_modifiers};
+        use tokio::io::AsyncWriteExt;
         use tokio::sync::mpsc;
 
-        use super::super::InputsChannel;
+        use super::super::{InputsChannel, MAX_MESSAGE_BODY};
         use crate::channels::test_support::{loopback, NullTraffic, TestChannelPeers};
         use crate::snapshots::InputsSnapshot;
         use crate::{ByteCounter, LogConfig};
@@ -2486,6 +2435,54 @@ mod tests {
                 .handle_server_message(inputs_server::KEY_MODIFIERS, &[0; KeyModifiers::SIZE - 1])
                 .await
                 .expect("a short KEY_MODIFIERS is ignored");
+        }
+
+        /// The server applies KEY_MODIFIERS by toggling every lock that
+        /// differs from its own record, so ryll sends it once, at open,
+        /// and never again. A periodic restatement (the old idle
+        /// keepalive) undid locks changed from inside the guest or by
+        /// another client (#517).
+        #[tokio::test(start_paused = true)]
+        async fn an_idle_channel_sends_only_its_opening_key_modifiers() {
+            let (channel, mut peers) = test_inputs_channel().await;
+            let task = tokio::spawn(async move {
+                let mut channel = channel;
+                channel.run().await
+            });
+
+            let mut sent = ReceiveBuffer::new();
+            sent.extend_from_slice(
+                &peers
+                    .read_sent(MessageHeader::SIZE + KeyModifiers::SIZE)
+                    .await,
+            );
+            let opening = sent
+                .take_message(MAX_MESSAGE_BODY)
+                .expect("a well-formed message")
+                .expect("a whole message");
+            assert_eq!(opening.header.message_type, inputs_client::KEY_MODIFIERS);
+            assert_eq!(
+                KeyModifiers::decode(opening.payload()).unwrap().modifiers,
+                keyboard_modifiers::NUM_LOCK
+            );
+
+            // A server that reports a lock change, then a long silence.
+            let report = make_message(
+                inputs_server::KEY_MODIFIERS,
+                &(keyboard_modifiers::NUM_LOCK | keyboard_modifiers::CAPS_LOCK).to_le_bytes(),
+            );
+            peers.peer.write_all(&report).await.unwrap();
+            tokio::time::sleep(Duration::from_secs(120)).await;
+
+            let mut byte = [0u8; 1];
+            assert!(
+                matches!(
+                    peers.peer.try_read(&mut byte),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                ),
+                "an idle inputs channel sent something after its opening KEY_MODIFIERS"
+            );
+            task.abort();
         }
 
         #[tokio::test]
