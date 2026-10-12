@@ -52,7 +52,7 @@ pub(crate) type ControlSink = mpsc::Sender<Vec<u8>>;
 /// the cursor where the user's pointer actually is, while in server
 /// mode the guest is authoritative and the only truthful position
 /// is the one the cursor channel reports. See the equivalent
-/// branch in `ryll/src/app.rs`.
+/// branch in `ryll/src/app/`.
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum ControlMsg {

@@ -32,7 +32,7 @@ use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::traffic::TrafficSink;
 
 // Re-export channel-state snapshot types for ryll-side callers
-// (e.g. tests in this file and consumers under `app.rs`).
+// (e.g. tests in this file and consumers under `ryll/src/app/`).
 #[allow(unused_imports)]
 pub use shakenfist_spice_renderer::snapshots::{
     ChannelSnapshots, CursorCacheEntry, CursorSnapshot, DecodeResult, DisplaySnapshot,
@@ -717,7 +717,7 @@ pub struct AppSnapshot {
     /// microseconds of mpsc-queue lag between the display channel
     /// emitting `ImageReady*` events and the egui frame loop
     /// processing them. Computed over a bounded recent window (cap
-    /// `RECENT_LAG_RING_CAP` in `app.rs`). A high mean here when the
+    /// `RECENT_LAG_RING_CAP` in `ryll/src/app/stats.rs`). A high mean here when the
     /// decode and socket-fill metrics look healthy implicates the egui
     /// loop / GUI thread as the bottleneck. Within-batch samples are
     /// correlated; `max` is the most informative single number. See

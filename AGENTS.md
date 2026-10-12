@@ -105,7 +105,7 @@ that table is an incomplete change.
 
 1. Add to `Args` struct in `ryll/src/config.rs`
 2. Pass through to relevant code in `ryll/src/main.rs` or
-   `ryll/src/app.rs`
+   `ryll/src/app/`
 
 ### Adding a new statistic
 
@@ -116,7 +116,7 @@ that table is an incomplete change.
    `self.events.emit(...)` — never a bare `event_tx`. `EventSink`
    couples the queue to the repaint wake-up so a new event cannot
    forget it and leave the UI stale.
-3. Handle in `process_events()` in `ryll/src/app.rs`
+3. Handle in `process_events()` in `ryll/src/app/`
 
 ### Modifying protocol handling
 

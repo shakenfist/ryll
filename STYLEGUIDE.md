@@ -158,7 +158,7 @@ The structured logging helpers (`logging::log_message`,
 | `info!` | Session lifecycle (connect, disconnect, init), surface create/destroy |
 | `debug!` | Per-message details when not in verbose mode, draw operations |
 | `warn!` | Recoverable errors (malformed messages, decompression failures, cache misses) |
-| `error!` | Only via `tracing::error!` in app.rs for fatal connection errors |
+| `error!` | Only via `tracing::error!` in `ryll/src/app/` for fatal connection errors |
 
 ### Adding a new message type
 
@@ -388,7 +388,7 @@ When adding a new channel or modifying message handling:
   `send()` method.
 - Call `capture.packet_received(channel, &bytes)` at the
   top of every message read loop iteration.
-- Video frames are captured in `app.rs` on `DisplayMark`
+- Video frames are captured in `ryll/src/app/` on `DisplayMark`
   events via `capture.frame(0, pixels, w, h)`.
 
 ### Zero overhead when disabled
