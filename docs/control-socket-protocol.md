@@ -33,10 +33,10 @@ Version history:
   the note under [`send_key`](#send_key).  Plain scancodes are
   unaffected, so a client that only sends those sees no difference.
 - **1.3** — added the `clipboard_set`, `clipboard_get` and `resize`
-  verbs and the `clipboard_changed` event, so a session with no host
-  window can carry clipboard text to and from the guest and ask the
-  guest for a display size.  Additive; a client that does not use
-  them sees no difference.
+  verbs, the `clipboard_changed` event and the `queue_full` error
+  code, so a session with no host window can carry clipboard text to
+  and from the guest and ask the guest for a display size.  Additive;
+  a client that does not use them sees no difference.
 
 ---
 
@@ -632,11 +632,15 @@ Params:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `text` | string | The text to put on the clipboard. |
+| `text` | string | The text to put on the clipboard, at most 104,857,600 bytes (100 MiB) of UTF-8. |
 
 Result on success: `{}`
 
-Verb-specific error codes: none beyond the common set.
+Verb-specific error codes:
+
+| Code | When |
+|------|------|
+| `bad_params` | `text` is missing, not a string, or longer than 100 MiB. The limit is spice-gtk's default `max-clipboard`, the largest clipboard ryll accepts from a guest; the clipboard is left unchanged. |
 
 Worked example:
 
@@ -711,6 +715,8 @@ Verb-specific error codes:
 | Code | When |
 |------|------|
 | `bad_params` | A side is missing, not a non-negative integer, zero, or larger than 16384. |
+| `queue_full` | Ryll's display-size queue is full, which takes dozens of requests faster than the session reads them. Nothing was queued; retry after a short delay. |
+| `internal_error` | The display-size queue is closed: the session has ended. |
 
 Worked example:
 
@@ -964,23 +970,35 @@ came back. Only the CLIPBOARD selection is synced, so selecting text
 in an X11 guest (PRIMARY) does not raise this event. Text set with
 `clipboard_set` does not raise it either.
 
+The event does not carry the text, only its length: a copy can be as
+large as 100 MiB, and events wait in a per-client queue bounded by
+count rather than size. Read the text with `clipboard_get`. That
+returns the clipboard as it is when the request is handled, which is
+the copy this event reported unless the guest has copied again, or
+`clipboard_set` has been called, since.
+
 Every copy is reported, including a copy of the same text as the
-last. The text is read from the session directly rather than from the
-event bus, like `agent_connected`, so falling behind the bus cannot
-lose it; a client that falls behind may see only the newest of several
-copies made in quick succession. Copies made before the client
-connected are not replayed; use `clipboard_get`.
+last. The copy is noticed from the session directly rather than from
+the event bus, like `agent_connected`, so falling behind the bus does
+not skip it, and a client slow to read several copies made in quick
+succession may hear only of the newest. Like any event, though, it is
+lost if this client's outbound queue is full when it is produced; that
+loss is reported by a `dropped` event, after which a client waiting on
+a copy should call `clipboard_get` rather than wait. Copies made before
+the client connected are not replayed; use `clipboard_get`.
 
 Data fields:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `text` | string | The text the guest copied. |
+| `bytes` | u64 | The length of the copied text in bytes, as UTF-8. |
 
 Worked example:
 
 ```
-← {"event": "clipboard_changed", "data": {"text": "hello from the guest"}}
+← {"event": "clipboard_changed", "data": {"bytes": 20}}
+→ {"id": 13, "method": "clipboard_get", "params": {}}
+← {"id": 13, "ok": true, "result": {"text": "hello from the guest"}}
 ```
 
 ---
@@ -1151,7 +1169,7 @@ The `code` field is a stable, machine-readable string. Do not parse
 `message` programmatically; it may change between minor versions.
 
 The following error codes are defined in v1.x (all were present in
-v1.0; v1.1 added no new codes):
+v1.0 except `queue_full`, added in v1.3):
 
 | Code | Semantics |
 |------|-----------|
@@ -1164,6 +1182,7 @@ v1.0; v1.1 added no new codes):
 | `agent_not_connected` | A `paste` was requested but the SPICE vdagent is not currently connected. Not returned by `clipboard_set` or `resize`, which hold their request until the agent connects. |
 | `no_such_surface` | A `screenshot` was requested for a `surface_id` that does not exist in the current session. |
 | `unsupported_format` | A `screenshot` was requested with a `format` value other than `"png"` or `"rgba"`. |
+| `queue_full` | A queue into the session was full, so nothing was queued. Retryable after a short delay. Returned by `resize`. |
 | `not_implemented` | The method is recognised but not yet implemented. Should not appear in a complete implementation; retained in the code so partial builds have a stable code to return during incremental rollout of a new verb. |
 | `internal_error` | An unexpected condition occurred server-side. The `message` field will contain details. Report these as bugs. |
 
@@ -1347,7 +1366,9 @@ line and is immediately closed.
   copies in it exactly as it does the GUI's clipboard; `clipboard_set`
   writes it through a separate method so that only guest copies are
   published on its watch, which is what `clipboard_changed` is
-  translated from.
+  translated from. The watch carries each copy's length, not its
+  text, so neither it nor a slow client's event queue holds a second
+  copy of a large clipboard.
 - `resize` sends on the same display-size queue the GUI's window and
   the browser's viewport use (in web mode it shares the browser's),
   so the main channel's debounce and its hold-until-the-agent-connects

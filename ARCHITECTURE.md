@@ -204,7 +204,9 @@ shakenfist-spice-renderer/src/
 ├── session_state.rs     # SessionState: watch channels for mouse mode and
 │                        #   agent state, shared by every frontend
 ├── capture_sink.rs      # CaptureSink trait
-├── clipboard.rs         # ClipboardBackend trait
+├── clipboard.rs         # ClipboardBackend trait; MemoryClipboard, the
+│                        #   in-memory backend headless and web mode
+│                        #   give a control socket's session
 ├── device_config.rs     # Virtual-disk / shared-directory config shapes
 │                        #   passed to the usbredir and webdav channels
 ├── digest.rs            # Visual-digest QR poller (digest-decode feature)

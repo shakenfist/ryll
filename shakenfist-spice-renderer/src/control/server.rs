@@ -45,14 +45,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{
-    major_version_matches, ClipboardSetParams, ClipboardText, ErrorCode, Event, HelloParams,
-    HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatusResult,
+    major_version_matches, ClipboardChanged, ClipboardSetParams, ClipboardText, ErrorCode, Event,
+    HelloParams, HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatusResult,
     SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION, SUPPORTED_METHODS,
 };
 use crate::channels::{align_monitor_dimension, ChannelEvent, DisplaySize, InputEvent};
 use crate::clipboard::MemoryClipboard;
 use crate::display::MAX_SURFACE_DIMENSION;
 use crate::surface_mirror::SurfaceMirror;
+use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
 
 /// Capacity of the per-client outbound queue (request responses +
 /// translated event lines).  If the writer falls behind by more
@@ -397,7 +398,7 @@ async fn handle_client(
     let event_handle = tokio::spawn(event_translator_task(
         event_rx,
         agent_connected,
-        handles.clipboard.subscribe_guest_text(),
+        handles.clipboard.subscribe_guest_copies(),
         event_state,
         event_out_tx,
     ));
@@ -514,7 +515,7 @@ async fn writer_task(
 async fn event_translator_task(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
     mut agent_connected: watch::Receiver<bool>,
-    mut guest_clipboard: watch::Receiver<Option<Arc<str>>>,
+    mut guest_clipboard: watch::Receiver<Option<usize>>,
     state: Arc<ClientState>,
     out_tx: mpsc::Sender<OutboundMessage>,
 ) {
@@ -562,8 +563,8 @@ async fn event_translator_task(
             },
             changed = guest_clipboard.changed(), if clipboard_open => match changed {
                 Ok(()) => {
-                    let text = guest_clipboard.borrow_and_update().clone();
-                    translate_clipboard_changed(text, &state)
+                    let bytes = *guest_clipboard.borrow_and_update();
+                    translate_clipboard_changed(bytes, &state)
                 }
                 Err(_) => {
                     clipboard_open = false;
@@ -625,21 +626,22 @@ fn translate_agent_connected(
     })
 }
 
-/// Map text the guest copied to a `clipboard_changed` wire event.
+/// Map a guest copy, given by its length in bytes, to a
+/// `clipboard_changed` wire event.
 ///
 /// Every copy is reported, including one of the same text as the last:
 /// the guest copied again, and a client waiting on a copy should hear
-/// of it.
-fn translate_clipboard_changed(text: Option<Arc<str>>, state: &ClientState) -> Option<Event> {
+/// of it. The text is not carried; see [`ClipboardChanged`].
+fn translate_clipboard_changed(bytes: Option<usize>, state: &ClientState) -> Option<Event> {
     if !state.is_subscribed("clipboard_changed") {
         return None;
     }
     // The watch starts at `None`; a copy is always `Some`.
-    let text = text?;
+    let bytes = bytes?;
     Some(Event {
         event: "clipboard_changed".into(),
-        data: serde_json::to_value(ClipboardText {
-            text: Some(text.to_string()),
+        data: serde_json::to_value(ClipboardChanged {
+            bytes: bytes as u64,
         })
         .unwrap_or(serde_json::Value::Object(Default::default())),
     })
@@ -1185,8 +1187,10 @@ fn handle_send_key(
 /// `agent_not_connected` is intentionally NOT returned: paste in Ryll
 /// works by translating text to US-QWERTY scancodes and issuing
 /// `KeyDown`/`KeyUp` events through the SPICE inputs channel — it
-/// does NOT use the vdagent clipboard path.  The `agent_not_connected`
-/// error code exists in the enum for future clipboard-based verbs.
+/// does NOT use the vdagent clipboard path.  No verb returns
+/// `agent_not_connected` today: the clipboard verbs, which do use the
+/// agent, hold their request until it connects instead.  The code
+/// stays in the enum because the protocol document defines it.
 /// See `InputsChannel::handle_input_event` at the `PasteText` arm in
 /// `channels/inputs.rs` for confirmation that no agent is involved.
 fn handle_paste(
@@ -1419,6 +1423,14 @@ async fn handle_screenshot(
 
 // ── Clipboard and resize verbs (v1.3) ────────────────────────────
 
+/// The longest text `clipboard_set` accepts, in bytes: 100 MiB,
+/// spice-gtk's default `max-clipboard`. It is the clipboard size the
+/// agent-message budget in the protocol crate is built from (that
+/// budget adds 4 KiB for the clipboard message's headers), so a client
+/// can never set more than ryll itself would accept from a guest, or
+/// than spice-gtk would send.
+pub const MAX_CLIPBOARD_SET_BYTES: usize = MAX_AGENT_MESSAGE_SIZE - 4096;
+
 /// Handle a `clipboard_set` request.
 ///
 /// Stores the text as the host side of the clipboard. The main
@@ -1443,6 +1455,17 @@ fn handle_clipboard_set(
             );
         }
     };
+    if p.text.len() > MAX_CLIPBOARD_SET_BYTES {
+        return Response::err(
+            id,
+            ErrorCode::BadParams,
+            format!(
+                "clipboard text is {} bytes; the most is {}",
+                p.text.len(),
+                MAX_CLIPBOARD_SET_BYTES
+            ),
+        );
+    }
     // Byte count only: clipboard text may be a password.
     debug!("control: clipboard_set ({} bytes)", p.text.len());
     clipboard.set_host_text(p.text);
@@ -1511,15 +1534,22 @@ fn handle_resize(
         Ok(size) => size,
         Err(message) => return Response::err(id, ErrorCode::BadParams, message),
     };
-    if resize_tx
-        .try_send(DisplaySize::Requested(size.width, size.height))
-        .is_err()
-    {
-        return Response::err(
-            id,
-            ErrorCode::InternalError,
-            "resize channel closed or full",
-        );
+    match resize_tx.try_send(DisplaySize::Requested(size.width, size.height)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return Response::err(
+                id,
+                ErrorCode::QueueFull,
+                "resize queue is full; retry shortly",
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Response::err(
+                id,
+                ErrorCode::InternalError,
+                "resize queue is closed: the session has ended",
+            );
+        }
     }
     debug!("control: resize to {}x{}", size.width, size.height);
     Response::ok(
@@ -1564,6 +1594,35 @@ mod tests {
                 height: MAX_SURFACE_DIMENSION
             })
         );
+    }
+
+    #[test]
+    fn clipboard_set_takes_up_to_the_cap_and_refuses_more() {
+        assert_eq!(MAX_CLIPBOARD_SET_BYTES, 100 * 1024 * 1024);
+        let clipboard = MemoryClipboard::new();
+
+        let at_cap = "a".repeat(MAX_CLIPBOARD_SET_BYTES);
+        let r = handle_clipboard_set(
+            RequestId::Int(1),
+            serde_json::json!({ "text": at_cap }),
+            &clipboard,
+        );
+        assert!(r.ok);
+        assert_eq!(
+            clipboard.text().map(|t| t.len()),
+            Some(MAX_CLIPBOARD_SET_BYTES)
+        );
+
+        clipboard.set_host_text("kept".to_string());
+        let over = "a".repeat(MAX_CLIPBOARD_SET_BYTES + 1);
+        let r = handle_clipboard_set(
+            RequestId::Int(2),
+            serde_json::json!({ "text": over }),
+            &clipboard,
+        );
+        assert!(!r.ok);
+        assert_eq!(r.error.map(|e| e.code), Some(ErrorCode::BadParams));
+        assert_eq!(clipboard.text().as_deref(), Some("kept"));
     }
 
     #[test]

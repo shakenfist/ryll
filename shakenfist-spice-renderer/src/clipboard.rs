@@ -10,7 +10,7 @@
 //! channel when they run a control socket, which reads and writes
 //! it with the `clipboard_get` and `clipboard_set` verbs.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use tokio::sync::watch;
 
@@ -50,21 +50,23 @@ pub trait ClipboardBackend: Send + Sync {
 ///
 /// The two writers are kept apart because only the guest's text is
 /// news to the control socket's client: it wrote the other itself.
-/// Each `set_text` is published on a watch, which the control
-/// socket's `clipboard_changed` event is translated from. A watch
-/// keeps only the latest value, so a client that falls behind sees
+/// Each `set_text` publishes the copy's length in bytes on a watch,
+/// which the control socket's `clipboard_changed` event is translated
+/// from. The text itself is not published: a copy can be 100 MiB, and
+/// a client reads it with `clipboard_get` when it wants it. A watch
+/// keeps only the latest value, so a client that falls behind hears of
 /// the newest copy rather than every one, which is what a clipboard
 /// means anyway.
 pub struct MemoryClipboard {
     text: Mutex<Option<String>>,
-    guest_text: watch::Sender<Option<Arc<str>>>,
+    guest_copies: watch::Sender<Option<usize>>,
 }
 
 impl MemoryClipboard {
     pub fn new() -> Self {
         Self {
             text: Mutex::new(None),
-            guest_text: watch::Sender::new(None),
+            guest_copies: watch::Sender::new(None),
         }
     }
 
@@ -87,11 +89,12 @@ impl MemoryClipboard {
         }
     }
 
-    /// Subscribe to text arriving from the guest. The receiver starts
-    /// with the current value marked seen, so it reports only copies
-    /// made after this call.
-    pub fn subscribe_guest_text(&self) -> watch::Receiver<Option<Arc<str>>> {
-        self.guest_text.subscribe()
+    /// Subscribe to text arriving from the guest: the value is the
+    /// latest copy's length in bytes. The receiver starts with the
+    /// current value marked seen, so it reports only copies made after
+    /// this call.
+    pub fn subscribe_guest_copies(&self) -> watch::Receiver<Option<usize>> {
+        self.guest_copies.subscribe()
     }
 }
 
@@ -114,7 +117,7 @@ impl ClipboardBackend for MemoryClipboard {
         // `send_replace` rather than `send`: it stores the value even
         // when nobody is subscribed, and marks it changed for every
         // receiver, including when the same text is copied twice.
-        self.guest_text.send_replace(Some(Arc::from(text)));
+        self.guest_copies.send_replace(Some(text.len()));
         Ok(())
     }
 }
@@ -133,7 +136,7 @@ mod tests {
     #[test]
     fn host_text_is_read_back_by_the_main_channel_without_publishing() {
         let cb = MemoryClipboard::new();
-        let rx = cb.subscribe_guest_text();
+        let rx = cb.subscribe_guest_copies();
         cb.set_host_text("from the host".to_string());
         assert_eq!(cb.get_text().as_deref(), Some("from the host"));
         assert_eq!(cb.text().as_deref(), Some("from the host"));
@@ -146,11 +149,11 @@ mod tests {
     #[test]
     fn guest_text_is_stored_and_published() {
         let cb = MemoryClipboard::new();
-        let mut rx = cb.subscribe_guest_text();
+        let mut rx = cb.subscribe_guest_copies();
         cb.set_text("from the guest").unwrap();
         assert_eq!(cb.text().as_deref(), Some("from the guest"));
         assert!(rx.has_changed().unwrap());
-        assert_eq!(rx.borrow_and_update().as_deref(), Some("from the guest"));
+        assert_eq!(*rx.borrow_and_update(), Some("from the guest".len()));
 
         // The same text copied again is a change all the same.
         cb.set_text("from the guest").unwrap();
@@ -171,9 +174,9 @@ mod tests {
     fn a_late_subscriber_sees_only_later_copies() {
         let cb = MemoryClipboard::new();
         cb.set_text("before").unwrap();
-        let mut rx = cb.subscribe_guest_text();
+        let mut rx = cb.subscribe_guest_copies();
         assert!(!rx.has_changed().unwrap());
         cb.set_text("after").unwrap();
-        assert_eq!(rx.borrow_and_update().as_deref(), Some("after"));
+        assert_eq!(*rx.borrow_and_update(), Some("after".len()));
     }
 }

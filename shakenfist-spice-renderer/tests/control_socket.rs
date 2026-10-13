@@ -1472,9 +1472,10 @@ async fn clipboard_set_is_seen_by_the_main_channel_and_read_back() {
 }
 
 /// A guest copy stored by the main channel raises `clipboard_changed`
-/// with its text, every time, and `clipboard_get` then returns it.
+/// with its length and not its text, every time, and `clipboard_get`
+/// then returns the text.
 #[tokio::test]
-async fn clipboard_changed_carries_each_guest_copy() {
+async fn clipboard_changed_reports_each_guest_copy() {
     let status = MockStatusProvider::new(default_status());
     let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
     let (mut r, mut w) = connect_client(&path).await;
@@ -1492,7 +1493,11 @@ async fn clipboard_changed_carries_each_guest_copy() {
     inputs.clipboard.set_text("from the guest").unwrap();
     let ev = recv_line(&mut r).await;
     assert_eq!(ev["event"], "clipboard_changed");
-    assert_eq!(ev["data"]["text"], "from the guest");
+    assert_eq!(
+        ev["data"],
+        serde_json::json!({ "bytes": "from the guest".len() }),
+        "the event carries the length, not the text"
+    );
 
     // The same text copied again is reported again.
     inputs.clipboard.set_text("from the guest").unwrap();
@@ -1535,7 +1540,7 @@ async fn clipboard_changed_needs_a_subscription() {
 
     inputs.clipboard.set_text("heard").unwrap();
     let ev = recv_line(&mut r).await;
-    assert_eq!(ev["data"]["text"], "heard");
+    assert_eq!(ev["data"]["bytes"], "heard".len());
 
     handle.stop().await;
 }
@@ -1606,6 +1611,63 @@ async fn resize_queues_the_rounded_size() {
         inputs.resize_rx.try_recv(),
         Ok(DisplaySize::Requested(1360, 8))
     );
+
+    handle.stop().await;
+}
+
+/// A full resize queue is `queue_full`, which a client can retry; a
+/// closed one means the session has ended.
+#[tokio::test]
+async fn resize_reports_a_full_queue_apart_from_a_closed_one() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, mut inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    // The harness's queue holds 32 and nothing drains it.
+    for id in 2..34 {
+        send_request(
+            &mut w,
+            id,
+            "resize",
+            serde_json::json!({ "width": 1024, "height": 768 }),
+        )
+        .await;
+        assert_eq!(recv_line(&mut r).await["ok"], true);
+    }
+    send_request(
+        &mut w,
+        34,
+        "resize",
+        serde_json::json!({ "width": 1024, "height": 768 }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "queue_full");
+
+    // Room again once the main channel takes one.
+    assert!(inputs.resize_rx.try_recv().is_ok());
+    send_request(
+        &mut w,
+        35,
+        "resize",
+        serde_json::json!({ "width": 1024, "height": 768 }),
+    )
+    .await;
+    assert_eq!(recv_line(&mut r).await["ok"], true);
+
+    drop(inputs.resize_rx);
+    send_request(
+        &mut w,
+        36,
+        "resize",
+        serde_json::json!({ "width": 1024, "height": 768 }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "internal_error");
 
     handle.stop().await;
 }

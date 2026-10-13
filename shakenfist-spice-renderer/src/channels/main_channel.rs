@@ -2681,9 +2681,8 @@ mod tests {
 
         #[tokio::test]
         async fn a_resize_asked_for_before_the_agent_connects_is_sent_when_it_does() {
-            // The survey's suspected gap: the debounce arm was the only
-            // sender, and it fired while there was no agent, so the size
-            // was held and never sent.
+            // The debounce arm fires while there is no agent and can only
+            // hold the size; unless connecting sends it, it is never sent.
             let (mut channel, mut peers, monitors_tx) = test_main_channel_full(None).await;
             let task = tokio::spawn(async move { channel.run().await });
 

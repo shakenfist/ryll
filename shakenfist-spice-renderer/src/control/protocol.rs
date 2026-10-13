@@ -186,6 +186,9 @@ pub enum ErrorCode {
     AgentNotConnected,
     NoSuchSurface,
     UnsupportedFormat,
+    /// A queue into the session was full; retry shortly.  Added in
+    /// v1.3, returned by `resize`.
+    QueueFull,
     NotImplemented,
     InternalError,
 }
@@ -286,12 +289,20 @@ pub struct ClipboardSetParams {
     pub text: String,
 }
 
-/// Result payload for the v1.3 `clipboard_get` verb, and data payload
-/// of the v1.3 `clipboard_changed` event.  `text` is `null` when
-/// nothing has been copied on either side yet.
+/// Result payload for the v1.3 `clipboard_get` verb.  `text` is
+/// `null` when nothing has been copied on either side yet.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClipboardText {
     pub text: Option<String>,
+}
+
+/// Data payload of the v1.3 `clipboard_changed` event: the length of
+/// the guest's copy in bytes.  The text is not carried, because a copy
+/// can be 100 MiB and the per-client queue is bounded by count, not
+/// size; a client reads it with `clipboard_get`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardChanged {
+    pub bytes: u64,
 }
 
 /// Params for the v1.3 `resize` verb, and its result: the result
