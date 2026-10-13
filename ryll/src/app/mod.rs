@@ -29,7 +29,7 @@ use crate::config::{Config, ShareDirConfig, VirtualDiskConfig};
 use crate::display_gui::TextureCache;
 use crate::input_egui::{
     modifier_events, mouse_button_to_spice, paste_shortcut_pressed, translate_key_events, HeldKeys,
-    HostShortcut,
+    HostShortcut, WheelAccumulator,
 };
 use crate::notifications::{
     self as notifications, register_gap_notification_observer, NotificationEntry,
@@ -37,7 +37,7 @@ use crate::notifications::{
 };
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
-use shakenfist_spice_protocol::{ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
+use shakenfist_spice_protocol::{mouse_buttons, ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
 use shakenfist_spice_renderer::channels::VolumeControl;
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
@@ -342,6 +342,9 @@ pub struct RyllApp {
     // inputs channel.  Used to send synthetic releases when input
     // forwarding is suppressed (e.g. bug report dialog opens).
     forwarded_buttons: u32,
+
+    // Wheel scroll not yet sent to the guest as whole clicks.
+    wheel: WheelAccumulator,
 
     // Pending viewport resize from a new primary-surface event.
     // Only set for (display_channel_id, surface_id) == (0, 0).
@@ -912,6 +915,7 @@ impl RyllApp {
             held_keys: HeldKeys::default(),
             screenshot_requested: false,
             forwarded_buttons: 0,
+            wheel: WheelAccumulator::default(),
             pending_resize: None,
             last_auto_resize: None,
             obey_guest_size,
@@ -1077,6 +1081,7 @@ impl RyllApp {
         self.last_modifiers = None;
         self.held_keys = HeldKeys::default();
         self.forwarded_buttons = 0;
+        self.wheel.reset();
         self.pending_resize = None;
         self.last_auto_resize = None;
         self.pending_resolution_notify = None;
@@ -4255,9 +4260,14 @@ impl eframe::App for RyllApp {
                                     }
 
                                     if pointer_on_surface {
-                                        let scroll_y = i.smooth_scroll_delta.y;
-                                        if scroll_y.abs() > 0.5 {
-                                            let btn = if scroll_y > 0.0 { 0x08 } else { 0x10 };
+                                        let clicks =
+                                            self.wheel.clicks(&i.events, response.rect.height());
+                                        let btn = if clicks > 0 {
+                                            mouse_buttons::UP
+                                        } else {
+                                            mouse_buttons::DOWN
+                                        };
+                                        for _ in 0..clicks.unsigned_abs() {
                                             let _ = tx.try_send(InputEvent::MouseDown {
                                                 button: btn,
                                                 x: pos.0,
@@ -4269,6 +4279,8 @@ impl eframe::App for RyllApp {
                                                 y: pos.1,
                                             });
                                         }
+                                    } else {
+                                        self.wheel.reset();
                                     }
                                 });
                             }

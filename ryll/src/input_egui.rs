@@ -514,6 +514,68 @@ pub fn modifier_events(prev: egui::Modifiers, now: egui::Modifiers) -> Vec<Input
         .collect()
 }
 
+/// Points of pixel-precise (trackpad) scroll that make one wheel click.
+/// This matches egui's native `line_scroll_speed`, so a trackpad scrolls
+/// the guest about as far as it would scroll an egui scroll area.
+const POINTS_PER_WHEEL_CLICK: f32 = 40.0;
+
+/// Most wheel clicks sent for one frame. A free-spinning wheel or a
+/// page-sized step would otherwise send a burst big enough to fill the
+/// input channel; the excess is dropped, not carried.
+const MAX_WHEEL_CLICKS_PER_FRAME: i32 = 10;
+
+/// Turns egui's raw wheel events into whole SPICE wheel clicks.
+///
+/// SPICE has only up and down wheel buttons, so ryll sends one press and
+/// release per notch. A mouse wheel reports whole lines, one per notch;
+/// a trackpad reports many small point deltas. Both are summed here in
+/// lines, whole lines become clicks, and the fraction carries into later
+/// frames. egui's `smooth_scroll_delta` is not used: it spreads one notch
+/// over several frames, and egui also folds Shift and Ctrl scrolling into
+/// horizontal scroll and zoom, which the guest should see as plain
+/// vertical scrolling with the modifier held. Horizontal deltas are
+/// ignored.
+#[derive(Debug, Default)]
+pub struct WheelAccumulator {
+    /// Scroll not yet sent, in lines. Positive is up.
+    lines: f32,
+}
+
+impl WheelAccumulator {
+    /// Fold one frame's events into wheel clicks: positive for up, negative
+    /// for down. `page_points` is the height a page-unit step scrolls,
+    /// normally the surface's height.
+    pub fn clicks(&mut self, events: &[egui::Event], page_points: f32) -> i32 {
+        for event in events {
+            if let egui::Event::MouseWheel {
+                unit, delta, phase, ..
+            } = event
+            {
+                // A new trackpad gesture starts from zero, so the end of the
+                // last one cannot tip this one over into an extra click.
+                if *phase == egui::TouchPhase::Start {
+                    self.lines = 0.0;
+                }
+                // egui's positive y moves the content down, which is
+                // scrolling up.
+                self.lines += match unit {
+                    egui::MouseWheelUnit::Line => delta.y,
+                    egui::MouseWheelUnit::Point => delta.y / POINTS_PER_WHEEL_CLICK,
+                    egui::MouseWheelUnit::Page => delta.y * page_points / POINTS_PER_WHEEL_CLICK,
+                };
+            }
+        }
+        let whole = self.lines.trunc();
+        self.lines -= whole;
+        (whole as i32).clamp(-MAX_WHEEL_CLICKS_PER_FRAME, MAX_WHEEL_CLICKS_PER_FRAME)
+    }
+
+    /// Forget scroll not yet sent, e.g. when the pointer leaves the surface.
+    pub fn reset(&mut self) {
+        self.lines = 0.0;
+    }
+}
+
 /// Convert an egui pointer button to the SPICE wire button flag.
 ///
 /// This was previously in `channels::inputs` alongside the scancode
@@ -1095,5 +1157,124 @@ mod tests {
             &mut held,
         );
         assert_eq!(wire(events), vec![(true, 0x0F), (false, 0x8F)]);
+    }
+
+    fn wheel(unit: egui::MouseWheelUnit, y: f32, phase: egui::TouchPhase) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, y),
+            phase,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    fn line(y: f32) -> egui::Event {
+        wheel(egui::MouseWheelUnit::Line, y, egui::TouchPhase::Move)
+    }
+
+    fn points(y: f32) -> egui::Event {
+        wheel(egui::MouseWheelUnit::Point, y, egui::TouchPhase::Move)
+    }
+
+    #[test]
+    fn wheel_notch_is_one_click() {
+        // One notch is one click however many frames follow it (#527).
+        let mut acc = WheelAccumulator::default();
+        assert_eq!(acc.clicks(&[line(1.0)], 600.0), 1);
+        assert_eq!(acc.clicks(&[], 600.0), 0);
+        assert_eq!(acc.clicks(&[], 600.0), 0);
+        assert_eq!(acc.clicks(&[line(-1.0)], 600.0), -1);
+        assert_eq!(acc.clicks(&[line(1.0), line(1.0), line(1.0)], 600.0), 3);
+    }
+
+    #[test]
+    fn trackpad_points_accumulate_across_frames() {
+        // Ten frames of 6 points are 60 points: one click once 40 is
+        // reached, with the 20 left over carried, not lost or rounded up.
+        let mut acc = WheelAccumulator::default();
+        let sent: Vec<i32> = (0..10).map(|_| acc.clicks(&[points(6.0)], 600.0)).collect();
+        assert_eq!(sent.iter().sum::<i32>(), 1);
+        assert_eq!(sent.iter().position(|&c| c != 0), Some(6));
+        assert_eq!(acc.clicks(&[points(24.0)], 600.0), 1);
+        // Small deltas below the old 0.5-point threshold still count.
+        let mut acc = WheelAccumulator::default();
+        let sent: i32 = (0..110).map(|_| acc.clicks(&[points(-0.4)], 600.0)).sum();
+        assert_eq!(sent, -1);
+    }
+
+    #[test]
+    fn reversing_cancels_unsent_scroll() {
+        let mut acc = WheelAccumulator::default();
+        assert_eq!(acc.clicks(&[points(30.0)], 600.0), 0);
+        assert_eq!(acc.clicks(&[points(-30.0)], 600.0), 0);
+        assert_eq!(acc.clicks(&[points(-30.0)], 600.0), 0);
+        assert_eq!(acc.clicks(&[points(-20.0)], 600.0), -1);
+    }
+
+    #[test]
+    fn new_gesture_drops_the_last_ones_remainder() {
+        let mut acc = WheelAccumulator::default();
+        assert_eq!(acc.clicks(&[points(35.0)], 600.0), 0);
+        let start = wheel(egui::MouseWheelUnit::Point, 10.0, egui::TouchPhase::Start);
+        assert_eq!(acc.clicks(&[start], 600.0), 0);
+        assert_eq!(acc.clicks(&[points(32.0)], 600.0), 1);
+    }
+
+    #[test]
+    fn reset_drops_unsent_scroll() {
+        let mut acc = WheelAccumulator::default();
+        assert_eq!(acc.clicks(&[points(35.0)], 600.0), 0);
+        acc.reset();
+        assert_eq!(acc.clicks(&[points(10.0)], 600.0), 0);
+    }
+
+    #[test]
+    fn horizontal_scroll_is_ignored() {
+        let mut acc = WheelAccumulator::default();
+        let sideways = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(5.0, 0.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        };
+        assert_eq!(acc.clicks(&[sideways], 600.0), 0);
+        assert_eq!(acc.clicks(&[line(1.0)], 600.0), 1);
+    }
+
+    #[test]
+    fn modified_scroll_stays_vertical() {
+        // egui turns Shift+wheel into horizontal scroll and Ctrl+wheel into
+        // zoom; the guest wants the vertical click with the modifier held.
+        let mut acc = WheelAccumulator::default();
+        for modifiers in [egui::Modifiers::SHIFT, egui::Modifiers::CTRL] {
+            let event = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers,
+            };
+            assert_eq!(acc.clicks(&[event], 600.0), -1);
+        }
+    }
+
+    #[test]
+    fn page_steps_scale_and_are_capped() {
+        let mut acc = WheelAccumulator::default();
+        let page = wheel(egui::MouseWheelUnit::Page, 1.0, egui::TouchPhase::Move);
+        // 200 points is 5 clicks.
+        assert_eq!(acc.clicks(std::slice::from_ref(&page), 200.0), 5);
+        // 2000 points would be 50; the excess is dropped, not carried.
+        assert_eq!(acc.clicks(&[page], 2000.0), MAX_WHEEL_CLICKS_PER_FRAME);
+        assert_eq!(acc.clicks(&[], 2000.0), 0);
+    }
+
+    #[test]
+    fn other_events_are_ignored() {
+        let mut acc = WheelAccumulator::default();
+        let events = [
+            egui::Event::PointerMoved(egui::pos2(1.0, 2.0)),
+            egui::Event::Text("a".to_string()),
+        ];
+        assert_eq!(acc.clicks(&events, 600.0), 0);
     }
 }
