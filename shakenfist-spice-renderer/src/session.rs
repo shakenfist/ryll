@@ -311,6 +311,7 @@ pub async fn run_connection(
         ChannelType,
         tokio::task::JoinHandle<Result<(), anyhow::Error>>,
     )> = vec![(ChannelType::Main, main_handle)];
+    let mut input_rx = Some(input_rx);
     let mut usb_rx = Some(usb_rx);
     let mut webdav_rx = Some(webdav_rx);
     let shared_glz_dictionary = DisplayChannel::new_shared_glz_dictionary(glz_dictionary_cap_bytes);
@@ -320,8 +321,17 @@ pub async fn run_connection(
         info!("RYLL_K1_MAIN_ONLY set — skipping all secondary channels (main only)");
     }
 
-    for (channel_type, channel_id) in channels {
+    for (channel_type, channel_id, link) in plan_channel_links(&channels) {
         if main_only {
+            continue;
+        }
+        if let ChannelLink::Skip(reason) = link {
+            info!(
+                "Skipping {} channel (id={}): {}",
+                channel_type.name(),
+                channel_id,
+                reason
+            );
             continue;
         }
         match channel_type {
@@ -377,27 +387,31 @@ pub async fn run_connection(
                 ));
             }
 
+            // The host hands over one receiver each for inputs, usbredir
+            // and webdav, so only one channel of each kind can be served.
+            // plan_channel_links() already skips the later ones; the
+            // `take()`s here are what moves each receiver into its channel.
             ChannelType::Inputs => {
-                let stream = client
-                    .connect_channel(session_id, channel_type, channel_id)
-                    .await?;
-                let mut channel = InputsChannel::new(
-                    stream,
-                    events.clone(),
-                    input_rx,
-                    capture.clone(),
-                    byte_counter.clone(),
-                    traffic.clone(),
-                    snapshots.inputs.clone(),
-                    enable_paste,
-                    log_config,
-                );
-                handles.push((
-                    ChannelType::Inputs,
-                    tokio::spawn(async move { channel.run().await }),
-                ));
-                // input_rx is moved, can't connect more inputs channels
-                break;
+                if let Some(input_rx) = input_rx.take() {
+                    let stream = client
+                        .connect_channel(session_id, channel_type, channel_id)
+                        .await?;
+                    let mut channel = InputsChannel::new(
+                        stream,
+                        events.clone(),
+                        input_rx,
+                        capture.clone(),
+                        byte_counter.clone(),
+                        traffic.clone(),
+                        snapshots.inputs.clone(),
+                        enable_paste,
+                        log_config,
+                    );
+                    handles.push((
+                        ChannelType::Inputs,
+                        tokio::spawn(async move { channel.run().await }),
+                    ));
+                }
             }
 
             ChannelType::Usbredir => {
@@ -420,11 +434,6 @@ pub async fn run_connection(
                         ChannelType::Usbredir,
                         tokio::spawn(async move { channel.run().await }),
                     ));
-                } else {
-                    info!(
-                        "Skipping additional usbredir channel (id={}): only one supported",
-                        channel_id
-                    );
                 }
             }
 
@@ -448,11 +457,6 @@ pub async fn run_connection(
                         ChannelType::Webdav,
                         tokio::spawn(async move { channel.run().await }),
                     ));
-                } else {
-                    info!(
-                        "Skipping additional webdav channel (id={}): only one supported",
-                        channel_id
-                    );
                 }
             }
 
@@ -477,21 +481,9 @@ pub async fn run_connection(
                     tokio::spawn(async move { channel.run().await }),
                 ));
             }
-            #[cfg(not(feature = "audio"))]
-            ChannelType::Playback => {
-                info!(
-                    "Skipping playback channel (id={}): audio feature disabled at compile time",
-                    channel_id
-                );
-            }
-
-            _ => {
-                info!(
-                    "Skipping channel: {} (id={})",
-                    channel_type.name(),
-                    channel_id
-                );
-            }
+            // plan_channel_links() skips every other type, and playback
+            // too when the `audio` feature is off.
+            _ => {}
         }
     }
 
@@ -1103,6 +1095,57 @@ pub async fn run_headless(
     Ok(())
 }
 
+/// What `run_connection` does with one entry of the server's channel
+/// list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChannelLink {
+    /// Link the channel and run its handler.
+    Open,
+    /// Leave the channel unlinked, for the given reason (logged).
+    Skip(&'static str),
+}
+
+/// Decide, for every entry of the server's CHANNELS_LIST, whether
+/// `run_connection` links it.
+///
+/// The decision depends only on the list, never on where in it an entry
+/// sits: a server may list its channels in any order (andris lists
+/// inputs before cursor), and an entry the client can't serve is
+/// skipped without stopping the walk, so every channel after it is
+/// still considered. Inputs, usbredir and webdav are each served by the
+/// one receiver the host hands in, so the first of each kind is linked
+/// and any later one is skipped. The main channel is already linked by
+/// the time the list arrives.
+fn plan_channel_links(channels: &[(ChannelType, u8)]) -> Vec<(ChannelType, u8, ChannelLink)> {
+    let mut seen_single = Vec::new();
+    channels
+        .iter()
+        .map(|&(channel_type, channel_id)| {
+            let link = match channel_type {
+                ChannelType::Display | ChannelType::Cursor => ChannelLink::Open,
+                ChannelType::Playback if cfg!(feature = "audio") => ChannelLink::Open,
+                ChannelType::Playback => {
+                    ChannelLink::Skip("audio feature disabled at compile time")
+                }
+                ChannelType::Inputs | ChannelType::Usbredir | ChannelType::Webdav => {
+                    if seen_single.contains(&channel_type) {
+                        ChannelLink::Skip("only one supported")
+                    } else {
+                        seen_single.push(channel_type);
+                        ChannelLink::Open
+                    }
+                }
+                ChannelType::Main => ChannelLink::Skip("already linked"),
+                ChannelType::Record
+                | ChannelType::Tunnel
+                | ChannelType::Smartcard
+                | ChannelType::Port => ChannelLink::Skip("not supported"),
+            };
+            (channel_type, channel_id, link)
+        })
+        .collect()
+}
+
 /// What joining `run_headless`'s connection task produced.
 type ConnectionJoin = std::result::Result<Result<()>, tokio::task::JoinError>;
 
@@ -1143,6 +1186,109 @@ fn connection_outcome(join: Option<ConnectionJoin>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened(plan: &[(ChannelType, u8, ChannelLink)]) -> Vec<(ChannelType, u8)> {
+        plan.iter()
+            .filter(|(_, _, link)| *link == ChannelLink::Open)
+            .map(|&(channel_type, channel_id, _)| (channel_type, channel_id))
+            .collect()
+    }
+
+    #[test]
+    fn channels_listed_after_inputs_are_still_linked() {
+        // andris's order: inputs before cursor (shakenfist/ryll#509).
+        let list = [
+            (ChannelType::Display, 0),
+            (ChannelType::Inputs, 0),
+            (ChannelType::Cursor, 0),
+            (ChannelType::Usbredir, 0),
+            (ChannelType::Webdav, 0),
+        ];
+        let plan = plan_channel_links(&list);
+        assert_eq!(opened(&plan), list.to_vec());
+    }
+
+    #[test]
+    fn a_second_single_receiver_channel_is_skipped_and_the_walk_goes_on() {
+        let list = [
+            (ChannelType::Inputs, 0),
+            (ChannelType::Inputs, 1),
+            (ChannelType::Usbredir, 0),
+            (ChannelType::Usbredir, 1),
+            (ChannelType::Webdav, 0),
+            (ChannelType::Webdav, 1),
+            (ChannelType::Cursor, 0),
+            (ChannelType::Display, 0),
+        ];
+        let plan = plan_channel_links(&list);
+        assert_eq!(
+            opened(&plan),
+            vec![
+                (ChannelType::Inputs, 0),
+                (ChannelType::Usbredir, 0),
+                (ChannelType::Webdav, 0),
+                (ChannelType::Cursor, 0),
+                (ChannelType::Display, 0),
+            ]
+        );
+        for duplicate in [
+            (ChannelType::Inputs, 1),
+            (ChannelType::Usbredir, 1),
+            (ChannelType::Webdav, 1),
+        ] {
+            assert!(
+                plan.contains(&(
+                    duplicate.0,
+                    duplicate.1,
+                    ChannelLink::Skip("only one supported")
+                )),
+                "{:?} should be skipped as a duplicate",
+                duplicate
+            );
+        }
+    }
+
+    #[test]
+    fn every_display_and_cursor_channel_is_linked() {
+        // A multi-head guest lists one display (and one cursor) per head.
+        let list = [
+            (ChannelType::Display, 0),
+            (ChannelType::Display, 1),
+            (ChannelType::Cursor, 0),
+            (ChannelType::Cursor, 1),
+        ];
+        assert_eq!(opened(&plan_channel_links(&list)), list.to_vec());
+    }
+
+    #[test]
+    fn unsupported_channels_are_skipped_without_stopping_the_walk() {
+        let list = [
+            (ChannelType::Main, 0),
+            (ChannelType::Record, 0),
+            (ChannelType::Smartcard, 0),
+            (ChannelType::Port, 0),
+            (ChannelType::Tunnel, 0),
+            (ChannelType::Cursor, 0),
+        ];
+        let plan = plan_channel_links(&list);
+        assert_eq!(opened(&plan), vec![(ChannelType::Cursor, 0)]);
+        assert_eq!(plan[0].2, ChannelLink::Skip("already linked"));
+        assert!(plan[1..5]
+            .iter()
+            .all(|(_, _, link)| *link == ChannelLink::Skip("not supported")));
+    }
+
+    #[test]
+    fn playback_follows_the_audio_feature() {
+        let plan = plan_channel_links(&[(ChannelType::Playback, 0), (ChannelType::Cursor, 0)]);
+        let expected = if cfg!(feature = "audio") {
+            ChannelLink::Open
+        } else {
+            ChannelLink::Skip("audio feature disabled at compile time")
+        };
+        assert_eq!(plan[0].2, expected);
+        assert_eq!(plan[1].2, ChannelLink::Open);
+    }
 
     #[test]
     fn connection_outcome_clean_finish_is_ok() {
