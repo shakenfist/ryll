@@ -704,7 +704,7 @@ impl InputsChannel {
                 }
                 .write(&mut payload);
                 let msg = make_message(inputs_client::MOUSE_PRESS, &payload);
-                info!(
+                debug!(
                     "inputs: mouse down: button={}, pos=({},{}), state={:#x}",
                     button, x, y, self.button_state
                 );
