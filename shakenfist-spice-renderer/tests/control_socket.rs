@@ -17,6 +17,11 @@
 //!   that `send_key` and `paste` produce the expected `InputEvent`s.
 //! - A `SurfaceMirror` pre-populated via the `with_test_surface` helper
 //!   in `surface_mirror.rs`.
+//! - A `MemoryClipboard` that tests write as the guest would, through
+//!   `ClipboardBackend::set_text`, and read back as the main channel
+//!   would.
+//! - A resize `mpsc` whose receiver the test inspects to verify what
+//!   `resize` queued for the main channel.
 //!
 //! Each test binds the server to a temporary Unix-socket path (via
 //! `tempfile::TempDir`), connects a client, drives one or more request/
@@ -46,9 +51,10 @@ use tokio_util::sync::CancellationToken;
 
 use shakenfist_spice_renderer::channels::{ChannelEvent, InputEvent};
 use shakenfist_spice_renderer::control::protocol::{RequestId, StatusResult, SurfaceInfo};
-use shakenfist_spice_renderer::control::server::{Server, StatusProvider};
+use shakenfist_spice_renderer::control::server::{Server, SessionHandles, StatusProvider};
 use shakenfist_spice_renderer::make_scancode;
 use shakenfist_spice_renderer::surface_mirror::SurfaceMirror;
+use shakenfist_spice_renderer::{ClipboardBackend, DisplaySize, MemoryClipboard};
 
 // ── Mock status provider ──────────────────────────────────────────
 
@@ -119,6 +125,12 @@ struct TestInputs {
     pub mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
     /// A ref to the status provider so tests can mutate it mid-run.
     pub status: Arc<MockStatusProvider>,
+    /// The clipboard the `clipboard_*` verbs act on. Tests write guest
+    /// copies through `ClipboardBackend::set_text`, as the main channel
+    /// does, and read what the main channel's poll would see.
+    pub clipboard: Arc<MemoryClipboard>,
+    /// Read the sizes the `resize` verb queues for the main channel.
+    pub resize_rx: mpsc::Receiver<DisplaySize>,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────
@@ -140,6 +152,8 @@ async fn spawn_server(
     let (event_tx, _) = broadcast::channel::<ChannelEvent>(1024);
     let (agent_connected_tx, agent_connected_rx) = watch::channel(false);
     let (input_tx, input_rx) = mpsc::channel::<InputEvent>(256);
+    let (resize_tx, resize_rx) = mpsc::channel::<DisplaySize>(32);
+    let clipboard = Arc::new(MemoryClipboard::new());
 
     let shutdown = CancellationToken::new();
     // Bound before the task is spawned, so the caller can connect at
@@ -149,8 +163,12 @@ async fn spawn_server(
         status.clone(),
         event_tx.clone(),
         agent_connected_rx,
-        input_tx,
-        mirror.clone(),
+        SessionHandles {
+            input_tx,
+            surface_mirror: mirror.clone(),
+            clipboard: clipboard.clone(),
+            resize_tx,
+        },
         shutdown.clone(),
     ));
 
@@ -163,6 +181,8 @@ async fn spawn_server(
             input_rx,
             mirror,
             status,
+            clipboard,
+            resize_rx,
         },
     )
 }
@@ -250,7 +270,7 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     let (mut r, mut w) = connect_client(&path).await;
 
     let result = hello(&mut r, &mut w).await;
-    assert_eq!(result["protocol_version"], "1.2");
+    assert_eq!(result["protocol_version"], "1.3");
     assert_eq!(result["server_name"], "ryll");
 
     let methods: Vec<String> =
@@ -262,7 +282,11 @@ async fn hello_returns_protocol_version_and_supported_sets() {
     assert!(methods.contains(&"screenshot".into()));
     assert!(methods.contains(&"subscribe".into()));
     assert!(methods.contains(&"unsubscribe".into()));
-    assert_eq!(methods.len(), 7, "expected exactly 7 v1 methods");
+    // Added in v1.3.
+    assert!(methods.contains(&"clipboard_set".into()));
+    assert!(methods.contains(&"clipboard_get".into()));
+    assert!(methods.contains(&"resize".into()));
+    assert_eq!(methods.len(), 10, "expected exactly 10 v1 methods");
 
     let events: Vec<String> =
         serde_json::from_value(result["supported_events"].clone()).expect("supported_events");
@@ -276,12 +300,17 @@ async fn hello_returns_protocol_version_and_supported_sets() {
         "surface_drawn (added in v1.1) missing from supported_events: {:?}",
         events,
     );
-    // 6 base events for any build; the `digest-decode` feature
+    assert!(
+        events.contains(&"clipboard_changed".into()),
+        "clipboard_changed (added in v1.3) missing from supported_events: {:?}",
+        events,
+    );
+    // 7 base events for any build; the `digest-decode` feature
     // appends one more.  Check the lower bound so the assertion
     // does not flap across feature configs.
     assert!(
-        events.len() >= 6,
-        "expected at least 6 events; got {}: {:?}",
+        events.len() >= 7,
+        "expected at least 7 events; got {}: {:?}",
         events.len(),
         events,
     );
@@ -1374,6 +1403,236 @@ async fn agent_transition_survives_a_lagged_event_bus() {
     let ev = recv_line(&mut r).await;
     assert_eq!(ev["event"], "agent_connected");
     assert_eq!(ev["data"]["connected"], true);
+
+    handle.stop().await;
+}
+
+// ── Clipboard and resize (v1.3) ──────────────────────────────────
+
+/// `clipboard_get` is null before either side has copied anything.
+#[tokio::test]
+async fn clipboard_get_is_null_when_nothing_was_copied() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, _inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(&mut w, 2, "clipboard_get", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"], serde_json::json!({ "text": null }));
+
+    handle.stop().await;
+}
+
+/// `clipboard_set` puts the text where the main channel's poll reads
+/// it, and `clipboard_get` reads it back; neither is a guest copy, so
+/// no `clipboard_changed` is sent.
+#[tokio::test]
+async fn clipboard_set_is_seen_by_the_main_channel_and_read_back() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["clipboard_changed"] }),
+    )
+    .await;
+    let sub = recv_line(&mut r).await;
+    assert_eq!(
+        sub["result"]["subscribed"],
+        serde_json::json!(["clipboard_changed"])
+    );
+
+    send_request(
+        &mut w,
+        3,
+        "clipboard_set",
+        serde_json::json!({ "text": "héllo\nworld" }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["id"], 3);
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["result"], serde_json::json!({}));
+    assert_eq!(inputs.clipboard.get_text().as_deref(), Some("héllo\nworld"));
+
+    send_request(&mut w, 4, "clipboard_get", serde_json::json!({})).await;
+    // The next line must be the response: had `clipboard_set` raised
+    // `clipboard_changed`, the event would be ahead of it.
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["id"], 4);
+    assert_eq!(resp["result"]["text"], "héllo\nworld");
+
+    handle.stop().await;
+}
+
+/// A guest copy stored by the main channel raises `clipboard_changed`
+/// with its text, every time, and `clipboard_get` then returns it.
+#[tokio::test]
+async fn clipboard_changed_carries_each_guest_copy() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "subscribe",
+        serde_json::json!({ "events": ["clipboard_changed"] }),
+    )
+    .await;
+    let _sub = recv_line(&mut r).await;
+
+    inputs.clipboard.set_text("from the guest").unwrap();
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "clipboard_changed");
+    assert_eq!(ev["data"]["text"], "from the guest");
+
+    // The same text copied again is reported again.
+    inputs.clipboard.set_text("from the guest").unwrap();
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["event"], "clipboard_changed");
+
+    send_request(&mut w, 3, "clipboard_get", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["result"]["text"], "from the guest");
+
+    handle.stop().await;
+}
+
+/// `clipboard_changed` is only sent to a subscriber, and a copy made
+/// before the client connected is not replayed.
+#[tokio::test]
+async fn clipboard_changed_needs_a_subscription() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    inputs.clipboard.set_text("before connect").unwrap();
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    // Not subscribed: no event, so the next line is this response.
+    inputs.clipboard.set_text("unheard").unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    send_request(&mut w, 2, "status", serde_json::json!({})).await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["id"], 2);
+
+    send_request(
+        &mut w,
+        3,
+        "subscribe",
+        serde_json::json!({ "events": ["clipboard_changed"] }),
+    )
+    .await;
+    let sub = recv_line(&mut r).await;
+    assert_eq!(sub["id"], 3, "nothing from before subscribing is replayed");
+
+    inputs.clipboard.set_text("heard").unwrap();
+    let ev = recv_line(&mut r).await;
+    assert_eq!(ev["data"]["text"], "heard");
+
+    handle.stop().await;
+}
+
+/// `clipboard_set` needs a string `text`.
+#[tokio::test]
+async fn clipboard_set_without_text_is_bad_params() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    for (id, params) in [
+        (2, serde_json::json!({})),
+        (3, serde_json::json!({ "text": 42 })),
+        (4, serde_json::json!({ "text": null })),
+    ] {
+        send_request(&mut w, id, "clipboard_set", params).await;
+        let resp = recv_line(&mut r).await;
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"]["code"], "bad_params");
+    }
+    assert_eq!(inputs.clipboard.get_text(), None);
+
+    handle.stop().await;
+}
+
+/// `resize` queues the size for the main channel, rounded down to the
+/// GUI's 8-pixel grid, and returns what it queued.
+#[tokio::test]
+async fn resize_queues_the_rounded_size() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, mut inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "resize",
+        serde_json::json!({ "width": 1024, "height": 768 }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(
+        resp["result"],
+        serde_json::json!({ "width": 1024, "height": 768 })
+    );
+    assert_eq!(
+        inputs.resize_rx.try_recv(),
+        Ok(DisplaySize::Requested(1024, 768))
+    );
+
+    send_request(
+        &mut w,
+        3,
+        "resize",
+        serde_json::json!({ "width": 1366, "height": 5 }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(
+        resp["result"],
+        serde_json::json!({ "width": 1360, "height": 8 })
+    );
+    assert_eq!(
+        inputs.resize_rx.try_recv(),
+        Ok(DisplaySize::Requested(1360, 8))
+    );
+
+    handle.stop().await;
+}
+
+/// `resize` refuses a missing, non-integer, zero or oversized side, and
+/// queues nothing.
+#[tokio::test]
+async fn resize_refuses_bad_sizes() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, mut inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    for (id, params) in [
+        (2, serde_json::json!({ "width": 1024 })),
+        (3, serde_json::json!({ "width": -1, "height": 768 })),
+        (4, serde_json::json!({ "width": 1024.5, "height": 768 })),
+        (5, serde_json::json!({ "width": 0, "height": 768 })),
+        (6, serde_json::json!({ "width": 1024, "height": 0 })),
+        (7, serde_json::json!({ "width": 16385, "height": 768 })),
+    ] {
+        send_request(&mut w, id, "resize", params.clone()).await;
+        let resp = recv_line(&mut r).await;
+        assert_eq!(resp["ok"], false, "{params}");
+        assert_eq!(resp["error"]["code"], "bad_params", "{params}");
+    }
+    assert!(inputs.resize_rx.try_recv().is_err(), "nothing was queued");
 
     handle.stop().await;
 }

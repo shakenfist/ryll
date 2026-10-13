@@ -105,6 +105,37 @@ fn client_agent_capabilities() -> AnnounceCapabilities {
     caps
 }
 
+/// What a frontend tells the main channel about the guest's display
+/// size, on the queue `MainChannel::new` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplaySize {
+    /// Ask the guest for this size: the GUI's window was resized, the
+    /// browser's viewport changed, or a control-socket client sent
+    /// `resize`. Debounced for 200 ms, then sent to the agent as a
+    /// `VD_AGENT_MONITORS_CONFIG`, or held until there is an agent.
+    Requested(u32, u32),
+    /// The guest already has this size, because the frontend has just
+    /// fitted itself to the guest's surface (the GUI's auto-fit). Sends
+    /// nothing; it records the size as the one the agent has and drops
+    /// any requested size still pending, which the frontend has
+    /// abandoned by following the guest. Without it, a size requested
+    /// before the agent connected would be sent once it did, and would
+    /// resize the guest away from the size it chose and the window
+    /// had since fitted to.
+    GuestHas(u32, u32),
+}
+
+/// Round a display dimension down to the 8-pixel grid that every size
+/// ryll asks the guest for is on, with 8 as the floor.
+///
+/// The GUI's window-driven resize and the control socket's `resize`
+/// verb both go through this, so the guest sees the same sizes from
+/// either. (Web mode rounds to even instead: its H.264 encoder needs
+/// that, and nothing more, so it asks for exactly the browser's size.)
+pub fn align_monitor_dimension(dim: u32) -> u32 {
+    (dim.max(8) / 8) * 8
+}
+
 /// The `VD_AGENT_MONITORS_CONFIG` ryll sends for a `width`x`height`
 /// window: `monitors` identical 32-bit monitors (one if `monitors` is 0),
 /// laid side by side and positioned only when there is more than one.
@@ -290,8 +321,15 @@ pub struct MainChannel {
     guest_clipboard_selection: Option<bool>,
     channels_requested: bool,
     monitors: u8,
-    monitors_config_rx: mpsc::Receiver<(u32, u32)>,
+    monitors_config_rx: mpsc::Receiver<DisplaySize>,
+    /// The latest size asked for and not yet sent to the agent. Kept
+    /// until it is sent, so a size asked for before the agent connects
+    /// goes out once it does; see `maybe_send_agent_monitors_config`.
     pending_monitors_config: Option<(u32, u32)>,
+    /// When the 200 ms resize debounce ends, while one is running. A
+    /// size is only sent once this is `None`, so that a drag through
+    /// many sizes reaches the agent as the one it settled on.
+    resize_debounce: Option<tokio::time::Instant>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_hash: Option<u64>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
@@ -396,7 +434,7 @@ impl MainChannel {
         byte_counter: Arc<ByteCounter>,
         traffic: Arc<dyn TrafficSink>,
         snapshot: Arc<Mutex<MainSnapshot>>,
-        monitors_config_rx: mpsc::Receiver<(u32, u32)>,
+        monitors_config_rx: mpsc::Receiver<DisplaySize>,
         monitors: u8,
         log_config: LogConfig,
         clipboard: Option<Arc<dyn ClipboardBackend>>,
@@ -418,6 +456,7 @@ impl MainChannel {
             monitors,
             monitors_config_rx,
             pending_monitors_config: None,
+            resize_debounce: None,
             last_sent_monitors_config: None,
             guest_caps_received: false,
             guest_clipboard_selection: None,
@@ -497,7 +536,6 @@ impl MainChannel {
     async fn run_loop(&mut self) -> Result<()> {
         info!("main: channel started");
 
-        let mut resize_debounce: Option<tokio::time::Instant> = None;
         // Diagnostic env var for the K1 hang investigation. When
         // RYLL_DISABLE_CLIPBOARD_POLL=1 is set in the environment,
         // the clipboard_interval is replaced by `None` and the
@@ -570,6 +608,10 @@ impl MainChannel {
         // alive, leaving our timer to catch the case where the
         // server disappears without any FIN/RST.
         let keepalive_timeout = std::time::Duration::from_secs(90);
+        // Cleared once every resize sender has gone. A closed receiver
+        // is ready at once, every time, so left in the select it would
+        // spin the loop.
+        let mut monitors_config_open = true;
 
         loop {
             iter_count = iter_count.wrapping_add(1);
@@ -577,6 +619,7 @@ impl MainChannel {
             let stream = &mut self.stream;
             let monitors_config_rx = &mut self.monitors_config_rx;
 
+            let resize_debounce = self.resize_debounce;
             let debounce_sleep = async {
                 match resize_debounce {
                     Some(deadline) => tokio::time::sleep_until(deadline).await,
@@ -625,22 +668,18 @@ impl MainChannel {
                     self.process_messages().await?;
                     last_arm = "read+process_messages_done";
                 }
-                resize = monitors_config_rx.recv() => {
+                resize = monitors_config_rx.recv(), if monitors_config_open => {
                     last_arm = "monitors_config_rx";
-                    let Some((width, height)) = resize else {
+                    let Some(size) = resize else {
+                        debug!("main: resize senders gone; no more resizes this session");
+                        monitors_config_open = false;
                         continue;
                     };
-
-                    if self.last_sent_monitors_config == Some((width, height)) {
-                        continue;
-                    }
-
-                    self.pending_monitors_config = Some((width, height));
-                    resize_debounce = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+                    self.note_display_size(size);
                 }
                 _ = debounce_sleep => {
                     last_arm = "debounce_sleep";
-                    resize_debounce = None;
+                    self.resize_debounce = None;
                     if let Some((width, height)) = self.pending_monitors_config {
                         info!("main: resize debounced: {}x{}", width, height);
                         self.events.emit(ChannelEvent::MonitorsConfig { width, height }).await;
@@ -1305,9 +1344,40 @@ impl MainChannel {
         Ok(())
     }
 
+    /// Take a display size from the frontend's queue. A requested size
+    /// starts (or restarts) the debounce; a size the guest already has
+    /// becomes the last one sent, superseding anything pending.
+    fn note_display_size(&mut self, size: DisplaySize) {
+        match size {
+            DisplaySize::Requested(width, height) => {
+                if self.last_sent_monitors_config == Some((width, height)) {
+                    // Back to the size the agent already has: a
+                    // different size still pending is superseded, not
+                    // sent.
+                    self.pending_monitors_config = None;
+                    self.resize_debounce = None;
+                    return;
+                }
+                self.pending_monitors_config = Some((width, height));
+                self.resize_debounce =
+                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+            }
+            DisplaySize::GuestHas(width, height) => {
+                debug!("main: guest has {}x{}; nothing to send", width, height);
+                self.last_sent_monitors_config = Some((width, height));
+                self.pending_monitors_config = None;
+                self.resize_debounce = None;
+            }
+        }
+    }
+
+    /// Start talking to a newly connected agent: grant it tokens,
+    /// announce our capabilities, and send any display size asked for
+    /// while there was no agent to send it to.
     async fn connect_agent(&mut self) -> Result<()> {
         self.send_agent_start().await?;
-        self.maybe_send_announce_capabilities().await
+        self.maybe_send_announce_capabilities().await?;
+        self.maybe_send_settled_monitors_config().await
     }
 
     async fn send_agent_start(&mut self) -> Result<()> {
@@ -1338,6 +1408,26 @@ impl MainChannel {
         Ok(())
     }
 
+    /// Send the pending display size if it has settled, that is, if no
+    /// resize debounce is running. Called whenever the agent becomes
+    /// able to take one: on connect, and when the guest announces its
+    /// capabilities. The debounce arm sends a size that is still
+    /// settling when it fires, so sending it here too would only send
+    /// the middle of a drag.
+    ///
+    /// Without this, the debounce arm was the only sender, and it
+    /// leaves a size it cannot send in `pending_monitors_config`: a
+    /// resize asked for before the agent connected was never sent.
+    async fn maybe_send_settled_monitors_config(&mut self) -> Result<()> {
+        if self.resize_debounce.is_some() {
+            return Ok(());
+        }
+        self.maybe_send_agent_monitors_config().await
+    }
+
+    /// Send `pending_monitors_config` if the agent can take it now,
+    /// and clear it once it is queued. A size that cannot go yet stays
+    /// pending; `maybe_send_settled_monitors_config` retries it.
     async fn maybe_send_agent_monitors_config(&mut self) -> Result<()> {
         let Some((width, height)) = self.pending_monitors_config else {
             debug!("main: monitors config: no pending config");
@@ -1355,6 +1445,7 @@ impl MainChannel {
         }
 
         if self.last_sent_monitors_config == Some((width, height)) {
+            self.pending_monitors_config = None;
             return Ok(());
         }
 
@@ -1573,6 +1664,11 @@ impl MainChannel {
                     self.agent_caps_announced = false;
                     self.maybe_send_announce_capabilities().await?;
                 }
+                // spice-gtk sends its display configuration when the
+                // guest's capabilities arrive; a size that could not go
+                // at connect (our announce did not fit the queue) gets
+                // another chance here.
+                self.maybe_send_settled_monitors_config().await?;
             }
             VD_AGENT_REPLY => match VdAgentReply::decode(payload) {
                 Ok(reply) => {
@@ -2182,6 +2278,7 @@ mod tests {
             VD_AGENT_CLIPBOARD_SELECTION_PRIMARY, VD_AGENT_MAX_DATA_SIZE,
         };
         use shakenfist_spice_protocol::MOUSE_MODE_SERVER;
+        use tokio::io::AsyncWriteExt;
 
         async fn test_main_channel() -> (MainChannel, TestChannelPeers) {
             test_main_channel_with_clipboard(None).await
@@ -2190,8 +2287,17 @@ mod tests {
         async fn test_main_channel_with_clipboard(
             clipboard: Option<Arc<dyn ClipboardBackend>>,
         ) -> (MainChannel, TestChannelPeers) {
+            let (channel, peers, _monitors_tx) = test_main_channel_full(clipboard).await;
+            (channel, peers)
+        }
+
+        /// A channel, the peers kept alive alongside it, and the sender
+        /// for its display-size queue.
+        async fn test_main_channel_full(
+            clipboard: Option<Arc<dyn ClipboardBackend>>,
+        ) -> (MainChannel, TestChannelPeers, mpsc::Sender<DisplaySize>) {
             let (stream, events, peers) = loopback().await;
-            let (_monitors_tx, monitors_rx) = mpsc::channel(1);
+            let (monitors_tx, monitors_rx) = mpsc::channel(1);
             let (init_tx, _init_rx) = oneshot::channel();
             let (channels_tx, _channels_rx) = oneshot::channel();
             let channel = MainChannel::new(
@@ -2210,7 +2316,7 @@ mod tests {
                 channels_tx,
                 Arc::new(MmClock::new()),
             );
-            (channel, peers)
+            (channel, peers, monitors_tx)
         }
 
         #[tokio::test]
@@ -2535,6 +2641,216 @@ mod tests {
                     "{name}"
                 );
             }
+        }
+
+        /// The AGENT_CONNECTED_TOKENS a server sends when the agent
+        /// connects, granting `tokens`.
+        fn agent_connected_tokens(tokens: u32) -> Vec<u8> {
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&main_server::AGENT_CONNECTED_TOKENS.to_le_bytes());
+            msg.extend_from_slice(&4u32.to_le_bytes());
+            msg.extend_from_slice(&tokens.to_le_bytes());
+            msg
+        }
+
+        /// Read the channel's messages until an AGENT_DATA carrying a
+        /// VD_AGENT_MONITORS_CONFIG, and return its agent message body;
+        /// `None` if none arrives within `wait`.
+        async fn next_monitors_config(
+            peers: &mut TestChannelPeers,
+            wait: std::time::Duration,
+        ) -> Option<Vec<u8>> {
+            let read = async {
+                loop {
+                    let header = peers.read_sent(6).await;
+                    let msg_type = u16::from_le_bytes([header[0], header[1]]);
+                    let size =
+                        u32::from_le_bytes([header[2], header[3], header[4], header[5]]) as usize;
+                    let body = peers.read_sent(size).await;
+                    if msg_type == main_client::AGENT_DATA
+                        && body.len() >= VdAgentMessageHeader::SIZE
+                        && u32::from_le_bytes([body[4], body[5], body[6], body[7]])
+                            == VD_AGENT_MONITORS_CONFIG
+                    {
+                        return body[VdAgentMessageHeader::SIZE..].to_vec();
+                    }
+                }
+            };
+            tokio::time::timeout(wait, read).await.ok()
+        }
+
+        #[tokio::test]
+        async fn a_resize_asked_for_before_the_agent_connects_is_sent_when_it_does() {
+            // The survey's suspected gap: the debounce arm was the only
+            // sender, and it fired while there was no agent, so the size
+            // was held and never sent.
+            let (mut channel, mut peers, monitors_tx) = test_main_channel_full(None).await;
+            let task = tokio::spawn(async move { channel.run().await });
+
+            monitors_tx
+                .send(DisplaySize::Requested(1024, 768))
+                .await
+                .unwrap();
+            // Past the 200 ms debounce, with no agent to send to.
+            assert_eq!(
+                next_monitors_config(&mut peers, std::time::Duration::from_millis(500)).await,
+                None
+            );
+
+            peers
+                .peer
+                .write_all(&agent_connected_tokens(10))
+                .await
+                .unwrap();
+            let body = next_monitors_config(&mut peers, std::time::Duration::from_secs(2))
+                .await
+                .expect("the held size is sent once the agent connects");
+            let config = MonitorsConfig::decode(&body).unwrap();
+            assert_eq!(config, agent_monitors_config(1, 1024, 768));
+
+            task.abort();
+        }
+
+        #[tokio::test]
+        async fn a_settled_pending_size_goes_out_on_connect() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.pending_monitors_config = Some((1024, 768));
+            channel
+                .handle_message(main_server::AGENT_CONNECTED_TOKENS, &10u32.to_le_bytes())
+                .await
+                .unwrap();
+            assert_eq!(channel.last_sent_monitors_config, Some((1024, 768)));
+            assert_eq!(channel.pending_monitors_config, None);
+        }
+
+        #[tokio::test]
+        async fn a_size_still_settling_waits_for_its_debounce() {
+            // Mid-drag, the debounce arm sends the size the drag ends on;
+            // connecting must not send one from the middle of it.
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.pending_monitors_config = Some((1024, 768));
+            channel.resize_debounce =
+                Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
+            channel
+                .handle_message(main_server::AGENT_CONNECTED_TOKENS, &10u32.to_le_bytes())
+                .await
+                .unwrap();
+            assert_eq!(channel.last_sent_monitors_config, None);
+            assert_eq!(channel.pending_monitors_config, Some((1024, 768)));
+        }
+
+        #[tokio::test]
+        async fn the_guest_announce_retries_a_pending_size() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            channel.pending_monitors_config = Some((800, 600));
+            let mut payload = Vec::new();
+            AnnounceCapabilities {
+                request: 0,
+                caps: Vec::new(),
+            }
+            .write(&mut payload);
+            channel
+                .handle_agent_message(VD_AGENT_ANNOUNCE_CAPABILITIES, &payload)
+                .await
+                .unwrap();
+            assert_eq!(channel.last_sent_monitors_config, Some((800, 600)));
+        }
+
+        #[tokio::test]
+        async fn a_pending_size_the_agent_already_has_is_dropped() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            channel.last_sent_monitors_config = Some((800, 600));
+            channel.pending_monitors_config = Some((800, 600));
+            channel.maybe_send_agent_monitors_config().await.unwrap();
+            assert_eq!(channel.pending_monitors_config, None);
+            assert_eq!(channel.agent_tokens, 10, "nothing was sent");
+        }
+
+        #[tokio::test]
+        async fn a_size_the_guest_already_has_supersedes_a_held_request() {
+            // A booting guest: the GUI asks for its window size with no
+            // agent yet, then fits the window to the guest's surface. The
+            // guest keeps its own size when the agent arrives.
+            let (mut channel, mut peers, monitors_tx) = test_main_channel_full(None).await;
+            let driver = async {
+                monitors_tx
+                    .send(DisplaySize::Requested(1280, 776))
+                    .await
+                    .unwrap();
+                // Past the debounce, so the request is held for an agent.
+                assert_eq!(
+                    next_monitors_config(&mut peers, std::time::Duration::from_millis(500)).await,
+                    None
+                );
+                monitors_tx
+                    .send(DisplaySize::GuestHas(1024, 768))
+                    .await
+                    .unwrap();
+                // The queue holds one, so room in it means the channel
+                // has taken the GuestHas. In the GUI it comes long
+                // before the agent; the channel's select does not
+                // order the queue against the socket.
+                drop(monitors_tx.reserve().await.unwrap());
+                peers
+                    .peer
+                    .write_all(&agent_connected_tokens(10))
+                    .await
+                    .unwrap();
+                next_monitors_config(&mut peers, std::time::Duration::from_millis(500)).await
+            };
+            let sent = tokio::select! {
+                result = channel.run() => panic!("the channel ended: {result:?}"),
+                sent = driver => sent,
+            };
+            assert_eq!(sent, None, "nothing is sent");
+            assert_eq!(channel.last_sent_monitors_config, Some((1024, 768)));
+            assert_eq!(channel.pending_monitors_config, None);
+        }
+
+        #[tokio::test]
+        async fn a_request_after_the_guest_size_is_still_sent() {
+            let (mut channel, mut peers, monitors_tx) = test_main_channel_full(None).await;
+            let driver = async {
+                peers
+                    .peer
+                    .write_all(&agent_connected_tokens(10))
+                    .await
+                    .unwrap();
+                monitors_tx
+                    .send(DisplaySize::GuestHas(1024, 768))
+                    .await
+                    .unwrap();
+                monitors_tx
+                    .send(DisplaySize::Requested(1280, 776))
+                    .await
+                    .unwrap();
+                next_monitors_config(&mut peers, std::time::Duration::from_secs(2)).await
+            };
+            let sent = tokio::select! {
+                result = channel.run() => panic!("the channel ended: {result:?}"),
+                sent = driver => sent,
+            };
+            let body = sent.expect("the request is sent");
+            assert_eq!(
+                MonitorsConfig::decode(&body).unwrap(),
+                agent_monitors_config(1, 1280, 776)
+            );
+            assert_eq!(channel.last_sent_monitors_config, Some((1280, 776)));
+        }
+
+        #[tokio::test]
+        async fn a_request_for_the_size_the_guest_has_is_not_sent() {
+            let (mut channel, _peers) = test_main_channel().await;
+            channel.note_display_size(DisplaySize::GuestHas(1024, 768));
+            channel.note_display_size(DisplaySize::Requested(1024, 768));
+            assert_eq!(channel.pending_monitors_config, None);
+            assert_eq!(channel.resize_debounce, None);
         }
     }
 }

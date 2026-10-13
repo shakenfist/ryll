@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use shakenfist_spice_renderer::channels::align_monitor_dimension;
+
 /// Approximate height of the stats bar at the bottom of the window
 pub(super) const STATS_BAR_HEIGHT: f32 = 20.0;
 
@@ -101,9 +103,10 @@ pub(super) fn compute_outgoing_resize(viewport: (f32, f32), is_max: bool) -> (u3
     let bar_height = if is_max { 0.0 } else { STATS_BAR_HEIGHT };
     let w_raw = viewport.0.max(0.0) as u32;
     let h_raw = (viewport.1 - bar_height).max(0.0) as u32;
-    let aligned_w = (w_raw.max(8) / 8) * 8;
-    let aligned_h = (h_raw.max(8) / 8) * 8;
-    (aligned_w, aligned_h)
+    (
+        align_monitor_dimension(w_raw),
+        align_monitor_dimension(h_raw),
+    )
 }
 
 /// Decide whether the pending resolution-change

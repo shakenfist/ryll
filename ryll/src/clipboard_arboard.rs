@@ -15,7 +15,8 @@ use shakenfist_spice_renderer::ClipboardBackend;
 ///
 /// Passed into `MainChannel::new` as
 /// `Some(Arc::new(ArboardClipboard::new()))` for GUI sessions.
-/// Headless sessions pass `None`.
+/// Headless and web sessions pass a `MemoryClipboard` when they run a
+/// control socket, and `None` otherwise.
 pub struct ArboardClipboard {
     inner: Mutex<Option<arboard::Clipboard>>,
 }

@@ -2,8 +2,8 @@
 //!
 //! This module provides the `--control-socket` feature: an external
 //! driver can connect to the socket and drive the headless SPICE
-//! session via NDJSON requests.  Protocol version 1.0 is documented
-//! in `ryll/docs/control-socket-protocol.md`.
+//! session via NDJSON requests.  The protocol is documented in
+//! `docs/control-socket-protocol.md`.
 //!
 //! ## Module layout
 //!
@@ -14,4 +14,4 @@
 pub mod protocol;
 pub mod server;
 
-pub use server::{Server, StatusProvider};
+pub use server::{Server, SessionHandles, StatusProvider};

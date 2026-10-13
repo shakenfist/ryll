@@ -16,7 +16,7 @@ pub use cursor::CursorChannel;
 pub use display::DisplayChannel;
 #[allow(unused_imports)] // PasteKey is part of translate_paste's public return type
 pub use inputs::{translate_paste, InputsChannel, PasteError, PasteKey};
-pub use main_channel::MainChannel;
+pub use main_channel::{align_monitor_dimension, DisplaySize, MainChannel};
 #[cfg(feature = "audio")]
 pub use playback::PlaybackChannel;
 pub use usbredir::UsbredirChannel;

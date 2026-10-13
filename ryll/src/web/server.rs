@@ -80,7 +80,7 @@ pub struct WebState {
     /// SPICE vdagent's `VDAgentMonitorsConfig` flow. 5c will
     /// send the browser's initial viewport here.
     #[allow(dead_code)] // wired in 5c
-    pub resize_tx: Option<mpsc::Sender<(u32, u32)>>,
+    pub resize_tx: Option<mpsc::Sender<shakenfist_spice_renderer::DisplaySize>>,
     /// Broadcaster for `ChannelEvent`s emitted by the renderer's
     /// session orchestrator. 5b/5d/5e each spawn a subscriber.
     /// `None` outside web-with-SPICE sessions (e.g. in unit
@@ -205,7 +205,7 @@ impl WebState {
     #[allow(clippy::too_many_arguments)]
     pub fn with_channels(
         input_tx: mpsc::Sender<InputEvent>,
-        resize_tx: mpsc::Sender<(u32, u32)>,
+        resize_tx: mpsc::Sender<shakenfist_spice_renderer::DisplaySize>,
         event_tx: broadcast::Sender<ChannelEvent>,
         mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,
@@ -228,7 +228,7 @@ impl WebState {
     #[allow(clippy::too_many_arguments)]
     fn build(
         input_tx: Option<mpsc::Sender<InputEvent>>,
-        resize_tx: Option<mpsc::Sender<(u32, u32)>>,
+        resize_tx: Option<mpsc::Sender<shakenfist_spice_renderer::DisplaySize>>,
         event_tx: Option<broadcast::Sender<ChannelEvent>>,
         mouse_mode: watch::Receiver<u32>,
         surface_mirror: Arc<Mutex<SurfaceMirror>>,

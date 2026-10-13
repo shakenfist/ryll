@@ -132,7 +132,7 @@ pub async fn run_mouse_mode_tracker(mut mouse_mode: watch::Receiver<u32>, contro
 pub async fn run_input_relay(
     mut control_rx: mpsc::Receiver<Vec<u8>>,
     input_tx: mpsc::Sender<InputEvent>,
-    resize_tx: mpsc::Sender<(u32, u32)>,
+    resize_tx: mpsc::Sender<shakenfist_spice_renderer::DisplaySize>,
     surface_mirror: Arc<Mutex<SurfaceMirror>>,
     mouse_mode: watch::Receiver<u32>,
     control_tx: ControlSink,
@@ -280,7 +280,13 @@ pub async fn run_input_relay(
                     debug!("web inputs: ignoring degenerate viewport");
                     continue;
                 }
-                if resize_tx.send((width, height)).await.is_err() {
+                if resize_tx
+                    .send(shakenfist_spice_renderer::DisplaySize::Requested(
+                        width, height,
+                    ))
+                    .await
+                    .is_err()
+                {
                     warn!("web inputs: resize_tx receiver dropped");
                 }
             }
@@ -350,7 +356,7 @@ mod tests {
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
-        mpsc::Receiver<(u32, u32)>,
+        mpsc::Receiver<shakenfist_spice_renderer::DisplaySize>,
         tokio::task::JoinHandle<()>,
     ) {
         spawn_relay_in_mode(mirror, MOUSE_MODE_CLIENT)
@@ -363,7 +369,7 @@ mod tests {
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
-        mpsc::Receiver<(u32, u32)>,
+        mpsc::Receiver<shakenfist_spice_renderer::DisplaySize>,
         tokio::task::JoinHandle<()>,
     ) {
         // The sender is dropped at once; the receiver keeps the value.
@@ -380,7 +386,7 @@ mod tests {
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
-        mpsc::Receiver<(u32, u32)>,
+        mpsc::Receiver<shakenfist_spice_renderer::DisplaySize>,
         tokio::task::JoinHandle<()>,
     ) {
         let (tx, input_rx, resize_rx, _outbound, handle) =
@@ -397,13 +403,13 @@ mod tests {
     ) -> (
         mpsc::Sender<Vec<u8>>,
         mpsc::Receiver<InputEvent>,
-        mpsc::Receiver<(u32, u32)>,
+        mpsc::Receiver<shakenfist_spice_renderer::DisplaySize>,
         mpsc::Receiver<Vec<u8>>,
         tokio::task::JoinHandle<()>,
     ) {
         let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
         let (input_tx, input_rx) = mpsc::channel::<InputEvent>(16);
-        let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(4);
+        let (resize_tx, resize_rx) = mpsc::channel::<shakenfist_spice_renderer::DisplaySize>(4);
         let (outbound_tx, outbound_rx) = crate::web::control::control_queue();
         let handle = tokio::spawn(run_input_relay(
             control_rx,
@@ -741,7 +747,10 @@ mod tests {
             .await
             .expect("timeout")
             .expect("relay should send");
-        assert_eq!(dims, (1920, 1080));
+        assert_eq!(
+            dims,
+            shakenfist_spice_renderer::DisplaySize::Requested(1920, 1080)
+        );
     }
 
     /// The browser reports `Math.round()` of a CSS size, so an odd
@@ -761,7 +770,10 @@ mod tests {
             .await
             .expect("timeout")
             .expect("relay should send");
-        assert_eq!(dims, (1366, 768));
+        assert_eq!(
+            dims,
+            shakenfist_spice_renderer::DisplaySize::Requested(1366, 768)
+        );
     }
 
     /// A viewport that rounds to zero would ask the guest for a mode
@@ -783,7 +795,11 @@ mod tests {
             .await
             .expect("timeout")
             .expect("relay should send");
-        assert_eq!(dims, (800, 600), "the degenerate viewport was forwarded");
+        assert_eq!(
+            dims,
+            shakenfist_spice_renderer::DisplaySize::Requested(800, 600),
+            "the degenerate viewport was forwarded"
+        );
     }
 
     /// `hello` is what the browser sends once its datachannel is
@@ -834,7 +850,7 @@ mod tests {
         let (_mode_tx, mode) = watch::channel(MOUSE_MODE_CLIENT);
         let (control_tx, control_rx) = mpsc::channel::<Vec<u8>>(16);
         let (input_tx, _input_rx) = mpsc::channel::<InputEvent>(16);
-        let (resize_tx, _resize_rx) = mpsc::channel::<(u32, u32)>(4);
+        let (resize_tx, _resize_rx) = mpsc::channel::<shakenfist_spice_renderer::DisplaySize>(4);
         let (outbound_tx, mut outbound) = crate::web::control::control_queue();
         let _h = tokio::spawn(run_input_relay(
             control_rx,

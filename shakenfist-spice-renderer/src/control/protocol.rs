@@ -1,4 +1,4 @@
-//! Wire types for the Ryll control-socket protocol (version 1.2).
+//! Wire types for the Ryll control-socket protocol (version 1.3).
 //!
 //! All types derive `serde::Serialize` / `serde::Deserialize` so they
 //! can be round-tripped through NDJSON without any manual parsing.
@@ -19,13 +19,18 @@
 //! behaviour and reached the guest correctly.  It is called out in
 //! the version number so a client needing arrow keys has something
 //! to require.
+//!
+//! v1.2 → v1.3 added the `clipboard_set`, `clipboard_get` and
+//! `resize` verbs and the `clipboard_changed` event, so a session
+//! with no host window can carry clipboard text both ways and ask
+//! the guest for a display size.  Additive, so a minor bump.
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::channels::RequestId;
 
 /// Protocol version this server speaks.
-pub const PROTOCOL_VERSION: &str = "1.2";
+pub const PROTOCOL_VERSION: &str = "1.3";
 
 /// All v1 verb names the server recognises. Advertised in the `hello`
 /// response so clients can adapt at runtime rather than hard-coding
@@ -38,11 +43,15 @@ pub const SUPPORTED_METHODS: &[&str] = &[
     "screenshot",
     "subscribe",
     "unsubscribe",
+    "clipboard_set",
+    "clipboard_get",
+    "resize",
 ];
 
 /// All event names the server can emit. Advertised in the `hello`
 /// response alongside `SUPPORTED_METHODS`.  `surface_drawn` was
-/// added in v1.1; `digest_updated` lives behind the
+/// added in v1.1 and `clipboard_changed` in v1.3; `digest_updated`
+/// lives behind the
 /// `digest-decode` Cargo feature and is appended at runtime by
 /// [`supported_events`].
 const BASE_SUPPORTED_EVENTS: &[&str] = &[
@@ -52,6 +61,7 @@ const BASE_SUPPORTED_EVENTS: &[&str] = &[
     "paste_failed",
     "dropped",
     "surface_drawn",
+    "clipboard_changed",
 ];
 
 /// Names of every event this server can emit, including any
@@ -268,6 +278,28 @@ pub struct SubscribeResult {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnsubscribeResult {
     pub unsubscribed: Vec<String>,
+}
+
+/// Params for the v1.3 `clipboard_set` verb.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardSetParams {
+    pub text: String,
+}
+
+/// Result payload for the v1.3 `clipboard_get` verb, and data payload
+/// of the v1.3 `clipboard_changed` event.  `text` is `null` when
+/// nothing has been copied on either side yet.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClipboardText {
+    pub text: Option<String>,
+}
+
+/// Params for the v1.3 `resize` verb, and its result: the result
+/// carries the size actually asked of the guest, after rounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResizeParams {
+    pub width: u32,
+    pub height: u32,
 }
 
 // ── Version helpers ──────────────────────────────────────────────

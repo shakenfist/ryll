@@ -38,7 +38,7 @@ use crate::notifications::{
 use crate::settings;
 use crate::streaming_state::{self, StreamingState};
 use shakenfist_spice_protocol::{mouse_buttons, ChannelType, NotifySeverity, MOUSE_MODE_SERVER};
-use shakenfist_spice_renderer::channels::VolumeControl;
+use shakenfist_spice_renderer::channels::{DisplaySize, VolumeControl};
 use shakenfist_spice_renderer::metrics::RuntimeMetrics;
 use shakenfist_spice_renderer::usb::{self, DeviceSource, UsbDeviceInfo};
 use shakenfist_spice_renderer::{
@@ -269,8 +269,16 @@ pub struct RyllApp {
     /// with `event_rx`; read once per frame by `sync_session_state`.
     session_state: SessionStateRx,
     input_tx: Option<mpsc::Sender<InputEvent>>,
-    resize_tx: Option<Arc<mpsc::Sender<(u32, u32)>>>,
+    resize_tx: Option<Arc<mpsc::Sender<DisplaySize>>>,
     last_sent_resize: Option<(u32, u32)>,
+    /// A size the window auto-fitted to, still to be told to the main
+    /// channel as `DisplaySize::GuestHas` because the resize queue was
+    /// full. Retried every frame until it goes, or until a requested
+    /// size supersedes it. Dropping it would leave the main channel
+    /// holding an older requested size, which it would send when the
+    /// agent connects, resizing the guest away from the size the
+    /// window has just fitted to.
+    pending_guest_size: Option<(u32, u32)>,
     volume_control: Arc<VolumeControl>,
 
     // Display state: the surfaces, and the egui textures drawn from them
@@ -891,6 +899,7 @@ impl RyllApp {
             input_tx: Some(input_tx),
             resize_tx: Some(resize_tx),
             last_sent_resize: None,
+            pending_guest_size: None,
             volume_control,
             surfaces: SurfaceMirror::new(),
             textures: TextureCache::new(),
@@ -1057,6 +1066,7 @@ impl RyllApp {
         self.input_tx = Some(input_tx);
         self.resize_tx = Some(resize_tx);
         self.last_sent_resize = None;
+        self.pending_guest_size = None;
         // volume_control is intentionally NOT replaced — see the
         // `vol_for_conn` binding below for the rationale.
         self.surfaces.surfaces.clear();
@@ -2778,7 +2788,23 @@ impl RyllApp {
         }
     }
 
+    /// Tell the main channel the size the window last auto-fitted to,
+    /// if that is still to do. On a full queue it stays pending for the
+    /// next frame; on a closed one the session is gone and it is moot.
+    fn send_pending_guest_size(&mut self) {
+        let (Some(tx), Some((width, height))) = (&self.resize_tx, self.pending_guest_size) else {
+            return;
+        };
+        match tx.try_send(DisplaySize::GuestHas(width, height)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => self.pending_guest_size = None,
+            Err(mpsc::error::TrySendError::Full(_)) => {}
+        }
+    }
+
     fn maybe_send_monitors_resize(&mut self, ctx: &egui::Context) {
+        // First, so that it reaches the main channel ahead of any size
+        // requested below, which supersedes it.
+        self.send_pending_guest_size();
         let Some(tx) = &self.resize_tx else {
             return;
         };
@@ -2800,8 +2826,11 @@ impl RyllApp {
             return;
         }
 
-        if tx.try_send((width, height)).is_ok() {
+        if tx.try_send(DisplaySize::Requested(width, height)).is_ok() {
             self.last_sent_resize = Some((width, height));
+            // Queued behind it or in place of it: either way the main
+            // channel's last word is now this request.
+            self.pending_guest_size = None;
         }
     }
 
@@ -3112,8 +3141,11 @@ impl eframe::App for RyllApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(w, total_h)));
             // Seed last_sent_resize so maybe_send_monitors_resize
             // doesn't echo our own resize back to the guest as a
-            // VDAgentMonitorsConfig change.
+            // VDAgentMonitorsConfig change, and tell the main channel
+            // the guest has this size, so it drops any size it is
+            // still holding for an agent rather than sending it.
             self.last_sent_resize = Some((aw, ah));
+            self.pending_guest_size = Some((aw, ah));
             self.last_auto_resize = Some((aw, ah));
             info!("app: window resize to {}x{} (surface)", w as u32, h as u32);
         }

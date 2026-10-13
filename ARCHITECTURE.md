@@ -108,7 +108,7 @@ injected at construction time rather than emitted as events:
 | `TrafficSink` | `shakenfist-spice-renderer` | `bugreport::TrafficBuffers` | Per-channel raw-byte ring buffer for bug-report traffic capture and the live traffic viewer |
 | `CaptureSink` | `shakenfist-spice-renderer` | `capture::CaptureSession` | pcap + MP4 frame recording; also has a no-op stub when the `capture` feature is disabled |
 | `NotificationSink` | `shakenfist-spice-renderer` | `notifications::NotificationStoreSink` | Pushes `NotificationEntry` values into the in-app notification store |
-| `ClipboardBackend` | `shakenfist-spice-renderer` | `clipboard_arboard` | Host clipboard read/write via `arboard` |
+| `ClipboardBackend` | `shakenfist-spice-renderer` | `clipboard_arboard`; the renderer's own `MemoryClipboard` for headless and web mode's control socket | Host clipboard read/write via `arboard`, or an in-memory clipboard the control socket's `clipboard_*` verbs drive |
 | `UsbDeviceBackend` | `shakenfist-spice-renderer` | usbredir channel constructor; `RealDevice` / `VirtualMsc` concrete types live in the renderer's `usb/` directory | USB host-side device attachment |
 | `WebdavBackend` | `shakenfist-spice-renderer` | webdav channel constructor; `MuxDemuxer` + `WebdavServer` live in the renderer's `webdav/` directory | WebDAV directory share lifecycle |
 | `OpusPacketSink` | `shakenfist-spice-renderer` | `web::audio::WebOpusSink` | Pre-decode Opus tap on the playback channel for WebRTC passthrough |

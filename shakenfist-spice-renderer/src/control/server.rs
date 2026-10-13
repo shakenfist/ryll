@@ -45,11 +45,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{
-    major_version_matches, ErrorCode, Event, HelloParams, HelloResult, Request, RequestId,
-    Response, RpcError, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
-    PROTOCOL_VERSION, SUPPORTED_METHODS,
+    major_version_matches, ClipboardSetParams, ClipboardText, ErrorCode, Event, HelloParams,
+    HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatusResult,
+    SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION, SUPPORTED_METHODS,
 };
-use crate::channels::{ChannelEvent, InputEvent};
+use crate::channels::{align_monitor_dimension, ChannelEvent, DisplaySize, InputEvent};
+use crate::clipboard::MemoryClipboard;
+use crate::display::MAX_SURFACE_DIMENSION;
 use crate::surface_mirror::SurfaceMirror;
 
 /// Capacity of the per-client outbound queue (request responses +
@@ -67,6 +69,26 @@ const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 /// real connection state without exposing session internals here.
 pub trait StatusProvider: Send + Sync {
     fn snapshot(&self) -> StatusResult;
+}
+
+// ── SessionHandles ────────────────────────────────────────────────
+
+/// The parts of a session the verbs act on.
+///
+/// Each accepted client gets a clone. Everything here is a handle --
+/// a channel sender or an `Arc` -- so cloning is cheap and every
+/// client acts on the same session.
+#[derive(Clone)]
+pub struct SessionHandles {
+    /// The inputs channel's queue, for `send_key` and `paste`.
+    pub input_tx: mpsc::Sender<InputEvent>,
+    /// The live pixel store, for `screenshot`.
+    pub surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    /// The clipboard the main channel was given, for `clipboard_set`
+    /// and `clipboard_get`, and the source of `clipboard_changed`.
+    pub clipboard: Arc<MemoryClipboard>,
+    /// The main channel's display-size queue, for `resize`.
+    pub resize_tx: mpsc::Sender<DisplaySize>,
 }
 
 // ── Server ────────────────────────────────────────────────────────
@@ -193,22 +215,15 @@ impl Server {
     /// than from the bus, so a client that lags the bus cannot miss a
     /// transition; each accepted client gets its own clone.
     ///
-    /// `input_tx` is the mpsc sender used by `run_headless` to push
-    /// `InputEvent`s to the SPICE inputs channel.  The control server
-    /// clones it into each accepted client so `send_key` and `paste`
-    /// verbs can enqueue events.
-    ///
-    /// `surface_mirror` is the live pixel store that `run_headless`
-    /// keeps in lock-step with the SPICE display channel.  Each
-    /// accepted client clones the `Arc` and the `screenshot` verb
-    /// locks it briefly to snapshot a surface.
+    /// `handles` are the session's input queue, surface mirror,
+    /// clipboard and resize queue, which the verbs act on; each
+    /// accepted client gets a clone. See [`SessionHandles`].
     pub async fn run(
         self,
         status_provider: Arc<dyn StatusProvider>,
         event_tx: broadcast::Sender<ChannelEvent>,
         agent_connected: watch::Receiver<bool>,
-        input_tx: mpsc::Sender<InputEvent>,
-        surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+        handles: SessionHandles,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
         // Owned for the whole loop, so the socket file outlives it.
@@ -243,11 +258,10 @@ impl Server {
                                 let cancel = shutdown.clone();
                                 let event_rx = event_tx.subscribe();
                                 let agent_rx = agent_connected.clone();
-                                let tx = input_tx.clone();
-                                let mirror = surface_mirror.clone();
+                                let client_handles = handles.clone();
                                 tokio::spawn(async move {
                                     handle_client(
-                                        stream, provider, event_rx, agent_rx, tx, mirror, cancel,
+                                        stream, provider, event_rx, agent_rx, client_handles, cancel,
                                     )
                                     .await;
                                     flag.store(false, Ordering::Release);
@@ -353,8 +367,7 @@ async fn handle_client(
     status_provider: Arc<dyn StatusProvider>,
     event_rx: broadcast::Receiver<ChannelEvent>,
     agent_connected: watch::Receiver<bool>,
-    input_tx: mpsc::Sender<InputEvent>,
-    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    handles: SessionHandles,
     shutdown: CancellationToken,
 ) {
     info!("control: client connected");
@@ -384,6 +397,7 @@ async fn handle_client(
     let event_handle = tokio::spawn(event_translator_task(
         event_rx,
         agent_connected,
+        handles.clipboard.subscribe_guest_text(),
         event_state,
         event_out_tx,
     ));
@@ -407,8 +421,7 @@ async fn handle_client(
                             &mut helloed,
                             &*status_provider,
                             &client_state,
-                            &input_tx,
-                            &surface_mirror,
+                            &handles,
                         )
                         .await;
 
@@ -490,7 +503,9 @@ async fn writer_task(
 /// broadcast bus, filters by the active subscription set, formats
 /// each `ChannelEvent` into a wire `Event`, and `try_send`s the
 /// result onto the outbound mpsc.  The `agent_connected` event comes
-/// from the session's agent-state watch instead of the bus.
+/// from the session's agent-state watch instead of the bus, and
+/// `clipboard_changed` from the clipboard's guest-text watch, so a
+/// client that lags the bus cannot miss either.
 ///
 /// Backpressure rule: on `try_send` failure (queue full) or on a
 /// broadcast `Lagged(n)` error, increment a local dropped counter.
@@ -499,6 +514,7 @@ async fn writer_task(
 async fn event_translator_task(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
     mut agent_connected: watch::Receiver<bool>,
+    mut guest_clipboard: watch::Receiver<Option<Arc<str>>>,
     state: Arc<ClientState>,
     out_tx: mpsc::Sender<OutboundMessage>,
 ) {
@@ -515,6 +531,9 @@ async fn event_translator_task(
     // finished session does not spin on a `changed()` that fails at
     // once.  The bus closing ends the task shortly after.
     let mut agent_state_open = true;
+    // The same, for the clipboard's watch. Subscribing marked its
+    // current value seen, so only copies after connect are reported.
+    let mut clipboard_open = true;
 
     loop {
         // Translate into the wire shape.  Anything the protocol
@@ -538,6 +557,16 @@ async fn event_translator_task(
                 }
                 Err(_) => {
                     agent_state_open = false;
+                    None
+                }
+            },
+            changed = guest_clipboard.changed(), if clipboard_open => match changed {
+                Ok(()) => {
+                    let text = guest_clipboard.borrow_and_update().clone();
+                    translate_clipboard_changed(text, &state)
+                }
+                Err(_) => {
+                    clipboard_open = false;
                     None
                 }
             },
@@ -593,6 +622,26 @@ fn translate_agent_connected(
     Some(Event {
         event: "agent_connected".into(),
         data: serde_json::json!({ "connected": connected }),
+    })
+}
+
+/// Map text the guest copied to a `clipboard_changed` wire event.
+///
+/// Every copy is reported, including one of the same text as the last:
+/// the guest copied again, and a client waiting on a copy should hear
+/// of it.
+fn translate_clipboard_changed(text: Option<Arc<str>>, state: &ClientState) -> Option<Event> {
+    if !state.is_subscribed("clipboard_changed") {
+        return None;
+    }
+    // The watch starts at `None`; a copy is always `Some`.
+    let text = text?;
+    Some(Event {
+        event: "clipboard_changed".into(),
+        data: serde_json::to_value(ClipboardText {
+            text: Some(text.to_string()),
+        })
+        .unwrap_or(serde_json::Value::Object(Default::default())),
     })
 }
 
@@ -789,16 +838,14 @@ fn translate_event(event: &ChannelEvent, state: &ClientState) -> Option<Event> {
 /// closed after writing the response (currently set only for the
 /// `protocol_version_mismatch` error path).
 ///
-/// `input_tx` is forwarded to the verb handlers that need to push
-/// `InputEvent`s (`send_key`, `paste`).  It is a borrow of the
-/// sender that lives for the lifetime of the client connection.
+/// `handles` is what the verb handlers act on, borrowed for the
+/// lifetime of the client connection.
 async fn dispatch_request(
     line: &str,
     helloed: &mut bool,
     status_provider: &dyn StatusProvider,
     client_state: &ClientState,
-    input_tx: &mpsc::Sender<InputEvent>,
-    surface_mirror: &Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    handles: &SessionHandles,
 ) -> (Response, bool) {
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -843,15 +890,24 @@ async fn dispatch_request(
         "status" => (handle_status(id, status_provider), false),
         "subscribe" => (handle_subscribe(id, request.params, client_state), false),
         "unsubscribe" => (handle_unsubscribe(id, request.params, client_state), false),
-        "send_key" => (handle_send_key(id, request.params, input_tx), false),
+        "send_key" => (
+            handle_send_key(id, request.params, &handles.input_tx),
+            false,
+        ),
         "paste" => (
-            handle_paste(id, request.params, client_state, input_tx),
+            handle_paste(id, request.params, client_state, &handles.input_tx),
             false,
         ),
         "screenshot" => (
-            handle_screenshot(id, request.params, surface_mirror).await,
+            handle_screenshot(id, request.params, &handles.surface_mirror).await,
             false,
         ),
+        "clipboard_set" => (
+            handle_clipboard_set(id, request.params, &handles.clipboard),
+            false,
+        ),
+        "clipboard_get" => (handle_clipboard_get(id, &handles.clipboard), false),
+        "resize" => (handle_resize(id, request.params, &handles.resize_tx), false),
         // Completely unknown:
         _ => (
             Response::err(
@@ -1361,9 +1417,163 @@ async fn handle_screenshot(
     )
 }
 
+// ── Clipboard and resize verbs (v1.3) ────────────────────────────
+
+/// Handle a `clipboard_set` request.
+///
+/// Stores the text as the host side of the clipboard. The main
+/// channel polls it every 500 ms and grabs the guest's clipboard when
+/// it changes, so the guest can paste it shortly after; nothing is
+/// sent from here. The text is held whether or not the agent is
+/// connected, and the grab follows once the agent and its
+/// capabilities are in, so this never fails with
+/// `agent_not_connected`.
+fn handle_clipboard_set(
+    id: RequestId,
+    params: serde_json::Value,
+    clipboard: &MemoryClipboard,
+) -> Response {
+    let p: ClipboardSetParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid clipboard_set params: {}", e),
+            );
+        }
+    };
+    // Byte count only: clipboard text may be a password.
+    debug!("control: clipboard_set ({} bytes)", p.text.len());
+    clipboard.set_host_text(p.text);
+    Response::ok(id, serde_json::Value::Object(Default::default()))
+}
+
+/// Handle a `clipboard_get` request: the clipboard's text, from
+/// whichever side wrote it last, or `null`. Takes no params.
+fn handle_clipboard_get(id: RequestId, clipboard: &MemoryClipboard) -> Response {
+    Response::ok(
+        id,
+        serde_json::to_value(ClipboardText {
+            text: clipboard.text(),
+        })
+        .unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
+/// Validate a `resize` request and round it as the GUI would.
+///
+/// Each side must be 1 to `MAX_SURFACE_DIMENSION`: zero is not a
+/// display, and ryll clamps any surface larger than that, so it could
+/// not show what it asked for. Within that range each side is rounded
+/// down to the 8-pixel grid with a floor of 8, by the same
+/// [`align_monitor_dimension`] the GUI's window-driven resize uses.
+fn validate_resize(p: ResizeParams) -> Result<ResizeParams, String> {
+    for (name, value) in [("width", p.width), ("height", p.height)] {
+        if value == 0 || value > MAX_SURFACE_DIMENSION {
+            return Err(format!(
+                "{} {} is out of range: expected 1 to {}",
+                name, value, MAX_SURFACE_DIMENSION
+            ));
+        }
+    }
+    Ok(ResizeParams {
+        width: align_monitor_dimension(p.width),
+        height: align_monitor_dimension(p.height),
+    })
+}
+
+/// Handle a `resize` request.
+///
+/// Queues the size on the main channel's display-size queue, as the
+/// GUI does when its window is resized, and returns the size actually
+/// queued. The main channel debounces it for 200 ms and then sends a
+/// `VD_AGENT_MONITORS_CONFIG`, or, with no agent connected yet, holds
+/// it and sends it once the agent connects; so this never fails with
+/// `agent_not_connected`. A size equal to the last one sent is not
+/// sent again.
+fn handle_resize(
+    id: RequestId,
+    params: serde_json::Value,
+    resize_tx: &mpsc::Sender<DisplaySize>,
+) -> Response {
+    let p: ResizeParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid resize params: {}", e),
+            );
+        }
+    };
+    let size = match validate_resize(p) {
+        Ok(size) => size,
+        Err(message) => return Response::err(id, ErrorCode::BadParams, message),
+    };
+    if resize_tx
+        .try_send(DisplaySize::Requested(size.width, size.height))
+        .is_err()
+    {
+        return Response::err(
+            id,
+            ErrorCode::InternalError,
+            "resize channel closed or full",
+        );
+    }
+    debug!("control: resize to {}x{}", size.width, size.height);
+    Response::ok(
+        id,
+        serde_json::to_value(size).unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_rounds_down_to_the_gui_grid() {
+        let check = |width, height| validate_resize(ResizeParams { width, height });
+        assert_eq!(
+            check(1024, 768),
+            Ok(ResizeParams {
+                width: 1024,
+                height: 768
+            })
+        );
+        assert_eq!(
+            check(1366, 770),
+            Ok(ResizeParams {
+                width: 1360,
+                height: 768
+            })
+        );
+        // Below the grid's first step, the floor.
+        assert_eq!(
+            check(1, 7),
+            Ok(ResizeParams {
+                width: 8,
+                height: 8
+            })
+        );
+        assert_eq!(
+            check(MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION),
+            Ok(ResizeParams {
+                width: MAX_SURFACE_DIMENSION,
+                height: MAX_SURFACE_DIMENSION
+            })
+        );
+    }
+
+    #[test]
+    fn resize_refuses_zero_and_oversized_sides() {
+        let check = |width, height| validate_resize(ResizeParams { width, height });
+        assert!(check(0, 768).is_err());
+        assert!(check(1024, 0).is_err());
+        assert!(check(MAX_SURFACE_DIMENSION + 1, 768).is_err());
+        assert!(check(1024, MAX_SURFACE_DIMENSION + 1).is_err());
+    }
 
     /// The mode must already be `0600` while the socket cannot yet be
     /// connected to, so there is no moment at which anyone else can
