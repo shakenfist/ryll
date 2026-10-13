@@ -17,9 +17,10 @@
 //     is 0xE048. That is not the wire form and it does not
 //     match `make_scancode()`; ryll converts it, swapping
 //     the bytes and applying the release bit. This comment
-//     said the opposite until phase 04, and believing it is
-//     how the browser path came to reimplement the encoding
-//     backwards. See the SCANCODE_TABLE comment below.
+//     said the opposite until #312 corrected it, and
+//     believing it is how the browser path came to
+//     reimplement the encoding backwards. See the
+//     SCANCODE_TABLE comment below.
 //   * keydown / keyup listeners on `document`, dispatched
 //     through the data channel as `{type:"key",scancode,down}`.
 //     Browser auto-repeat is dropped and held keys are released

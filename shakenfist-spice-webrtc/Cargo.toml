@@ -49,8 +49,9 @@ webrtc = "0.21.0"
 # version here guarantees by construction that the `Packet` we build is
 # the type `write_rtp` expects — the alignment-by-hand that issue #215
 # was about. Replaces the standalone `rtp` crate, an abandoned line
-# ending at 0.17.2 (Decision 2). Tracks `webrtc`'s floor, including the
-# 0.20.4 datachannel fix described above.
+# ending at 0.17.2: RTP moved to `rtc-rtp`, reached as `rtc::rtp`.
+# Tracks `webrtc`'s floor, including the 0.20.4 datachannel fix
+# described above.
 rtc = "0.21.0"
 
 # `webrtc::peer_connection::PeerConnectionEventHandler` is declared with

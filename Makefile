@@ -230,17 +230,17 @@ check-windows: fetch
 		cargo check --frozen --target x86_64-pc-windows-gnu --no-default-features \
 			--features ryll/gui,ryll/audio -p ryll
 
-# Cutting a release is a two-phase operation so the version bump
-# goes through the normal PR review gate rather than landing
-# directly on develop.
+# Cutting a release takes two steps so the version bump goes
+# through the normal PR review gate rather than landing directly
+# on develop.
 #
-# Phase 1: `make propose-release X.Y.Z` creates a release-X.Y.Z
+# First, `make propose-release X.Y.Z` creates a release-X.Y.Z
 # branch off develop, bumps the workspace version, pushes the
 # branch, and prints the PR creation URL.
 #
-# Phase 2: after the PR merges, `make tag-release X.Y.Z` tags
-# the resulting commit on develop and pushes the tag, which
-# triggers .github/workflows/release.yml.
+# Then, after the PR merges, `make tag-release X.Y.Z` tags the
+# resulting commit on develop and pushes the tag, which triggers
+# .github/workflows/release.yml.
 #
 # The second word of MAKECMDGOALS is the version; the no-op
 # rules below catch X.Y.Z-shaped goals so make does not

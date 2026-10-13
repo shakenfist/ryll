@@ -2,12 +2,12 @@
 # measure-idle-cpu.sh — per-thread CPU sampler for a running ryll.
 #
 # Answers "how much CPU is ryll actually burning, and which threads
-# are burning it".  Written for PLAN-idle-cpu-and-latency, whose
-# phase 1 profiled a 6.24-core idle client and whose phase 2 had to
-# show the fix worked; the numbers in both plan files came from this
-# method.  Keeping it as a script rather than a recipe means the next
-# person to make a CPU claim about ryll can reproduce it rather than
-# quote it.
+# are burning it".  Written to profile an idle client that was
+# burning 6.24 cores, and then to show that the repaint fix brought
+# that down; the numbers recorded in PLAN-idle-cpu-and-latency.md
+# came from this method.  Keeping it as a script rather than a recipe
+# means the next person to make a CPU claim about ryll can reproduce
+# it rather than quote it.
 #
 # Method: read utime + stime from /proc/<pid>/task/<tid>/stat for
 # every thread, sleep, read them again, and convert the deltas to
