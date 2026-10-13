@@ -101,3 +101,10 @@ path = "fuzz_targets/fuzz_agent_reassembly.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_receive_buffer"
+path = "fuzz_targets/fuzz_receive_buffer.rs"
+test = false
+doc = false
+bench = false

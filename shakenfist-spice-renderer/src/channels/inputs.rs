@@ -15,8 +15,8 @@ use crate::{
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, InputsInit, KeyEvent, KeyModifiers, MouseButton, MouseMotion,
-    MousePosition, Notify as NotifyMessage, Ping, SetAck, WireType,
+    make_message, InputsInit, KeyEvent, KeyModifiers, MouseButton, MouseMotion, MousePosition,
+    Notify as NotifyMessage, Ping, ReceiveBuffer, SetAck, WireType,
 };
 use shakenfist_spice_protocol::{
     inputs_client, inputs_server, keyboard_modifiers, ChannelType, NotifySeverity,
@@ -122,7 +122,7 @@ pub struct InputsChannel {
     stream: SpiceStream,
     events: EventSink,
     input_rx: mpsc::Receiver<InputEvent>,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     last_key_time: Option<Instant>,
     button_state: u32,
     motion_count: u32,
@@ -194,7 +194,7 @@ impl InputsChannel {
             stream,
             events,
             input_rx,
-            buffer: Vec::with_capacity(4096),
+            buffer: ReceiveBuffer::with_capacity(4096),
             last_key_time: None,
             button_state: 0,
             motion_count: 0,
@@ -430,7 +430,7 @@ impl InputsChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "inputs",

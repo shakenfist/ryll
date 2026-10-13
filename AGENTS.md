@@ -142,7 +142,7 @@ that table is an incomplete change.
 5. Parsers of untrusted wire input use the `BoundedReader`
    in `shakenfist-spice-protocol/src/reader.rs` (bounds- and
    overflow-checked, panic-free) rather than ad-hoc slicing.
-   Channel read loops frame messages with `take_message`
+   Channel read loops frame messages with a `ReceiveBuffer`
    and `MAX_MESSAGE_BODY`, never by hand (STYLEGUIDE.md,
    "Message framing").
    Image decoders size output buffers with `limits::rgba_len`

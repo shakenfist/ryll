@@ -348,8 +348,8 @@ pub fn make_message(message_type: u16, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// One complete message split off the front of a receive buffer by
-/// [`take_message`]: the header and the raw bytes it framed.
+/// One complete message taken off the front of a [`ReceiveBuffer`]: the
+/// header and the raw bytes it framed.
 #[derive(Debug, Clone)]
 pub struct ReceivedMessage {
     pub header: MessageHeader,
@@ -364,39 +364,124 @@ impl ReceivedMessage {
     }
 }
 
-/// Split the next complete message off the front of a receive buffer.
+/// A channel's receive buffer: the bytes read from its socket, from which
+/// complete messages are taken off the front.
 ///
-/// Returns `Ok(None)` while `buffer` does not yet hold a whole message, so
-/// a read loop calls this until it returns `None` and then reads more.
-///
-/// # Errors
-///
-/// Fails with [`io::ErrorKind::InvalidData`] as soon as a header declares a
-/// body larger than `max_body`, without waiting for that body. The size is
-/// server-supplied, so without the check a peer could make the caller
-/// buffer up to 4 GiB per channel by declaring a huge message and sending
-/// it slowly. The caller should drop the connection.
-pub fn take_message(buffer: &mut Vec<u8>, max_body: usize) -> io::Result<Option<ReceivedMessage>> {
-    if buffer.len() < MessageHeader::SIZE {
-        return Ok(None);
+/// Taking a message advances a read offset instead of shifting the rest of
+/// the buffer down, so taking the N messages that one read delivered costs
+/// O(N) rather than O(N²). With a buffer grown to 64 KiB or more, a peer
+/// sending empty six-byte messages would otherwise make each read move
+/// hundreds of megabytes (shakenfist/ryll#510). The consumed prefix is
+/// reclaimed when more bytes are added, and only once it is at least as
+/// large as what is left, so the bytes moved never exceed the bytes
+/// consumed, and a large message arriving over many reads is not moved at
+/// all.
+#[derive(Debug, Default)]
+pub struct ReceiveBuffer {
+    data: Vec<u8>,
+    /// Bytes at the front of `data` already taken as messages.
+    start: usize,
+    /// Bytes moved by compaction, so tests can check the bound above.
+    #[cfg(test)]
+    moved: usize,
+}
+
+impl ReceiveBuffer {
+    /// An empty buffer.
+    pub fn new() -> Self {
+        Self::default()
     }
-    let header = MessageHeader::read(buffer)?;
-    let body = header.message_size as usize;
-    if body > max_body {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "message type {} declares a {} byte body, over the {} byte limit",
-                header.message_type, body, max_body
-            ),
-        ));
+
+    /// An empty buffer that can hold `capacity` bytes before it reallocates.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity),
+            ..Self::default()
+        }
     }
-    let total = MessageHeader::SIZE + body;
-    if buffer.len() < total {
-        return Ok(None);
+
+    /// The bytes received but not yet taken as a message.
+    pub fn unconsumed(&self) -> &[u8] {
+        &self.data[self.start..]
     }
-    let raw = buffer.drain(..total).collect();
-    Ok(Some(ReceivedMessage { header, raw }))
+
+    /// How many bytes are waiting: at most one partial message once
+    /// [`take_message`](Self::take_message) has returned `None`.
+    pub fn len(&self) -> usize {
+        self.data.len() - self.start
+    }
+
+    /// Whether no bytes are waiting.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Append bytes read from the socket.
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.compact();
+        self.data.extend_from_slice(bytes);
+    }
+
+    /// Reclaim the consumed prefix if that is cheap: free when everything
+    /// has been consumed, and otherwise only when the bytes still waiting
+    /// are no more than the bytes consumed, so each move is paid for by
+    /// bytes that are leaving the buffer for good.
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        let remaining = self.data.len() - self.start;
+        if remaining == 0 {
+            self.data.clear();
+            self.start = 0;
+        } else if remaining <= self.start {
+            self.data.drain(..self.start);
+            self.start = 0;
+            #[cfg(test)]
+            {
+                self.moved += remaining;
+            }
+        }
+    }
+
+    /// Take the next complete message off the front of the buffer.
+    ///
+    /// Returns `Ok(None)` while the buffer does not yet hold a whole
+    /// message, so a read loop calls this until it returns `None` and then
+    /// reads more.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`io::ErrorKind::InvalidData`] as soon as a header
+    /// declares a body larger than `max_body`, without waiting for that
+    /// body. The size is peer-supplied, so without the check a peer could
+    /// make the caller buffer up to 4 GiB per channel by declaring a huge
+    /// message and sending it slowly. The caller should drop the
+    /// connection.
+    pub fn take_message(&mut self, max_body: usize) -> io::Result<Option<ReceivedMessage>> {
+        let waiting = self.unconsumed();
+        if waiting.len() < MessageHeader::SIZE {
+            return Ok(None);
+        }
+        let header = MessageHeader::read(waiting)?;
+        let body = header.message_size as usize;
+        if body > max_body {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "message type {} declares a {} byte body, over the {} byte limit",
+                    header.message_type, body, max_body
+                ),
+            ));
+        }
+        let total = MessageHeader::SIZE + body;
+        if waiting.len() < total {
+            return Ok(None);
+        }
+        let raw = waiting[..total].to_vec();
+        self.start += total;
+        Ok(Some(ReceivedMessage { header, raw }))
+    }
 }
 
 #[cfg(test)]
@@ -404,61 +489,175 @@ mod tests {
     use super::*;
     use crate::messages::assert_round_trip;
 
-    // --- take_message tests ---
+    // --- ReceiveBuffer tests ---
+
+    fn buffer_of(bytes: &[u8]) -> ReceiveBuffer {
+        let mut buffer = ReceiveBuffer::new();
+        buffer.extend_from_slice(bytes);
+        buffer
+    }
 
     #[test]
     fn take_message_splits_complete_messages() {
-        let mut buffer = make_message(3, &[1, 2, 3]);
-        buffer.extend_from_slice(&make_message(4, &[]));
-        buffer.extend_from_slice(&[9]); // start of a third header
+        let mut bytes = make_message(3, &[1, 2, 3]);
+        bytes.extend_from_slice(&make_message(4, &[]));
+        bytes.extend_from_slice(&[9]); // start of a third header
+        let mut buffer = buffer_of(&bytes);
 
-        let first = take_message(&mut buffer, 16)
-            .expect("ok")
-            .expect("complete");
+        let first = buffer.take_message(16).expect("ok").expect("complete");
         assert_eq!(first.header.message_type, 3);
         assert_eq!(first.payload(), &[1, 2, 3]);
         assert_eq!(first.raw.len(), MessageHeader::SIZE + 3);
 
-        let second = take_message(&mut buffer, 16)
-            .expect("ok")
-            .expect("complete");
+        let second = buffer.take_message(16).expect("ok").expect("complete");
         assert_eq!(second.header.message_type, 4);
         assert!(second.payload().is_empty());
 
-        assert!(take_message(&mut buffer, 16).expect("ok").is_none());
-        assert_eq!(buffer, vec![9]);
+        assert!(buffer.take_message(16).expect("ok").is_none());
+        assert_eq!(buffer.unconsumed(), &[9]);
+        assert_eq!(buffer.len(), 1);
     }
 
     #[test]
     fn take_message_waits_for_the_body() {
         let full = make_message(3, &[1, 2, 3]);
-        let mut buffer = full[..full.len() - 1].to_vec();
-        assert!(take_message(&mut buffer, 16).expect("ok").is_none());
+        let mut buffer = buffer_of(&full[..full.len() - 1]);
+        assert!(buffer.take_message(16).expect("ok").is_none());
         assert_eq!(
             buffer.len(),
             full.len() - 1,
             "a partial message is left in place"
         );
+
+        buffer.extend_from_slice(&full[full.len() - 1..]);
+        let message = buffer.take_message(16).expect("ok").expect("complete");
+        assert_eq!(message.payload(), &[1, 2, 3]);
+        assert!(buffer.is_empty());
     }
 
     /// shakenfist/ryll#181: an oversized body is refused from the header
     /// alone, before any of it has arrived.
     #[test]
     fn take_message_refuses_oversized_body_from_header() {
-        let mut buffer = Vec::new();
+        let mut header = Vec::new();
         MessageHeader {
             message_type: 3,
             message_size: u32::MAX,
         }
-        .write(&mut buffer)
+        .write(&mut header)
         .expect("write");
-        let err = take_message(&mut buffer, 16).expect_err("over the limit");
+        let err = buffer_of(&header)
+            .take_message(16)
+            .expect_err("over the limit");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
-        let mut buffer = make_message(3, &[0; 17]);
-        assert!(take_message(&mut buffer, 16).is_err());
-        let mut buffer = make_message(3, &[0; 16]);
-        assert!(take_message(&mut buffer, 16).expect("ok").is_some());
+        assert!(buffer_of(&make_message(3, &[0; 17]))
+            .take_message(16)
+            .is_err());
+        assert!(buffer_of(&make_message(3, &[0; 16]))
+            .take_message(16)
+            .expect("ok")
+            .is_some());
+    }
+
+    /// The oversized check applies to a message behind others in the same
+    /// read, not only to the first.
+    #[test]
+    fn take_message_refuses_oversized_body_after_others() {
+        let mut bytes = make_message(3, &[]);
+        bytes.extend_from_slice(&make_message(4, &[0; 17]));
+        let mut buffer = buffer_of(&bytes);
+        assert!(buffer.take_message(16).expect("ok").is_some());
+        assert!(buffer.take_message(16).is_err());
+    }
+
+    /// shakenfist/ryll#510: one read delivering thousands of empty
+    /// messages, then a partial one, is taken in order, and taking them
+    /// moves no bytes at all.
+    #[test]
+    fn many_small_messages_are_taken_without_moving_the_buffer() {
+        const COUNT: usize = 13_000;
+        let mut bytes = Vec::with_capacity(COUNT * MessageHeader::SIZE + 4);
+        for i in 0..COUNT {
+            bytes.extend_from_slice(&make_message((i % 1000) as u16, &[]));
+        }
+        let trailing = make_message(7, &[1, 2, 3, 4]);
+        bytes.extend_from_slice(&trailing[..4]);
+        let mut buffer = buffer_of(&bytes);
+
+        for i in 0..COUNT {
+            let message = buffer.take_message(16).expect("ok").expect("complete");
+            assert_eq!(message.header.message_type, (i % 1000) as u16);
+            assert!(message.payload().is_empty());
+        }
+        assert!(buffer.take_message(16).expect("ok").is_none());
+        assert_eq!(buffer.unconsumed(), &trailing[..4]);
+        assert_eq!(buffer.moved, 0, "taking messages must not shift the buffer");
+
+        // The next read reclaims the consumed prefix by moving only the
+        // four waiting bytes, and the message completes.
+        buffer.extend_from_slice(&trailing[4..]);
+        assert_eq!(buffer.moved, 4);
+        let message = buffer.take_message(16).expect("ok").expect("complete");
+        assert_eq!(message.header.message_type, 7);
+        assert_eq!(message.payload(), &[1, 2, 3, 4]);
+        assert!(buffer.is_empty());
+    }
+
+    /// A read that completes a small message and starts a large one does
+    /// not move the large one's bytes to reclaim the small prefix: that
+    /// would cost far more than the bytes it frees, on every such read.
+    #[test]
+    fn a_large_partial_message_is_not_moved_for_a_small_prefix() {
+        let large = make_message(5, &[0x5a; 2_000]);
+        let mut bytes = make_message(4, &[]);
+        bytes.extend_from_slice(&large[..1_000]);
+        let mut buffer = buffer_of(&bytes);
+        assert!(buffer.take_message(4_096).expect("ok").is_some());
+        assert!(buffer.take_message(4_096).expect("ok").is_none());
+
+        buffer.extend_from_slice(&large[1_000..1_010]);
+        assert_eq!(buffer.moved, 0, "1,000 waiting bytes moved to free 6");
+        buffer.extend_from_slice(&large[1_010..]);
+        let message = buffer.take_message(4_096).expect("ok").expect("complete");
+        assert_eq!(message.raw, large);
+        assert!(buffer.is_empty());
+    }
+
+    /// Whatever the read sizes, compaction never moves more bytes than
+    /// have been consumed, and a large message arriving over many reads
+    /// is not moved while it accumulates.
+    #[test]
+    fn compaction_moves_no_more_than_was_consumed() {
+        let mut stream = Vec::new();
+        for i in 0..2_000u32 {
+            let body = vec![0xa5; (i as usize * 37) % 300];
+            stream.extend_from_slice(&make_message(i as u16, &body));
+        }
+        stream.extend_from_slice(&make_message(9, &vec![0x5a; 200_000]));
+
+        for read_size in [1, 5, 6, 7, 64, 4096, 65_536] {
+            let mut buffer = ReceiveBuffer::new();
+            let mut consumed = 0;
+            let mut taken = 0;
+            for chunk in stream.chunks(read_size) {
+                buffer.extend_from_slice(chunk);
+                while let Some(message) = buffer.take_message(300_000).expect("ok") {
+                    consumed += message.raw.len();
+                    taken += 1;
+                }
+                assert!(
+                    buffer.moved <= consumed,
+                    "read size {}: moved {} bytes having consumed {}",
+                    read_size,
+                    buffer.moved,
+                    consumed
+                );
+            }
+            assert_eq!(taken, 2_001, "read size {}", read_size);
+            assert_eq!(consumed, stream.len());
+            assert!(buffer.is_empty());
+        }
     }
 
     // --- Ping and Pong tests ---

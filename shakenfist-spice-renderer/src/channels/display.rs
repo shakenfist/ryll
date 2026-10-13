@@ -24,12 +24,12 @@ use shakenfist_spice_protocol::constants::{bitmap_flags, bitmap_fmt, ropd};
 use shakenfist_spice_protocol::link::SpiceStream;
 use shakenfist_spice_protocol::logging::{self, message_names};
 use shakenfist_spice_protocol::messages::{
-    make_message, take_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig,
-    DrawBase, ImageDescriptor, Notify as NotifyMessage, Ping, PreferredCompression,
-    PreferredVideoCodecType, Rect, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceCopy,
-    SpiceFill, SpiceOpaque, SpicePoint, SpiceTransparent, StreamActivateReport, StreamClip,
-    StreamCreate, StreamDataRef, StreamDataSizedRef, StreamDestroy, StreamReport, SurfaceCreate,
-    SurfaceDestroy, WireType,
+    make_message, BinaryData, BitmapHeader, DisplayInit, DisplayMonitorsConfig, DrawBase,
+    ImageDescriptor, Notify as NotifyMessage, Ping, PreferredCompression, PreferredVideoCodecType,
+    ReceiveBuffer, Rect, SetAck, SpiceAlphaBlend, SpiceBlackness, SpiceBrush, SpiceCopy, SpiceFill,
+    SpiceOpaque, SpicePoint, SpiceTransparent, StreamActivateReport, StreamClip, StreamCreate,
+    StreamDataRef, StreamDataSizedRef, StreamDestroy, StreamReport, SurfaceCreate, SurfaceDestroy,
+    WireType,
 };
 use shakenfist_spice_protocol::parse::{read_u16_le, read_u32_le, read_u64_le};
 use shakenfist_spice_protocol::reader::{BoundedReader, LinkError};
@@ -826,7 +826,7 @@ pub struct DisplayChannel {
     channel_id: u8,
     stream: SpiceStream,
     events: EventSink,
-    buffer: Vec<u8>,
+    buffer: ReceiveBuffer,
     glz_dictionary: SharedGlzDictionary,
     /// MJPEG decoder backend selected once at construction via
     /// `best_for_platform()`. Shared as `Arc<dyn JpegDecoder>` so
@@ -973,7 +973,7 @@ impl DisplayChannel {
             channel_id,
             stream,
             events,
-            buffer: Vec::with_capacity(1024 * 1024),
+            buffer: ReceiveBuffer::with_capacity(1024 * 1024),
             glz_dictionary,
             jpeg_decoder: best_for_platform(),
             image_cache: BoundedImageCache::new(image_cache_cap_bytes),
@@ -1285,7 +1285,7 @@ impl DisplayChannel {
     }
 
     async fn process_messages(&mut self) -> Result<()> {
-        while let Some(message) = take_message(&mut self.buffer, MAX_MESSAGE_BODY)? {
+        while let Some(message) = self.buffer.take_message(MAX_MESSAGE_BODY)? {
             let msg_type = message.header.message_type;
             self.traffic.record_received(
                 "display",
