@@ -432,14 +432,6 @@
       "author": "mikal"
     },
     {
-      "path": "tools/homebrew-formula.rb",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/measure-idle-cpu.sh",
-      "author": "mikal"
-    },
-    {
       "path": "tools/report-fuzz-failure.sh",
       "author": "mikal"
     },
@@ -461,10 +453,6 @@
     },
     {
       "path": "tools/test-report-fuzz-run.sh",
-      "author": "mikal"
-    },
-    {
-      "path": "tools/web-soak.sh",
       "author": "mikal"
     },
     {
@@ -525,10 +513,6 @@
     },
     {
       "path": "shakenfist-spice-webrtc/tests",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-webrtc/Cargo.toml",
       "author": "mikal"
     },
     {
