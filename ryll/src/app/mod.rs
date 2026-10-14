@@ -2929,6 +2929,25 @@ fn window_focused(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.raw.focused)
 }
 
+/// Keep egui's keyboard navigation away from keys meant for the guest.
+///
+/// `handle_input` forwards every key to the guest, but egui reads the same
+/// keys: Tab and the arrows move focus between widgets, and Space or Enter
+/// clicks the focused one. So typing in the guest could focus the status
+/// bar's bell or ☰ button, and every later space or newline toggled the
+/// notifications panel or the menu; the arrows could move the volume
+/// slider (#535). Called at the start of each pass, after egui has read this
+/// pass's Tab and arrow presses, it cancels the move they asked for and
+/// drops any focus already held.
+fn keep_keyboard_for_guest(ctx: &egui::Context) {
+    ctx.memory_mut(|m| {
+        m.move_focus(egui::FocusDirection::None);
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
+        }
+    });
+}
+
 impl eframe::App for RyllApp {
     // A bug report the user has started must not be lost to the
     // window closing: a Display report waiting for its region is
@@ -3118,6 +3137,12 @@ impl eframe::App for RyllApp {
         // while the close goes through.
         if crate::SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed) {
             return;
+        }
+
+        // The bug report dialog's description box is the one widget that
+        // takes typing; input forwarding is off while it is open.
+        if !self.show_bug_dialog {
+            keep_keyboard_for_guest(ctx);
         }
 
         // Resize viewport to match the remote surface (plus stats
@@ -4997,6 +5022,85 @@ mod tests {
         assert!(!surface_contains_pointer(egui::pos2(120.0, 40.0), true));
         // Elsewhere on the surface the window does not matter.
         assert!(surface_contains_pointer(egui::pos2(20.0, 80.0), true));
+    }
+
+    // -------------------------------------------------------------------------
+    // Keys typed for the guest must not drive egui's widgets
+    //
+    // Tab then Space, typed into the guest, opened the notifications panel
+    // or the ☰ menu: egui moved focus to a status-bar button and clicked it.
+    // -------------------------------------------------------------------------
+
+    fn key_press(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// Run one pass per batch of events over a status bar with one button.
+    /// Returns how many times the button was clicked.
+    fn status_button_clicks(passes: &[Vec<egui::Event>], guard: bool) -> usize {
+        let ctx = egui::Context::default();
+        let mut clicks = 0;
+        for events in passes {
+            let input = egui::RawInput {
+                events: events.clone(),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                if guard {
+                    keep_keyboard_for_guest(ui.ctx());
+                }
+                egui::Panel::bottom("stats").show(ui, |ui| {
+                    if ui.button("bell").clicked() {
+                        clicks += 1;
+                    }
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        clicks
+    }
+
+    #[test]
+    fn tab_then_space_clicks_a_status_button_unguarded() {
+        // Pins the egui behaviour behind the bug, so the guarded test below
+        // keeps proving something.
+        let passes = vec![
+            vec![],
+            vec![key_press(egui::Key::Tab)],
+            vec![],
+            vec![key_press(egui::Key::Space)],
+        ];
+        assert_eq!(status_button_clicks(&passes, false), 1);
+    }
+
+    #[test]
+    fn guest_keys_do_not_click_status_buttons() {
+        let separate = vec![
+            vec![],
+            vec![key_press(egui::Key::Tab)],
+            vec![],
+            vec![key_press(egui::Key::Space)],
+            vec![key_press(egui::Key::Enter)],
+        ];
+        assert_eq!(status_button_clicks(&separate, true), 0);
+        let same_pass = vec![
+            vec![],
+            vec![key_press(egui::Key::Tab), key_press(egui::Key::Space)],
+            vec![key_press(egui::Key::Space)],
+        ];
+        assert_eq!(status_button_clicks(&same_pass, true), 0);
+        let arrows = vec![
+            vec![],
+            vec![key_press(egui::Key::ArrowDown)],
+            vec![key_press(egui::Key::Enter)],
+        ];
+        assert_eq!(status_button_clicks(&arrows, true), 0);
     }
 
     #[test]
