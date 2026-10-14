@@ -598,6 +598,34 @@
     {
       "path": "shakenfist-spice-compression/src/limits.rs",
       "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/wheel/Dockerfile",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer/wheel",
+      "author": "mikal"
+    },
+    {
+      "path": ".devcontainer",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/manual-build.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "author": "mikal"
+    },
+    {
+      "path": ".github/workflows/renovate.yml",
+      "author": "mikal"
     }
   ],
   "partiallyAuditedFiles": [],
