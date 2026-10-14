@@ -272,10 +272,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/Cargo.toml",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/web/assets.rs",
       "author": "mikal"
     },
