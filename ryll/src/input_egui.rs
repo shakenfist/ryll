@@ -5,7 +5,8 @@
 /// SPICE-button representations.  A future web-frontend adapter
 /// will provide the same conversions for `KeyboardEvent.code` /
 /// browser mouse-button values without touching this file.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use eframe::egui;
 
@@ -13,6 +14,14 @@ use shakenfist_spice_renderer::channels::inputs::{
     scancode_for_logical_key, Direction, LogicalKey, NavKey, PunctKey, WSKey,
 };
 use shakenfist_spice_renderer::channels::InputEvent;
+
+use crate::bugreport::{
+    HeldKeyRecord, KeyLogEntry, KeyLogEvent, KeyModifiers, KeyOutcome, KeyboardSnapshot,
+    SentScancodes,
+};
+
+/// How many recent keyboard events `HeldKeys` keeps for bug reports.
+const KEY_LOG_CAPACITY: usize = 256;
 
 /// Convert an egui key event to the substrate-neutral `LogicalKey`.
 ///
@@ -241,7 +250,11 @@ impl ClipboardChord {
 /// are withheld too and the guest never sees half of a key stroke, and
 /// presses egui-winit reported as clipboard events, so their releases
 /// can be paired up.
-#[derive(Debug, Default)]
+///
+/// Finally, it keeps a log of the recent events it was handed and what
+/// it did with each, which bug reports carry so that a key left held in
+/// the guest can be traced to the host event behind it (#536).
+#[derive(Debug)]
 pub struct HeldKeys {
     /// Held key -> the wire scancode that releases it.
     held: HashMap<egui::Key, u32>,
@@ -260,9 +273,37 @@ pub struct HeldKeys {
     /// loss; this follows those events, and `end_frame` keeps it
     /// current across frames whose events are never translated.
     modifiers: egui::Modifiers,
+    /// Session start on the traffic buffers' clock, so the log's
+    /// timestamps line up with the pcap and the inputs channel's own
+    /// event ring.
+    start: Instant,
+    /// The most recent events, oldest first.
+    log: VecDeque<KeyLogEntry>,
+    /// Events logged since `start`, including those dropped from `log`.
+    events_seen: u64,
+}
+
+impl Default for HeldKeys {
+    fn default() -> Self {
+        HeldKeys::new(Instant::now())
+    }
 }
 
 impl HeldKeys {
+    /// Track keys for a session that started at `session_start`, the
+    /// `Instant` its `TrafficBuffers` measure time from.
+    pub fn new(session_start: Instant) -> Self {
+        HeldKeys {
+            held: HashMap::new(),
+            suppressed: HashSet::new(),
+            clipboard: HashMap::new(),
+            modifiers: egui::Modifiers::default(),
+            start: session_start,
+            log: VecDeque::with_capacity(KEY_LOG_CAPACITY),
+            events_seen: 0,
+        }
+    }
+
     /// Release every held key, returning the key-up events to send so
     /// the guest does not see a key stuck down while ryll is not
     /// forwarding input to it.
@@ -271,10 +312,88 @@ impl HeldKeys {
         // swallow the next, unrelated release of the same key.
         self.suppressed.clear();
         self.clipboard.clear();
-        self.held
-            .drain()
-            .map(|(_, up_code)| InputEvent::KeyUp(up_code))
+        let released: Vec<(egui::Key, u32)> = self.held.drain().collect();
+        released
+            .into_iter()
+            .map(|(key, up_code)| {
+                self.log_entry(
+                    KeyLogEvent::ReleaseAll,
+                    Some(key),
+                    KeyOutcome::Forwarded,
+                    SentScancodes::new([up_code]),
+                );
+                InputEvent::KeyUp(up_code)
+            })
             .collect()
+    }
+
+    /// Events logged so far. It changes whenever the snapshot would.
+    pub fn events_seen(&self) -> u64 {
+        self.events_seen
+    }
+
+    /// The held keys and the recent event log, for a bug report.
+    pub fn snapshot(&self) -> KeyboardSnapshot {
+        let mut held: Vec<HeldKeyRecord> = self
+            .held
+            .iter()
+            .map(|(key, up_code)| HeldKeyRecord {
+                key: key.name(),
+                release_scancode: *up_code,
+            })
+            .collect();
+        held.sort_by_key(|record| record.key);
+        let mut withheld: Vec<&'static str> =
+            self.suppressed.iter().map(|key| key.name()).collect();
+        withheld.sort_unstable();
+        KeyboardSnapshot {
+            events_seen: self.events_seen,
+            held,
+            withheld,
+            recent_events: self.log.iter().copied().collect(),
+        }
+    }
+
+    /// Log an event that is not a key event of egui's: `key` names the
+    /// key it concerns, if any.
+    fn log_entry(
+        &mut self,
+        event: KeyLogEvent,
+        key: Option<egui::Key>,
+        outcome: KeyOutcome,
+        sent: SentScancodes,
+    ) {
+        let mut entry = self.new_entry(event, outcome, sent);
+        entry.key = key.map(egui::Key::name);
+        self.push_log(entry);
+    }
+
+    /// An entry stamped now, with the current modifiers.
+    fn new_entry(
+        &self,
+        event: KeyLogEvent,
+        outcome: KeyOutcome,
+        sent: SentScancodes,
+    ) -> KeyLogEntry {
+        KeyLogEntry {
+            at_secs: self.start.elapsed().as_secs_f64(),
+            event,
+            key: None,
+            physical_key: None,
+            pressed: None,
+            repeat: None,
+            modifiers: key_modifiers(self.modifiers),
+            outcome,
+            sent,
+        }
+    }
+
+    fn push_log(&mut self, entry: KeyLogEntry) {
+        if self.log.len() == KEY_LOG_CAPACITY {
+            self.log.pop_front();
+        }
+        self.log.push_back(entry);
+        self.events_seen += 1;
     }
 
     /// Record the modifiers a frame ended with (egui's `i.modifiers`).
@@ -305,28 +424,33 @@ impl HeldKeys {
     /// and the key press it replaced is sent in its place. On macOS it
     /// is a Cmd chord, which belongs to the host and is withheld like
     /// any other (see `translate_key_events`).
-    fn press_clipboard_chord(&mut self, chord: ClipboardChord, out: &mut Vec<InputEvent>) {
+    fn press_clipboard_chord(
+        &mut self,
+        chord: ClipboardChord,
+        out: &mut Vec<InputEvent>,
+    ) -> KeyOutcome {
         if self.modifiers.mac_cmd {
             self.clipboard.insert(chord, None);
-            return;
+            return KeyOutcome::Withheld;
         }
         let Some(key) = chord.replaced_key(self.modifiers) else {
-            return;
+            return KeyOutcome::Unmapped;
         };
         let Some((down_code, up_code)) =
             egui_key_to_logical(key).and_then(scancode_for_logical_key)
         else {
-            return;
+            return KeyOutcome::Unmapped;
         };
         if self.held.contains_key(&key) {
             // Auto-repeat: egui-winit reports every repeat of the chord
             // as another clipboard event.
-            return;
+            return KeyOutcome::Repeat;
         }
         self.suppressed.remove(&key);
         self.held.insert(key, up_code);
         self.clipboard.insert(chord, Some(key));
         out.push(InputEvent::KeyDown(down_code));
+        KeyOutcome::Forwarded
     }
 
     /// Take the outstanding clipboard chord, if any, that a release of
@@ -371,85 +495,151 @@ impl HeldKeys {
 pub fn translate_key_events(events: &[egui::Event], held: &mut HeldKeys) -> Vec<InputEvent> {
     let mut out = Vec::new();
     for event in events {
-        match event {
-            egui::Event::WindowFocused(false) => {
-                out.extend(held.release_all());
-                // egui-winit forgets its modifiers on focus loss without
-                // emitting `ModifiersChanged`; do the same.
-                held.modifiers = egui::Modifiers::default();
-            }
-            egui::Event::ModifiersChanged(modifiers) => held.modifiers = *modifiers,
-            egui::Event::Cut => held.press_clipboard_chord(ClipboardChord::Cut, &mut out),
-            egui::Event::Copy => held.press_clipboard_chord(ClipboardChord::Copy, &mut out),
-            egui::Event::Paste(_) => held.press_clipboard_chord(ClipboardChord::Paste, &mut out),
-            egui::Event::Key {
-                key,
-                physical_key,
-                pressed,
-                modifiers,
-                ..
-            } => {
-                held.modifiers = *modifiers;
-                let lookup_key = physical_key.unwrap_or(*key);
-                if HostShortcut::is_shortcut_key(lookup_key) {
-                    continue;
-                }
-                if !*pressed {
-                    if let Some(up_code) = held.held.remove(&lookup_key) {
-                        held.clipboard.retain(|_, sent| *sent != Some(lookup_key));
-                        out.push(InputEvent::KeyUp(up_code));
-                        continue;
-                    }
-                    if let Some(sent) = held.take_clipboard_chord(*key) {
-                        // The release of a clipboard chord whose press
-                        // was sent as a different physical key, or
-                        // withheld. Release whatever was sent.
-                        if let Some(up_code) = sent.and_then(|k| held.held.remove(&k)) {
-                            out.push(InputEvent::KeyUp(up_code));
-                        }
-                        continue;
-                    }
-                }
-                let Some((down_code, up_code)) =
-                    egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
-                else {
-                    continue;
-                };
-                if *pressed {
-                    if held.held.contains_key(&lookup_key) {
-                        // Auto-repeat of a key the guest already holds.
-                        continue;
-                    }
-                    if modifiers.mac_cmd {
-                        held.suppressed.insert(lookup_key);
-                        continue;
-                    }
-                    held.suppressed.remove(&lookup_key);
-                    held.held.insert(lookup_key, up_code);
-                    out.push(InputEvent::KeyDown(down_code));
-                } else if held.suppressed.remove(&lookup_key)
-                    || modifiers.mac_cmd
-                    || (is_paste_shortcut_modifiers(*modifiers) && *key == egui::Key::V)
-                {
-                    // The release of a withheld Cmd chord press. The
-                    // other two arms cover a Cmd+V, or ryll's own
-                    // Ctrl+Alt+V, whose press left no event at all
-                    // because the host clipboard held no text.
-                } else {
-                    if ClipboardChord::is_guest_paste(*key, *modifiers) {
-                        // A paste chord whose press egui-winit swallowed
-                        // without an `Event::Paste`, because the host
-                        // clipboard held no text. The guest's clipboard
-                        // may well hold some, so send the whole stroke.
-                        out.push(InputEvent::KeyDown(down_code));
-                    }
-                    out.push(InputEvent::KeyUp(up_code));
-                }
-            }
-            _ => {}
+        if let egui::Event::WindowFocused(false) = event {
+            held.log_entry(
+                KeyLogEvent::FocusLost,
+                None,
+                KeyOutcome::State,
+                SentScancodes::default(),
+            );
+            out.extend(held.release_all());
+            // egui-winit forgets its modifiers on focus loss without
+            // emitting `ModifiersChanged`; do the same.
+            held.modifiers = egui::Modifiers::default();
+            continue;
         }
+        let first_sent = out.len();
+        let Some((kind, outcome)) = translate_key_event(event, held, &mut out) else {
+            continue;
+        };
+        let sent = SentScancodes::new(out[first_sent..].iter().filter_map(|ev| match ev {
+            InputEvent::KeyDown(code) | InputEvent::KeyUp(code) => Some(*code),
+            _ => None,
+        }));
+        let mut entry = held.new_entry(kind, outcome, sent);
+        if let egui::Event::Key {
+            key,
+            physical_key,
+            pressed,
+            repeat,
+            ..
+        } = event
+        {
+            entry.key = Some(key.name());
+            entry.physical_key = physical_key.map(egui::Key::name);
+            entry.pressed = Some(*pressed);
+            entry.repeat = Some(*repeat);
+        }
+        held.push_log(entry);
     }
     out
+}
+
+/// Translate one event other than focus loss, pushing what it sends to
+/// `out`. Returns the kind of event and what was done with it, or `None`
+/// for an event that is not about the keyboard.
+fn translate_key_event(
+    event: &egui::Event,
+    held: &mut HeldKeys,
+    out: &mut Vec<InputEvent>,
+) -> Option<(KeyLogEvent, KeyOutcome)> {
+    let (key, physical_key, pressed, modifiers) = match event {
+        egui::Event::ModifiersChanged(modifiers) => {
+            held.modifiers = *modifiers;
+            return Some((KeyLogEvent::Modifiers, KeyOutcome::State));
+        }
+        egui::Event::Cut => {
+            let outcome = held.press_clipboard_chord(ClipboardChord::Cut, out);
+            return Some((KeyLogEvent::Cut, outcome));
+        }
+        egui::Event::Copy => {
+            let outcome = held.press_clipboard_chord(ClipboardChord::Copy, out);
+            return Some((KeyLogEvent::Copy, outcome));
+        }
+        egui::Event::Paste(_) => {
+            let outcome = held.press_clipboard_chord(ClipboardChord::Paste, out);
+            return Some((KeyLogEvent::Paste, outcome));
+        }
+        egui::Event::Key {
+            key,
+            physical_key,
+            pressed,
+            modifiers,
+            ..
+        } => (key, physical_key, pressed, modifiers),
+        _ => return None,
+    };
+    let key_outcome = |outcome| Some((KeyLogEvent::Key, outcome));
+
+    held.modifiers = *modifiers;
+    let lookup_key = physical_key.unwrap_or(*key);
+    if HostShortcut::is_shortcut_key(lookup_key) {
+        return key_outcome(KeyOutcome::HostShortcut);
+    }
+    if !*pressed {
+        if let Some(up_code) = held.held.remove(&lookup_key) {
+            held.clipboard.retain(|_, sent| *sent != Some(lookup_key));
+            out.push(InputEvent::KeyUp(up_code));
+            return key_outcome(KeyOutcome::Forwarded);
+        }
+        if let Some(sent) = held.take_clipboard_chord(*key) {
+            // The release of a clipboard chord whose press was sent as a
+            // different physical key, or withheld. Release whatever was
+            // sent.
+            if let Some(up_code) = sent.and_then(|k| held.held.remove(&k)) {
+                out.push(InputEvent::KeyUp(up_code));
+                return key_outcome(KeyOutcome::Forwarded);
+            }
+            return key_outcome(KeyOutcome::Withheld);
+        }
+    }
+    let Some((down_code, up_code)) =
+        egui_key_to_logical(lookup_key).and_then(scancode_for_logical_key)
+    else {
+        return key_outcome(KeyOutcome::Unmapped);
+    };
+    if *pressed {
+        if held.held.contains_key(&lookup_key) {
+            // Auto-repeat of a key the guest already holds.
+            return key_outcome(KeyOutcome::Repeat);
+        }
+        if modifiers.mac_cmd {
+            held.suppressed.insert(lookup_key);
+            return key_outcome(KeyOutcome::Withheld);
+        }
+        held.suppressed.remove(&lookup_key);
+        held.held.insert(lookup_key, up_code);
+        out.push(InputEvent::KeyDown(down_code));
+        key_outcome(KeyOutcome::Forwarded)
+    } else if held.suppressed.remove(&lookup_key)
+        || modifiers.mac_cmd
+        || (is_paste_shortcut_modifiers(*modifiers) && *key == egui::Key::V)
+    {
+        // The release of a withheld Cmd chord press. The other two arms
+        // cover a Cmd+V, or ryll's own Ctrl+Alt+V, whose press left no
+        // event at all because the host clipboard held no text.
+        key_outcome(KeyOutcome::Withheld)
+    } else {
+        if ClipboardChord::is_guest_paste(*key, *modifiers) {
+            // A paste chord whose press egui-winit swallowed without an
+            // `Event::Paste`, because the host clipboard held no text.
+            // The guest's clipboard may well hold some, so send the
+            // whole stroke.
+            out.push(InputEvent::KeyDown(down_code));
+        }
+        out.push(InputEvent::KeyUp(up_code));
+        key_outcome(KeyOutcome::UnheldRelease)
+    }
+}
+
+/// The modifiers worth recording in the key log.
+fn key_modifiers(modifiers: egui::Modifiers) -> KeyModifiers {
+    KeyModifiers {
+        alt: modifiers.alt,
+        ctrl: modifiers.ctrl,
+        shift: modifiers.shift,
+        mac_cmd: modifiers.mac_cmd,
+    }
 }
 
 /// Whether this frame's input holds ryll's paste-as-keystrokes chord,
@@ -1157,6 +1347,196 @@ mod tests {
             &mut held,
         );
         assert_eq!(wire(events), vec![(true, 0x0F), (false, 0x8F)]);
+    }
+
+    // ── Key log for bug reports (#536) ──────────────────────────────
+
+    /// The outcome and scancodes of each logged entry, oldest first.
+    fn logged(held: &HeldKeys) -> Vec<(KeyLogEvent, KeyOutcome, Vec<u32>)> {
+        held.snapshot()
+            .recent_events
+            .iter()
+            .map(|e| (e.event, e.outcome, e.sent.as_slice().to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn key_log_records_each_key_event_and_its_scancodes() {
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                key(egui::Key::Slash, egui::Key::Slash, true, false),
+                key(egui::Key::Slash, egui::Key::Slash, true, true),
+                key(egui::Key::Slash, egui::Key::Slash, false, false),
+                key(egui::Key::F12, egui::Key::F12, true, false),
+                key(egui::Key::F13, egui::Key::F13, true, false),
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            logged(&held),
+            vec![
+                (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0x35]),
+                (KeyLogEvent::Key, KeyOutcome::Repeat, vec![]),
+                (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0xB5]),
+                (KeyLogEvent::Key, KeyOutcome::HostShortcut, vec![]),
+                (KeyLogEvent::Key, KeyOutcome::Unmapped, vec![]),
+            ]
+        );
+        let first = held.snapshot().recent_events[0];
+        assert_eq!(first.key, Some("Slash"));
+        assert_eq!(first.physical_key, Some("Slash"));
+        assert_eq!(first.pressed, Some(true));
+        assert_eq!(first.repeat, Some(false));
+        assert_eq!(held.events_seen(), 5);
+    }
+
+    #[test]
+    fn key_log_shows_a_release_whose_key_differs_from_its_press() {
+        // A press and a release that map to different keys leave the
+        // first held: the log shows the stray release and the held set
+        // shows the key the guest still holds down.
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                key(egui::Key::Slash, egui::Key::Slash, true, false),
+                key(egui::Key::Questionmark, egui::Key::Period, false, false),
+            ],
+            &mut held,
+        );
+        let snap = held.snapshot();
+        assert_eq!(snap.recent_events[1].outcome, KeyOutcome::UnheldRelease);
+        assert_eq!(snap.recent_events[1].key, Some("Questionmark"));
+        assert_eq!(snap.recent_events[1].physical_key, Some("Period"));
+        assert_eq!(
+            snap.held,
+            vec![HeldKeyRecord {
+                key: "Slash",
+                release_scancode: 0xB5
+            }]
+        );
+    }
+
+    #[test]
+    fn key_log_records_withheld_cmd_chords_and_modifier_changes() {
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CMD),
+                cmd_key(egui::Key::Q, true),
+                egui::Event::Copy,
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            logged(&held),
+            vec![
+                (KeyLogEvent::Modifiers, KeyOutcome::State, vec![]),
+                (KeyLogEvent::Key, KeyOutcome::Withheld, vec![]),
+                (KeyLogEvent::Copy, KeyOutcome::Withheld, vec![]),
+            ]
+        );
+        let snap = held.snapshot();
+        assert!(snap.recent_events[0].modifiers.mac_cmd);
+        assert_eq!(snap.withheld, vec!["Q"]);
+    }
+
+    #[test]
+    fn key_log_records_a_forwarded_clipboard_chord() {
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                egui::Event::ModifiersChanged(CTRL),
+                egui::Event::Copy,
+                key_with(egui::Key::C, egui::Key::C, false, CTRL),
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            logged(&held),
+            vec![
+                (KeyLogEvent::Modifiers, KeyOutcome::State, vec![]),
+                (KeyLogEvent::Copy, KeyOutcome::Forwarded, vec![0x2E]),
+                (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0xAE]),
+            ]
+        );
+    }
+
+    #[test]
+    fn key_log_records_each_key_released_on_focus_loss() {
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                key(egui::Key::A, egui::Key::A, true, false),
+                egui::Event::WindowFocused(false),
+            ],
+            &mut held,
+        );
+        assert_eq!(
+            logged(&held),
+            vec![
+                (KeyLogEvent::Key, KeyOutcome::Forwarded, vec![0x1E]),
+                (KeyLogEvent::FocusLost, KeyOutcome::State, vec![]),
+                (KeyLogEvent::ReleaseAll, KeyOutcome::Forwarded, vec![0x9E]),
+            ]
+        );
+        assert_eq!(held.snapshot().recent_events[2].key, Some("A"));
+        assert!(held.snapshot().held.is_empty());
+    }
+
+    #[test]
+    fn key_log_records_release_all_outside_translation() {
+        // `RyllApp::release_guest_keys` calls this as a dialog opens; in
+        // the stuck `/` report that was the only release the key got.
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[key(egui::Key::Slash, egui::Key::Slash, true, false)],
+            &mut held,
+        );
+        held.release_all();
+        let snap = held.snapshot();
+        assert_eq!(snap.recent_events[1].event, KeyLogEvent::ReleaseAll);
+        assert_eq!(snap.recent_events[1].key, Some("Slash"));
+        assert_eq!(snap.recent_events[1].sent.as_slice(), &[0xB5]);
+    }
+
+    #[test]
+    fn key_log_ignores_events_that_are_not_about_the_keyboard() {
+        let mut held = HeldKeys::default();
+        translate_key_events(
+            &[
+                egui::Event::PointerMoved(egui::pos2(1.0, 2.0)),
+                egui::Event::Text("a".to_string()),
+                egui::Event::WindowFocused(true),
+            ],
+            &mut held,
+        );
+        assert_eq!(held.events_seen(), 0);
+    }
+
+    #[test]
+    fn key_log_keeps_the_most_recent_entries() {
+        let mut held = HeldKeys::default();
+        let stroke = [
+            key(egui::Key::A, egui::Key::A, true, false),
+            key(egui::Key::A, egui::Key::A, false, false),
+        ];
+        for _ in 0..KEY_LOG_CAPACITY {
+            translate_key_events(&stroke, &mut held);
+        }
+        let snap = held.snapshot();
+        assert_eq!(snap.recent_events.len(), KEY_LOG_CAPACITY);
+        assert_eq!(snap.events_seen, 2 * KEY_LOG_CAPACITY as u64);
+        assert_eq!(snap.recent_events.last().unwrap().sent.as_slice(), &[0x9E]);
+    }
+
+    #[test]
+    fn key_log_times_are_since_the_session_start() {
+        let start = Instant::now() - std::time::Duration::from_secs(100);
+        let mut held = HeldKeys::new(start);
+        translate_key_events(&[key(egui::Key::A, egui::Key::A, true, false)], &mut held);
+        let at = held.snapshot().recent_events[0].at_secs;
+        assert!((100.0..200.0).contains(&at), "at_secs = {at}");
     }
 
     fn wheel(unit: egui::MouseWheelUnit, y: f32, phase: egui::TouchPhase) -> egui::Event {

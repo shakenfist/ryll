@@ -747,6 +747,10 @@ pub struct AppSnapshot {
     /// Whether the status-bar mute button is engaged. `None`
     /// under the same conditions as `audio_volume_percent`.
     pub audio_muted: Option<bool>,
+    /// The GUI's keyboard state and its recent key events, for a guest
+    /// key left held down. `None` where no GUI maintains the snapshot,
+    /// as for `audio_volume_percent`.
+    pub keyboard: Option<KeyboardSnapshot>,
 }
 
 impl Default for AppSnapshot {
@@ -775,7 +779,141 @@ impl Default for AppSnapshot {
             auto_snapshots_pruned: 0,
             audio_volume_percent: None,
             audio_muted: None,
+            keyboard: None,
         }
+    }
+}
+
+/// The GUI's keyboard state, for diagnosing a key the guest was told is
+/// held and never released (#536).
+///
+/// The inputs channel's `recent_events` and the pcap show the scancodes
+/// that reached the wire, but not the host key event each came from, nor
+/// the host events that sent nothing. This records those: every key,
+/// clipboard, modifier and focus event `translate_key_events` saw, what
+/// it did with each, and which keys it holds down in the guest now.
+/// Timestamps are seconds since session start, the clock the inputs
+/// channel's `recent_events` and the pcap use.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct KeyboardSnapshot {
+    /// Events logged since the session started, including those that
+    /// have since fallen out of `recent_events`.
+    pub events_seen: u64,
+    /// Keys the guest has been sent a press for and no release yet.
+    pub held: Vec<HeldKeyRecord>,
+    /// Keys whose press was withheld from the guest as part of a host
+    /// Cmd chord, so whose release will be withheld too.
+    pub withheld: Vec<&'static str>,
+    /// The most recent events, oldest first.
+    pub recent_events: Vec<KeyLogEntry>,
+}
+
+/// A key the guest is holding down, by egui key name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct HeldKeyRecord {
+    pub key: &'static str,
+    /// The scancode that will release it.
+    pub release_scancode: u32,
+}
+
+/// One host keyboard event and what ryll did with it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct KeyLogEntry {
+    pub at_secs: f64,
+    pub event: KeyLogEvent,
+    /// egui's logical key: what the layout produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<&'static str>,
+    /// egui's physical key: the key's position, which ryll maps to a
+    /// scancode when it is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_key: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pressed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeat: Option<bool>,
+    pub modifiers: KeyModifiers,
+    pub outcome: KeyOutcome,
+    /// The scancodes sent to the guest because of this event, in order.
+    pub sent: SentScancodes,
+}
+
+/// What kind of host event a [`KeyLogEntry`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyLogEvent {
+    /// A key press or release.
+    Key,
+    /// A press egui-winit reported as a clipboard event, not a key.
+    Cut,
+    Copy,
+    Paste,
+    /// The modifiers changed.
+    Modifiers,
+    /// The window lost focus.
+    FocusLost,
+    /// ryll released a held key itself: on focus loss, or when it
+    /// stopped forwarding input (a dialog opened, say).
+    ReleaseAll,
+}
+
+/// What ryll did with a host keyboard event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyOutcome {
+    /// Sent to the guest.
+    Forwarded,
+    /// A release of a key not recorded as held, sent anyway.
+    UnheldRelease,
+    /// A press of a key already held: an auto-repeat, not sent.
+    Repeat,
+    /// One of ryll's own shortcut keys, never sent.
+    HostShortcut,
+    /// Part of a host Cmd chord or of ryll's own paste chord, not sent.
+    Withheld,
+    /// A key with no scancode, not sent.
+    Unmapped,
+    /// A change of state that sends nothing itself.
+    State,
+}
+
+/// The modifiers egui reported with a [`KeyLogEntry`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct KeyModifiers {
+    pub alt: bool,
+    pub ctrl: bool,
+    pub shift: bool,
+    /// The Cmd key, on macOS only.
+    pub mac_cmd: bool,
+}
+
+/// Up to two scancodes, the most one host event sends; serialised as a
+/// list. Fixed-size so that logging an event never allocates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SentScancodes {
+    codes: [u32; 2],
+    len: u8,
+}
+
+impl SentScancodes {
+    /// Collect the scancodes, keeping the first two.
+    pub fn new(codes: impl IntoIterator<Item = u32>) -> Self {
+        let mut sent = SentScancodes::default();
+        for code in codes.into_iter().take(2) {
+            sent.codes[sent.len as usize] = code;
+            sent.len += 1;
+        }
+        sent
+    }
+
+    pub fn as_slice(&self) -> &[u32] {
+        &self.codes[..self.len as usize]
+    }
+}
+
+impl Serialize for SentScancodes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
     }
 }
 
@@ -2644,6 +2782,69 @@ mod tests {
         assert_eq!(v["last_request_ts_secs"], json!(0.5));
         assert_eq!(v["last_response_ts_secs"], json!(0.9));
         assert_eq!(v["decompressed_size_limit_exceeded_count"], json!(1));
+    }
+
+    #[test]
+    fn keyboard_snapshot_serialises() {
+        let snap = AppSnapshot {
+            keyboard: Some(KeyboardSnapshot {
+                events_seen: 300,
+                held: vec![HeldKeyRecord {
+                    key: "Slash",
+                    release_scancode: 0xB5,
+                }],
+                withheld: vec!["Q"],
+                recent_events: vec![
+                    KeyLogEntry {
+                        at_secs: 7450.614,
+                        event: KeyLogEvent::Key,
+                        key: Some("Slash"),
+                        physical_key: Some("Slash"),
+                        pressed: Some(true),
+                        repeat: Some(false),
+                        modifiers: KeyModifiers::default(),
+                        outcome: KeyOutcome::Forwarded,
+                        sent: SentScancodes::new([0x35]),
+                    },
+                    KeyLogEntry {
+                        at_secs: 7456.792,
+                        event: KeyLogEvent::ReleaseAll,
+                        key: Some("Slash"),
+                        physical_key: None,
+                        pressed: None,
+                        repeat: None,
+                        modifiers: KeyModifiers::default(),
+                        outcome: KeyOutcome::UnheldRelease,
+                        sent: SentScancodes::new([0xB5, 0x01, 0x02]),
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&snap).unwrap();
+        let kb = &v["keyboard"];
+        assert_eq!(kb["events_seen"], json!(300));
+        assert_eq!(
+            kb["held"],
+            json!([{"key": "Slash", "release_scancode": 0xB5}])
+        );
+        assert_eq!(kb["withheld"], json!(["Q"]));
+        let first = &kb["recent_events"][0];
+        assert_eq!(first["event"], json!("key"));
+        assert_eq!(first["outcome"], json!("forwarded"));
+        assert_eq!(first["sent"], json!([0x35]));
+        assert_eq!(first["pressed"], json!(true));
+        assert_eq!(first["modifiers"]["mac_cmd"], json!(false));
+        // Absent fields are left out rather than written as null, and
+        // only the first two scancodes are kept.
+        let second = &kb["recent_events"][1];
+        assert_eq!(second["event"], json!("release_all"));
+        assert_eq!(second["outcome"], json!("unheld_release"));
+        assert!(second.get("pressed").is_none());
+        assert_eq!(second["sent"], json!([0xB5, 0x01]));
+        // Where no GUI keeps the snapshot it is null.
+        let empty = serde_json::to_value(AppSnapshot::default()).unwrap();
+        assert!(empty["keyboard"].is_null());
     }
 
     #[test]
