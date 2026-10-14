@@ -53,10 +53,6 @@
       "sha": "c42f54754a55943a43daa3ddad2c9188db547984",
       "date": "2026-09-29"
     },
-    ".github/workflows/prune-reviews.yml": {
-      "sha": "7fc119ce46252ba56037d99ddf90ea9dc180e3b8",
-      "date": "2026-10-05"
-    },
     ".github/workflows/supply-chain.yml": {
       "sha": "c855b8e116194dc365244a69aff28900f33023fe",
       "date": "2026-09-26"

@@ -540,10 +540,6 @@
       "author": "mikal"
     },
     {
-      "path": ".github/workflows/prune-reviews.yml",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-compression/src/lz.rs",
       "author": "mikal"
     },
