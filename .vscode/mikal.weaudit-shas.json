@@ -97,10 +97,6 @@
       "sha": "518de92ccf3999ad33e5104a4a519d0d1fb24b51",
       "date": "2026-08-18"
     },
-    "docs/web-frontend.md": {
-      "sha": "e5269c048c5b13029df507a8f0d2a14457bc600b",
-      "date": "2026-09-17"
-    },
     "examples/control-socket-demo.py": {
       "sha": "1e39ea70aaa51526508b15997706449a378ce09a",
       "date": "2026-09-17"
@@ -124,10 +120,6 @@
     "ryll/src/auto_snapshot.rs": {
       "sha": "643d96c07572e19475d9f07c55aeba6613af9c1c",
       "date": "2026-09-27"
-    },
-    "ryll/src/clipboard_arboard.rs": {
-      "sha": "f6c0183c7619c9e7fd18c5c57b492b2132ad6d4a",
-      "date": "2026-09-18"
     },
     "ryll/src/notifications.rs": {
       "sha": "cfd7c5df773b57965f15ed83526d46f5d217b747",
@@ -164,10 +156,6 @@
     "ryll/src/web/mod.rs": {
       "sha": "b97b31c030126cfaf504fb20d972734c30d88b79",
       "date": "2026-08-18"
-    },
-    "ryll/src/web/server.rs": {
-      "sha": "551e4b082b1d9f20c755bc84f26333244693efa9",
-      "date": "2026-10-05"
     },
     "scripts/check-rust.sh": {
       "sha": "6b134226743b654c751c04352cc9072f20476bb9",
@@ -275,18 +263,6 @@
     },
     "shakenfist-spice-renderer/src/channels/watchdog.rs": {
       "sha": "f5a71924c175312fc6ee96cd5e23f99703596048",
-      "date": "2026-09-19"
-    },
-    "shakenfist-spice-renderer/src/clipboard.rs": {
-      "sha": "e8455ec05c19196d6583abc8eccc79308a78580b",
-      "date": "2026-07-21"
-    },
-    "shakenfist-spice-renderer/src/control/mod.rs": {
-      "sha": "e5d17a3a8dcd9c28de519ced1d31b502a1639fcd",
-      "date": "2026-07-19"
-    },
-    "shakenfist-spice-renderer/src/control/protocol.rs": {
-      "sha": "3f2f75abfe5ba66229e112df157164a9cc029cf7",
       "date": "2026-09-19"
     },
     "shakenfist-spice-renderer/src/device_config.rs": {

@@ -72,10 +72,6 @@
       "author": "mikal"
     },
     {
-      "path": "shakenfist-spice-renderer/src/control/mod.rs",
-      "author": "mikal"
-    },
-    {
       "path": "shakenfist-spice-renderer/src/webdav/mod.rs",
       "author": "mikal"
     },
@@ -93,10 +89,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/byte_counter.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/clipboard.rs",
       "author": "mikal"
     },
     {
@@ -268,10 +260,6 @@
       "author": "mikal"
     },
     {
-      "path": "docs/web-frontend.md",
-      "author": "mikal"
-    },
-    {
       "path": "examples/control-socket-demo.py",
       "author": "mikal"
     },
@@ -300,10 +288,6 @@
       "author": "mikal"
     },
     {
-      "path": "ryll/src/clipboard_arboard.rs",
-      "author": "mikal"
-    },
-    {
       "path": "ryll/src/notifications.rs",
       "author": "mikal"
     },
@@ -317,10 +301,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/src/channels/watchdog.rs",
-      "author": "mikal"
-    },
-    {
-      "path": "shakenfist-spice-renderer/src/control/protocol.rs",
       "author": "mikal"
     },
     {
@@ -617,10 +597,6 @@
     },
     {
       "path": "shakenfist-spice-renderer/Cargo.toml",
-      "author": "mikal"
-    },
-    {
-      "path": "ryll/src/web/server.rs",
       "author": "mikal"
     },
     {
