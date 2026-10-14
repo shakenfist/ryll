@@ -48,12 +48,14 @@ use shakenfist_spice_renderer::{
 
 use crate::clipboard_arboard::ArboardClipboard;
 
+mod agent_state;
 mod notification_snapshots;
 mod reconnect;
 mod resize;
 mod session_init;
 mod stats;
 
+use agent_state::{mac_paste_chord, paste_hint, AgentState};
 use notification_snapshots::NotificationSnapshotStore;
 use reconnect::{
     format_expiry_local, modal_variant_notification, ModalVariant, ReconnectPolicy, ReconnectState,
@@ -531,9 +533,13 @@ pub struct RyllApp {
     /// Inter-character delay for paste-as-keystrokes in milliseconds.
     paste_char_delay_ms: u32,
 
-    /// Whether the guest has a vdagent connected (disables
-    /// paste-as-keystrokes in favour of the clipboard path).
-    agent_connected: bool,
+    /// The guest agent as this session has seen it. A connected agent
+    /// disables paste-as-keystrokes in favour of the clipboard path.
+    agent_state: AgentState,
+
+    /// Whether this session has already explained why Cmd+V does not
+    /// paste without an agent. Reset on reconnect.
+    paste_hint_shown: bool,
 
     /// `MainSnapshot::events_dropped_count` as of the last frame that
     /// looked, so a rise can be told apart from a count already
@@ -994,7 +1000,8 @@ impl RyllApp {
             notifications_panel_was_open_last_frame: false,
             enable_paste,
             paste_char_delay_ms,
-            agent_connected: false,
+            agent_state: AgentState::Unknown,
+            paste_hint_shown: false,
             last_seen_events_dropped: 0,
             cached_clipboard: None,
             paste_error_message: None,
@@ -1063,6 +1070,8 @@ impl RyllApp {
 
         self.event_rx = event_rx;
         self.session_state = session_state.subscribe();
+        self.agent_state = AgentState::Unknown;
+        self.paste_hint_shown = false;
         self.input_tx = Some(input_tx);
         self.resize_tx = Some(resize_tx);
         self.last_sent_resize = None;
@@ -1973,19 +1982,15 @@ impl RyllApp {
         };
         if let Some(connected) = agent {
             info!("app: vdagent connected={}", connected);
-            self.agent_connected = connected;
             // Record the agent-state transition. Affects clipboard sync, paste,
             // and resolution updates — useful for the user to see when those
-            // features come or go.
-            self.push_connection_event(
-                NotifySeverity::Info,
-                if connected {
-                    "Guest agent connected"
-                } else {
-                    "Guest agent disconnected"
-                }
-                .to_string(),
-            );
+            // features come or go. A server with no agent at all is told
+            // apart from an agent that went away (#537).
+            let (state, notice) = self.agent_state.on_report(connected);
+            self.agent_state = state;
+            if let Some(notice) = notice {
+                self.push_connection_event(NotifySeverity::Info, notice);
+            }
         }
     }
 
@@ -2015,7 +2020,7 @@ impl RyllApp {
     fn trigger_paste(&mut self) -> bool {
         use shakenfist_spice_renderer::channels::{translate_paste, PasteError};
 
-        if !self.enable_paste || self.agent_connected {
+        if !self.enable_paste || self.agent_state.connected() {
             return false;
         }
 
@@ -3206,6 +3211,21 @@ impl eframe::App for RyllApp {
                     self.held_keys.withhold_paste_release();
                 }
             }
+
+            // Cmd+V with no agent does nothing in the guest; say why, once
+            // a session (#537).
+            if self.connected
+                && !self.paste_hint_shown
+                && !self.agent_state.connected()
+                && ctx.input(|i| mac_paste_chord(i.modifiers, &i.events))
+            {
+                self.paste_hint_shown = true;
+                self.push_notification(
+                    NotifySeverity::Warn,
+                    NotificationSource::Internal,
+                    paste_hint(self.enable_paste),
+                );
+            }
         }
 
         // Handle input (skip if paste was triggered this frame)
@@ -3455,6 +3475,13 @@ impl eframe::App for RyllApp {
                             }
                         });
 
+                        // Guest agent indicator: what clipboard sharing and
+                        // guest resizing depend on (#537).
+                        ui.separator();
+                        let agent = self.agent_state;
+                        ui.label(egui::RichText::new("Agent").color(agent.indicator_colour()))
+                            .on_hover_text(agent.tooltip());
+
                         ui.separator();
 
                         ui.allocate_ui_with_layout(
@@ -3559,7 +3586,7 @@ impl eframe::App for RyllApp {
                             if self.enable_paste {
                                 ui.separator();
                                 let label = egui::Button::new("Paste").shortcut_text("Ctrl+Alt+V");
-                                let enabled = !self.agent_connected;
+                                let enabled = !self.agent_state.connected();
                                 let response = ui.add_enabled(enabled, label);
                                 if response.clicked() {
                                     self.trigger_paste();
