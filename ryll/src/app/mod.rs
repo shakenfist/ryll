@@ -921,7 +921,7 @@ impl RyllApp {
             ticket_expiry_warned: false,
             last_mouse_pos: None,
             last_modifiers: None,
-            held_keys: HeldKeys::default(),
+            held_keys: HeldKeys::new(traffic.session_start()),
             screenshot_requested: false,
             forwarded_buttons: 0,
             wheel: WheelAccumulator::default(),
@@ -1089,7 +1089,7 @@ impl RyllApp {
         }
         self.last_mouse_pos = None;
         self.last_modifiers = None;
-        self.held_keys = HeldKeys::default();
+        self.held_keys = HeldKeys::new(traffic.session_start());
         self.forwarded_buttons = 0;
         self.wheel.reset();
         self.pending_resize = None;
@@ -2109,6 +2109,12 @@ impl RyllApp {
         snap.video_drop_count = self.video_drop_count;
         snap.audio_volume_percent = Some(self.volume_control.volume());
         snap.audio_muted = Some(self.volume_control.muted());
+        // Copied only when a key event has been logged since, as this runs
+        // on every pass and the log holds up to 256 entries.
+        let keys_seen = self.held_keys.events_seen();
+        if snap.keyboard.as_ref().map(|k| k.events_seen) != Some(keys_seen) {
+            snap.keyboard = Some(self.held_keys.snapshot());
+        }
 
         // Render-side latency aggregates.
         let (img_min, img_max, img_mean) = recent_lag_stats(&self.recent_image_ready_lag_us);
