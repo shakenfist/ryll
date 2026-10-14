@@ -641,8 +641,33 @@ fn run_web(
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::UsbCommand>(16);
         let (webdav_tx, webdav_rx) =
             tokio::sync::mpsc::channel::<shakenfist_spice_renderer::WebdavCommand>(16);
-        let (resize_tx, resize_rx) =
-            tokio::sync::mpsc::channel::<(u32, u32)>(crate::web::server::RESIZE_CHANNEL_CAPACITY);
+        let (resize_tx, resize_rx) = tokio::sync::mpsc::channel::<
+            shakenfist_spice_renderer::DisplaySize,
+        >(crate::web::server::RESIZE_CHANNEL_CAPACITY);
+        // A control socket's `resize` verb shares the browser's queue,
+        // so the main channel debounces the two together.
+        #[cfg(unix)]
+        let resize_tx_for_control = resize_tx.clone();
+        // The browser has no clipboard sync, but a control socket can
+        // carry clipboard text, through an in-memory clipboard the
+        // main channel syncs with the guest. Made only with a socket,
+        // as headless does, so an ordinary browser session does not
+        // fetch every guest copy for nobody.
+        #[cfg(unix)]
+        let control_server = control_server.map(|server| {
+            (
+                server,
+                Arc::new(shakenfist_spice_renderer::MemoryClipboard::new()),
+            )
+        });
+        #[cfg(unix)]
+        let clipboard_for_conn = control_server.as_ref().map(|(_, clipboard)| {
+            clipboard.clone() as Arc<dyn shakenfist_spice_renderer::ClipboardBackend>
+        });
+        #[cfg(not(unix))]
+        let clipboard_for_conn: Option<
+            Arc<dyn shakenfist_spice_renderer::ClipboardBackend>,
+        > = None;
         // usb / webdav senders are dropped immediately so the
         // corresponding receivers see a closed channel; the
         // matching channel tasks treat closed-channel as "no
@@ -718,9 +743,10 @@ fn run_web(
         let spice_connected = Arc::new(AtomicBool::new(true));
 
         // Spawn the renderer's session orchestrator. The web
-        // mode has no clipboard backend (clipboard sync is
-        // out of scope for the MVP) and never enables paste-as-
-        // keystrokes (that's a host-side hotkey feature).
+        // mode's only clipboard is the control socket's (browser
+        // clipboard sync is out of scope for the MVP), and it never
+        // enables paste-as-keystrokes (that's a host-side hotkey
+        // feature).
         let connection_cancel = cancel.clone();
         let spice_connected_for_conn = spice_connected.clone();
         let connection_handle = tokio::spawn(async move {
@@ -744,7 +770,7 @@ fn run_web(
                 /* enable_paste */ false,
                 log_config,
                 connection_cancel,
-                /* clipboard */ None,
+                clipboard_for_conn,
                 /* opus_sink */ Some(opus_sink_dyn),
                 experimental_h264,
                 image_cache_cap_bytes,
@@ -825,7 +851,7 @@ fn run_web(
         #[cfg(unix)]
         let control_cancel = shakenfist_spice_renderer::CancellationToken::new();
         #[cfg(unix)]
-        let control_handle = control_server.map(|server| {
+        let control_handle = control_server.map(|(server, clipboard)| {
             let status: Arc<dyn shakenfist_spice_renderer::control::StatusProvider> =
                 Arc::new(shakenfist_spice_renderer::SessionStatus::new(
                     spice_connected.clone(),
@@ -850,13 +876,18 @@ fn run_web(
                 event_broadcast_tx.clone(),
                 cancel.clone(),
             );
+            let handles = shakenfist_spice_renderer::control::SessionHandles {
+                input_tx: input_tx_for_control,
+                surface_mirror: surface_mirror.clone(),
+                clipboard,
+                resize_tx: resize_tx_for_control,
+            };
             shakenfist_spice_renderer::spawn_control_socket(
                 server,
                 status,
                 event_broadcast_tx.clone(),
                 session_state_rx.agent_connected.clone(),
-                input_tx_for_control,
-                surface_mirror.clone(),
+                handles,
                 control_cancel.clone(),
             )
         });

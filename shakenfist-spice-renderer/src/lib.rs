@@ -39,8 +39,8 @@ pub use audio_sink::OpusPacketSink;
 pub use byte_counter::ByteCounter;
 pub use capture_sink::CaptureSink;
 pub use channels::inputs::make_scancode;
-pub use channels::{ChannelEvent, CursorImage, InputEvent, UsbCommand, WebdavCommand};
-pub use clipboard::ClipboardBackend;
+pub use channels::{ChannelEvent, CursorImage, DisplaySize, InputEvent, UsbCommand, WebdavCommand};
+pub use clipboard::{ClipboardBackend, MemoryClipboard};
 pub use device_config::{ShareDirConfig, VirtualDiskConfig};
 pub use display::DisplaySurface;
 pub use encoder::{

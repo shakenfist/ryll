@@ -38,19 +38,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde::Deserialize;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{
-    major_version_matches, ErrorCode, Event, HelloParams, HelloResult, Request, RequestId,
-    Response, RpcError, StatusResult, SubscribeParams, SubscribeResult, UnsubscribeResult,
-    PROTOCOL_VERSION, SUPPORTED_METHODS,
+    major_version_matches, ClipboardChanged, ClipboardSetParams, ClipboardText, ErrorCode, Event,
+    HelloParams, HelloResult, Request, RequestId, ResizeParams, Response, RpcError, StatusResult,
+    SubscribeParams, SubscribeResult, UnsubscribeResult, PROTOCOL_VERSION, SUPPORTED_METHODS,
 };
-use crate::channels::{ChannelEvent, InputEvent};
+use crate::channels::{align_monitor_dimension, ChannelEvent, DisplaySize, InputEvent};
+use crate::clipboard::MemoryClipboard;
+use crate::display::MAX_SURFACE_DIMENSION;
 use crate::surface_mirror::SurfaceMirror;
+use shakenfist_spice_protocol::messages::agent_stream::MAX_AGENT_MESSAGE_SIZE;
 
 /// Capacity of the per-client outbound queue (request responses +
 /// translated event lines).  If the writer falls behind by more
@@ -69,6 +72,26 @@ pub trait StatusProvider: Send + Sync {
     fn snapshot(&self) -> StatusResult;
 }
 
+// ── SessionHandles ────────────────────────────────────────────────
+
+/// The parts of a session the verbs act on.
+///
+/// Each accepted client gets a clone. Everything here is a handle --
+/// a channel sender or an `Arc` -- so cloning is cheap and every
+/// client acts on the same session.
+#[derive(Clone)]
+pub struct SessionHandles {
+    /// The inputs channel's queue, for `send_key` and `paste`.
+    pub input_tx: mpsc::Sender<InputEvent>,
+    /// The live pixel store, for `screenshot`.
+    pub surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    /// The clipboard the main channel was given, for `clipboard_set`
+    /// and `clipboard_get`, and the source of `clipboard_changed`.
+    pub clipboard: Arc<MemoryClipboard>,
+    /// The main channel's display-size queue, for `resize`.
+    pub resize_tx: mpsc::Sender<DisplaySize>,
+}
+
 // ── Server ────────────────────────────────────────────────────────
 
 /// A bound control socket, ready to `run`.
@@ -79,7 +102,24 @@ pub trait StatusProvider: Send + Sync {
 pub struct Server {
     listener: std::os::unix::net::UnixListener,
     socket_file: SocketFile,
+    /// The longest request line accepted, excluding its newline; see
+    /// [`MAX_REQUEST_LINE_BYTES`].
+    max_request_line: usize,
 }
+
+/// The longest request line the server reads, in bytes, excluding the
+/// newline.
+///
+/// Sized so that every request within the verbs' own limits fits,
+/// whatever the client's JSON encoder does: the largest is a
+/// `clipboard_set` of [`MAX_CLIPBOARD_SET_BYTES`], and JSON escaping
+/// can grow text sixfold (a control character becomes `\u00XX`; an
+/// encoder that escapes all non-ASCII grows other text by less), plus
+/// 1 MiB for the envelope. A line longer than this is refused before
+/// it is buffered further, so a client cannot make the server hold an
+/// unbounded line. The socket is owner-only, so the bound is against a
+/// runaway client, not an attacker.
+pub const MAX_REQUEST_LINE_BYTES: usize = 6 * MAX_CLIPBOARD_SET_BYTES + 1024 * 1024;
 
 /// Unlinks the socket file when dropped.
 struct SocketFile(PathBuf);
@@ -174,7 +214,16 @@ impl Server {
         Ok(Self {
             listener,
             socket_file,
+            max_request_line: MAX_REQUEST_LINE_BYTES,
         })
+    }
+
+    /// Accept request lines of at most `bytes` rather than
+    /// [`MAX_REQUEST_LINE_BYTES`]. For tests, which can then exercise
+    /// the limit without sending hundreds of megabytes.
+    pub fn with_max_request_line(mut self, bytes: usize) -> Self {
+        self.max_request_line = bytes;
+        self
     }
 
     /// The path the socket is bound at.
@@ -193,27 +242,21 @@ impl Server {
     /// than from the bus, so a client that lags the bus cannot miss a
     /// transition; each accepted client gets its own clone.
     ///
-    /// `input_tx` is the mpsc sender used by `run_headless` to push
-    /// `InputEvent`s to the SPICE inputs channel.  The control server
-    /// clones it into each accepted client so `send_key` and `paste`
-    /// verbs can enqueue events.
-    ///
-    /// `surface_mirror` is the live pixel store that `run_headless`
-    /// keeps in lock-step with the SPICE display channel.  Each
-    /// accepted client clones the `Arc` and the `screenshot` verb
-    /// locks it briefly to snapshot a surface.
+    /// `handles` are the session's input queue, surface mirror,
+    /// clipboard and resize queue, which the verbs act on; each
+    /// accepted client gets a clone. See [`SessionHandles`].
     pub async fn run(
         self,
         status_provider: Arc<dyn StatusProvider>,
         event_tx: broadcast::Sender<ChannelEvent>,
         agent_connected: watch::Receiver<bool>,
-        input_tx: mpsc::Sender<InputEvent>,
-        surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+        handles: SessionHandles,
         shutdown: CancellationToken,
     ) -> std::io::Result<()> {
         // Owned for the whole loop, so the socket file outlives it.
         let socket_file = self.socket_file;
         let listener = UnixListener::from_std(self.listener)?;
+        let max_request_line = self.max_request_line;
 
         // Single-client enforcement: true while a client connection
         // is being handled.
@@ -243,11 +286,16 @@ impl Server {
                                 let cancel = shutdown.clone();
                                 let event_rx = event_tx.subscribe();
                                 let agent_rx = agent_connected.clone();
-                                let tx = input_tx.clone();
-                                let mirror = surface_mirror.clone();
+                                let client_handles = handles.clone();
                                 tokio::spawn(async move {
                                     handle_client(
-                                        stream, provider, event_rx, agent_rx, tx, mirror, cancel,
+                                        stream,
+                                        provider,
+                                        event_rx,
+                                        agent_rx,
+                                        client_handles,
+                                        max_request_line,
+                                        cancel,
                                     )
                                     .await;
                                     flag.store(false, Ordering::Release);
@@ -353,8 +401,8 @@ async fn handle_client(
     status_provider: Arc<dyn StatusProvider>,
     event_rx: broadcast::Receiver<ChannelEvent>,
     agent_connected: watch::Receiver<bool>,
-    input_tx: mpsc::Sender<InputEvent>,
-    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    handles: SessionHandles,
+    max_request_line: usize,
     shutdown: CancellationToken,
 ) {
     info!("control: client connected");
@@ -384,6 +432,7 @@ async fn handle_client(
     let event_handle = tokio::spawn(event_translator_task(
         event_rx,
         agent_connected,
+        handles.clipboard.subscribe_guest_copies(),
         event_state,
         event_out_tx,
     ));
@@ -391,14 +440,60 @@ async fn handle_client(
     // Reader / dispatcher: parses each request line, dispatches to
     // the appropriate verb handler, and queues the response on the
     // outbound mpsc.
-    let mut lines = BufReader::new(read_half).lines();
+    let mut reader = BufReader::new(read_half);
+    let mut line_buf: Vec<u8> = Vec::new();
     let mut helloed = false;
 
     loop {
         tokio::select! {
-            line_result = lines.next_line() => {
+            line_result = read_request_line(&mut reader, &mut line_buf, max_request_line) => {
                 match line_result {
-                    Ok(Some(line)) => {
+                    Ok(RequestLine::TooLong) => {
+                        // The rest of the line is still unread, and
+                        // there is no cheap way back to a line
+                        // boundary, so the connection ends here.
+                        warn!(
+                            "control: request line over {} bytes; closing the connection",
+                            max_request_line
+                        );
+                        let response = Response {
+                            id: None,
+                            ok: false,
+                            result: None,
+                            error: Some(RpcError {
+                                code: ErrorCode::BadParams,
+                                message: format!(
+                                    "request line is longer than {} bytes",
+                                    max_request_line
+                                ),
+                            }),
+                        };
+                        let _ = out_tx.send(OutboundMessage::Response(response)).await;
+                        break;
+                    }
+                    Ok(RequestLine::Line) => {
+                        let line = match String::from_utf8(std::mem::take(&mut line_buf)) {
+                            Ok(line) => line,
+                            Err(_) => {
+                                // Refused like any other unparseable
+                                // request, rather than repaired: a
+                                // replacement character would change
+                                // clipboard text without saying so.
+                                let response = Response {
+                                    id: None,
+                                    ok: false,
+                                    result: None,
+                                    error: Some(RpcError {
+                                        code: ErrorCode::BadParams,
+                                        message: "request line is not valid UTF-8".into(),
+                                    }),
+                                };
+                                if out_tx.send(OutboundMessage::Response(response)).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
                         if line.trim().is_empty() {
                             continue;
                         }
@@ -407,8 +502,7 @@ async fn handle_client(
                             &mut helloed,
                             &*status_provider,
                             &client_state,
-                            &input_tx,
-                            &surface_mirror,
+                            &handles,
                         )
                         .await;
 
@@ -428,7 +522,7 @@ async fn handle_client(
                             break;
                         }
                     }
-                    Ok(None) => {
+                    Ok(RequestLine::Eof) => {
                         info!("control: client disconnected");
                         break;
                     }
@@ -457,6 +551,52 @@ async fn handle_client(
     event_handle.abort();
     let _ = event_handle.await;
     let _ = writer_handle.await;
+}
+
+/// What [`read_request_line`] found.
+enum RequestLine {
+    /// A line is in the buffer, without its newline.
+    Line,
+    /// The client closed the connection.
+    Eof,
+    /// The line runs past the limit; what was read of it is discarded.
+    TooLong,
+}
+
+/// Read one request line into `buf` (cleared by the caller between
+/// lines), holding at most `max` bytes of it, newline excluded. A
+/// `\r` before the newline is dropped, as `lines()` would. A last
+/// line with no newline before EOF is still a line.
+///
+/// Cancel-safe in the way `read_until` is: bytes read before a
+/// cancellation stay in `buf`. The caller only cancels it to shut
+/// down.
+async fn read_request_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<RequestLine> {
+    // One byte beyond the limit, for the newline of a line exactly at it.
+    let budget = (max + 1).saturating_sub(buf.len()) as u64;
+    let read = (&mut *reader).take(budget).read_until(b'\n', buf).await?;
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+        return Ok(RequestLine::Line);
+    }
+    if buf.len() > max {
+        buf.clear();
+        return Ok(RequestLine::TooLong);
+    }
+    // No newline, within the limit: `take` was not exhausted, so the
+    // client has closed the connection, part-way through a last line
+    // or between lines.
+    if read == 0 && buf.is_empty() {
+        return Ok(RequestLine::Eof);
+    }
+    Ok(RequestLine::Line)
 }
 
 /// Writer side of the per-client connection.  Owned by its own task
@@ -490,7 +630,9 @@ async fn writer_task(
 /// broadcast bus, filters by the active subscription set, formats
 /// each `ChannelEvent` into a wire `Event`, and `try_send`s the
 /// result onto the outbound mpsc.  The `agent_connected` event comes
-/// from the session's agent-state watch instead of the bus.
+/// from the session's agent-state watch instead of the bus, and
+/// `clipboard_changed` from the clipboard's guest-text watch, so a
+/// client that lags the bus cannot miss either.
 ///
 /// Backpressure rule: on `try_send` failure (queue full) or on a
 /// broadcast `Lagged(n)` error, increment a local dropped counter.
@@ -499,6 +641,7 @@ async fn writer_task(
 async fn event_translator_task(
     mut event_rx: broadcast::Receiver<ChannelEvent>,
     mut agent_connected: watch::Receiver<bool>,
+    mut guest_clipboard: watch::Receiver<Option<usize>>,
     state: Arc<ClientState>,
     out_tx: mpsc::Sender<OutboundMessage>,
 ) {
@@ -515,6 +658,9 @@ async fn event_translator_task(
     // finished session does not spin on a `changed()` that fails at
     // once.  The bus closing ends the task shortly after.
     let mut agent_state_open = true;
+    // The same, for the clipboard's watch. Subscribing marked its
+    // current value seen, so only copies after connect are reported.
+    let mut clipboard_open = true;
 
     loop {
         // Translate into the wire shape.  Anything the protocol
@@ -538,6 +684,16 @@ async fn event_translator_task(
                 }
                 Err(_) => {
                     agent_state_open = false;
+                    None
+                }
+            },
+            changed = guest_clipboard.changed(), if clipboard_open => match changed {
+                Ok(()) => {
+                    let bytes = *guest_clipboard.borrow_and_update();
+                    translate_clipboard_changed(bytes, &state)
+                }
+                Err(_) => {
+                    clipboard_open = false;
                     None
                 }
             },
@@ -593,6 +749,27 @@ fn translate_agent_connected(
     Some(Event {
         event: "agent_connected".into(),
         data: serde_json::json!({ "connected": connected }),
+    })
+}
+
+/// Map a guest copy, given by its length in bytes, to a
+/// `clipboard_changed` wire event.
+///
+/// Every copy is reported, including one of the same text as the last:
+/// the guest copied again, and a client waiting on a copy should hear
+/// of it. The text is not carried; see [`ClipboardChanged`].
+fn translate_clipboard_changed(bytes: Option<usize>, state: &ClientState) -> Option<Event> {
+    if !state.is_subscribed("clipboard_changed") {
+        return None;
+    }
+    // The watch starts at `None`; a copy is always `Some`.
+    let bytes = bytes?;
+    Some(Event {
+        event: "clipboard_changed".into(),
+        data: serde_json::to_value(ClipboardChanged {
+            bytes: bytes as u64,
+        })
+        .unwrap_or(serde_json::Value::Object(Default::default())),
     })
 }
 
@@ -789,16 +966,14 @@ fn translate_event(event: &ChannelEvent, state: &ClientState) -> Option<Event> {
 /// closed after writing the response (currently set only for the
 /// `protocol_version_mismatch` error path).
 ///
-/// `input_tx` is forwarded to the verb handlers that need to push
-/// `InputEvent`s (`send_key`, `paste`).  It is a borrow of the
-/// sender that lives for the lifetime of the client connection.
+/// `handles` is what the verb handlers act on, borrowed for the
+/// lifetime of the client connection.
 async fn dispatch_request(
     line: &str,
     helloed: &mut bool,
     status_provider: &dyn StatusProvider,
     client_state: &ClientState,
-    input_tx: &mpsc::Sender<InputEvent>,
-    surface_mirror: &Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    handles: &SessionHandles,
 ) -> (Response, bool) {
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -843,15 +1018,24 @@ async fn dispatch_request(
         "status" => (handle_status(id, status_provider), false),
         "subscribe" => (handle_subscribe(id, request.params, client_state), false),
         "unsubscribe" => (handle_unsubscribe(id, request.params, client_state), false),
-        "send_key" => (handle_send_key(id, request.params, input_tx), false),
+        "send_key" => (
+            handle_send_key(id, request.params, &handles.input_tx),
+            false,
+        ),
         "paste" => (
-            handle_paste(id, request.params, client_state, input_tx),
+            handle_paste(id, request.params, client_state, &handles.input_tx),
             false,
         ),
         "screenshot" => (
-            handle_screenshot(id, request.params, surface_mirror).await,
+            handle_screenshot(id, request.params, &handles.surface_mirror).await,
             false,
         ),
+        "clipboard_set" => (
+            handle_clipboard_set(id, request.params, &handles.clipboard),
+            false,
+        ),
+        "clipboard_get" => (handle_clipboard_get(id, &handles.clipboard), false),
+        "resize" => (handle_resize(id, request.params, &handles.resize_tx), false),
         // Completely unknown:
         _ => (
             Response::err(
@@ -1129,8 +1313,10 @@ fn handle_send_key(
 /// `agent_not_connected` is intentionally NOT returned: paste in Ryll
 /// works by translating text to US-QWERTY scancodes and issuing
 /// `KeyDown`/`KeyUp` events through the SPICE inputs channel — it
-/// does NOT use the vdagent clipboard path.  The `agent_not_connected`
-/// error code exists in the enum for future clipboard-based verbs.
+/// does NOT use the vdagent clipboard path.  No verb returns
+/// `agent_not_connected` today: the clipboard verbs, which do use the
+/// agent, hold their request until it connects instead.  The code
+/// stays in the enum because the protocol document defines it.
 /// See `InputsChannel::handle_input_event` at the `PasteText` arm in
 /// `channels/inputs.rs` for confirmation that no agent is involved.
 fn handle_paste(
@@ -1361,9 +1547,256 @@ async fn handle_screenshot(
     )
 }
 
+// ── Clipboard and resize verbs (v1.3) ────────────────────────────
+
+/// The longest text `clipboard_set` accepts, in bytes: 100 MiB,
+/// spice-gtk's default `max-clipboard`. It is the clipboard size the
+/// agent-message budget in the protocol crate is built from (that
+/// budget adds 4 KiB for the clipboard message's headers), so a client
+/// can never set more than ryll itself would accept from a guest, or
+/// than spice-gtk would send.
+pub const MAX_CLIPBOARD_SET_BYTES: usize = MAX_AGENT_MESSAGE_SIZE - 4096;
+
+/// Refuse clipboard text longer than [`MAX_CLIPBOARD_SET_BYTES`].
+fn check_clipboard_set_len(len: usize) -> Result<(), String> {
+    if len > MAX_CLIPBOARD_SET_BYTES {
+        return Err(format!(
+            "clipboard text is {} bytes; the most is {}",
+            len, MAX_CLIPBOARD_SET_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// Handle a `clipboard_set` request.
+///
+/// Stores the text as the host side of the clipboard. The main
+/// channel polls it every 500 ms and grabs the guest's clipboard when
+/// it changes, so the guest can paste it shortly after; nothing is
+/// sent from here. The text is held whether or not the agent is
+/// connected, and the grab follows once the agent and its
+/// capabilities are in, so this never fails with
+/// `agent_not_connected`.
+fn handle_clipboard_set(
+    id: RequestId,
+    params: serde_json::Value,
+    clipboard: &MemoryClipboard,
+) -> Response {
+    let p: ClipboardSetParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid clipboard_set params: {}", e),
+            );
+        }
+    };
+    if let Err(message) = check_clipboard_set_len(p.text.len()) {
+        return Response::err(id, ErrorCode::BadParams, message);
+    }
+    // Byte count only: clipboard text may be a password.
+    debug!("control: clipboard_set ({} bytes)", p.text.len());
+    clipboard.set_host_text(p.text);
+    Response::ok(id, serde_json::Value::Object(Default::default()))
+}
+
+/// Handle a `clipboard_get` request: the clipboard's text, from
+/// whichever side wrote it last, or `null`. Takes no params.
+fn handle_clipboard_get(id: RequestId, clipboard: &MemoryClipboard) -> Response {
+    Response::ok(
+        id,
+        serde_json::to_value(ClipboardText {
+            text: clipboard.text(),
+        })
+        .unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
+/// Validate a `resize` request and round it as the GUI would.
+///
+/// Each side must be 1 to `MAX_SURFACE_DIMENSION`: zero is not a
+/// display, and ryll clamps any surface larger than that, so it could
+/// not show what it asked for. Within that range each side is rounded
+/// down to the 8-pixel grid with a floor of 8, by the same
+/// [`align_monitor_dimension`] the GUI's window-driven resize uses.
+fn validate_resize(p: ResizeParams) -> Result<ResizeParams, String> {
+    for (name, value) in [("width", p.width), ("height", p.height)] {
+        if value == 0 || value > MAX_SURFACE_DIMENSION {
+            return Err(format!(
+                "{} {} is out of range: expected 1 to {}",
+                name, value, MAX_SURFACE_DIMENSION
+            ));
+        }
+    }
+    Ok(ResizeParams {
+        width: align_monitor_dimension(p.width),
+        height: align_monitor_dimension(p.height),
+    })
+}
+
+/// Handle a `resize` request.
+///
+/// Queues the size on the main channel's display-size queue, as the
+/// GUI does when its window is resized, and returns the size actually
+/// queued. The main channel debounces it for 200 ms and then sends a
+/// `VD_AGENT_MONITORS_CONFIG`, or, with no agent connected yet, holds
+/// it and sends it once the agent connects; so this never fails with
+/// `agent_not_connected`. A size equal to the last one sent is not
+/// sent again.
+fn handle_resize(
+    id: RequestId,
+    params: serde_json::Value,
+    resize_tx: &mpsc::Sender<DisplaySize>,
+) -> Response {
+    let p: ResizeParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::err(
+                id,
+                ErrorCode::BadParams,
+                format!("invalid resize params: {}", e),
+            );
+        }
+    };
+    let size = match validate_resize(p) {
+        Ok(size) => size,
+        Err(message) => return Response::err(id, ErrorCode::BadParams, message),
+    };
+    match resize_tx.try_send(DisplaySize::Requested(size.width, size.height)) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return Response::err(
+                id,
+                ErrorCode::QueueFull,
+                "resize queue is full; retry shortly",
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            return Response::err(
+                id,
+                ErrorCode::InternalError,
+                "resize queue is closed: the session has ended",
+            );
+        }
+    }
+    debug!("control: resize to {}x{}", size.width, size.height);
+    Response::ok(
+        id,
+        serde_json::to_value(size).unwrap_or(serde_json::Value::Object(Default::default())),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_rounds_down_to_the_gui_grid() {
+        let check = |width, height| validate_resize(ResizeParams { width, height });
+        assert_eq!(
+            check(1024, 768),
+            Ok(ResizeParams {
+                width: 1024,
+                height: 768
+            })
+        );
+        assert_eq!(
+            check(1366, 770),
+            Ok(ResizeParams {
+                width: 1360,
+                height: 768
+            })
+        );
+        // Below the grid's first step, the floor.
+        assert_eq!(
+            check(1, 7),
+            Ok(ResizeParams {
+                width: 8,
+                height: 8
+            })
+        );
+        assert_eq!(
+            check(MAX_SURFACE_DIMENSION, MAX_SURFACE_DIMENSION),
+            Ok(ResizeParams {
+                width: MAX_SURFACE_DIMENSION,
+                height: MAX_SURFACE_DIMENSION
+            })
+        );
+    }
+
+    #[test]
+    fn clipboard_set_length_is_capped_at_100_mib() {
+        assert_eq!(MAX_CLIPBOARD_SET_BYTES, 100 * 1024 * 1024);
+        assert!(check_clipboard_set_len(0).is_ok());
+        assert!(check_clipboard_set_len(MAX_CLIPBOARD_SET_BYTES).is_ok());
+        assert!(check_clipboard_set_len(MAX_CLIPBOARD_SET_BYTES + 1).is_err());
+        assert!(check_clipboard_set_len(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn the_line_limit_fits_the_largest_clipboard_set_however_escaped() {
+        let envelope =
+            r#"{"id":18446744073709551615,"method":"clipboard_set","params":{"text":""}}"#;
+        assert!(6 * MAX_CLIPBOARD_SET_BYTES + envelope.len() <= MAX_REQUEST_LINE_BYTES);
+    }
+
+    /// Read every line `input` holds with limit `max`.
+    async fn read_lines(input: &[u8], max: usize) -> Vec<Result<String, &'static str>> {
+        let mut reader = BufReader::new(input);
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        loop {
+            match read_request_line(&mut reader, &mut buf, max).await.unwrap() {
+                RequestLine::Line => {
+                    out.push(Ok(String::from_utf8(buf.clone()).unwrap()));
+                    buf.clear();
+                }
+                RequestLine::TooLong => {
+                    out.push(Err("too long"));
+                    return out;
+                }
+                RequestLine::Eof => return out,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lines_are_split_and_bounded() {
+        assert_eq!(
+            read_lines(b"one\ntwo\r\n\nlast", 8).await,
+            vec![
+                Ok("one".to_string()),
+                Ok("two".to_string()),
+                Ok(String::new()),
+                Ok("last".to_string())
+            ]
+        );
+        // Exactly at the limit, with or without its newline, is a line.
+        assert_eq!(
+            read_lines(b"12345678\n", 8).await,
+            vec![Ok("12345678".to_string())]
+        );
+        assert_eq!(
+            read_lines(b"12345678", 8).await,
+            vec![Ok("12345678".to_string())]
+        );
+        // One over is refused, whether or not its newline follows.
+        assert_eq!(
+            read_lines(b"ok\n123456789\nmore\n", 8).await,
+            vec![Ok("ok".to_string()), Err("too long")]
+        );
+        assert_eq!(read_lines(b"123456789", 8).await, vec![Err("too long")]);
+    }
+
+    #[test]
+    fn resize_refuses_zero_and_oversized_sides() {
+        let check = |width, height| validate_resize(ResizeParams { width, height });
+        assert!(check(0, 768).is_err());
+        assert!(check(1024, 0).is_err());
+        assert!(check(MAX_SURFACE_DIMENSION + 1, 768).is_err());
+        assert!(check(1024, MAX_SURFACE_DIMENSION + 1).is_err());
+    }
 
     /// The mode must already be `0600` while the socket cannot yet be
     /// connected to, so there is no moment at which anyone else can

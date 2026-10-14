@@ -212,7 +212,7 @@ pub async fn run_connection(
     traffic: Arc<dyn TrafficSink>,
     snapshots: ChannelSnapshots,
     monitors: u8,
-    resize_rx: mpsc::Receiver<(u32, u32)>,
+    resize_rx: mpsc::Receiver<crate::channels::DisplaySize>,
     volume_control: Arc<VolumeControl>,
     enable_paste: bool,
     log_config: LogConfig,
@@ -563,6 +563,10 @@ pub async fn run_connection(
 /// which the `agent_connected` event is translated from. It is not on the
 /// event bus because a client lagging the bus could miss a transition.
 ///
+/// `handles` are what the verbs act on. Its clipboard must be the one
+/// given to `run_connection`, and its resize sender the one whose
+/// receiver was, or `clipboard_*` and `resize` reach nothing.
+///
 /// Unix-only: the server uses `tokio::net::UnixListener`, which has
 /// no Windows equivalent in this shape.
 #[cfg(unix)]
@@ -571,20 +575,12 @@ pub fn spawn_control_socket(
     status: Arc<dyn crate::control::StatusProvider>,
     event_tx: broadcast::Sender<ChannelEvent>,
     agent_connected: watch::Receiver<bool>,
-    input_tx: mpsc::Sender<InputEvent>,
-    surface_mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    handles: crate::control::SessionHandles,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(e) = server
-            .run(
-                status,
-                event_tx,
-                agent_connected,
-                input_tx,
-                surface_mirror,
-                cancel,
-            )
+            .run(status, event_tx, agent_connected, handles, cancel)
             .await
         {
             warn!("control: server exited with error: {}", e);
@@ -694,7 +690,25 @@ pub async fn run_headless(
     let (input_tx, input_rx) = mpsc::channel(INPUT_CHANNEL_SIZE);
     let (_usb_tx, usb_rx) = mpsc::channel(16);
     let (_webdav_tx, webdav_rx) = mpsc::channel(16);
-    let (_resize_tx, resize_rx) = mpsc::channel(32);
+    // Driven by the control socket's `resize` verb. Held for the whole
+    // session even with no socket to drive it, as the GUI and web mode
+    // hold theirs.
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    let (resize_tx, resize_rx) = mpsc::channel(32);
+
+    // The clipboard the main channel syncs with the guest, which the
+    // control socket's `clipboard_*` verbs read and write. Made only
+    // with a socket: without one nothing could read what the guest
+    // copied, and the main channel would fetch every copy for nobody.
+    #[cfg(unix)]
+    let control_server =
+        control_server.map(|server| (server, Arc::new(crate::clipboard::MemoryClipboard::new())));
+    #[cfg(unix)]
+    let clipboard_for_conn = control_server
+        .as_ref()
+        .map(|(_, clipboard)| clipboard.clone() as Arc<dyn ClipboardBackend>);
+    #[cfg(not(unix))]
+    let clipboard_for_conn: Option<Arc<dyn ClipboardBackend>> = None;
 
     // Broadcast bus that the headless event loop and the control
     // socket both subscribe to.  The fan-out task spawned below
@@ -772,7 +786,7 @@ pub async fn run_headless(
             enable_paste,
             log_config,
             cancel_for_conn,
-            None, // headless mode: no clipboard
+            clipboard_for_conn,
             None, // headless mode: no opus sink (cpal output only)
             experimental_h264,
             image_cache_cap_bytes,
@@ -834,19 +848,24 @@ pub async fn run_headless(
     #[cfg(unix)]
     let control_cancel = CancellationToken::new();
     #[cfg(unix)]
-    let control_handle = control_server.map(|server| {
+    let control_handle = control_server.map(|(server, clipboard)| {
         let status: Arc<dyn crate::control::StatusProvider> = Arc::new(SessionStatus::new(
             spice_connected.clone(),
             session_state_rx.agent_connected.clone(),
             surface_mirror.clone(),
         ));
+        let handles = crate::control::SessionHandles {
+            input_tx: input_tx_for_control,
+            surface_mirror: surface_mirror.clone(),
+            clipboard,
+            resize_tx: resize_tx.clone(),
+        };
         spawn_control_socket(
             server,
             status,
             event_broadcast_tx.clone(),
             session_state_rx.agent_connected.clone(),
-            input_tx_for_control,
-            surface_mirror.clone(),
+            handles,
             control_cancel.clone(),
         )
     });
