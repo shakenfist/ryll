@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
-use shakenfist_spice_renderer::channels::align_monitor_dimension;
+use shakenfist_spice_renderer::channels::{align_monitor_dimension, DisplaySize};
+use tokio::sync::mpsc;
 
 /// Approximate height of the stats bar at the bottom of the window
 pub(super) const STATS_BAR_HEIGHT: f32 = 20.0;
@@ -147,9 +148,54 @@ pub(super) fn resolution_notification_due(
     Some(target)
 }
 
+/// Tell the main channel the size the window last auto-fitted to, if
+/// `pending` holds one, as `DisplaySize::GuestHas`.
+///
+/// On a full queue it stays pending, for the caller to retry next
+/// frame: dropping it would leave the main channel holding an older
+/// requested size, which it would send when the agent connects. On a
+/// closed queue the session is gone, and so is the point.
+pub(super) fn send_guest_size(tx: &mpsc::Sender<DisplaySize>, pending: &mut Option<(u32, u32)>) {
+    let Some((width, height)) = *pending else {
+        return;
+    };
+    match tx.try_send(DisplaySize::GuestHas(width, height)) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => *pending = None,
+        Err(mpsc::error::TrySendError::Full(_)) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_guest_size_waits_out_a_full_queue() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(DisplaySize::Requested(800, 600)).unwrap();
+
+        let mut pending = Some((1024, 768));
+        send_guest_size(&tx, &mut pending);
+        assert_eq!(pending, Some((1024, 768)), "full: still pending");
+
+        assert_eq!(rx.try_recv(), Ok(DisplaySize::Requested(800, 600)));
+        send_guest_size(&tx, &mut pending);
+        assert_eq!(pending, None, "sent once there is room");
+        assert_eq!(rx.try_recv(), Ok(DisplaySize::GuestHas(1024, 768)));
+
+        // Nothing pending: nothing sent.
+        send_guest_size(&tx, &mut pending);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_guest_size_is_dropped_when_the_session_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let mut pending = Some((1024, 768));
+        send_guest_size(&tx, &mut pending);
+        assert_eq!(pending, None);
+    }
 
     #[test]
     fn compute_auto_resize_decisions() {

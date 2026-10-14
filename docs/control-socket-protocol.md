@@ -164,6 +164,20 @@ object.
   line always has a complete JSON object.
 - JSON values that span multiple lines are not supported. Do not pretty-
   print messages on the wire.
+- A request line may be at most 629,145,600 bytes (600 MiB) plus
+  1,048,576 (1 MiB), not counting its `\n`: six times the largest
+  `clipboard_set` text, which is the most JSON escaping can grow it
+  (a control character becomes `\u00XX`), plus room for the envelope.
+  Any request within the verbs' own limits therefore fits, however
+  the client's encoder escapes. The server stops reading a longer
+  line once it passes the limit, writes a `bad_params` error with no
+  `id` (the line was never parsed), and closes the connection, since
+  the rest of the line is still unread and there is no reliable way
+  back to a line boundary. Added in v1.3; earlier servers had no
+  limit.
+- A request line that is not valid UTF-8 gets a `bad_params` error
+  with no `id`, and the connection stays open. Earlier servers closed
+  the connection.
 
 ---
 
@@ -622,8 +636,14 @@ their capabilities. This verb therefore never fails with
 `agent_not_connected`. Only the CLIPBOARD selection is synced, not
 PRIMARY, and only UTF-8 text.
 
-Setting text equal to what the guest last copied does not grab: the
-guest already has it. Empty text is stored, and `clipboard_get`
+Setting text equal to the last text that crossed -- copied in the
+guest, or set here and offered to it -- does not grab: the guest
+already has it. The comparison ignores differences in line endings
+(CRLF, CR and LF) and trailing whitespace, so that text which
+made a round trip through a host clipboard is not offered back to the
+guest. A client that needs the guest to receive an exact byte
+sequence differing from its last copy only in those ways should vary
+the text some other way. Empty text is stored, and `clipboard_get`
 returns it, but is never offered to the guest, which keeps its own
 clipboard. Setting the clipboard does not raise `clipboard_changed`,
 which reports only text from the guest.
@@ -695,6 +715,12 @@ before then is held and sent when they are, so this verb never fails
 with `agent_not_connected`. A size equal to the last one sent is not
 sent again. Whether the guest applies the size is up to the guest;
 watch `status` (or `screenshot`) for the new surface dimensions.
+
+In `--web` mode the browser reports its viewport size on the same
+queue, so a later viewport change -- the browser window resized, or a
+viewer connecting -- replaces a size a control client asked for, and
+the reverse. A scenario that needs a fixed size should run with no
+browser connected, or resize after the browser has settled.
 
 Params:
 

@@ -332,6 +332,10 @@ pub struct MainChannel {
     resize_debounce: Option<tokio::time::Instant>,
     last_sent_monitors_config: Option<(u32, u32)>,
     last_clipboard_hash: Option<u64>,
+    /// The clipboard backend's generation at the last poll that read
+    /// it, for a backend that keeps one; a poll that finds it unchanged
+    /// skips the read. See `ClipboardBackend::generation`.
+    last_polled_clipboard_generation: Option<u64>,
     clipboard: Option<Arc<dyn ClipboardBackend>>,
     capture: Option<Arc<dyn CaptureSink>>,
     byte_counter: Arc<ByteCounter>,
@@ -462,6 +466,7 @@ impl MainChannel {
             guest_clipboard_selection: None,
             channels_requested: false,
             last_clipboard_hash: None,
+            last_polled_clipboard_generation: None,
             clipboard,
             capture,
             byte_counter,
@@ -1862,14 +1867,27 @@ impl MainChannel {
             Some(c) => c.clone(),
             None => return Ok(()),
         };
+        // Read before the text, so a write that lands in between bumps
+        // it past what is recorded here and the next poll reads again.
+        let generation = cb.generation();
+        if generation.is_some() && generation == self.last_polled_clipboard_generation {
+            return Ok(());
+        }
         let text = match tokio::time::timeout(
             std::time::Duration::from_secs(1),
             tokio::task::spawn_blocking(move || cb.get_text()),
         )
         .await
         {
-            Ok(Ok(Some(t))) => t,
-            Ok(Ok(None)) => return Ok(()),
+            Ok(Ok(text)) => {
+                // Recorded only for a read that completed, so a timed
+                // out or failed one is retried.
+                self.last_polled_clipboard_generation = generation;
+                match text {
+                    Some(t) => t,
+                    None => return Ok(()),
+                }
+            }
             Ok(Err(e)) => {
                 warn!("main: clipboard poll task panicked: {}", e);
                 return Ok(());
@@ -2850,6 +2868,89 @@ mod tests {
             channel.note_display_size(DisplaySize::Requested(1024, 768));
             assert_eq!(channel.pending_monitors_config, None);
             assert_eq!(channel.resize_debounce, None);
+        }
+
+        /// A `MemoryClipboard` that counts the main channel's reads, and
+        /// reports its generation only if `reports_generation`, standing
+        /// in for a host clipboard otherwise.
+        #[derive(Default)]
+        struct CountingClipboard {
+            inner: crate::clipboard::MemoryClipboard,
+            reads: std::sync::atomic::AtomicUsize,
+            reports_generation: bool,
+        }
+
+        impl ClipboardBackend for CountingClipboard {
+            fn get_text(&self) -> Option<String> {
+                self.reads
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.inner.get_text()
+            }
+
+            fn set_text(&self, text: &str) -> Result<(), String> {
+                self.inner.set_text(text)
+            }
+
+            fn generation(&self) -> Option<u64> {
+                self.reports_generation
+                    .then(|| self.inner.generation())
+                    .flatten()
+            }
+        }
+
+        #[tokio::test]
+        async fn the_poll_reads_a_clipboard_only_when_its_generation_moves() {
+            let clipboard = Arc::new(CountingClipboard {
+                reports_generation: true,
+                ..Default::default()
+            });
+            let (mut channel, mut peers) =
+                test_main_channel_with_clipboard(Some(clipboard.clone())).await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            channel.guest_clipboard_selection = Some(true);
+            let reads = || clipboard.reads.load(std::sync::atomic::Ordering::Relaxed);
+
+            clipboard.inner.set_host_text("hello".to_string());
+            channel.poll_host_clipboard().await.unwrap();
+            assert_eq!(reads(), 1);
+            let grab = agent_data(7, &[0, 0, 0, 0, 1, 0, 0, 0]);
+            assert_eq!(
+                peers.read_sent(grab.len()).await,
+                grab,
+                "the change is grabbed"
+            );
+
+            // Unchanged: no read at all.
+            channel.poll_host_clipboard().await.unwrap();
+            channel.poll_host_clipboard().await.unwrap();
+            assert_eq!(reads(), 1);
+
+            // Rewritten with the same text: read again, and not grabbed
+            // again, because the text has not changed.
+            clipboard.inner.set_host_text("hello".to_string());
+            channel.poll_host_clipboard().await.unwrap();
+            assert_eq!(reads(), 2);
+            assert_eq!(channel.agent_tokens, 9, "one grab in all");
+        }
+
+        #[tokio::test]
+        async fn the_poll_reads_a_clipboard_without_a_generation_every_time() {
+            let clipboard = Arc::new(CountingClipboard::default());
+            let (mut channel, _peers) =
+                test_main_channel_with_clipboard(Some(clipboard.clone())).await;
+            channel.agent_connected = true;
+            channel.agent_caps_announced = true;
+            channel.agent_tokens = 10;
+            channel.guest_clipboard_selection = Some(true);
+            clipboard.inner.set_host_text("hello".to_string());
+            channel.poll_host_clipboard().await.unwrap();
+            channel.poll_host_clipboard().await.unwrap();
+            assert_eq!(
+                clipboard.reads.load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
         }
     }
 }

@@ -142,6 +142,16 @@ async fn spawn_server(
     status: Arc<MockStatusProvider>,
     mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
 ) -> (PathBuf, ServerHandle, TestInputs) {
+    spawn_server_with_line_limit(status, mirror, None).await
+}
+
+/// As [`spawn_server`], with the request-line limit lowered to
+/// `max_request_line` when given.
+async fn spawn_server_with_line_limit(
+    status: Arc<MockStatusProvider>,
+    mirror: Arc<tokio::sync::Mutex<SurfaceMirror>>,
+    max_request_line: Option<usize>,
+) -> (PathBuf, ServerHandle, TestInputs) {
     // Pick a unique socket path inside a temp dir.
     let dir = tempfile::tempdir().expect("tempdir");
     let socket_path = dir.path().join("control.sock");
@@ -158,7 +168,10 @@ async fn spawn_server(
     let shutdown = CancellationToken::new();
     // Bound before the task is spawned, so the caller can connect at
     // once.
-    let server = Server::bind(socket_path.clone()).expect("bind control socket");
+    let mut server = Server::bind(socket_path.clone()).expect("bind control socket");
+    if let Some(limit) = max_request_line {
+        server = server.with_max_request_line(limit);
+    }
     let task = tokio::spawn(server.run(
         status.clone(),
         event_tx.clone(),
@@ -1541,6 +1554,71 @@ async fn clipboard_changed_needs_a_subscription() {
     inputs.clipboard.set_text("heard").unwrap();
     let ev = recv_line(&mut r).await;
     assert_eq!(ev["data"]["bytes"], "heard".len());
+
+    handle.stop().await;
+}
+
+/// A request line over the limit is refused with `bad_params`, without
+/// an id since it was never parsed, and the connection is closed;
+/// lines within it are served as usual.
+#[tokio::test]
+async fn an_over_long_request_line_is_refused_and_closes_the_connection() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, inputs) =
+        spawn_server_with_line_limit(status, empty_mirror(), Some(256)).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    send_request(
+        &mut w,
+        2,
+        "clipboard_set",
+        serde_json::json!({ "text": "x".repeat(100) }),
+    )
+    .await;
+    assert_eq!(recv_line(&mut r).await["ok"], true);
+
+    send_request(
+        &mut w,
+        3,
+        "clipboard_set",
+        serde_json::json!({ "text": "y".repeat(300) }),
+    )
+    .await;
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "bad_params");
+    assert!(resp.get("id").is_none(), "an unparsed line has no id");
+
+    let mut rest = String::new();
+    let n = tokio::time::timeout(Duration::from_secs(2), r.read_line(&mut rest))
+        .await
+        .expect("closed promptly")
+        .expect("read");
+    assert_eq!(n, 0, "the connection is closed");
+    assert_eq!(inputs.clipboard.get_text(), Some("x".repeat(100)));
+
+    handle.stop().await;
+}
+
+/// A request line that is not UTF-8 is refused, and the connection
+/// carries on.
+#[tokio::test]
+async fn a_request_line_that_is_not_utf8_is_refused() {
+    let status = MockStatusProvider::new(default_status());
+    let (path, handle, _inputs) = spawn_server(status, empty_mirror()).await;
+    let (mut r, mut w) = connect_client(&path).await;
+    hello(&mut r, &mut w).await;
+
+    w.write_all(b"{\"id\": 2, \"method\": \"status\", \"params\": {\"x\": \"\xff\"}}\n")
+        .await
+        .expect("write");
+    let resp = recv_line(&mut r).await;
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"]["code"], "bad_params");
+
+    send_request(&mut w, 3, "status", serde_json::json!({})).await;
+    assert_eq!(recv_line(&mut r).await["id"], 3);
 
     handle.stop().await;
 }

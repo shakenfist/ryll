@@ -61,8 +61,8 @@ use reconnect::{
 };
 use resize::{
     auto_fit_size_acceptable, compute_auto_resize, compute_outgoing_resize, is_primary_surface,
-    resolution_notification_due, MAX_AUTO_FIT_DIMENSION, RESOLUTION_NOTIFY_DEBOUNCE,
-    STATS_BAR_HEIGHT,
+    resolution_notification_due, send_guest_size, MAX_AUTO_FIT_DIMENSION,
+    RESOLUTION_NOTIFY_DEBOUNCE, STATS_BAR_HEIGHT,
 };
 use session_init::{
     classify_session_initialized, SessionInitDecision, MIN_SESSION_RESPAWN_INTERVAL,
@@ -2792,12 +2792,8 @@ impl RyllApp {
     /// if that is still to do. On a full queue it stays pending for the
     /// next frame; on a closed one the session is gone and it is moot.
     fn send_pending_guest_size(&mut self) {
-        let (Some(tx), Some((width, height))) = (&self.resize_tx, self.pending_guest_size) else {
-            return;
-        };
-        match tx.try_send(DisplaySize::GuestHas(width, height)) {
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => self.pending_guest_size = None,
-            Err(mpsc::error::TrySendError::Full(_)) => {}
+        if let Some(tx) = &self.resize_tx {
+            send_guest_size(tx, &mut self.pending_guest_size);
         }
     }
 
