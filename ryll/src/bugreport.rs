@@ -2810,7 +2810,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"session.json".to_string()));
@@ -3147,7 +3147,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"screenshot.png".to_string()));
         assert!(names.contains(&"screenshot-region.png".to_string()));
@@ -3356,7 +3356,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"session.json".to_string()));
@@ -3436,7 +3436,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"channel-state.json".to_string()));
@@ -3483,7 +3483,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"channel-state.json".to_string()));
@@ -3588,7 +3588,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
 
         // runtime-metrics.json must be present.
@@ -3739,7 +3739,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"session.json".to_string()));
@@ -3947,7 +3947,7 @@ mod tests {
         let file = std::fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().into_owned())
             .collect();
         assert!(names.contains(&"metadata.json".to_string()));
         assert!(names.contains(&"session.json".to_string()));
